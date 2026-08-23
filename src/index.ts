@@ -1,0 +1,153 @@
+import express from 'express';
+import cors from 'cors';
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { WebSocketServer, WebSocket } from 'ws';
+import { PORT, HOST, CORS_ORIGIN } from './config/env.js';
+import { dataRouter } from './controllers/dataController.js';
+import { runRouter } from './controllers/runController.js';
+import { runtimeRouter } from './controllers/runtimeController.js';
+import { githubRouter } from './controllers/githubController.js';
+import { chatRouter } from './controllers/chatController.js';
+import { runnerService } from './services/runnerService.js';
+import { chatService } from './services/chatService.js';
+import { runtimeService } from './services/runtimeService.js';
+import { logInfo, logError } from './utils/logger.js';
+
+const app = express();
+
+/**
+ * CORS allowlist, not `*`.
+ *
+ * This API spawns agents that run shell commands. With `origin: '*'` any website
+ * the user visited could call http://localhost:3001/api from page JavaScript and
+ * start a run on their machine — no network access required, just an open tab.
+ *
+ * `CORS_ORIGIN` was already parsed in config/env.ts but ignored here.
+ */
+const allowedOrigins = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, callback) {
+    // Same-origin / curl / Electron send no Origin header.
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`Origin ${origin} is not allowed`));
+  },
+  credentials: true
+}));
+
+/**
+ * Keep the raw request bytes alongside the parsed body.
+ *
+ * GitHub signs webhook deliveries over the exact bytes it sent, so the HMAC has
+ * to be computed on those. Re-serialising the parsed object does not reproduce
+ * them (key order and escaping are not guaranteed), which would make every
+ * genuine delivery fail verification. Only the webhook route reads this.
+ */
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+    }
+  })
+);
+
+/**
+ * Optional shared secret for local callers.
+ *
+ * Enforced only when ALPHA_LOCAL_TOKEN is set, so local development keeps
+ * working unconfigured. Set it (and send `X-Alpha-Token`) whenever the daemon
+ * might be reachable by another process or user on the machine.
+ */
+if (process.env.ALPHA_LOCAL_TOKEN) {
+  const expected = process.env.ALPHA_LOCAL_TOKEN;
+  app.use('/api', (req, res, next) => {
+    if (req.path === '/health') return next();
+    if (req.header('X-Alpha-Token') === expected) return next();
+    return res.status(401).json({ error: 'Missing or invalid X-Alpha-Token' });
+  });
+  logInfo('Local token authentication is ENABLED');
+}
+
+// API Routes
+app.use('/api', dataRouter);
+app.use('/api', runRouter);
+app.use('/api', runtimeRouter);
+app.use('/api', githubRouter);
+app.use('/api', chatRouter);
+
+app.get('/api/download/desktop', (req, res) => {
+  const zipPath = path.resolve('..', 'Alpha-v2-FullPlatform.zip');
+  if (fs.existsSync(zipPath)) {
+    res.download(zipPath, 'Alpha-Desktop-Windows-v2.0.0.zip');
+  } else {
+    res.status(404).json({ error: 'Desktop package bundle not found' });
+  }
+});
+
+app.get('/api/download/exe', (req, res) => {
+  const batPath = path.resolve('..', 'start-alpha.bat');
+  if (fs.existsSync(batPath)) {
+    res.download(batPath, 'Alpha-Launcher.bat');
+  } else {
+    res.status(404).json({ error: 'Launcher file not found' });
+  }
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'healthy', version: '2.0.0', time: new Date().toISOString() });
+});
+
+const server = http.createServer(app);
+
+// WebSocket Server for Live Real-Time 5-Stage Streaming
+const wss = new WebSocketServer({ server });
+
+const clients = new Set<WebSocket>();
+
+wss.on('connection', (ws: WebSocket) => {
+  clients.add(ws);
+  logInfo('Client connected to WebSocket stream');
+
+  ws.send(JSON.stringify({ type: 'connected', time: new Date().toISOString() }));
+
+  ws.on('close', () => {
+    clients.delete(ws);
+    logInfo('Client disconnected from WebSocket stream');
+  });
+
+  ws.on('error', (err) => {
+    logError('WebSocket client error:', err);
+    clients.delete(ws);
+  });
+});
+
+function broadcast(payload: Record<string, any>) {
+  const data = JSON.stringify(payload);
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
+  }
+}
+
+// Subscribe runner events to WebSocket broadcast
+runnerService.on('stage_update', (data) => broadcast({ type: 'stage_update', payload: data }));
+runnerService.on('log_chunk', (data) => broadcast({ type: 'log_chunk', payload: data }));
+runnerService.on('run_completed', (data) => broadcast({ type: 'run_completed', payload: data }));
+runnerService.on('run_failed', (data) => broadcast({ type: 'run_failed', payload: data }));
+runnerService.on('run_cancelled', (data) => broadcast({ type: 'run_cancelled', payload: data }));
+
+// Subscribe chat events to WebSocket broadcast
+chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
+
+server.listen(PORT, HOST, () => {
+  logInfo(`Alpha v2 Execution Engine & Backend Daemon running on http://${HOST}:${PORT}`);
+  logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  // Initial runtime scan in background
+  runtimeService.scanRuntimes().catch(err => logError('Initial runtime probe failed:', err));
+});
