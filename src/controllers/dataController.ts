@@ -1,5 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { sqliteService } from '../services/sqliteService.js';
+import { agentValidationError } from './agentValidation.js';
+import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
 
 export const dataRouter = Router();
 
@@ -30,11 +32,19 @@ dataRouter.get('/agents', (req: Request, res: Response) => {
 });
 
 dataRouter.post('/agents', (req: Request, res: Response) => {
+  const error = agentValidationError(req.body, { partial: false });
+  if (error) return res.status(400).json({ error });
+
   const agent = sqliteService.createAgent(req.body);
   res.status(201).json(agent);
 });
 
 dataRouter.put('/agents/:id', (req: Request, res: Response) => {
+  // A PUT here carries only the fields being changed, so absent ones are not
+  // cleared — and must not be validated as if they had been sent empty.
+  const error = agentValidationError(req.body, { partial: true });
+  if (error) return res.status(400).json({ error });
+
   const updated = sqliteService.updateAgent(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Agent not found' });
   res.json(updated);
@@ -43,6 +53,28 @@ dataRouter.put('/agents/:id', (req: Request, res: Response) => {
 dataRouter.delete('/agents/:id', (req: Request, res: Response) => {
   const deleted = sqliteService.deleteAgent(req.params.id);
   res.json({ success: deleted });
+});
+
+/**
+ * One turn of the conversational agent builder.
+ *
+ * Declared before no route that could shadow it — `/agents/:id` is a GET-less
+ * PUT/DELETE pair, so `/agents/builder/message` cannot be captured by it.
+ */
+dataRouter.post('/agents/builder/message', async (req: Request, res: Response) => {
+  try {
+    const result = await sendBuilderMessage({
+      sessionId: String(req.body?.sessionId ?? ''),
+      runtimeId: String(req.body?.runtimeId ?? ''),
+      message: String(req.body?.message ?? '')
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof AgentBuilderError) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    throw err;
+  }
 });
 
 // --- Issues ---
