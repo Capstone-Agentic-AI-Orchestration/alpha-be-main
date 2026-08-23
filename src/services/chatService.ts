@@ -217,6 +217,9 @@ export class ChatService extends EventEmitter {
           '--json',
           '--sandbox', 'read-only',
           '--skip-git-repo-check',
+          // -- ends option parsing: a prompt that happens to start with a
+          // hyphen is then read as text, not as a codex flag.
+          '--',
           withPersona(prompt)
         ];
       } else if (isAntigravity) {

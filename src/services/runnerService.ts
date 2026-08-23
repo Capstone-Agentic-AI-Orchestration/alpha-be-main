@@ -160,7 +160,10 @@ export class RunnerService extends EventEmitter {
 
     if (isCodex) {
       bin = 'codex';
-      args = ['exec', prompt, '--json', '--sandbox', 'workspace-write'];
+      // Flags first, then -- , then the prompt. codex ignores flags that
+      // follow the positional prompt, and -- stops a leading hyphen in the
+      // prompt from being parsed as an option.
+      args = ['exec', '--json', '--sandbox', 'workspace-write', '--', prompt];
     }
 
     const child = processManager.spawnProcess({

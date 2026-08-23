@@ -21,6 +21,33 @@ import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContex
  *  enough that a leaked URL is not reusable later. */
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * Reject anything that is not a plain git branch name. Shared by every helper
+ * that passes a branch to git or gh — argv already defuses shell syntax, but
+ * git reads a leading `-` as an option and treats `..`, `~`, `^`, `:` as
+ * revision operators, so the name still has to be constrained.
+ */
+function assertSafeBranchName(branchName: string, label = 'Branch name'): void {
+  const valid =
+    /^[A-Za-z0-9._/-]{1,200}$/.test(branchName) &&
+    !branchName.startsWith('-') &&
+    !branchName.startsWith('/') &&
+    !branchName.endsWith('/') &&
+    !branchName.endsWith('.') &&
+    !branchName.endsWith('.lock') &&
+    !branchName.includes('..') &&
+    !branchName.includes('//');
+
+  if (!valid) throw new Error(`${label} "${branchName}" is not a valid git branch name.`);
+}
+
+/** A PR reference must be a number or a github.com pull URL — nothing else. */
+function assertSafePrRef(ref: string): void {
+  if (!/^(\d+|https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+)$/.test(ref)) {
+    throw new Error(`"${ref}" is not a pull request number or github.com pull request URL.`);
+  }
+}
+
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
@@ -243,7 +270,11 @@ export class GhCliGitHubService implements IGitHubService {
 
   async listRepositories(limit = 30): Promise<GitHubRepo[]> {
     try {
-      const { stdout } = await execAsync(`gh repo list --limit ${limit} --json name,nameWithOwner,url,isPrivate,defaultBranchRef`);
+      const { stdout } = await execFileAsync('gh', [
+        'repo', 'list',
+        '--limit', String(Math.max(1, Math.min(200, Math.trunc(Number(limit) || 30)))),
+        '--json', 'name,nameWithOwner,url,isPrivate,defaultBranchRef'
+      ]);
       const parsed = JSON.parse(stdout);
       return parsed.map((r: any) => ({
         ...r,
@@ -355,33 +386,60 @@ export class GhCliGitHubService implements IGitHubService {
 
   async getFailedWorkflowLogs(cwd: string, runId: string | number): Promise<string> {
     try {
-      const { stdout } = await execAsync(`gh run view ${runId} --log-failed`, { cwd });
+      // runId arrives as the :id route parameter, so it is caller-controlled.
+      if (!/^\d+$/.test(String(runId))) throw new Error(`Invalid workflow run id "${runId}".`);
+      const { stdout } = await execFileAsync('gh', ['run', 'view', String(runId), '--log-failed'], { cwd });
       return stdout;
     } catch (err: any) {
       return err?.stdout || 'Failed to pull workflow error logs';
     }
   }
 
+  /**
+   * Commit everything in `cwd` and push the branch.
+   *
+   * Quote-escaping a commit message into a shell string does not work: the
+   * previous `msg.replace(/"/g,'\\"')` left backticks and $(...) intact, and an
+   * agent-authored message reaches here unmodified. execFile removes the shell,
+   * so none of it is interpretable.
+   */
   async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
-    const escapedMsg = commitMessage.replace(/"/g, '\\"');
-    await execAsync('git add -A', { cwd });
-    await execAsync(`git commit -m "${escapedMsg}"`, { cwd });
-    await execAsync(`git push -u origin ${branchName}`, { cwd });
+    assertSafeBranchName(branchName);
+    await execFileAsync('git', ['add', '-A'], { cwd });
+    await execFileAsync('git', ['commit', '-m', commitMessage], { cwd });
+    await execFileAsync('git', ['push', '-u', 'origin', branchName], { cwd });
   }
 
-  async createPullRequest(cwd: string, title: string, body: string, base = 'main', headBranch?: string): Promise<string> {
-    const escapedTitle = title.replace(/"/g, '\\"');
-    const escapedBody = body.replace(/"/g, '\\"');
-    const headArg = headBranch ? ` --head ${headBranch}` : '';
-    const { stdout } = await execAsync(
-      `gh pr create --title "${escapedTitle}" --body "${escapedBody}" --base ${base}${headArg}`,
-      { cwd }
-    );
+  async createPullRequest(
+    cwd: string,
+    title: string,
+    body: string,
+    base = 'main',
+    headBranch?: string
+  ): Promise<string> {
+    assertSafeBranchName(base, 'Base branch');
+    if (headBranch) assertSafeBranchName(headBranch, 'Head branch');
+
+    // Title and body are model-authored free text; they are safe as argv but
+    // would not be safe interpolated into a command string.
+    const args = ['pr', 'create', '--title', title, '--body', body, '--base', base];
+    if (headBranch) args.push('--head', headBranch);
+
+    const { stdout } = await execFileAsync('gh', args, { cwd });
     return stdout.trim();
   }
 
-  async mergePullRequest(cwd: string, prUrlOrNumber: string, method: 'squash' | 'merge' | 'rebase' = 'squash'): Promise<string> {
-    const { stdout } = await execAsync(`gh pr merge ${prUrlOrNumber} --${method} --delete-branch`, { cwd });
+  async mergePullRequest(
+    cwd: string,
+    prUrlOrNumber: string,
+    method: 'squash' | 'merge' | 'rebase' = 'squash'
+  ): Promise<string> {
+    assertSafePrRef(prUrlOrNumber);
+    const { stdout } = await execFileAsync(
+      'gh',
+      ['pr', 'merge', prUrlOrNumber, `--${method}`, '--delete-branch'],
+      { cwd }
+    );
     return stdout.trim();
   }
 
@@ -758,9 +816,29 @@ export class RestGitHubService implements IGitHubService {
   async cloneRepository(repo: string, intoDir: string): Promise<string> {
     const folder = repo.split('/').pop()!;
     const target = path.join(intoDir, folder);
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) {
+      throw new Error(`Repository must be given as "owner/name", got "${repo}".`);
+    }
+
     const token = await this.getAuthToken();
-    const authUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
-    await execAsync(`git clone ${authUrl} "${target}"`);
+
+    // The token goes in a header via `-c`, not embedded in the clone URL.
+    // A URL-embedded credential is written into .git/config in the checkout and
+    // survives there; both forms are visible in the process list, but only the
+    // URL form persists to disk for anything that later reads the remote.
+    await execFileAsync(
+      'git',
+      [
+        '-c',
+        `http.https://github.com/.extraheader=Authorization: Basic ${Buffer.from(
+          `x-access-token:${token}`
+        ).toString('base64')}`,
+        'clone',
+        `https://github.com/${repo}.git`,
+        target
+      ],
+      { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
+    );
     return target;
   }
 
