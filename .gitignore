@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime data — machine-specific, never shared
+*.db
+*.db-shm
+*.db-wal
+alpha.db
+data/
+.alpha/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# OS cruft
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Test / coverage output
+coverage/
+.nyc_output/
+
+# Misc
+.eslintcache
+.temp/
+.tmp/
