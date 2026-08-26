@@ -101,6 +101,38 @@ function assertOwnerRepo(ownerRepo: string): void {
 }
 
 /**
+ * Validate and encode a path inside a repository.
+ *
+ * The value is interpolated into a REST path, and both `fetch` and `gh`
+ * resolve `..` segments before the request leaves — so `contents/../../../user`
+ * addresses `/user`, not a file. That escapes the repository surface these
+ * tools are supposed to be limited to, using the operator's own token, and the
+ * caller is an LLM that may be acting on untrusted repository content.
+ *
+ * `?` and `#` are rejected for the same reason: either would let the caller
+ * append query parameters or a fragment to an endpoint chosen elsewhere.
+ * Segments are encoded individually so a legitimate space or `#` in a filename
+ * still resolves, while the separators stay separators.
+ */
+function assertRepoFilePath(filePath: string): string {
+  const invalid =
+    !filePath ||
+    filePath.startsWith('/') ||
+    filePath.includes('..') ||
+    filePath.includes('\\') ||
+    filePath.includes('\0') ||
+    /[?#]/.test(filePath);
+
+  if (invalid) {
+    throw new Error(
+      `Invalid file path "${filePath}". Use a path inside the repository, e.g. src/index.ts.`
+    );
+  }
+
+  return filePath.split('/').map(encodeURIComponent).join('/');
+}
+
+/**
  * GitHub answers 404 both for "does not exist" and for "exists but your token
  * cannot see it". Saying so is more useful than repeating the raw status,
  * because the two have different fixes.
@@ -407,13 +439,14 @@ export class GhCliGitHubService implements IGitHubService {
 
   async getFileContents(ownerRepo: string, filePath: string, ref?: string): Promise<string> {
     assertOwnerRepo(ownerRepo);
+    const safePath = assertRepoFilePath(filePath);
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     try {
       // Raw media type returns the file body directly, so nothing has to be
       // base64-decoded here and a large file is not doubled in memory.
       const { stdout } = await execFileAsync('gh', [
         'api',
-        `repos/${ownerRepo}/contents/${filePath}${query}`,
+        `repos/${ownerRepo}/contents/${safePath}${query}`,
         '-H',
         'Accept: application/vnd.github.raw'
       ], { maxBuffer: 10 * 1024 * 1024 });
@@ -959,10 +992,11 @@ export class RestGitHubService implements IGitHubService {
 
   async getFileContents(ownerRepo: string, filePath: string, ref?: string): Promise<string> {
     assertOwnerRepo(ownerRepo);
+    const safePath = assertRepoFilePath(filePath);
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     try {
       // The raw media type returns the body as text rather than a base64 blob.
-      const res = await this.request(`/repos/${ownerRepo}/contents/${filePath}${query}`, {
+      const res = await this.request(`/repos/${ownerRepo}/contents/${safePath}${query}`, {
         headers: { Accept: 'application/vnd.github.raw' }
       });
       return typeof res === 'string' ? res : JSON.stringify(res);
