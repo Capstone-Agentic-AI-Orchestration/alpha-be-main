@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DB_PATH, ALPHA_DIR } from '../config/env.js';
+import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR } from '../config/env.js';
 import {
   Project,
   Issue,
@@ -266,9 +266,18 @@ export class SQLiteService {
 
     const now = new Date().toISOString();
 
-    // Auto-register current workspace in allowed_paths
-    const currentWorkspace = path.resolve('..');
-    this.addAllowedPath(currentWorkspace, 'Alpha-v2 Workspace');
+    /**
+     * Allowlist the managed workspace root, and only that.
+     *
+     * This used to seed `path.resolve('..')` — the directory above the daemon,
+     * i.e. Alpha's own source tree — under the name "Alpha-v2 Workspace". Any
+     * run that resolved there was therefore pre-approved, which is precisely
+     * what let a project with no checkout run an agent inside Alpha itself.
+     *
+     * `isPathAllowed` matches on prefix, so this single entry covers every
+     * repository Alpha clones or scaffolds beneath the root, and nothing else.
+     */
+    this.addAllowedPath(WORKSPACES_DIR, 'Alpha managed workspaces');
 
     // Default Skills
     const defaultSkills: Skill[] = [
@@ -398,8 +407,16 @@ export class SQLiteService {
       leadType: 'agent',
       leadName: 'Ada Lovelace',
       leadAgentId: 'agent-ada',
+      /**
+       * A repository, and no local checkout.
+       *
+       * The seed used to attach `path.resolve('..')` as a `local_path` — so a
+       * fresh install came with a project whose working copy was Alpha's own
+       * source, and the first agent run edited Alpha. The project now starts in
+       * the honest state: it has a repository, and cloning it is one action
+       * away.
+       */
       resources: [
-        { id: 'res-1', type: 'local_path', name: 'Alpha-v2 Repository', pathOrUrl: currentWorkspace, branchOrMachine: 'main' },
         { id: 'res-2', type: 'github_repo', name: 'GitHub Repository', pathOrUrl: 'https://github.com/LloydLim1/Alpha-v2', branchOrMachine: 'main' }
       ],
       createdAt: now

@@ -11,9 +11,11 @@
  *   * Alpha handles no token. On the desktop `gh` reads the OS keyring itself;
  *     nothing passes through this process, no config file, no env var.
  *
- * Every tool is READ-ONLY. Mutating GitHub from a chat turn is a separate
- * decision with its own approval story; mixing them would let an agent push
- * while merely answering a question.
+ * Nothing here mutates GitHub. `github_clone_repository` is the only tool that
+ * writes at all, and it writes to this machine — into the managed workspace,
+ * at a path Alpha computes. Pushing, opening PRs and merging stay out: those
+ * change state other people can see, and they need an approval story this
+ * layer does not have.
  *
  * The JSON-RPC is hand-rolled rather than taken from @modelcontextprotocol/sdk
  * because that package is ESM-only and this backend compiles to CommonJS. The
@@ -26,6 +28,7 @@
 import { createInterface } from 'node:readline';
 
 import { githubService } from '../services/githubService.js';
+import { cloneToWorkspace } from '../services/repoCloneService.js';
 
 /** Newest protocol version this server implements. */
 const PROTOCOL_VERSION = '2025-06-18';
@@ -123,6 +126,28 @@ const TOOLS: Record<string, ToolDef> = {
       ['repo', 'runId']
     ),
     run: ({ repo, runId }) => githubService.getFailedWorkflowLogs(repo, runId)
+  },
+
+  github_clone_repository: {
+    description:
+      'Clone a repository onto this machine so its files can be worked on locally. Alpha chooses the destination inside its managed workspace — do not ask for a path and do not run git yourself. Cloning a repository that is already checked out refreshes it instead. Returns the local path.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        ref: str('Branch to check out. Defaults to the repository default branch.')
+      },
+      ['repo']
+    ),
+    run: async ({ repo, ref }) => {
+      const result = await cloneToWorkspace(repo, ref);
+      return {
+        ...result,
+        note:
+          result.action === 'refreshed'
+            ? 'An existing checkout was reset to the remote state.'
+            : 'Cloned fresh.'
+      };
+    }
   },
 
   github_auth_status: {

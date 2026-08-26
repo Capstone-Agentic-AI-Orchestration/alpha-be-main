@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { WORKSPACES_DIR } from '../config/env.js';
+import { ensureWorkspacesRoot, projectRepoPath } from './workspaceService.js';
 import { initRepoWithCommit } from '../utils/gitUtils.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { githubService } from './githubService.js';
@@ -119,7 +119,9 @@ export async function createScaffoldedRepository(
   assertSafePathSegment(org.trim(), 'organization');
 
   const serviceName = input.serviceName?.trim() || repoName;
-  const workspaceDir = path.join(WORKSPACES_DIR, projectKey, repoName);
+  // Same resolver the clone path uses, so both land under one allowlisted root.
+  ensureWorkspacesRoot();
+  const workspaceDir = projectRepoPath(projectKey, repoName);
 
   if (!(await isEmptyOrMissing(workspaceDir))) {
     throw new Error(

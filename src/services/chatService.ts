@@ -2,8 +2,7 @@ import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
 import { ChatMessage, ChatThread } from '../models/index.js';
 import { runCliTurn } from './cliRunner.js';
-import { logInfo } from '../utils/logger.js';
-import path from 'node:path';
+import { ensureWorkspacesRoot } from './workspaceService.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -147,9 +146,22 @@ export class ChatService extends EventEmitter {
      */
     const priorSession = sqliteService.getThreadSession(threadId, agent.id);
 
+    /**
+     * Chat turns run in the managed workspace root, not `path.resolve('..')`.
+     *
+     * That old default was the directory above the daemon — Alpha's own source
+     * tree. A chat agent asked about someone's repository was reading and
+     * editing Alpha itself, and the allowlist could not object because the
+     * seed data granted exactly that path.
+     *
+     * The workspace root is the honest answer for a thread: chats belong to no
+     * project, so the right scope is everything Alpha has cloned or scaffolded
+     * and nothing else. A repository the agent wants is one
+     * `github_clone_repository` call away, and lands right here.
+     */
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
-      cwd: path.resolve('..'),
+      cwd: ensureWorkspacesRoot(),
       provider: agent.modelProvider,
       modelName: agent.modelName,
       systemPrompt: agent.systemPrompt,
