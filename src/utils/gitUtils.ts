@@ -44,8 +44,14 @@ export async function checkDirtyWorktree(cwd: string): Promise<boolean> {
  * `issue.identifier`, which arrives in a POST /issues body, and git itself
  * treats some of these characters as syntax: a leading `-` would be read as an
  * option, and `..`, `~`, `^`, `:` are revision operators.
+ *
+ * Exported because the same check guards refs arriving from agent tool calls —
+ * see repoCloneService. Note that `--` is *not* an alternative here: for
+ * `git checkout` it means "the rest are pathspecs", so `checkout -- main`
+ * looks for a file called main instead of switching branch. For a ref, the
+ * only correct defence is rejecting the value.
  */
-function assertSafeBranchName(branchName: string): void {
+export function assertSafeBranchName(branchName: string): void {
   const valid =
     /^[A-Za-z0-9._/-]{1,200}$/.test(branchName) &&
     !branchName.startsWith('-') &&

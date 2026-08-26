@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { githubService } from './githubService.js';
+import { assertSafeBranchName } from '../utils/gitUtils.js';
 import { logInfo } from '../utils/logger.js';
 import {
   clonePathFor,
@@ -35,6 +36,16 @@ export interface CloneResult {
  * which is the behaviour this replaces.
  */
 export async function cloneToWorkspace(ownerRepo: string, ref?: string): Promise<CloneResult> {
+  /**
+   * The ref reaches git's argv. `execFile` removes the shell, so this is not
+   * command injection — but a value like `-f` or `--orphan` is still read by
+   * git as an option rather than a branch, and the caller here is a model.
+   *
+   * Validated at the boundary rather than at each call site, so a ref that got
+   * this far is known good everywhere below.
+   */
+  if (ref !== undefined) assertSafeBranchName(ref);
+
   // Reachability first: `gh repo clone` on a private or missing repo fails with
   // git's transport error, which is far less useful than "it does not exist, or
   // you cannot see it". This also validates the owner/name shape.
@@ -84,6 +95,10 @@ export async function cloneToWorkspace(ownerRepo: string, ref?: string): Promise
  * already had its turn.
  */
 async function refreshCheckout(dir: string, branch: string): Promise<void> {
+  // Re-checked rather than assumed: the caller validates, but this is a
+  // separate entry point and the value lands in argv either way.
+  assertSafeBranchName(branch);
+
   await execFileAsync('git', ['fetch', 'origin', '--prune'], { cwd: dir });
   await execFileAsync('git', ['checkout', branch], { cwd: dir });
   await execFileAsync('git', ['reset', '--hard', `origin/${branch}`], { cwd: dir });
