@@ -68,6 +68,50 @@ export async function createBranch(cwd: string, branchName: string): Promise<voi
   await execFileAsync('git', ['checkout', '-B', branchName], { cwd });
 }
 
+/**
+ * Turn a directory of files into a git repository with one commit on `main`.
+ *
+ * `gh repo create --source` refuses a directory that is not already a repo with
+ * at least one commit, so this runs before the repository exists on GitHub.
+ *
+ * The branch is set explicitly rather than relying on `init.defaultBranch`,
+ * which varies by machine — a repo that landed on `master` here would disagree
+ * with every base branch Alpha assumes elsewhere.
+ *
+ * Identity is passed per-command instead of being written to the config. The
+ * daemon runs on someone else's machine and a scaffold commit is not a reason
+ * to edit their global git identity; `-c` applies only to this invocation, and
+ * only when they have no identity of their own set.
+ */
+export async function initRepoWithCommit(
+  cwd: string,
+  commitMessage: string,
+  defaultBranch = 'main'
+): Promise<void> {
+  assertSafeBranchName(defaultBranch);
+
+  await execFileAsync('git', ['init', '--initial-branch', defaultBranch], { cwd });
+  await execFileAsync('git', ['add', '--all'], { cwd });
+
+  const identity = (await hasGitIdentity(cwd))
+    ? []
+    : ['-c', 'user.name=Alpha', '-c', 'user.email=alpha@localhost'];
+
+  // `--` stops a message beginning with '-' being read as an option.
+  await execFileAsync('git', [...identity, 'commit', '-m', commitMessage, '--'], { cwd });
+}
+
+async function hasGitIdentity(cwd: string): Promise<boolean> {
+  try {
+    const name = await execFileAsync('git', ['config', '--get', 'user.name'], { cwd });
+    const email = await execFileAsync('git', ['config', '--get', 'user.email'], { cwd });
+    return name.stdout.trim().length > 0 && email.stdout.trim().length > 0;
+  } catch {
+    // `--get` exits non-zero when the key is unset, which is the answer.
+    return false;
+  }
+}
+
 export async function getGitDiffStats(
   cwd: string
 ): Promise<{ changedFiles: number; insertions: number; deletions: number }> {

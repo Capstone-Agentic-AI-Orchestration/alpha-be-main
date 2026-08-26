@@ -80,6 +80,15 @@ export interface ProjectResource {
   name: string;
   pathOrUrl: string;
   branchOrMachine?: string;
+  /** Stack the scaffold was generated from. Absent on attached repositories. */
+  stack?: string;
+  /** Repository shape the scaffold used. Absent on attached repositories. */
+  shape?: string;
+  /**
+   * Managed working copy on this machine, when Alpha created or cloned it.
+   * Absent means there is no local checkout yet.
+   */
+  localPath?: string;
 }
 
 export interface Project {
@@ -97,6 +106,12 @@ export interface Project {
   leadName: string;
   leadAgentId?: string;
   resources: ProjectResource[];
+  /**
+   * GitHub organization every repository for this project is created under.
+   * Alpha creates no personal repositories, so without this the project cannot
+   * create one at all.
+   */
+  githubOrg?: string;
   createdAt: string;
 }
 

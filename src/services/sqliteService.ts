@@ -62,6 +62,7 @@ export class SQLiteService {
         lead_name TEXT,
         lead_agent_id TEXT,
         resources TEXT DEFAULT '[]',
+        github_org TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -242,7 +243,11 @@ export class SQLiteService {
 
     const additions: Array<[string, string]> = [
       ['runtimes', "type TEXT DEFAULT 'cloud'"],
-      ['runtimes', 'latency_ms INTEGER DEFAULT 0']
+      ['runtimes', 'latency_ms INTEGER DEFAULT 0'],
+      // Owning GitHub organization. Null on every project created before repo
+      // scaffolding existed, which is why the create form asks when it is unset
+      // rather than assuming one.
+      ['projects', 'github_org TEXT']
     ];
 
     for (const [table, definition] of additions) {
@@ -521,14 +526,15 @@ export class SQLiteService {
       leadName: r.lead_name,
       leadAgentId: r.lead_agent_id,
       resources: JSON.parse(r.resources || '[]'),
+      githubOrg: r.github_org || undefined,
       createdAt: r.created_at
     }));
   }
 
   createProject(p: Project): Project {
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, created_at)
-      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @createdAt)
+      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_at)
+      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdAt)
     `);
     stmt.run({
       ...p,
@@ -538,6 +544,7 @@ export class SQLiteService {
       leadName: p.leadName || '',
       leadAgentId: p.leadAgentId || null,
       resources: JSON.stringify(p.resources || []),
+      githubOrg: p.githubOrg || null,
       createdAt: p.createdAt || new Date().toISOString()
     });
     return p;
@@ -551,12 +558,14 @@ export class SQLiteService {
       UPDATE projects SET
         name = @name, key = @key, description = @description, color = @color, icon = @icon,
         status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
-        lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources
+        lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
+        github_org = @githubOrg
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
-      resources: JSON.stringify(merged.resources || [])
+      resources: JSON.stringify(merged.resources || []),
+      githubOrg: merged.githubOrg || null
     });
     return merged;
   }

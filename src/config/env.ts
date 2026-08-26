@@ -15,6 +15,9 @@ export const LOGS_DIR = path.join(ALPHA_DIR, 'logs');
 export const AUDIT_LOG_PATH = path.join(LOGS_DIR, 'audit.log');
 export const MEMORY_DIR = path.join(ALPHA_DIR, 'memory');
 export const RUNS_DIR = path.join(ALPHA_DIR, 'runs');
+// Working copies of repositories Alpha created or cloned. One allowlisted root
+// keeps every agent-writable path in a single place that is easy to reason about.
+export const WORKSPACES_DIR = path.join(ALPHA_DIR, 'workspaces');
 
 export const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000,http://localhost:5173';
 
