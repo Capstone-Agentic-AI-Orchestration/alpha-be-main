@@ -2,7 +2,8 @@ import { processManager } from './processManager.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { StreamParser, StreamFamily } from './streamParser.js';
 import { RuntimeService } from './runtimeService.js';
-import { logError } from '../utils/logger.js';
+import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
+import { logError, logInfo } from '../utils/logger.js';
 
 /**
  * One turn against whichever agent CLI a provider maps to.
@@ -36,6 +37,14 @@ export interface CliTurnOptions {
   prompt: string;
   /** CLI session id to continue, or null to start a new one. */
   priorSession: string | null;
+  /**
+   * MCP server names this agent is granted, from `agent.mcpServers`.
+   *
+   * Resolved against the built-ins and the user catalog, then written to a
+   * per-run config. An agent granted nothing gets no `--mcp-config` at all,
+   * which is not the same as getting an empty one.
+   */
+  mcpServers?: string[];
 }
 
 export interface CliTurnResult {
@@ -74,6 +83,12 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   let family: StreamFamily = 'claude';
   let bin = isWin ? 'claude.cmd' : 'claude';
 
+  // Resolve the agent's granted MCP servers into a config for this run only.
+  const mcp = writeRunMcpConfig(runId, options.mcpServers);
+  if (mcp.serverNames.length) {
+    logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
+  }
+
   try {
     let args = [
       '-p', prompt,
@@ -86,7 +101,11 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       // These turns inspect, they do not mutate. Denying the write tools
       // outright is safer than bypassPermissions and — unlike leaving them to
       // prompt — cannot hang a headless process waiting on a TTY that isn't there.
-      '--allowedTools', 'Read', 'Glob', 'Grep',
+      //
+      // MCP tools are namespaced `mcp__<server>__<tool>`, and this allowlist is
+      // exhaustive: without the patterns appended here the servers would
+      // connect and then every call against them would be denied.
+      '--allowedTools', 'Read', 'Glob', 'Grep', ...mcpToolPatterns(mcp.serverNames),
       '--disallowedTools', 'Write', 'Edit', 'Bash',
       // Isolate the agent persona from the operator's personal Claude Code
       // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
@@ -146,6 +165,23 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       bin = RuntimeService.agyPath();
       args = ['-p', withPersona(prompt), '--output-format', 'stream-json'];
       if (modelName) args.push('--model', modelName);
+    }
+
+    /**
+     * Attach the run's MCP servers.
+     *
+     * Claude Code only. `agy` and `codex exec` take MCP configuration from
+     * their own settings files rather than argv, so pointing them at this
+     * per-run file is not possible — granting an agent a server therefore has
+     * no effect on those families yet, and silently pretending otherwise would
+     * be worse than the gap.
+     *
+     * `--strict-mcp-config` makes the pruning real: without it the CLI merges
+     * its own configured servers in, and an agent granted one server would
+     * still see every server the operator has installed.
+     */
+    if (mcp.configPath && family === 'claude') {
+      args.push('--mcp-config', mcp.configPath, '--strict-mcp-config');
     }
 
     // Apply the resume flag for whichever family we settled on.
@@ -253,5 +289,9 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       failureDetail: err?.message ?? String(err),
       failureKind: 'spawn'
     };
+  } finally {
+    // The config exists only for the duration of the spawn. Leaving it would
+    // accumulate a directory per turn under ~/.alpha/runs.
+    cleanupRunMcpConfig(runId);
   }
 }

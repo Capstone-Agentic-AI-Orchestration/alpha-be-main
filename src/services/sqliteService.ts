@@ -309,7 +309,7 @@ export class SQLiteService {
         systemPrompt: 'You are Ada, a master software architect. Focus on clean interfaces, modular decomposition, and strict type definitions.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-git', 'sk-browser'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -326,7 +326,7 @@ export class SQLiteService {
         systemPrompt: 'You are Kaelen, lead fullstack coder. Write robust, concise, bug-free TypeScript code with zero extraneous comments.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash', 'sk-git'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -343,7 +343,7 @@ export class SQLiteService {
         systemPrompt: 'You are Vesper, code review specialist. Inspect diffs for correctness, performance, and security anti-patterns.',
         autonomyLevel: 'Supervised',
         skills: ['sk-fs', 'sk-git'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -360,7 +360,7 @@ export class SQLiteService {
         systemPrompt: 'You are Orion, QA engineer. Write thorough unit and regression tests with high assertion density.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {

@@ -13,6 +13,7 @@ import { chatRouter } from './controllers/chatController.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { runtimeService } from './services/runtimeService.js';
+import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { logInfo, logError } from './utils/logger.js';
 
 const app = express();
@@ -147,6 +148,10 @@ chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', paylo
 server.listen(PORT, HOST, () => {
   logInfo(`Alpha v2 Execution Engine & Backend Daemon running on http://${HOST}:${PORT}`);
   logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  // Write a starter MCP catalog if the user has none, so the file is
+  // discoverable rather than something you have to know to create.
+  ensureCatalogSeed();
 
   // Initial runtime scan in background
   runtimeService.scanRuntimes().catch(err => logError('Initial runtime probe failed:', err));

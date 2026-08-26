@@ -155,7 +155,8 @@ export class ChatService extends EventEmitter {
       systemPrompt: agent.systemPrompt,
       personaName: agent.name,
       prompt,
-      priorSession
+      priorSession,
+      mcpServers: agent.mcpServers
     });
 
     // Store the session so the next message in this thread continues it.
