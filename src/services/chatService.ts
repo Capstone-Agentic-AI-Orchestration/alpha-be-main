@@ -3,6 +3,7 @@ import { sqliteService } from './sqliteService.js';
 import { ChatMessage, ChatThread } from '../models/index.js';
 import { runCliTurn } from './cliRunner.js';
 import { ensureWorkspacesRoot } from './workspaceService.js';
+import { resolveAgentLogged } from './personaService.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -159,16 +160,25 @@ export class ChatService extends EventEmitter {
      * and nothing else. A repository the agent wants is one
      * `github_clone_repository` call away, and lands right here.
      */
+    /**
+     * The persona file wins over the database row, and the memory tiers are
+     * appended to it.
+     *
+     * No project key: a chat thread belongs to no project, so Tier 2 does not
+     * apply. Global and agent memory do.
+     */
+    const persona = resolveAgentLogged(agent);
+
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
       cwd: ensureWorkspacesRoot(),
-      provider: agent.modelProvider,
-      modelName: agent.modelName,
-      systemPrompt: agent.systemPrompt,
-      personaName: agent.name,
+      provider: persona.modelProvider,
+      modelName: persona.modelName,
+      systemPrompt: persona.systemPrompt,
+      personaName: persona.name,
       prompt,
       priorSession,
-      mcpServers: agent.mcpServers
+      mcpServers: persona.mcpServers
     });
 
     // Store the session so the next message in this thread continues it.
@@ -181,12 +191,12 @@ export class ChatService extends EventEmitter {
     let content = turn.content;
     if (turn.failureKind === 'empty') {
       content =
-        `I could not reach the ${agent.modelProvider} CLI, so I have no answer for you.\n\n` +
+        `I could not reach the ${persona.modelProvider} CLI, so I have no answer for you.\n\n` +
         `Reason: ${turn.failureDetail}\n\n` +
         `Check that \`${turn.bin.replace('.cmd', '')}\` is installed and signed in — the Runtimes page shows its status.`;
     } else if (turn.failureKind === 'spawn') {
       content =
-        `I could not start the ${agent.modelProvider} CLI.\n\n` +
+        `I could not start the ${persona.modelProvider} CLI.\n\n` +
         `Reason: ${turn.failureDetail}`;
     }
 

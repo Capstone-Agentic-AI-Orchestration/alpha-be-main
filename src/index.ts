@@ -14,6 +14,9 @@ import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { runtimeService } from './services/runtimeService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
+import { sqliteService } from './services/sqliteService.js';
+import { ensureAgentFiles } from './services/agentFileService.js';
+import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
 
 const app = express();
@@ -152,6 +155,25 @@ server.listen(PORT, HOST, () => {
   // Write a starter MCP catalog if the user has none, so the file is
   // discoverable rather than something you have to know to create.
   ensureCatalogSeed();
+
+  /**
+   * Grow the file layer for installs that predate it.
+   *
+   * Agents created from now on get a persona file at creation time
+   * (sqliteService.createAgent), but an existing alpha.db has rows with no
+   * file — and a user who deleted a file should get it back rather than
+   * silently lose the override. Existing files are never overwritten.
+   *
+   * The global memory tier is scaffolded here too: templates only, and
+   * template-only files contribute nothing to a prompt until someone writes
+   * in them.
+   */
+  try {
+    ensureMemoryScaffold();
+    ensureAgentFiles(sqliteService.getAgents());
+  } catch (err) {
+    logError('Could not initialise the agent file layer:', err);
+  }
 
   // Initial runtime scan in background
   runtimeService.scanRuntimes().catch(err => logError('Initial runtime probe failed:', err));

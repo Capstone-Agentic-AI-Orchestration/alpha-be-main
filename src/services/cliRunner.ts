@@ -65,34 +65,135 @@ export interface CliTurnResult {
   failureKind: 'spawn' | 'empty' | null;
 }
 
-export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
-  const { runId, cwd, provider, modelName, systemPrompt, personaName, prompt, priorSession } =
-    options;
+/** Resolved argv for one turn, plus which stream dialect to expect back. */
+interface TurnInvocation {
+  bin: string;
+  args: string[];
+  family: StreamFamily;
+}
 
-  const tools: CliToolRecord[] = [];
-  let content = '';
-  let thinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
-
-  let stderr = '';
-  let streamError = '';
+/**
+ * Build the argv for one turn.
+ *
+ * Separate from `runCliTurn` because the provider-specific rules below are the
+ * part most likely to need changing, and they are far easier to read — and to
+ * test — without a spawn and a stream loop wrapped around them. Exported for
+ * exactly that: cliRunner.test.ts asserts on the flags rather than on a
+ * subprocess, which is the only way to catch a regression like
+ * `--system-prompt` in place of `--append-system-prompt` without a live CLI.
+ */
+export function buildTurnInvocation(
+  options: CliTurnOptions,
+  mcp: ReturnType<typeof writeRunMcpConfig>
+): TurnInvocation {
+  const { provider, modelName, systemPrompt, personaName, prompt, priorSession } = options;
 
   const isWin = process.platform === 'win32';
   const isCodex = provider === 'OpenAI';
   const isAntigravity = provider === 'Antigravity' || provider === 'Google Gemini';
 
-  let family: StreamFamily = 'claude';
-  let bin = isWin ? 'claude.cmd' : 'claude';
+  /**
+   * The persona, already composed by personaService — agent file body plus
+   * whichever memory tiers applied.
+   */
+  const persona = systemPrompt?.trim() ?? '';
 
-  // Resolve the agent's granted MCP servers into a config for this run only.
-  const mcp = writeRunMcpConfig(runId, options.mcpServers);
-  if (mcp.serverNames.length) {
-    logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
+  /**
+   * Only Claude Code takes a persona as a flag.
+   *
+   * `agy` offers `--agent <name>` (a named file in ~/.gemini/agents) and
+   * `codex exec` takes instructions as the prompt argument — neither accepts a
+   * persona inline. Passing nothing meant the persona was silently dropped and
+   * the model answered as itself: an agent labelled "Ada Lovelace" in the UI
+   * replied "I am Antigravity, built by Google DeepMind".
+   *
+   * So for those families the persona is prepended to the message instead — but
+   * only on the FIRST message of a session. Once a session exists the persona is
+   * already in its transcript, and repeating it every turn would grow the
+   * context without adding anything.
+   */
+  const withPersona = (message: string) => {
+    if (priorSession || !persona) return message;
+
+    const stayInCharacter = personaName
+      ? `Stay in character as ${personaName} at all times. If asked who or what ` +
+        `you are, answer as ${personaName}, never as the underlying tool or model.\n\n`
+      : '';
+
+    return `${persona}\n\n${stayInCharacter}---\n\n${message}`;
+  };
+
+  if (isCodex) {
+    return {
+      family: 'codex',
+      bin: isWin ? 'codex.cmd' : 'codex',
+      // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
+      // With the prompt first, codex silently ignores everything after it and
+      // reports "--skip-git-repo-check was not specified" even though it was.
+      //
+      // `--skip-git-repo-check` because codex refuses to start outside a git
+      // repo, and a chat has no reason to require one.
+      //
+      // Codex resume is `codex exec resume <id>`, a different argv shape — left
+      // out until there is a captured transcript to verify against.
+      args: [
+        'exec',
+        '--json',
+        '--sandbox', 'read-only',
+        '--skip-git-repo-check',
+        // Before the `--`, necessarily: after it, `--model` would be read as
+        // part of the prompt text rather than as a flag.
+        ...(modelName ? ['--model', modelName] : []),
+        // -- ends option parsing: a prompt that happens to start with a
+        // hyphen is then read as text, not as a codex flag.
+        '--',
+        withPersona(prompt)
+      ]
+    };
   }
 
-  try {
-    let args = [
+  if (isAntigravity) {
+    // Antigravity ships as a desktop IDE, so `agy` is usually not on PATH;
+    // resolve the install location. Its flags mirror Claude Code's but its
+    // event schema does not — see StreamParser.handleAntigravityEvent.
+    return {
+      family: 'antigravity',
+      bin: RuntimeService.agyPath(),
+      args: [
+        '-p', withPersona(prompt),
+        '--output-format', 'stream-json',
+        ...(modelName ? ['--model', modelName] : []),
+        ...(priorSession ? ['--conversation', priorSession] : [])
+      ]
+    };
+  }
+
+  return {
+    family: 'claude',
+    bin: isWin ? 'claude.cmd' : 'claude',
+    args: [
       '-p', prompt,
-      '--system-prompt', systemPrompt ?? '',
+      /**
+       * `--append-system-prompt`, NOT `--system-prompt`.
+       *
+       * `--system-prompt` REPLACES Claude Code's default system prompt outright.
+       * Passing a one-line persona there left the model with that single line as
+       * its entire instruction — no tool-use guidance, no output conventions,
+       * nothing — which is why replies read as generic and unfocused. The CLI's
+       * own help is explicit about the pair:
+       *
+       *   --system-prompt          System prompt to use for the session
+       *   --append-system-prompt   Append a system prompt to the default
+       *
+       * and `--exclude-dynamic-system-prompt-sections` documents the same thing
+       * from the other side: "Only applies with the default system prompt
+       * (ignored with --system-prompt)."
+       *
+       * Omitted entirely when there is no persona. The old code passed
+       * `systemPrompt ?? ''`, so an agent with no prompt got an EMPTY system
+       * prompt — strictly worse than not passing the flag at all.
+       */
+      ...(persona ? ['--append-system-prompt', persona] : []),
       '--output-format', 'stream-json',
       // REQUIRED. Without it the CLI exits 1 with
       // "When using --print, --output-format=stream-json requires --verbose",
@@ -111,86 +212,57 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
       // into every reply — output-style directives and all — so Ada answered
       // in the machine owner's preferred format instead of her own.
-      '--setting-sources', ''
-    ];
+      '--setting-sources', '',
+      // Honour the agent's configured model. `--model` previously appeared only
+      // in the Antigravity branch, so an agent whose card read `claude-sonnet-5`
+      // ran on whatever the machine's default was — the picker was decorative.
+      ...(modelName ? ['--model', modelName] : []),
+      /**
+       * Attach the run's MCP servers.
+       *
+       * Claude Code only. `agy` and `codex exec` take MCP configuration from
+       * their own settings files rather than argv, so pointing them at this
+       * per-run file is not possible — granting an agent a server therefore has
+       * no effect on those families yet, and silently pretending otherwise would
+       * be worse than the gap.
+       *
+       * `--strict-mcp-config` makes the pruning real: without it the CLI merges
+       * its own configured servers in, and an agent granted one server would
+       * still see every server the operator has installed.
+       */
+      ...(mcp.configPath ? ['--mcp-config', mcp.configPath, '--strict-mcp-config'] : []),
+      ...(priorSession ? ['--resume', priorSession] : [])
+    ]
+  };
+}
 
-    /**
-     * Only Claude Code has a `--system-prompt` flag.
-     *
-     * `agy` offers `--agent <name>` (a named file in ~/.gemini/agents) and
-     * `codex exec` takes instructions as the prompt argument — neither accepts
-     * a persona inline. Passing nothing meant the persona was silently dropped
-     * and the model answered as itself: an agent labelled "Ada Lovelace" in the
-     * UI replied "I am Antigravity, built by Google DeepMind".
-     *
-     * So for those families the persona is prepended to the message instead —
-     * but only on the FIRST message of a session. Once a session exists the
-     * persona is already in its transcript, and repeating it every turn would
-     * grow the context without adding anything.
-     */
-    const withPersona = (message: string) =>
-      !priorSession && systemPrompt?.trim()
-        ? `${systemPrompt.trim()}\n\n` +
-          (personaName
-            ? `Stay in character as ${personaName} at all times. If asked who or what ` +
-              `you are, answer as ${personaName}, never as the underlying tool or model.\n\n`
-            : '') +
-          `---\n\n${message}`
-        : message;
+export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
+  const { runId, cwd, provider, modelName } = options;
 
-    if (isCodex) {
-      family = 'codex';
-      bin = isWin ? 'codex.cmd' : 'codex';
-      // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
-      // With the prompt first, codex silently ignores everything after it and
-      // reports "--skip-git-repo-check was not specified" even though it was.
-      //
-      // `--skip-git-repo-check` because codex refuses to start outside a git
-      // repo, and a chat has no reason to require one.
-      args = [
-        'exec',
-        '--json',
-        '--sandbox', 'read-only',
-        '--skip-git-repo-check',
-        // -- ends option parsing: a prompt that happens to start with a
-        // hyphen is then read as text, not as a codex flag.
-        '--',
-        withPersona(prompt)
-      ];
-    } else if (isAntigravity) {
-      // Antigravity ships as a desktop IDE, so `agy` is usually not on PATH;
-      // resolve the install location. Its flags mirror Claude Code's but its
-      // event schema does not — see StreamParser.handleAntigravityEvent.
-      family = 'antigravity';
-      bin = RuntimeService.agyPath();
-      args = ['-p', withPersona(prompt), '--output-format', 'stream-json'];
-      if (modelName) args.push('--model', modelName);
-    }
+  const tools: CliToolRecord[] = [];
+  let content = '';
+  let thinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
 
-    /**
-     * Attach the run's MCP servers.
-     *
-     * Claude Code only. `agy` and `codex exec` take MCP configuration from
-     * their own settings files rather than argv, so pointing them at this
-     * per-run file is not possible — granting an agent a server therefore has
-     * no effect on those families yet, and silently pretending otherwise would
-     * be worse than the gap.
-     *
-     * `--strict-mcp-config` makes the pruning real: without it the CLI merges
-     * its own configured servers in, and an agent granted one server would
-     * still see every server the operator has installed.
-     */
-    if (mcp.configPath && family === 'claude') {
-      args.push('--mcp-config', mcp.configPath, '--strict-mcp-config');
-    }
+  let stderr = '';
+  let streamError = '';
 
-    // Apply the resume flag for whichever family we settled on.
-    if (priorSession) {
-      if (family === 'claude') args.push('--resume', priorSession);
-      else if (family === 'antigravity') args.push('--conversation', priorSession);
-      // Codex resume is `codex exec resume <id>`, a different argv shape —
-      // left out until there is a captured transcript to verify against.
-    }
+  // Defaults so the catch block can still report something useful if argv
+  // construction itself fails — RuntimeService.agyPath() throws when the
+  // Antigravity install cannot be located.
+  let family: StreamFamily = 'claude';
+  let bin = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+
+  // Resolve the agent's granted MCP servers into a config for this run only.
+  const mcp = writeRunMcpConfig(runId, options.mcpServers);
+  if (mcp.serverNames.length) {
+    logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
+  }
+
+  try {
+    const invocation = buildTurnInvocation(options, mcp);
+    family = invocation.family;
+    bin = invocation.bin;
+    const args = invocation.args;
 
     // Same parser the run pipeline uses — tested against real captured
     // transcripts in streamParser.test.ts. The hand-rolled inline parser this
@@ -255,7 +327,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       const detail =
         streamError ||
         stderrLines.find(l => /error|fail|not supported|denied/i.test(l)) ||
-        stderrLines[stderrLines.length - 1] ||
+        stderrLines.at(-1) ||
         'the CLI produced no output';
       logError('CLI turn produced no content', detail);
       return {

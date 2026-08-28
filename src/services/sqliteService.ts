@@ -15,6 +15,8 @@ import {
   Skill,
   RuntimeEngine
 } from '../models/index.js';
+import { syncAgentFile, deleteAgentFile } from './agentFileService.js';
+import { ensureMemoryScaffold } from './memoryService.js';
 
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
@@ -639,6 +641,14 @@ export class SQLiteService {
       concurrencyLimit: a.concurrencyLimit ?? 2,
       createdAt: a.createdAt || new Date().toISOString()
     });
+
+    // Project the new agent to its persona file. Hooked here rather than in the
+    // controller so that seeding (defaultAgents.forEach(createAgent)) produces
+    // files too, and so no future caller can create an agent without one.
+    // 'replace' because there is no prior body to protect on a create.
+    syncAgentFile(a, 'replace');
+    ensureMemoryScaffold({ agentId: a.id });
+
     return a;
   }
 
@@ -662,12 +672,28 @@ export class SQLiteService {
       mcpServers: JSON.stringify(merged.mcpServers || []),
       envVars: JSON.stringify(merged.envVars || [])
     });
+
+    /**
+     * Refresh the persona file's frontmatter, but keep its body unless this
+     * update actually changed the system prompt.
+     *
+     * Without that distinction, renaming an agent in the UI would overwrite a
+     * hand-written persona with whatever one-liner is still in the column —
+     * which would make the file layer unusable for its main purpose.
+     */
+    syncAgentFile(merged, 'systemPrompt' in updates ? 'replace' : 'preserve');
+
     return merged;
   }
 
   deleteAgent(id: string): boolean {
     const stmt = this.db.prepare('DELETE FROM agents WHERE id = ?');
     const res = stmt.run(id);
+
+    // Only when a row really went away, so a delete of an unknown id does not
+    // remove a file that some other agent might still be using.
+    if (res.changes > 0) deleteAgentFile(id);
+
     return res.changes > 0;
   }
 
