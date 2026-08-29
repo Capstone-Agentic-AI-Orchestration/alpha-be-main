@@ -5,6 +5,7 @@ import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderS
 import {
   AGENT_FILE_MAX_BYTES,
   agentFilePath,
+  agentFromFileContent,
   parseAgentFileContent,
   readAgentFile,
   readAgentFileRaw,
@@ -13,7 +14,7 @@ import {
 import { resolveAgent } from '../services/personaService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
 import { Agent } from '../models/index.js';
-import { logError } from '../utils/logger.js';
+import { logError, logInfo } from '../utils/logger.js';
 
 export const dataRouter = Router();
 
@@ -179,6 +180,44 @@ dataRouter.put('/agents/:id/persona', (req: Request, res: Response) => {
   } catch (err: any) {
     logError('Could not save persona file', err?.message ?? String(err));
     res.status(400).json({ error: err?.message ?? 'Could not save the persona file' });
+  }
+});
+
+/**
+ * Import an agent from a persona file someone shared.
+ *
+ * The counterpart to downloading `GET /agents/:id/persona`, and the reason the
+ * file carries a complete definition rather than only prose: a teammate should
+ * be able to receive an agent and run it, without the sender's machine, keys or
+ * subscription being involved.
+ *
+ * A new id is minted here rather than trusting the file's, so importing the
+ * same agent twice produces two agents instead of silently overwriting one —
+ * and so an id from elsewhere never becomes a path segment.
+ */
+dataRouter.post('/agents/import', (req: Request, res: Response) => {
+  const { content } = req.body ?? {};
+
+  if (typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({ error: 'content must be the text of a persona file' });
+  }
+  if (Buffer.byteLength(content, 'utf8') > AGENT_FILE_MAX_BYTES) {
+    return res.status(413).json({ error: `Persona file exceeds ${AGENT_FILE_MAX_BYTES} bytes.` });
+  }
+
+  try {
+    const existingIds = sqliteService.getAgents().map(a => a.id);
+    const { agent, warnings } = agentFromFileContent(content, existingIds);
+
+    // createAgent writes the persona file too, so the body arrives on disk
+    // without a second round trip.
+    const created = sqliteService.createAgent(agent);
+
+    logInfo(`Imported agent ${created.id} (${created.name})`);
+    res.status(201).json({ agent: withFileOverlay(created), warnings });
+  } catch (err: any) {
+    logError('Agent import failed', err?.message ?? String(err));
+    res.status(400).json({ error: err?.message ?? 'Could not import this persona file' });
   }
 });
 

@@ -51,7 +51,16 @@ const FILE_KEYS = {
   autonomy: 'autonomyLevel',
   temperature: 'temperature',
   skills: 'skills',
-  mcpServers: 'mcpServers'
+  mcpServers: 'mcpServers',
+  /**
+   * Appearance, last because it is the least interesting to a reader.
+   *
+   * Carried so the file is a complete portable definition: an agent exported to
+   * a teammate should arrive looking like itself, not as a broken image and a
+   * default swatch. Both are ignored by the runner.
+   */
+  color: 'color',
+  avatar: 'avatar'
 } as const;
 
 const ROLES: readonly AgentRole[] = [
@@ -80,10 +89,12 @@ const AUTONOMY_LEVELS: readonly AutonomyLevel[] = [
 ];
 
 /**
- * Fields a persona file may override. Everything absent here — id, owner,
- * avatar, colour, isMine, createdAt, envVars, customCliArgs — stays
- * database-owned, either because it is identity or because it is not
- * meaningfully hand-editable.
+ * Fields a persona file may override.
+ *
+ * Everything absent here — id, owner, isMine, createdAt, envVars,
+ * customCliArgs — stays database-owned: identity, or machine-specific, or
+ * secret. `envVars` in particular must never reach the file, because the file
+ * is the thing people export and send to each other.
  */
 export interface AgentFileOverlay {
   systemPrompt?: string;
@@ -96,6 +107,8 @@ export interface AgentFileOverlay {
   temperature?: number;
   skills?: string[];
   mcpServers?: string[];
+  color?: string;
+  avatar?: string;
 }
 
 /** How `syncAgentFile` treats an existing body. */
@@ -220,6 +233,8 @@ export function parseAgentFileContent(raw: string): {
     temperature: asTemperature(data.temperature, warnings),
     skills: asStringList(data.skills),
     mcpServers: asStringList(data.mcpServers),
+    color: asString(data.color),
+    avatar: asString(data.avatar),
     /**
      * Comments stripped: the generated file explains itself to whoever opens
      * it, and that guidance ("Frontmatter keys override the matching columns in
@@ -324,9 +339,19 @@ function frontmatterFor(agent: Agent): FrontmatterData {
 function starterBody(agent: Agent): string {
   const prompt = (agent.systemPrompt ?? '').trim();
 
+  /**
+   * Only add a heading when the prompt does not already start with one.
+   *
+   * The generated body opens with `# {name}`, and that heading is part of the
+   * body, so it comes back as part of `systemPrompt` when the file is read.
+   * Writing the file again then prepended a second copy. It showed up on the
+   * export/import round trip — an imported agent arrived with its name twice,
+   * and every further cycle would have added another.
+   */
+  const heading = prompt.startsWith('#') ? [] : [`# ${agent.name}`, ''];
+
   return [
-    `# ${agent.name}`,
-    '',
+    ...heading,
     '<!--',
     '  This file is the system prompt for this agent. Everything below the',
     '  frontmatter is sent to the model verbatim, appended to the CLI\'s own',
@@ -408,4 +433,102 @@ export function ensureAgentFiles(agents: Agent[]): number {
 
   if (created) logInfo(`Wrote ${created} agent persona file(s) to ${AGENTS_DIR}`);
   return created;
+}
+
+/**
+ * Build a new agent from a persona file someone else exported.
+ *
+ * Sharing an agent is the one capability that works the same whether Alpha is
+ * running locally or hosted, because an agent definition is data rather than
+ * execution: the recipient runs it on their own CLI, signed into their own
+ * subscription. Nothing about the sender's machine needs to travel — and
+ * nothing secret does, because `envVars` is not a file field.
+ *
+ * A new id is minted rather than reusing the sender's. Two people importing the
+ * same file onto the same machine should get two agents, not a silent overwrite
+ * of the first, and an id from elsewhere would also be an untrusted path
+ * segment.
+ *
+ * Unrecognised values fall back to a default and are reported. The alternative —
+ * refusing the whole import over one mistyped `role:` — makes a shared file
+ * feel fragile when the fix is obvious and the rest of the definition is fine.
+ */
+export function agentFromFileContent(
+  raw: string,
+  existingIds: string[]
+): { agent: Agent; warnings: string[] } {
+  const { overlay, warnings } = parseAgentFileContent(raw);
+
+  const name = overlay?.name?.trim();
+  if (!name) {
+    throw new Error(
+      'This file has no `name:` in its frontmatter, so there is no agent to import.'
+    );
+  }
+
+  if (!overlay?.role) warnings.push('No role given — defaulting to Coder.');
+  if (!overlay?.modelProvider) warnings.push('No provider given — defaulting to Anthropic.');
+  if (!overlay?.systemPrompt) {
+    warnings.push('This file has no persona text below the frontmatter.');
+  }
+
+  const agent: Agent = {
+    id: uniqueAgentId(name, existingIds),
+    name,
+    role: overlay?.role ?? 'Coder',
+    avatar: overlay?.avatar ?? '',
+    color: overlay?.color ?? '#6366f1',
+    description: overlay?.description ?? '',
+    owner: 'You',
+    isMine: true,
+    modelProvider: overlay?.modelProvider ?? 'Anthropic',
+    /**
+     * The sender's model when the file names one, blank when it does not.
+     *
+     * Kept rather than cleared even though it may not exist on the recipient's
+     * machine: the model picker already shows an unrecognised value as
+     * "(not detected)" instead of dropping it, so keeping it tells the importer
+     * what the agent was built for. Nothing runs until a model is chosen anyway.
+     */
+    modelName: overlay?.modelName ?? '',
+    systemPrompt: overlay?.systemPrompt ?? '',
+    autonomyLevel: overlay?.autonomyLevel ?? 'Semi-Autonomous (Requires Approval)',
+    temperature: overlay?.temperature,
+    skills: overlay?.skills ?? [],
+    mcpServers: overlay?.mcpServers ?? [],
+    // Deliberately not imported: an environment belongs to a machine, and a
+    // shared file must never carry someone else's keys.
+    envVars: [],
+    customCliArgs: '',
+    createdAt: new Date().toISOString()
+  };
+
+  return { agent, warnings };
+}
+
+/**
+ * A filesystem-safe id derived from the agent's name, unique on this machine.
+ *
+ * Readable rather than a uuid because it becomes the persona file's name, and
+ * `agent-ada-lovelace.md` is findable in a directory listing where a uuid is not.
+ */
+export function uniqueAgentId(name: string, existingIds: string[]): string {
+  const slug =
+    name
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/g, '-')
+      .replaceAll(/^-+|-+$/g, '')
+      .slice(0, 40) || 'agent';
+
+  const base = `agent-${slug}`;
+  if (!existingIds.includes(base)) return base;
+
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${base}-${n}`;
+    if (!existingIds.includes(candidate)) return candidate;
+  }
+
+  // A thousand agents of the same name is not a real case; fall back rather
+  // than loop forever.
+  return `${base}-${Date.now()}`;
 }
