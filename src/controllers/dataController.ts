@@ -6,6 +6,7 @@ import {
   AGENT_FILE_MAX_BYTES,
   agentFilePath,
   parseAgentFileContent,
+  readAgentFile,
   readAgentFileRaw,
   writeAgentFileRaw
 } from '../services/agentFileService.js';
@@ -37,8 +38,34 @@ dataRouter.delete('/projects/:id', (req: Request, res: Response) => {
 });
 
 // --- Agents ---
+
+/**
+ * The agent as it will actually behave, plus which fields the file decides.
+ *
+ * The list previously returned raw database rows while runs resolved the
+ * persona file over the top, so a card could read `claude-sonnet-5` for an
+ * agent running on something else entirely. Merging here makes the card honest.
+ *
+ * `managedByFile` is what stops the merge becoming a new lie: without it the UI
+ * would offer an editable input holding a value it cannot change, and the next
+ * save would appear to work and then revert on reload. The client uses it to
+ * mark those fields read-only and point at the persona file instead.
+ */
+function withFileOverlay(agent: Agent) {
+  let overlay: ReturnType<typeof readAgentFile> = null;
+  try {
+    overlay = readAgentFile(agent.id);
+  } catch {
+    // An unreadable or badly-named persona file must not take the roster down.
+  }
+
+  if (!overlay) return { ...agent, managedByFile: [] as string[] };
+
+  return { ...agent, ...overlay, managedByFile: Object.keys(overlay) };
+}
+
 dataRouter.get('/agents', (req: Request, res: Response) => {
-  res.json(sqliteService.getAgents());
+  res.json(sqliteService.getAgents().map(withFileOverlay));
 });
 
 dataRouter.post('/agents', (req: Request, res: Response) => {
@@ -46,7 +73,7 @@ dataRouter.post('/agents', (req: Request, res: Response) => {
   if (error) return res.status(400).json({ error });
 
   const agent = sqliteService.createAgent(req.body);
-  res.status(201).json(agent);
+  res.status(201).json(withFileOverlay(agent));
 });
 
 dataRouter.put('/agents/:id', (req: Request, res: Response) => {
@@ -57,7 +84,9 @@ dataRouter.put('/agents/:id', (req: Request, res: Response) => {
 
   const updated = sqliteService.updateAgent(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Agent not found' });
-  res.json(updated);
+  // Merged, like the list: a field the file owns must not appear to have taken
+  // the value that was just written to the database.
+  res.json(withFileOverlay(updated));
 });
 
 dataRouter.delete('/agents/:id', (req: Request, res: Response) => {

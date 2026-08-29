@@ -15,7 +15,7 @@ import {
   Skill,
   RuntimeEngine
 } from '../models/index.js';
-import { syncAgentFile, deleteAgentFile } from './agentFileService.js';
+import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
 
 // Ensure alpha dir exists
@@ -664,7 +664,29 @@ export class SQLiteService {
   updateAgent(id: string, updates: Partial<Agent>): Agent | null {
     const existing = this.getAgents().find(a => a.id === id);
     if (!existing) return null;
-    const merged = { ...existing, ...updates };
+
+    /**
+     * Database row, then the persona file, then what is actually being changed.
+     *
+     * The file layer has to sit in the middle or this method destroys it. The
+     * projection below rewrites the file's frontmatter from `merged`, and
+     * `existing` is the raw database row — so editing any one field in the UI
+     * used to rewrite EVERY frontmatter key from a stale column. An agent whose
+     * file said `model: claude-opus-5` would silently drop back to whatever the
+     * database still held, purely because someone renamed it.
+     *
+     * Layered this way the file keeps what it declares, and an explicit update
+     * still wins — which is what makes editing in the UI write through to the
+     * file rather than fight with it.
+     */
+    let overlay: Partial<Agent> = {};
+    try {
+      overlay = readAgentFile(id) ?? {};
+    } catch {
+      // A broken persona file must not block an update to the row.
+    }
+
+    const merged = { ...existing, ...overlay, ...updates };
     const stmt = this.db.prepare(`
       UPDATE agents SET
         name = @name, role = @role, avatar = @avatar, color = @color, description = @description,
