@@ -1,6 +1,9 @@
 import { processManager } from './processManager.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { StreamParser, StreamFamily } from './streamParser.js';
+import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
+import { parseCustomCliArgs } from './customCliArgs.js';
+import { CHAT_ALLOWED_TOOLS, CHAT_DISALLOWED_TOOLS } from './toolPolicy.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -17,13 +20,7 @@ import { logError, logInfo } from '../utils/logger.js';
  * turns one into a message in the thread, the builder into an error response.
  */
 
-export interface CliToolRecord {
-  id: string;
-  toolName: string;
-  parameters: Record<string, unknown>;
-  status: 'success';
-  executedAt: string;
-}
+export type { CliToolRecord } from './turnAccumulator.js';
 
 export interface CliTurnOptions {
   runId: string;
@@ -37,6 +34,31 @@ export interface CliTurnOptions {
   prompt: string;
   /** CLI session id to continue, or null to start a new one. */
   priorSession: string | null;
+  /**
+   * The persona changed since this session started.
+   *
+   * Only meaningful with `priorSession`. Claude Code receives the persona on
+   * every turn via `--append-system-prompt`, so it picks up edits by itself;
+   * `codex` and `agy` take it prepended to the first message only, which left
+   * an edit invisible to any conversation already underway. When this is set
+   * those families are told, in the next message, that their instructions
+   * changed.
+   */
+  personaChanged?: boolean;
+  /**
+   * Environment for the spawned CLI, from `agent.envVars`.
+   *
+   * Merged over `process.env` by processManager. Never logged — an agent's env
+   * is where its API keys live.
+   */
+  env?: Record<string, string>;
+  /**
+   * Extra CLI flags from `agent.customCliArgs`.
+   *
+   * Parsed and filtered — see `parseCustomCliArgs`. Anything that would widen
+   * what the turn can reach is dropped rather than honoured.
+   */
+  customCliArgs?: string;
   /**
    * MCP server names this agent is granted, from `agent.mcpServers`.
    *
@@ -88,6 +110,19 @@ export function buildTurnInvocation(
 ): TurnInvocation {
   const { provider, modelName, systemPrompt, personaName, prompt, priorSession } = options;
 
+  /**
+   * The agent's own extra flags, minus anything the runner owns.
+   *
+   * Rejections are logged rather than dropped quietly: a flag someone typed
+   * that silently does nothing is the failure mode this whole field had before
+   * it was read at all.
+   */
+  const custom = parseCustomCliArgs(options.customCliArgs);
+  if (custom.rejected.length) {
+    logError('Ignored custom CLI arguments', custom.rejected.join('; '));
+  }
+  const customArgs = custom.args;
+
   const isWin = process.platform === 'win32';
   const isCodex = provider === 'OpenAI';
   const isAntigravity = provider === 'Antigravity' || provider === 'Google Gemini';
@@ -113,14 +148,32 @@ export function buildTurnInvocation(
    * context without adding anything.
    */
   const withPersona = (message: string) => {
-    if (priorSession || !persona) return message;
+    if (!persona) return message;
+    // Already in the transcript and unchanged — repeating it every turn would
+    // grow the context without adding anything.
+    if (priorSession && !options.personaChanged) return message;
 
     const stayInCharacter = personaName
       ? `Stay in character as ${personaName} at all times. If asked who or what ` +
         `you are, answer as ${personaName}, never as the underlying tool or model.\n\n`
       : '';
 
-    return `${persona}\n\n${stayInCharacter}---\n\n${message}`;
+    /**
+     * Mid-session re-injection is worded as a correction, not an introduction.
+     *
+     * Dropping the persona in again unannounced reads, in a transcript that
+     * already contains one, as a duplicate rather than a replacement — and the
+     * model has no way to know which of the two now governs. Saying so
+     * explicitly is what makes an edit to a persona file take effect on a
+     * conversation that is already running.
+     */
+    const preamble =
+      priorSession && options.personaChanged
+        ? 'Your instructions have been updated. Everything below replaces any ' +
+          'earlier instructions in this conversation; follow it from now on.\n\n'
+        : '';
+
+    return `${preamble}${persona}\n\n${stayInCharacter}---\n\n${message}`;
   };
 
   if (isCodex) {
@@ -144,6 +197,8 @@ export function buildTurnInvocation(
         // Before the `--`, necessarily: after it, `--model` would be read as
         // part of the prompt text rather than as a flag.
         ...(modelName ? ['--model', modelName] : []),
+        // Before the terminator for the same reason --model is.
+        ...customArgs,
         // -- ends option parsing: a prompt that happens to start with a
         // hyphen is then read as text, not as a codex flag.
         '--',
@@ -163,7 +218,8 @@ export function buildTurnInvocation(
         '-p', withPersona(prompt),
         '--output-format', 'stream-json',
         ...(modelName ? ['--model', modelName] : []),
-        ...(priorSession ? ['--conversation', priorSession] : [])
+        ...(priorSession ? ['--conversation', priorSession] : []),
+        ...customArgs
       ]
     };
   }
@@ -206,8 +262,8 @@ export function buildTurnInvocation(
       // MCP tools are namespaced `mcp__<server>__<tool>`, and this allowlist is
       // exhaustive: without the patterns appended here the servers would
       // connect and then every call against them would be denied.
-      '--allowedTools', 'Read', 'Glob', 'Grep', ...mcpToolPatterns(mcp.serverNames),
-      '--disallowedTools', 'Write', 'Edit', 'Bash',
+      '--allowedTools', ...CHAT_ALLOWED_TOOLS, ...mcpToolPatterns(mcp.serverNames),
+      '--disallowedTools', ...CHAT_DISALLOWED_TOOLS,
       // Isolate the agent persona from the operator's personal Claude Code
       // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
       // into every reply — output-style directives and all — so Ada answered
@@ -231,7 +287,11 @@ export function buildTurnInvocation(
        * still see every server the operator has installed.
        */
       ...(mcp.configPath ? ['--mcp-config', mcp.configPath, '--strict-mcp-config'] : []),
-      ...(priorSession ? ['--resume', priorSession] : [])
+      ...(priorSession ? ['--resume', priorSession] : []),
+      // Last, so the agent's own flags are visible in argv order — but they
+      // cannot override anything above: parseCustomCliArgs drops every flag
+      // this runner sets. See customCliArgs for why that is a denylist.
+      ...customArgs
     ]
   };
 }
@@ -239,12 +299,11 @@ export function buildTurnInvocation(
 export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
   const { runId, cwd, provider, modelName } = options;
 
-  const tools: CliToolRecord[] = [];
-  let content = '';
-  let thinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
+  // Owns the "what is the answer, what is narration" rule — see TurnAccumulator.
+  const turn = new TurnAccumulator();
+  const idleThinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
 
   let stderr = '';
-  let streamError = '';
 
   // Defaults so the catch block can still report something useful if argv
   // construction itself fails — RuntimeService.agyPath() throws when the
@@ -276,30 +335,15 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
         bin,
         args,
         cwd,
+        // Merged over process.env by processManager. Not logged — an agent's
+        // env is where its API keys live.
+        env: options.env,
         onExit: () => resolve()
       });
 
       if (child.stdout) {
         createLineBuffer(child.stdout, (line) => {
-          for (const ev of parser.parseLine(line)) {
-            if (ev.type === 'log' && ev.message) {
-              content += (content ? '\n' : '') + ev.message;
-            } else if (ev.type === 'thinking' && ev.thinking) {
-              thinking = ev.thinking;
-            } else if (ev.type === 'error' && ev.message) {
-              // The CLI's own error is far more useful than stderr's first
-              // line, which is often an unrelated warning.
-              streamError = ev.message;
-            } else if (ev.type === 'tool_call' && ev.toolName) {
-              tools.push({
-                id: `tool-${Date.now()}-${tools.length}`,
-                toolName: ev.toolName,
-                parameters: ev.toolInput ?? {},
-                status: 'success',
-                executedAt: new Date().toISOString()
-              });
-            }
-          }
+          for (const ev of parser.parseLine(line)) turn.accept(ev);
         });
       }
 
@@ -315,6 +359,9 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       logError('CLI stream had unhandled event types', unhandled.join(', '));
     }
 
+    const content = turn.getContent();
+    const thinking = turn.getThinking(idleThinking);
+
     if (!content.trim()) {
       // Report the real reason instead of a reassuring placeholder. The old
       // fallback ("All systems and components are aligned") made a failed
@@ -325,7 +372,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       // the last line.
       const stderrLines = stderr.split('\n').map(l => l.trim()).filter(Boolean);
       const detail =
-        streamError ||
+        turn.getStreamError() ||
         stderrLines.find(l => /error|fail|not supported|denied/i.test(l)) ||
         stderrLines.at(-1) ||
         'the CLI produced no output';
@@ -333,7 +380,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       return {
         content: '',
         thinking,
-        tools,
+        tools: turn.getTools(),
         sessionId: parser.getSessionId() ?? null,
         bin,
         failureDetail: detail,
@@ -344,7 +391,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     return {
       content: content.trim(),
       thinking,
-      tools,
+      tools: turn.getTools(),
       sessionId: parser.getSessionId() ?? null,
       bin,
       failureDetail: null,
@@ -354,8 +401,8 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     logError('Failed to start CLI turn:', err);
     return {
       content: '',
-      thinking,
-      tools,
+      thinking: turn.getThinking(idleThinking),
+      tools: turn.getTools(),
       sessionId: null,
       bin,
       failureDetail: err?.message ?? String(err),

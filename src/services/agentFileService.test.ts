@@ -292,3 +292,104 @@ describe('ensureAgentFiles', () => {
     expect(svc.agentFileExists('agent-orion')).toBe(true);
   });
 });
+
+describe('raw read and write — the editor path', () => {
+  it('returns null for a file that does not exist', () => {
+    expect(svc.readAgentFileRaw('agent-nobody')).toBeNull();
+  });
+
+  it('returns the file exactly as written', () => {
+    const raw = '---\nname: Ada\n---\n\nHand written.\n';
+    writeFile(raw);
+    expect(svc.readAgentFileRaw('agent-ada')).toBe(raw);
+  });
+
+  it('saves text verbatim, frontmatter included', () => {
+    svc.writeAgentFileRaw('agent-ada', '---\nmodel: claude-opus-5\n---\n\nMy persona.');
+
+    const overlay = svc.readAgentFile('agent-ada');
+    expect(overlay?.modelName).toBe('claude-opus-5');
+    expect(overlay?.systemPrompt).toBe('My persona.');
+  });
+
+  it('normalises to a single trailing newline', () => {
+    svc.writeAgentFileRaw('agent-ada', 'No frontmatter.\n\n\n');
+    expect(readFile()).toBe('No frontmatter.\n');
+  });
+
+  it('creates the agents directory when saving into a fresh store', () => {
+    expect(() => svc.writeAgentFileRaw('agent-new', 'Persona.')).not.toThrow();
+    expect(svc.agentFileExists('agent-new')).toBe(true);
+  });
+
+  it('refuses content past the size cap', () => {
+    const tooBig = 'x'.repeat(svc.AGENT_FILE_MAX_BYTES + 1);
+    expect(() => svc.writeAgentFileRaw('agent-ada', tooBig)).toThrow(/exceeds/);
+  });
+
+  it('accepts content exactly at the cap', () => {
+    expect(() =>
+      svc.writeAgentFileRaw('agent-ada', 'y'.repeat(svc.AGENT_FILE_MAX_BYTES))
+    ).not.toThrow();
+  });
+
+  it('rejects an unsafe id before touching the filesystem', () => {
+    expect(() => svc.writeAgentFileRaw('../escape', 'Persona.')).toThrow(/Invalid agent id/);
+  });
+
+  it('round-trips an edit made through the editor path', () => {
+    svc.syncAgentFile(agent(), 'replace');
+    const original = svc.readAgentFileRaw('agent-ada')!;
+
+    svc.writeAgentFileRaw('agent-ada', original.replace('claude-sonnet-5', 'claude-opus-5'));
+
+    expect(svc.readAgentFile('agent-ada')?.modelName).toBe('claude-opus-5');
+  });
+});
+
+describe('parseAgentFileContent — warnings for the editor', () => {
+  it('reports no warnings for a valid file', () => {
+    const { warnings } = svc.parseAgentFileContent('---\nrole: Coder\n---\n\nPersona.');
+    expect(warnings).toEqual([]);
+  });
+
+  it('names the unknown role and lists what was expected', () => {
+    const { warnings, overlay } = svc.parseAgentFileContent('---\nrole: Wizard\n---\n\nPersona.');
+
+    expect(overlay?.role).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Wizard');
+    expect(warnings[0]).toContain('Architect');
+  });
+
+  it('warns about an unknown provider', () => {
+    const { warnings } = svc.parseAgentFileContent('---\nprovider: Skynet\n---\n\nPersona.');
+    expect(warnings[0]).toContain('Skynet');
+  });
+
+  it('warns about an out-of-range temperature', () => {
+    const { warnings } = svc.parseAgentFileContent('---\ntemperature: 9\n---\n\nPersona.');
+    expect(warnings[0]).toMatch(/temperature/i);
+  });
+
+  it('collects every problem rather than stopping at the first', () => {
+    const { warnings } = svc.parseAgentFileContent(
+      '---\nrole: Wizard\nprovider: Skynet\ntemperature: 9\n---\n\nPersona.'
+    );
+    expect(warnings).toHaveLength(3);
+  });
+
+  it('still returns the valid fields alongside the warnings', () => {
+    const { overlay, warnings } = svc.parseAgentFileContent(
+      '---\nrole: Wizard\nmodel: claude-opus-5\n---\n\nPersona.'
+    );
+
+    expect(warnings).toHaveLength(1);
+    expect(overlay?.modelName).toBe('claude-opus-5');
+    expect(overlay?.systemPrompt).toBe('Persona.');
+  });
+
+  it('reports nothing for empty content', () => {
+    expect(svc.parseAgentFileContent('')).toEqual({ overlay: null, warnings: [] });
+  });
+});

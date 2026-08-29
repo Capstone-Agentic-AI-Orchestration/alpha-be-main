@@ -350,11 +350,26 @@ export class StreamParser {
     const kind = String(step.step_type ?? '');
 
     // Assistant prose, streamed a fragment at a time.
-    if (kind === 'agent_response' && typeof step.text_delta === 'string' && step.text_delta) {
-      this.sawAssistantText = true;
-      this.antigravityText += step.text_delta;
+    if (kind === 'agent_response') {
+      if (typeof step.text_delta === 'string' && step.text_delta) {
+        this.sawAssistantText = true;
+        this.antigravityText += step.text_delta;
+      }
 
-      // Flush once the step completes so consumers get whole sentences.
+      /**
+       * Flush on DONE whether or not THIS event carried a delta.
+       *
+       * The delta and the completion do not have to arrive together. When a
+       * DONE came through with no `text_delta`, the old condition skipped this
+       * branch entirely: the step fell through to the bottom, was recorded as
+       * an unhandled `antigravity.step.agent_response`, and everything already
+       * accumulated in `antigravityText` was dropped — the agent's whole reply
+       * silently vanished and the turn reported "the CLI produced no output".
+       *
+       * fixtures/antigravity-stream-sample.jsonl happens to carry a delta on
+       * its DONE, which is why the tests never caught this; the unhandled-type
+       * log from a real run is what surfaced it.
+       */
       if (step.state === 'DONE') {
         const text = this.antigravityText.trim();
         this.antigravityText = '';

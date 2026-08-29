@@ -2,6 +2,16 @@ import { Request, Response, Router } from 'express';
 import { sqliteService } from '../services/sqliteService.js';
 import { agentValidationError } from './agentValidation.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
+import {
+  AGENT_FILE_MAX_BYTES,
+  agentFilePath,
+  parseAgentFileContent,
+  readAgentFileRaw,
+  writeAgentFileRaw
+} from '../services/agentFileService.js';
+import { resolveAgent } from '../services/personaService.js';
+import { Agent } from '../models/index.js';
+import { logError } from '../utils/logger.js';
 
 export const dataRouter = Router();
 
@@ -53,6 +63,81 @@ dataRouter.put('/agents/:id', (req: Request, res: Response) => {
 dataRouter.delete('/agents/:id', (req: Request, res: Response) => {
   const deleted = sqliteService.deleteAgent(req.params.id);
   res.json({ success: deleted });
+});
+
+/**
+ * The agent's persona file — `~/.alpha/agents/{id}.md` — as text.
+ *
+ * Exposed so the file can be edited in the app rather than only in an editor on
+ * the machine running the daemon. That matters for the same reason the file
+ * exists at all: the persona is prose, and prose is written where the person
+ * is, not where the process is.
+ *
+ * `effective` is what the agent actually resolves to once the file is merged
+ * over the database row — the honest answer to "what will this agent be", which
+ * neither source gives on its own.
+ */
+function personaPayload(id: string, agent: Agent) {
+  const content = readAgentFileRaw(id);
+  const { warnings } = parseAgentFileContent(content ?? '');
+  const effective = resolveAgent(agent, { includeMemory: false });
+
+  return {
+    agentId: id,
+    path: agentFilePath(id),
+    exists: content !== null,
+    content: content ?? '',
+    warnings,
+    effective: {
+      name: effective.name,
+      role: effective.role,
+      modelProvider: effective.modelProvider,
+      modelName: effective.modelName,
+      autonomyLevel: effective.autonomyLevel,
+      skills: effective.skills,
+      mcpServers: effective.mcpServers,
+      systemPromptChars: effective.systemPrompt.length,
+      /** 'agents/{id}.md' when the file supplied the persona, else 'alpha.db'. */
+      promptSource: effective.sources[0]
+    }
+  };
+}
+
+dataRouter.get('/agents/:id/persona', (req: Request, res: Response) => {
+  const agent = sqliteService.getAgents().find(a => a.id === req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  try {
+    res.json(personaPayload(req.params.id, agent));
+  } catch (err: any) {
+    // agentFilePath throws on an id that would escape the agents directory.
+    res.status(400).json({ error: err?.message ?? 'Could not read the persona file' });
+  }
+});
+
+dataRouter.put('/agents/:id/persona', (req: Request, res: Response) => {
+  const agent = sqliteService.getAgents().find(a => a.id === req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  const { content } = req.body ?? {};
+  if (typeof content !== 'string') {
+    return res.status(400).json({ error: 'content must be a string' });
+  }
+  if (Buffer.byteLength(content, 'utf8') > AGENT_FILE_MAX_BYTES) {
+    return res.status(413).json({
+      error: `Persona file exceeds ${AGENT_FILE_MAX_BYTES} bytes.`
+    });
+  }
+
+  try {
+    writeAgentFileRaw(req.params.id, content);
+    // Read back rather than echo, so the response reflects what is on disk —
+    // including the warnings the saved text produces.
+    res.json(personaPayload(req.params.id, agent));
+  } catch (err: any) {
+    logError('Could not save persona file', err?.message ?? String(err));
+    res.status(400).json({ error: err?.message ?? 'Could not save the persona file' });
+  }
 });
 
 /**

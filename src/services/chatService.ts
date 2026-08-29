@@ -4,6 +4,8 @@ import { ChatMessage, ChatThread } from '../models/index.js';
 import { runCliTurn } from './cliRunner.js';
 import { ensureWorkspacesRoot } from './workspaceService.js';
 import { resolveAgentLogged } from './personaService.js';
+import { buildEnv } from './customCliArgs.js';
+import { logInfo } from '../utils/logger.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -167,7 +169,24 @@ export class ChatService extends EventEmitter {
      * No project key: a chat thread belongs to no project, so Tier 2 does not
      * apply. Global and agent memory do.
      */
-    const persona = resolveAgentLogged(agent);
+    const persona = resolveAgentLogged(agent, { includeToolPolicy: true });
+
+    /**
+     * Has the persona changed since this conversation started?
+     *
+     * A null stored hash means the session predates the column, not that
+     * anything changed — announcing an instruction change to every existing
+     * thread on first upgrade would be noise, so unknown is treated as
+     * unchanged.
+     */
+    const personaChanged =
+      !!priorSession?.personaHash && priorSession.personaHash !== persona.personaHash;
+
+    if (personaChanged) {
+      logInfo(`Persona for ${agent.id} changed mid-thread ${threadId} — re-announcing`);
+    }
+
+    const { env } = buildEnv(agent.envVars);
 
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
@@ -177,15 +196,19 @@ export class ChatService extends EventEmitter {
       systemPrompt: persona.systemPrompt,
       personaName: persona.name,
       prompt,
-      priorSession,
-      mcpServers: persona.mcpServers
+      priorSession: priorSession?.cliSessionId ?? null,
+      personaChanged,
+      mcpServers: persona.mcpServers,
+      env,
+      customCliArgs: agent.customCliArgs
     });
 
     // Store the session so the next message in this thread continues it.
     // Claude mints a NEW id on every resume, so this must be re-saved each
-    // turn rather than written once.
+    // turn rather than written once. The persona hash rides along: it is what
+    // the NEXT turn compares against.
     if (turn.sessionId) {
-      sqliteService.setThreadSession(threadId, agent.id, turn.sessionId);
+      sqliteService.setThreadSession(threadId, agent.id, turn.sessionId, persona.personaHash);
     }
 
     let content = turn.content;

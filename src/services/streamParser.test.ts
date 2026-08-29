@@ -225,3 +225,49 @@ describe('StreamParser — robustness', () => {
     expect(events.some((e) => e.type === 'error')).toBe(true);
   });
 });
+
+describe('Antigravity agent_response completion', () => {
+  const step = (over: Record<string, unknown>) => JSON.stringify({ event: 'step_update', step_update: { step_type: 'agent_response', ...over } });
+
+  it('flushes accumulated text when DONE carries no delta', () => {
+    // The regression: a DONE without its own text_delta used to skip the
+    // branch, be logged as an unhandled type, and drop the whole reply.
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'Hello ' }));
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'world' }));
+    const events = parser.parseLine(step({ state: 'DONE' }));
+
+    expect(events.map(e => e.message)).toEqual(['Hello world']);
+  });
+
+  it('no longer records agent_response as an unhandled type', () => {
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'Hi' }));
+    parser.parseLine(step({ state: 'DONE' }));
+
+    expect(parser.getUnhandledTypes()).not.toContain('antigravity.step.agent_response');
+  });
+
+  it('still flushes when DONE does carry the final delta', () => {
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'PONG' }));
+    const events = parser.parseLine(step({ state: 'DONE', text_delta: '!' }));
+
+    expect(events.map(e => e.message)).toEqual(['PONG!']);
+  });
+
+  it('emits nothing when the step completes with no text at all', () => {
+    const parser = new StreamParser('antigravity');
+    expect(parser.parseLine(step({ state: 'DONE' }))).toEqual([]);
+  });
+
+  it('starts clean for the next response after a flush', () => {
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'first' }));
+    parser.parseLine(step({ state: 'DONE' }));
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'second' }));
+    const events = parser.parseLine(step({ state: 'DONE' }));
+
+    expect(events.map(e => e.message)).toEqual(['second']);
+  });
+});

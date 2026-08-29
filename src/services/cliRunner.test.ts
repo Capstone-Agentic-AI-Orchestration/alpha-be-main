@@ -158,6 +158,119 @@ describe('buildTurnInvocation — Codex', () => {
   });
 });
 
+describe('persona re-injection mid-session', () => {
+  const codex = (over: Partial<CliTurnOptions> = {}) =>
+    buildTurnInvocation(options({ provider: 'OpenAI', ...over }), noMcp);
+
+  it('omits the persona on a continuing session when nothing changed', () => {
+    expect(codex({ priorSession: 'sess-1' }).args.at(-1)).toBe('What does this service do?');
+  });
+
+  it('re-injects the persona when it changed under a live session', () => {
+    const prompt = codex({ priorSession: 'sess-1', personaChanged: true }).args.at(-1)!;
+
+    expect(prompt).toContain('You are Ada.');
+    expect(prompt).toContain('What does this service do?');
+  });
+
+  it('words the re-injection as a replacement, not an introduction', () => {
+    // Dropped in unannounced, a second persona reads as a duplicate rather than
+    // a correction, and the model cannot tell which one now governs.
+    const prompt = codex({ priorSession: 'sess-1', personaChanged: true }).args.at(-1)!;
+
+    expect(prompt).toContain('Your instructions have been updated');
+    expect(prompt).toContain('replaces any earlier instructions');
+  });
+
+  it('does not add that preamble on a brand new session', () => {
+    const prompt = codex({ priorSession: null }).args.at(-1)!;
+
+    expect(prompt).toContain('You are Ada.');
+    expect(prompt).not.toContain('Your instructions have been updated');
+  });
+
+  it('changes nothing when the agent has no persona at all', () => {
+    const prompt = codex({
+      priorSession: 'sess-1',
+      personaChanged: true,
+      systemPrompt: ''
+    }).args.at(-1);
+
+    expect(prompt).toBe('What does this service do?');
+  });
+
+  it('applies to Antigravity too', () => {
+    const { args } = buildTurnInvocation(
+      options({ provider: 'Antigravity', priorSession: 'conv-1', personaChanged: true }),
+      noMcp
+    );
+
+    expect(valueOf(args, '-p')).toContain('Your instructions have been updated');
+  });
+
+  it('is irrelevant to Claude, which resends the persona by flag every turn', () => {
+    const { args } = buildTurnInvocation(
+      options({ priorSession: 'sess-1', personaChanged: true }),
+      noMcp
+    );
+
+    expect(valueOf(args, '--append-system-prompt')).toBe('You are Ada.');
+    expect(valueOf(args, '-p')).toBe('What does this service do?');
+  });
+});
+
+describe('custom CLI arguments', () => {
+  it('appends a permitted flag to the Claude argv', () => {
+    const { args } = buildTurnInvocation(options({ customCliArgs: '--debug' }), noMcp);
+    expect(args).toContain('--debug');
+  });
+
+  it('cannot override the tool policy the runner set', () => {
+    const { args } = buildTurnInvocation(
+      options({ customCliArgs: '--dangerously-skip-permissions --allowedTools Bash' }),
+      noMcp
+    );
+
+    expect(args).not.toContain('--dangerously-skip-permissions');
+
+    // `Bash` is legitimately present as a DENIED tool, so the check has to be
+    // that it did not get into the allowed list — not that it is absent.
+    const allowed = args.slice(
+      args.indexOf('--allowedTools') + 1,
+      args.indexOf('--disallowedTools')
+    );
+    expect(allowed).toEqual(['Read', 'Glob', 'Grep']);
+    expect(args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--setting-sources')))
+      .toEqual(['Write', 'Edit', 'Bash']);
+  });
+
+  it('cannot replace the composed persona', () => {
+    const { args } = buildTurnInvocation(
+      options({ customCliArgs: '--system-prompt hijacked' }),
+      noMcp
+    );
+
+    expect(args).not.toContain('--system-prompt');
+    expect(valueOf(args, '--append-system-prompt')).toBe('You are Ada.');
+  });
+
+  it('places codex custom flags before the -- terminator', () => {
+    const { args } = buildTurnInvocation(
+      options({ provider: 'OpenAI', customCliArgs: '--debug' }),
+      noMcp
+    );
+
+    expect(args.indexOf('--debug')).toBeLessThan(args.indexOf('--'));
+  });
+
+  it('adds nothing when the field is empty', () => {
+    const withArgs = buildTurnInvocation(options({ customCliArgs: '' }), noMcp).args;
+    const without = buildTurnInvocation(options(), noMcp).args;
+
+    expect(withArgs).toEqual(without);
+  });
+});
+
 describe('buildTurnInvocation — Antigravity', () => {
   const agy = (over: Partial<CliTurnOptions> = {}) =>
     buildTurnInvocation(options({ provider: 'Antigravity', modelName: 'gemini-3-pro', ...over }), noMcp);

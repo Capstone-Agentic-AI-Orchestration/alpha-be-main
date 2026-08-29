@@ -89,7 +89,10 @@ export async function sendBuilderMessage(params: {
   // Its own model choice is the runtime's first, independent of whatever model
   // it ends up recommending for the agent being designed.
   const modelName = (runtime.models ?? [])[0] ?? '';
-  const priorSession = sqliteService.getThreadSession(sessionId, BUILDER_AGENT_ID);
+  // The builder's persona is a constant in this file, never a persona file, so
+  // it cannot change mid-session and needs no hash comparison.
+  const priorSession =
+    sqliteService.getThreadSession(sessionId, BUILDER_AGENT_ID)?.cliSessionId ?? null;
 
   const turn = await runCliTurn({
     runId: `builder-${Date.now()}`,

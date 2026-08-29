@@ -168,29 +168,27 @@ function asUnion<T extends string>(
   value: unknown,
   allowed: readonly T[],
   label: string,
-  id: string
+  warnings: string[]
 ): T | undefined {
   const raw = asString(value);
   if (raw === undefined) return undefined;
 
   const hit = allowed.find(a => a.toLowerCase() === raw.toLowerCase());
   if (!hit) {
-    logError(
-      `Persona file ${id}.md: ignoring unknown ${label} "${raw}"`,
-      `expected one of: ${allowed.join(' | ')}`
+    warnings.push(
+      `Ignoring unknown ${label} "${raw}" — expected one of: ${allowed.join(', ')}`
     );
     return undefined;
   }
   return hit;
 }
 
-function asTemperature(value: unknown, id: string): number | undefined {
+function asTemperature(value: unknown, warnings: string[]): number | undefined {
   if (value === undefined || value === '') return undefined;
   const num = typeof value === 'number' ? value : Number(asString(value));
   if (!Number.isFinite(num) || num < 0 || num > 2) {
-    logError(
-      `Persona file ${id}.md: ignoring out-of-range temperature ${JSON.stringify(value)}`,
-      '0..2 expected'
+    warnings.push(
+      `Ignoring out-of-range temperature ${JSON.stringify(value)} — expected a number from 0 to 2`
     );
     return undefined;
   }
@@ -198,34 +196,28 @@ function asTemperature(value: unknown, id: string): number | undefined {
 }
 
 /**
- * Read a persona file into an overlay, or null when there is no usable file.
+ * Parse persona file text into an overlay, collecting anything it had to ignore.
  *
- * Never throws for a content problem — a broken persona file must not take an
- * agent offline. Only an invalid id (a programming error) throws.
+ * Warnings are returned rather than only logged so the editor can put them in
+ * front of whoever typed the file — a mistyped `role:` that silently does
+ * nothing is the kind of thing you only discover by wondering why an edit had
+ * no effect.
  */
-export function readAgentFile(id: string): AgentFileOverlay | null {
-  const file = agentFilePath(id);
-
-  let raw: string;
-  try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (err: any) {
-    if (err?.code !== 'ENOENT') {
-      logError(`Could not read persona file ${file}`, err?.message ?? String(err));
-    }
-    return null;
-  }
-
+export function parseAgentFileContent(raw: string): {
+  overlay: AgentFileOverlay | null;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
   const { data, body } = parseFrontmatter(raw);
 
   const overlay: AgentFileOverlay = {
     name: asString(data.name),
-    role: asUnion(data.role, ROLES, 'role', id),
+    role: asUnion(data.role, ROLES, 'role', warnings),
     description: asString(data.description),
-    modelProvider: asUnion(data.provider, PROVIDERS, 'provider', id),
+    modelProvider: asUnion(data.provider, PROVIDERS, 'provider', warnings),
     modelName: asString(data.model),
-    autonomyLevel: asUnion(data.autonomy, AUTONOMY_LEVELS, 'autonomy', id),
-    temperature: asTemperature(data.temperature, id),
+    autonomyLevel: asUnion(data.autonomy, AUTONOMY_LEVELS, 'autonomy', warnings),
+    temperature: asTemperature(data.temperature, warnings),
     skills: asStringList(data.skills),
     mcpServers: asStringList(data.mcpServers),
     /**
@@ -247,7 +239,67 @@ export function readAgentFile(id: string): AgentFileOverlay | null {
     if (overlay[key] === undefined) delete overlay[key];
   }
 
-  return Object.keys(overlay).length ? overlay : null;
+  return { overlay: Object.keys(overlay).length ? overlay : null, warnings };
+}
+
+/**
+ * Read a persona file into an overlay, or null when there is no usable file.
+ *
+ * Never throws for a content problem — a broken persona file must not take an
+ * agent offline. Only an invalid id (a programming error) throws.
+ */
+export function readAgentFile(id: string): AgentFileOverlay | null {
+  const raw = readAgentFileRaw(id);
+  if (raw === null) return null;
+
+  const { overlay, warnings } = parseAgentFileContent(raw);
+  for (const warning of warnings) logError(`Persona file ${id}.md`, warning);
+
+  return overlay;
+}
+
+/** The file's text as written, or null when it does not exist. */
+export function readAgentFileRaw(id: string): string | null {
+  const file = agentFilePath(id);
+
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      logError(`Could not read persona file ${file}`, err?.message ?? String(err));
+    }
+    return null;
+  }
+}
+
+/**
+ * Largest persona file the editor will save.
+ *
+ * The body becomes a system prompt paid for on every request, so an accidental
+ * paste of a whole document is worth refusing rather than silently billing for.
+ */
+export const AGENT_FILE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Save persona file text exactly as given.
+ *
+ * Deliberately not merged with `syncAgentFile`: that projects the database row
+ * onto disk, whereas this is the person editing the file and their text wins
+ * verbatim, frontmatter included. Returns the path written.
+ */
+export function writeAgentFileRaw(id: string, content: string): string {
+  const file = agentFilePath(id);
+
+  if (Buffer.byteLength(content, 'utf8') > AGENT_FILE_MAX_BYTES) {
+    throw new Error(`Persona file exceeds ${AGENT_FILE_MAX_BYTES} bytes.`);
+  }
+
+  agentsRoot();
+  // Normalised to a trailing newline so a later read/serialize round trip does
+  // not show a spurious one-line diff.
+  fs.writeFileSync(file, content.replace(/\s*$/, '') + '\n', 'utf8');
+
+  return file;
 }
 
 function frontmatterFor(agent: Agent): FrontmatterData {

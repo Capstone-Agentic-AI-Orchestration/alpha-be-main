@@ -249,7 +249,16 @@ export class SQLiteService {
       // Owning GitHub organization. Null on every project created before repo
       // scaffolding existed, which is why the create form asks when it is unset
       // rather than assuming one.
-      ['projects', 'github_org TEXT']
+      ['projects', 'github_org TEXT'],
+      // Fingerprint of the persona in force when this CLI session started.
+      //
+      // Only Claude Code receives the persona on every turn (via
+      // --append-system-prompt). `codex` and `agy` take it prepended to the
+      // FIRST message only, so an edit to an agent's persona file was invisible
+      // to any conversation already underway — possibly forever. Comparing this
+      // against the current persona is what lets a live session be told its
+      // instructions changed. Null on sessions that predate the column.
+      ['thread_sessions', 'persona_hash TEXT']
     ];
 
     for (const [table, definition] of additions) {
@@ -1046,24 +1055,54 @@ export class SQLiteService {
   }
 
   /** The CLI session for this thread + agent ON THIS MACHINE, if any. */
-  getThreadSession(threadId: string, agentId: string): string | null {
+  /**
+   * The CLI session for this thread, with the persona that was in force when it
+   * started.
+   *
+   * `personaHash` is null for sessions created before the column existed, which
+   * callers must read as "unknown", not as "changed" — re-announcing a persona
+   * to every pre-existing conversation on first upgrade would be noise.
+   */
+  getThreadSession(
+    threadId: string,
+    agentId: string
+  ): { cliSessionId: string; personaHash: string | null } | null {
     const row = this.db
       .prepare(
-        'SELECT cli_session_id FROM thread_sessions WHERE thread_id = ? AND machine_id = ? AND agent_id = ?'
+        `SELECT cli_session_id, persona_hash FROM thread_sessions
+         WHERE thread_id = ? AND machine_id = ? AND agent_id = ?`
       )
-      .get(threadId, this.getMachineId(), agentId) as { cli_session_id: string } | undefined;
-    return row?.cli_session_id ?? null;
+      .get(threadId, this.getMachineId(), agentId) as
+      | { cli_session_id: string; persona_hash: string | null }
+      | undefined;
+
+    if (!row) return null;
+    return { cliSessionId: row.cli_session_id, personaHash: row.persona_hash ?? null };
   }
 
-  setThreadSession(threadId: string, agentId: string, cliSessionId: string) {
+  setThreadSession(
+    threadId: string,
+    agentId: string,
+    cliSessionId: string,
+    personaHash: string | null = null
+  ) {
     this.db
       .prepare(
-        `INSERT INTO thread_sessions (thread_id, machine_id, agent_id, cli_session_id, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO thread_sessions (thread_id, machine_id, agent_id, cli_session_id, persona_hash, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id, machine_id, agent_id)
-         DO UPDATE SET cli_session_id = excluded.cli_session_id, updated_at = excluded.updated_at`
+         DO UPDATE SET cli_session_id = excluded.cli_session_id,
+                       persona_hash   = excluded.persona_hash,
+                       updated_at     = excluded.updated_at`
       )
-      .run(threadId, this.getMachineId(), agentId, cliSessionId, new Date().toISOString());
+      .run(
+        threadId,
+        this.getMachineId(),
+        agentId,
+        cliSessionId,
+        personaHash,
+        new Date().toISOString()
+      );
   }
 }
 
