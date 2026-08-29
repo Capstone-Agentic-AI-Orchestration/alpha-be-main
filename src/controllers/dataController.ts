@@ -11,6 +11,7 @@ import {
   writeAgentFileRaw
 } from '../services/agentFileService.js';
 import { resolveAgent } from '../services/personaService.js';
+import { agentReadiness } from '../services/agentReadiness.js';
 import { Agent } from '../models/index.js';
 import { logError } from '../utils/logger.js';
 
@@ -51,7 +52,7 @@ dataRouter.delete('/projects/:id', (req: Request, res: Response) => {
  * save would appear to work and then revert on reload. The client uses it to
  * mark those fields read-only and point at the persona file instead.
  */
-function withFileOverlay(agent: Agent) {
+function withFileOverlay(agent: Agent, runtimes = sqliteService.getRuntimes()) {
   let overlay: ReturnType<typeof readAgentFile> = null;
   try {
     overlay = readAgentFile(agent.id);
@@ -59,13 +60,25 @@ function withFileOverlay(agent: Agent) {
     // An unreadable or badly-named persona file must not take the roster down.
   }
 
-  if (!overlay) return { ...agent, managedByFile: [] as string[] };
+  const merged = overlay
+    ? { ...agent, ...overlay, managedByFile: Object.keys(overlay) }
+    : { ...agent, managedByFile: [] as string[] };
 
-  return { ...agent, ...overlay, managedByFile: Object.keys(overlay) };
+  /**
+   * Whether the CLI behind this agent is actually usable on this machine.
+   *
+   * Alpha holds no credentials, so an agent is only as available as the binary
+   * it spawns — and that differs per machine and per person. Attached here
+   * because the roster is where someone looks before sending a message, rather
+   * than after one has already failed.
+   */
+  return { ...merged, readiness: agentReadiness(merged, runtimes) };
 }
 
 dataRouter.get('/agents', (req: Request, res: Response) => {
-  res.json(sqliteService.getAgents().map(withFileOverlay));
+  // Runtimes read once for the whole roster, not once per agent.
+  const runtimes = sqliteService.getRuntimes();
+  res.json(sqliteService.getAgents().map(a => withFileOverlay(a, runtimes)));
 });
 
 dataRouter.post('/agents', (req: Request, res: Response) => {
