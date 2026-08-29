@@ -7,6 +7,7 @@ import { CHAT_ALLOWED_TOOLS, CHAT_DISALLOWED_TOOLS } from './toolPolicy.js';
 import { cliHomeEnv } from './cliHome.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
+import { EXECUTION_LIMITS } from '../config/constants.js';
 import { logError, logInfo } from '../utils/logger.js';
 
 /**
@@ -23,9 +24,25 @@ import { logError, logInfo } from '../utils/logger.js';
 
 export type { CliToolRecord } from './turnAccumulator.js';
 
+/**
+ * What a turn is for, which decides what it is allowed to do.
+ *
+ * `chat` is a conversation: read-only, because it has no branch, no diff and no
+ * approval gate. `run` is Alpha doing the work on an issue — it has all three,
+ * and editing the repository is the point.
+ *
+ * One builder for both so the provider-specific argv rules exist once. They
+ * previously existed twice: runnerService predates this module and was never
+ * migrated, so every fix here — the persona flag, --model, the isolation from
+ * the operator's own CLI configuration — reached chat and not runs.
+ */
+export type TurnMode = 'chat' | 'run';
+
 export interface CliTurnOptions {
   runId: string;
   cwd: string;
+  /** Defaults to 'chat', so existing callers keep today's read-only behaviour. */
+  mode?: TurnMode;
   /** Agent `modelProvider` value — selects the CLI family. */
   provider: string;
   modelName?: string;
@@ -116,7 +133,8 @@ export function buildTurnInvocation(
   options: CliTurnOptions,
   mcp: ReturnType<typeof writeRunMcpConfig>
 ): TurnInvocation {
-  const { provider, modelName, systemPrompt, personaName, prompt, priorSession } = options;
+  const { provider, cwd, modelName, systemPrompt, personaName, prompt, priorSession } = options;
+  const isRun = options.mode === 'run';
 
   /**
    * The agent's own extra flags, minus anything the runner owns.
@@ -203,7 +221,8 @@ export function buildTurnInvocation(
       args: [
         'exec',
         '--json',
-        '--sandbox', 'read-only',
+        // A run edits the repository it was given; a chat only inspects it.
+        '--sandbox', isRun ? 'workspace-write' : 'read-only',
         '--skip-git-repo-check',
         /**
          * Isolate codex from ~/.codex/config.toml — the operator's own file.
@@ -250,6 +269,14 @@ export function buildTurnInvocation(
         // A chat message that happens to start with '/' is a message, not a
         // command. Without this agy expands it as a slash command or skill.
         '--disable-slash-commands',
+        /**
+         * Without --add-dir the working directory is outside agy's workspace,
+         * and its file writes land in its own scratch directory instead —
+         * measured. For a chat that is a harmless accident; for a run it would
+         * be fatal, because the run would report success having changed
+         * nothing in the repository it was given.
+         */
+        ...(isRun ? ['--add-dir', cwd] : []),
         ...(modelName ? ['--model', modelName] : []),
         ...(priorSession ? ['--conversation', priorSession] : []),
         ...customArgs
@@ -291,15 +318,26 @@ export function buildTurnInvocation(
       // "When using --print, --output-format=stream-json requires --verbose",
       // stdout stays empty, and this method silently returns a canned string.
       '--verbose',
-      // These turns inspect, they do not mutate. Denying the write tools
-      // outright is safer than bypassPermissions and — unlike leaving them to
-      // prompt — cannot hang a headless process waiting on a TTY that isn't there.
-      //
-      // MCP tools are namespaced `mcp__<server>__<tool>`, and this allowlist is
-      // exhaustive: without the patterns appended here the servers would
-      // connect and then every call against them would be denied.
-      '--allowedTools', ...CHAT_ALLOWED_TOOLS, ...mcpToolPatterns(mcp.serverNames),
-      '--disallowedTools', ...CHAT_DISALLOWED_TOOLS,
+      /**
+       * A chat inspects; a run edits.
+       *
+       * Chat denies the write tools outright — safer than bypassPermissions and,
+       * unlike leaving them to prompt, cannot hang a headless process waiting on
+       * a TTY that isn't there. MCP tools are namespaced `mcp__<server>__<tool>`
+       * and the allowlist is exhaustive, so without the patterns appended here
+       * the servers would connect and every call against them be denied.
+       *
+       * A run instead takes `acceptEdits`, which applies the edits it decides on
+       * without prompting. Verified to still work alongside `--setting-sources
+       * ''` below: the isolation removes the operator's settings, not the
+       * permission mode given on the command line.
+       */
+      ...(isRun
+        ? ['--permission-mode', 'acceptEdits', '--max-turns', String(EXECUTION_LIMITS.MAX_TURNS)]
+        : [
+            '--allowedTools', ...CHAT_ALLOWED_TOOLS, ...mcpToolPatterns(mcp.serverNames),
+            '--disallowedTools', ...CHAT_DISALLOWED_TOOLS
+          ]),
       // Isolate the agent persona from the operator's personal Claude Code
       // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
       // into every reply — output-style directives and all — so Ada answered

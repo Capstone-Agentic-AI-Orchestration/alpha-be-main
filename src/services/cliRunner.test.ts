@@ -381,3 +381,81 @@ describe('Codex isolation from the operator config', () => {
     ).not.toContain('--ignore-user-config');
   });
 });
+
+describe('run mode — Alpha doing the work, not discussing it', () => {
+  const run = (over: Partial<CliTurnOptions> = {}) =>
+    buildTurnInvocation(options({ mode: 'run', ...over }), noMcp);
+
+  it('lets Claude apply edits instead of denying the write tools', () => {
+    const { args } = run();
+
+    expect(valueOf(args, '--permission-mode')).toBe('acceptEdits');
+    expect(args).not.toContain('--disallowedTools');
+    expect(args).not.toContain('--allowedTools');
+  });
+
+  it('caps the turns so a run cannot loop forever', () => {
+    expect(Number(valueOf(run().args, '--max-turns'))).toBeGreaterThan(0);
+  });
+
+  it('still isolates from the operator\'s own Claude settings', () => {
+    // The whole reason for sharing this builder: the run path had none of this.
+    const { args } = run();
+    expect(args[args.indexOf('--setting-sources') + 1]).toBe('');
+  });
+
+  it('still passes the agent\'s model', () => {
+    expect(valueOf(run({ modelName: 'claude-opus-5' }).args, '--model')).toBe('claude-opus-5');
+  });
+
+  it('still carries the composed persona', () => {
+    expect(valueOf(run().args, '--append-system-prompt')).toBe('You are Ada.');
+  });
+
+  it('gives codex a writable sandbox', () => {
+    const { args } = run({ provider: 'OpenAI' });
+    expect(valueOf(args, '--sandbox')).toBe('workspace-write');
+  });
+
+  it('still ignores the operator\'s codex config on a run', () => {
+    expect(run({ provider: 'OpenAI' }).args).toContain('--ignore-user-config');
+  });
+
+  it('gives Antigravity the workspace, or its writes go to a scratch dir', () => {
+    // Measured: without --add-dir, agy writes land in its own scratch
+    // directory, so a run would report success having changed nothing.
+    const { args } = run({ provider: 'Antigravity', cwd: '/workspaces/repo' });
+    expect(valueOf(args, '--add-dir')).toBe('/workspaces/repo');
+  });
+
+  it('still isolates Antigravity from ~/.gemini on a run', () => {
+    expect(run({ provider: 'Antigravity' }).env.HOME).toBeTruthy();
+  });
+
+  it('routes Antigravity to the right binary and parser', () => {
+    // Previously `isCodex ? 'codex' : 'claude'`, so an Antigravity agent ran as
+    // Claude with no model and its stream parsed by the wrong dialect.
+    const { family, bin } = run({ provider: 'Antigravity' });
+    expect(family).toBe('antigravity');
+    expect(bin).toBe('/opt/antigravity/agy');
+  });
+});
+
+describe('chat mode is unchanged by run mode existing', () => {
+  it('still denies the write tools when no mode is given', () => {
+    const { args } = buildTurnInvocation(options(), noMcp);
+    expect(args).toContain('--disallowedTools');
+    expect(args).not.toContain('--permission-mode');
+  });
+
+  it('still denies them when chat is explicit', () => {
+    const { args } = buildTurnInvocation(options({ mode: 'chat' }), noMcp);
+    expect(args).toContain('--disallowedTools');
+    expect(args).not.toContain('--add-dir');
+  });
+
+  it('keeps codex read-only in chat', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', mode: 'chat' }), noMcp);
+    expect(valueOf(args, '--sandbox')).toBe('read-only');
+  });
+});

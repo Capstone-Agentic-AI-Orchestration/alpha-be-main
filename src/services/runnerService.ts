@@ -4,6 +4,10 @@ import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
 import { processManager } from './processManager.js';
 import { StreamParser } from './streamParser.js';
+import { buildTurnInvocation } from './cliRunner.js';
+import { resolveAgentLogged } from './personaService.js';
+import { buildEnv } from './customCliArgs.js';
+import { writeRunMcpConfig } from './mcpConfigService.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
 import { githubService } from './githubService.js';
@@ -11,7 +15,6 @@ import { supabaseService } from './supabaseService.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue } from '../models/index.js';
 import { RUNS_DIR } from '../config/env.js';
-import { EXECUTION_LIMITS } from '../config/constants.js';
 
 export interface StartRunParams {
   issueId: string;
@@ -175,38 +178,62 @@ export class RunnerService extends EventEmitter {
     this.advanceStage(runId, 'analysis', 'running');
 
     // 2. Build task prompt with project rules & issue details
-    const prompt = this.buildTaskPrompt(issue, agent, plan);
+    const prompt = this.buildTaskPrompt(issue, plan);
 
     // 3. Prepare run directory for per-run configs
     const runDir = path.join(RUNS_DIR, runId);
     fs.mkdirSync(runDir, { recursive: true });
 
-    // 4. Select CLI binary and arguments
-    const isCodex = agent.modelProvider === 'OpenAI';
-    const parser = new StreamParser(isCodex ? 'codex' : 'claude');
+    /**
+     * 4. Resolve the agent, then build the invocation with the same code chat
+     *    uses.
+     *
+     * This method used to build its own argv. It predates `cliRunner`, was
+     * never migrated, and had drifted badly: no persona file, no memory, no
+     * `--model`, no isolation from the operator's own CLI configuration, and
+     * `isCodex ? 'codex' : 'claude'` meant an Antigravity agent silently ran as
+     * Claude. Every one of those was fixed in cliRunner and reached chat only.
+     *
+     * The project key is passed because a run — unlike a chat — belongs to a
+     * project, so the Tier 2 memory that `projects/{KEY}/rules.md` holds finally
+     * applies. The tool policy is not: it describes a read-only conversation,
+     * and a run is allowed to edit.
+     */
+    const persona = resolveAgentLogged(agent, {
+      projectKey: ctx.project?.key,
+      includeToolPolicy: false
+    });
 
-    let bin = 'claude';
-    let args = [
-      '-p', prompt,
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--permission-mode', 'acceptEdits',
-      '--max-turns', String(EXECUTION_LIMITS.MAX_TURNS)
-    ];
+    const { env } = buildEnv(agent.envVars);
+    const mcp = writeRunMcpConfig(runId, undefined);
 
-    if (isCodex) {
-      bin = 'codex';
-      // Flags first, then -- , then the prompt. codex ignores flags that
-      // follow the positional prompt, and -- stops a leading hyphen in the
-      // prompt from being parsed as an option.
-      args = ['exec', '--json', '--sandbox', 'workspace-write', '--', prompt];
-    }
+    const invocation = buildTurnInvocation(
+      {
+        runId,
+        cwd,
+        mode: 'run',
+        provider: persona.modelProvider,
+        modelName: persona.modelName,
+        systemPrompt: persona.systemPrompt,
+        personaName: persona.name,
+        prompt,
+        priorSession: null,
+        env,
+        customCliArgs: agent.customCliArgs
+      },
+      mcp
+    );
+
+    const { bin, args, family } = invocation;
+    const parser = new StreamParser(family);
 
     const child = processManager.spawnProcess({
       runId,
       bin,
       args,
       cwd,
+      // Agent env first, then the family's isolation overrides — see cliHome.
+      env: { ...env, ...invocation.env },
       onStdout: () => {},
       onExit: async (code) => {
         await this.handleProcessExit(runId, cwd, branchName, issue, code);
@@ -238,14 +265,16 @@ export class RunnerService extends EventEmitter {
     }
   }
 
-  private buildTaskPrompt(issue: Issue, agent: any, plan: string[]): string {
+  private buildTaskPrompt(issue: Issue, plan: string[]): string {
     const planSection = plan.length > 0
       ? `\n\nExecution Plan:\n${plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
       : '';
 
-    return `${agent.systemPrompt}
-
-You are working on Issue ${issue.identifier}: ${issue.title}
+    // The persona is NOT interpolated here any more: it reaches the model
+    // through --append-system-prompt (or, on the families without such a flag,
+    // prepended by cliRunner), resolved from the persona file and the memory
+    // tiers rather than from the one-line database column this used to read.
+    return `You are working on Issue ${issue.identifier}: ${issue.title}
 
 Description:
 ${issue.description}${planSection}
@@ -273,8 +302,15 @@ Instructions:
       // Compute real Git diff
       const diffStats = await getGitDiffStats(cwd);
 
-      // Perform real git commit, push, and create Pull Request if git repo
-      let prUrl = `https://github.com/LloydLim1/Alpha-v2/pull/${issue.identifier.toLowerCase()}`;
+      /**
+       * Commit, push, and open a pull request — when there is somewhere to push.
+       *
+       * This was seeded with `https://github.com/LloydLim1/Alpha-v2/pull/<id>`,
+       * a hardcoded link into one person's repository. When PR creation failed,
+       * or the project had no remote, the run reported that URL as though a
+       * pull request existed — pointing at a stranger's project.
+       */
+      let prUrl: string | undefined;
       try {
         const isRepo = await isGitRepo(cwd);
         if (isRepo) {
@@ -292,7 +328,7 @@ ${issue.description}
 - **Changed Files:** ${diffStats.changedFiles}
 - **Insertions:** +${diffStats.insertions}
 - **Deletions:** -${diffStats.deletions}
-- **Test Summary:** All automated unit and regression checks passed.
+- **Tests:** not verified by Alpha — see the run log
 
 ---
 *Autonomous Pull Request created by Alpha Orchestration Engine.*`;
@@ -328,10 +364,34 @@ ${issue.description}
         status: 'awaiting_approval',
         currentStageIndex: 4,
         stages: updatedStages,
-        changedFiles: diffStats.changedFiles || 3,
-        insertions: diffStats.insertions || 45,
-        deletions: diffStats.deletions || 8,
-        testSummary: 'All unit and regression tests passed.',
+        /**
+         * Real numbers, including zero.
+         *
+         * These read `diffStats.changedFiles || 3`, `|| 45`, `|| 8` — so a run
+         * that changed nothing reported three files and forty-five insertions.
+         * Measured: an Antigravity run whose tool was auto-denied produced no
+         * edits at all and still came back as "3 files, +45/-8, all tests
+         * passed", which is indistinguishable from a real success.
+         *
+         * cliRunner carries a comment about the identical mistake one layer
+         * down — a canned string "made a failed spawn look like a successful
+         * answer, which is how this went unnoticed". Same pattern, same file
+         * tree, fixed once before.
+         */
+        changedFiles: diffStats.changedFiles,
+        insertions: diffStats.insertions,
+        deletions: diffStats.deletions,
+        /**
+         * Alpha does not run the tests, so it cannot report on them.
+         *
+         * This said "All unit and regression tests passed." unconditionally.
+         * The agent is *asked* to run tests in the task prompt, but nothing
+         * checks whether it did, or what happened — and the claim was also
+         * being written into pull request descriptions.
+         */
+        testSummary: diffStats.changedFiles
+          ? `${diffStats.changedFiles} file(s) changed. Tests were not verified by Alpha — review the run log.`
+          : 'No files were changed by this run.',
         prUrl,
         updatedAt: now
       };
@@ -353,7 +413,10 @@ ${issue.description}
         issueId: issue.id,
         authorType: 'agent',
         authorName: 'Alpha Execution Engine',
-        content: `Run completed successfully. Produced **+${finalRun.insertions}** / **-${finalRun.deletions}** lines across **${finalRun.changedFiles}** files. Staged PR: [${prUrl}](${prUrl}).`,
+        content: finalRun.changedFiles
+          ? `Run finished. **+${finalRun.insertions}** / **-${finalRun.deletions}** across **${finalRun.changedFiles}** file(s) on \`${branchName}\`.` +
+            (prUrl ? ` Pull request: [${prUrl}](${prUrl}).` : ' No pull request was opened.')
+          : `Run finished without changing any files. Check the run log — the agent may not have been able to edit the workspace.`,
         createdAt: now
       });
 
