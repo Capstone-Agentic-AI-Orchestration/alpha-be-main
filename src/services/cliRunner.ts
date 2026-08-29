@@ -205,6 +205,22 @@ export function buildTurnInvocation(
         '--json',
         '--sandbox', 'read-only',
         '--skip-git-repo-check',
+        /**
+         * Isolate codex from ~/.codex/config.toml — the operator's own file.
+         *
+         * This is codex's equivalent of --setting-sources for claude, and
+         * without it an Alpha agent inherited everything configured there.
+         * On this machine that meant a `node_repl` MCP server (arbitrary
+         * JavaScript, plus browser control), a `supabase` MCP server pointing
+         * at a live project, eighteen paths marked trust_level = "trusted",
+         * a shell_environment_policy, and a different default model and
+         * reasoning effort — none of it granted by Alpha.
+         *
+         * Credentials are unaffected: they live in ~/.codex/auth.json, not in
+         * config.toml, and codex still reads and attempts to refresh the token
+         * with this flag set.
+         */
+        '--ignore-user-config',
         // Before the `--`, necessarily: after it, `--model` would be read as
         // part of the prompt text rather than as a flag.
         ...(modelName ? ['--model', modelName] : []),
@@ -296,11 +312,13 @@ export function buildTurnInvocation(
       /**
        * Attach the run's MCP servers.
        *
-       * Claude Code only. `agy` and `codex exec` take MCP configuration from
-       * their own settings files rather than argv, so pointing them at this
-       * per-run file is not possible — granting an agent a server therefore has
-       * no effect on those families yet, and silently pretending otherwise would
-       * be worse than the gap.
+       * Claude Code only. Neither `agy` nor `codex exec` accepts an MCP config
+       * on the command line, so an agent on those families gets no MCP servers
+       * at all — `agent.mcpServers` does nothing for them yet.
+       *
+       * That is now the truth rather than an understatement. Until
+       * --ignore-user-config was passed, codex did not get "no servers": it got
+       * every server the operator had configured in ~/.codex/config.toml.
        *
        * `--strict-mcp-config` makes the pruning real: without it the CLI merges
        * its own configured servers in, and an agent granted one server would

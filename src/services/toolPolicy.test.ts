@@ -27,8 +27,15 @@ describe('describeChatToolPolicy', () => {
     expect(text).toMatch(/do not claim/i);
   });
 
-  it('says an attempt fails rather than prompts, which is what actually happens', () => {
-    expect(describeChatToolPolicy()).toMatch(/fails rather than asking permission/i);
+  it('does not claim a write would fail, because on agy it would not', () => {
+    // agy has no tool-permission flags: --sandbox does not stop write_to_file
+    // and --mode plan is ignored. Asserting a mechanism that does not hold on
+    // every family teaches the model to disbelieve the constraint.
+    const text = describeChatToolPolicy();
+
+    expect(text).not.toMatch(/fails rather than asking permission/i);
+    expect(text).toMatch(/do not Write, Edit, Bash/i);
+    expect(text).toMatch(/nothing you write here reaches/i);
   });
 
   it('lists the granted MCP servers', () => {

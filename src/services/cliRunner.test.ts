@@ -346,3 +346,38 @@ describe('isolation from the operator\'s own CLI configuration', () => {
     expect(merged.HOME).toBe(env.HOME);
   });
 });
+
+describe('Codex isolation from the operator config', () => {
+  it('ignores ~/.codex/config.toml', () => {
+    // Without this the agent inherited the operator's MCP servers — a node
+    // REPL and a live supabase project — plus eighteen trusted paths.
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI' }), noMcp);
+    expect(args).toContain('--ignore-user-config');
+  });
+
+  it('places it before the -- terminator', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI' }), noMcp);
+    expect(args.indexOf('--ignore-user-config')).toBeLessThan(args.indexOf('--'));
+  });
+
+  it('keeps the read-only sandbox alongside it', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI' }), noMcp);
+    expect(valueOf(args, '--sandbox')).toBe('read-only');
+  });
+
+  it('cannot be undone through customCliArgs', () => {
+    const { args } = buildTurnInvocation(
+      options({ provider: 'OpenAI', customCliArgs: '--sandbox danger-full-access' }),
+      noMcp
+    );
+    expect(valueOf(args, '--sandbox')).toBe('read-only');
+    expect(args).not.toContain('danger-full-access');
+  });
+
+  it('does not apply the flag to other families', () => {
+    expect(buildTurnInvocation(options(), noMcp).args).not.toContain('--ignore-user-config');
+    expect(
+      buildTurnInvocation(options({ provider: 'Antigravity' }), noMcp).args
+    ).not.toContain('--ignore-user-config');
+  });
+});

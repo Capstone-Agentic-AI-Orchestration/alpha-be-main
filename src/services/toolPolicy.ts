@@ -74,6 +74,29 @@ export const CHAT_ALLOWED_TOOLS = ['Read', 'Glob', 'Grep'] as const;
  *
  * Denied outright rather than left to prompt: `bypassPermissions` is worse, and
  * leaving them to ask would hang a headless process on a TTY that is not there.
+ *
+ * ## Enforcement is not uniform, and the wording below reflects that
+ *
+ * Only Claude Code takes these as flags. Measured against the other two:
+ *
+ * - `codex exec --sandbox read-only` enforces it.
+ * - `agy` has NO tool-permission flags. `--sandbox` does not stop a file write;
+ *   `--mode plan` is ignored outright alongside `--disable-slash-commands`
+ *   ("--mode plan has no effect while slash command expansion is disabled") and
+ *   did not block a write when tested without it either. Its shell tool IS
+ *   auto-denied, because headless mode cannot prompt for the permission it
+ *   needs — but `write_to_file` is not.
+ *
+ * What keeps Antigravity turns harmless today is that Alpha passes no
+ * `--add-dir`, so the cwd is outside agy's workspace and its writes land in its
+ * own scratch directory under the managed home. That is agy's behaviour, not a
+ * guarantee Alpha makes.
+ *
+ * Hence the text says "do not" and "nothing you write reaches the project"
+ * rather than claiming an attempt fails. An earlier version asserted that
+ * writes "fail rather than asking permission", which is true for Claude and
+ * codex and false for agy — and a prompt that lies about its own constraints
+ * teaches the model to disbelieve them.
  */
 export const CHAT_DISALLOWED_TOOLS = ['Write', 'Edit', 'Bash'] as const;
 
@@ -98,7 +121,7 @@ export function describeChatToolPolicy(mcpServers: string[] = []): string {
     '',
     `You can inspect the workspace with ${CHAT_ALLOWED_TOOLS.join(', ')}.${mcp}`,
     '',
-    `You cannot ${CHAT_DISALLOWED_TOOLS.join(', ')} — file writes and shell commands are disabled here, and attempting one fails rather than asking permission.`,
+    `Do not ${CHAT_DISALLOWED_TOOLS.join(', ')}. This conversation is for inspection and advice only: nothing you write here reaches the project being discussed, and shell commands are blocked.`,
     '',
     'So: propose changes as code blocks, and name the exact file path each one belongs to.',
     'Hand over any command you would have run, for the user to execute.',
