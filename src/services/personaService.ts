@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Agent, AgentRole, AutonomyLevel, ModelProvider } from '../models/index.js';
 import { readAgentFile } from './agentFileService.js';
 import { composeMemory } from './memoryService.js';
-import { describeChatToolPolicy } from './toolPolicy.js';
+import { describeChatToolPolicy, describeRoster, RosterEntry } from './toolPolicy.js';
 import { logInfo } from '../utils/logger.js';
 
 /**
@@ -58,6 +58,13 @@ export interface ResolveOptions {
    * personas otherwise promise writes the runner denies — see toolPolicy.
    */
   includeToolPolicy?: boolean;
+  /**
+   * The other Alpha agents, so this one can answer about its own team.
+   *
+   * Passed in rather than read here, to keep this module free of the database
+   * and testable without it.
+   */
+  roster?: RosterEntry[];
 }
 
 /**
@@ -67,7 +74,7 @@ export interface ResolveOptions {
  * direction and not the reverse.
  */
 export function resolveAgent(agent: Agent, options: ResolveOptions = {}): ResolvedPersona {
-  const { projectKey, includeMemory = true, includeToolPolicy = false } = options;
+  const { projectKey, includeMemory = true, includeToolPolicy = false, roster } = options;
 
   const overlay = readAgentFile(agent.id);
   const merged = { ...agent, ...(overlay ?? {}) };
@@ -84,6 +91,14 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
     if (memory.text) {
       parts.push(memory.text);
       sources.push(...memory.sources);
+    }
+  }
+
+  if (roster?.length) {
+    const text = describeRoster(roster, agent.id);
+    if (text) {
+      parts.push(text);
+      sources.push('roster');
     }
   }
 

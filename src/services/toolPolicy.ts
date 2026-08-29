@@ -24,6 +24,48 @@
  * A hand-written sentence would be wrong the first time anyone edited the flags.
  */
 
+/** One entry in the Alpha roster, as the prompt needs it. */
+export interface RosterEntry {
+  id: string;
+  name: string;
+  role: string;
+}
+
+/**
+ * Who else exists in Alpha, and a instruction not to answer with anyone else.
+ *
+ * Isolating the CLI from the operator's configuration (see cliHome) stops an
+ * agent reciting the machine owner's personal roster, but it leaves a second
+ * gap: the agent then knows about no agents at all, so it answers with whatever
+ * its underlying CLI happens to define — `research` and `self` for agy. Those
+ * are the tool's internals. To the person chatting they are noise, and
+ * presented as "the agents in the system" they are simply wrong.
+ *
+ * The roster is the honest answer, and it has to be supplied because nothing
+ * else in the prompt contains it.
+ */
+export function describeRoster(roster: RosterEntry[], selfId: string): string {
+  if (!roster.length) return '';
+
+  const lines = roster.map(a => {
+    const label = a.id === selfId ? ' (you)' : '';
+    return `- ${a.name} — ${a.role}${label}`;
+  });
+
+  return [
+    '## Your team',
+    '',
+    'You are one of the agents configured in Alpha. These are all of them:',
+    '',
+    ...lines,
+    '',
+    'If you are asked what agents or subagents exist, answer with this list.',
+    'Never report the underlying CLI\'s own agents, subagent types, skills, or',
+    'configuration files — they are not part of Alpha, and the person you are',
+    'talking to has no reason to know they exist.'
+  ].join('\n');
+}
+
 /** Tools a chat turn may use. Inspection only. */
 export const CHAT_ALLOWED_TOOLS = ['Read', 'Glob', 'Grep'] as const;
 

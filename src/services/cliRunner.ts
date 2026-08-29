@@ -4,6 +4,7 @@ import { StreamParser, StreamFamily } from './streamParser.js';
 import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
 import { parseCustomCliArgs } from './customCliArgs.js';
 import { CHAT_ALLOWED_TOOLS, CHAT_DISALLOWED_TOOLS } from './toolPolicy.js';
+import { cliHomeEnv } from './cliHome.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -92,6 +93,13 @@ interface TurnInvocation {
   bin: string;
   args: string[];
   family: StreamFamily;
+  /**
+   * Environment overrides for this family, merged over the caller's own.
+   *
+   * Carries the managed home that isolates a CLI from the operator's personal
+   * configuration — see cliHome.
+   */
+  env: Record<string, string>;
 }
 
 /**
@@ -179,6 +187,9 @@ export function buildTurnInvocation(
   if (isCodex) {
     return {
       family: 'codex',
+      // Left on the real home: codex keeps auth.json under ~/.codex, so
+      // relocating it would sign the user out. See cliHome.
+      env: {},
       bin: isWin ? 'codex.cmd' : 'codex',
       // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
       // With the prompt first, codex silently ignores everything after it and
@@ -214,9 +225,15 @@ export function buildTurnInvocation(
     return {
       family: 'antigravity',
       bin: RuntimeService.agyPath(),
+      // Isolates agy from ~/.gemini — the operator's own GEMINI.md, agents,
+      // rules, skills and memory were all being loaded into every Alpha turn.
+      env: cliHomeEnv('antigravity'),
       args: [
         '-p', withPersona(prompt),
         '--output-format', 'stream-json',
+        // A chat message that happens to start with '/' is a message, not a
+        // command. Without this agy expands it as a slash command or skill.
+        '--disable-slash-commands',
         ...(modelName ? ['--model', modelName] : []),
         ...(priorSession ? ['--conversation', priorSession] : []),
         ...customArgs
@@ -226,6 +243,9 @@ export function buildTurnInvocation(
 
   return {
     family: 'claude',
+    // Already isolated by --setting-sources below, and its credentials live
+    // under ~/.claude, so the home must stay real.
+    env: {},
     bin: isWin ? 'claude.cmd' : 'claude',
     args: [
       '-p', prompt,
@@ -335,9 +355,11 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
         bin,
         args,
         cwd,
-        // Merged over process.env by processManager. Not logged — an agent's
+        // Agent env first, then the family's isolation overrides — a HOME
+        // supplied by an agent's envVars must not defeat the isolation.
+        // Merged over process.env by processManager. Not logged: an agent's
         // env is where its API keys live.
-        env: options.env,
+        env: { ...options.env, ...invocation.env },
         onExit: () => resolve()
       });
 

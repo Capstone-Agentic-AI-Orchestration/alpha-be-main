@@ -169,7 +169,15 @@ export class ChatService extends EventEmitter {
      * No project key: a chat thread belongs to no project, so Tier 2 does not
      * apply. Global and agent memory do.
      */
-    const persona = resolveAgentLogged(agent, { includeToolPolicy: true });
+    const persona = resolveAgentLogged(agent, {
+      includeToolPolicy: true,
+      // Alpha's own roster. Without it the agent answers "what agents exist"
+      // with whatever its underlying CLI defines, which is not Alpha's answer.
+      roster: sqliteService
+        .getAgents()
+        .filter(a => !a.isArchived)
+        .map(a => ({ id: a.id, name: a.name, role: a.role }))
+    });
 
     /**
      * Has the persona changed since this conversation started?

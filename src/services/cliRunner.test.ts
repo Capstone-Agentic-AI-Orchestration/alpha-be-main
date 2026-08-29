@@ -298,3 +298,51 @@ describe('buildTurnInvocation — Antigravity', () => {
     );
   });
 });
+
+describe('isolation from the operator\'s own CLI configuration', () => {
+  it('gives Antigravity a managed home so ~/.gemini does not leak in', () => {
+    // The bug: asked what agents existed, an agent recited the machine
+    // owner's personal roster out of ~/.gemini/GEMINI.md and ~/.gemini/agents.
+    const { env } = buildTurnInvocation(options({ provider: 'Antigravity' }), noMcp);
+
+    expect(env.HOME).toBeTruthy();
+    expect(env.USERPROFILE).toBe(env.HOME);
+    expect(env.HOME).not.toContain('.gemini');
+  });
+
+  it('sets both HOME and USERPROFILE, since the CLIs are a mix of Go and Node', () => {
+    const { env } = buildTurnInvocation(options({ provider: 'Antigravity' }), noMcp);
+    expect(Object.keys(env).sort()).toEqual(['HOME', 'USERPROFILE']);
+  });
+
+  it('disables slash commands so a message starting with / stays a message', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'Antigravity' }), noMcp);
+    expect(args).toContain('--disable-slash-commands');
+  });
+
+  it('leaves Claude on the real home — its credentials live there', () => {
+    expect(buildTurnInvocation(options(), noMcp).env).toEqual({});
+  });
+
+  it('leaves Codex on the real home — auth.json lives under ~/.codex', () => {
+    expect(buildTurnInvocation(options({ provider: 'OpenAI' }), noMcp).env).toEqual({});
+  });
+
+  it('still isolates Claude through --setting-sources', () => {
+    const { args } = buildTurnInvocation(options(), noMcp);
+    expect(args[args.indexOf('--setting-sources') + 1]).toBe('');
+  });
+
+  it('treats Google Gemini as Antigravity for isolation too', () => {
+    const { env } = buildTurnInvocation(options({ provider: 'Google Gemini' }), noMcp);
+    expect(env.HOME).toBeTruthy();
+  });
+
+  it('does not let an agent env var override the isolation', () => {
+    // buildTurnInvocation owns env; runCliTurn spreads it AFTER options.env
+    // precisely so a HOME in an agent's envVars cannot defeat this.
+    const { env } = buildTurnInvocation(options({ provider: 'Antigravity' }), noMcp);
+    const merged = { ...{ HOME: '/c/Users/Lloyd' }, ...env };
+    expect(merged.HOME).toBe(env.HOME);
+  });
+});
