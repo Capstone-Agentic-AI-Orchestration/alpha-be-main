@@ -382,7 +382,19 @@ export class StreamParser {
     // what is recognisable and record the rest instead of silently dropping it.
     if (kind === 'tool_call' || kind === 'tool_use' || step.tool_name) {
       const toolName = String(step.tool_name ?? kind);
-      const mapped = this.mapToolToStage(toolName, step.tool_input ?? {});
+      /**
+       * Antigravity puts the arguments under `tool_info.parameters`, not
+       * `tool_input`.
+       *
+       * Reading only `tool_input` meant every Antigravity tool call carried an
+       * empty argument object: the UI's tool chips showed a bare name with no
+       * detail, and `mapToolToStage` — which decides the run stage by looking
+       * at the arguments — was choosing from nothing. `tool_input` is kept as
+       * a fallback since the schema is not documented and may vary.
+       */
+      const toolInput = step.tool_info?.parameters ?? step.tool_input ?? {};
+
+      const mapped = this.mapToolToStage(toolName, toolInput);
       if (mapped && mapped !== this.currentStage) {
         this.currentStage = mapped;
         events.push({ type: 'stage_transition', stage: mapped });
@@ -391,7 +403,7 @@ export class StreamParser {
         type: 'tool_call',
         stage: this.currentStage,
         toolName,
-        toolInput: step.tool_input ?? {},
+        toolInput,
         message: `Executing ${toolName}`
       });
       return events;

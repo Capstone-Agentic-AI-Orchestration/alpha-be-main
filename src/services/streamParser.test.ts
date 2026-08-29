@@ -271,3 +271,47 @@ describe('Antigravity agent_response completion', () => {
     expect(events.map(e => e.message)).toEqual(['second']);
   });
 });
+
+describe('against a real Antigravity tool transcript', () => {
+  /**
+   * fixtures/antigravity-tool-sample.jsonl is a captured run that carries the
+   * shapes the hand-written sample does not: an agent_response DONE with no
+   * text_delta, and step_type 'tool' whose arguments live under
+   * tool_info.parameters rather than tool_input.
+   */
+  const replay = () => {
+    const file = path.join(process.cwd(), 'fixtures', 'antigravity-tool-sample.jsonl');
+    const parser = new StreamParser('antigravity');
+    const events: ReturnType<StreamParser['parseLine']> = [];
+
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      events.push(...parser.parseLine(line));
+    }
+    return { events, parser };
+  };
+
+  it('recognises the tool call', () => {
+    const { events } = replay();
+    const calls = events.filter(e => e.type === 'tool_call');
+
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0].toolName).toBe('run_command');
+  });
+
+  it('keeps the tool arguments, which live under tool_info.parameters', () => {
+    // Reading only `tool_input` left every Antigravity tool call with an empty
+    // argument object, so the UI chips showed a bare name.
+    const { events } = replay();
+    const call = events.find(e => e.type === 'tool_call')!;
+
+    expect(call.toolInput).toEqual({ CommandLine: 'Get-Location' });
+  });
+
+  it('leaves no unhandled event types', () => {
+    expect(replay().parser.getUnhandledTypes()).toEqual([]);
+  });
+
+  it('picks up the conversation id for resuming', () => {
+    expect(replay().parser.getSessionId()).toBe('conv-sample');
+  });
+});
