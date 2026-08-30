@@ -124,18 +124,40 @@ export async function getGitDiffStats(
   const shortstat = async (args: string[]) =>
     (await execFileAsync('git', ['diff', '--shortstat', ...args], { cwd })).stdout;
 
+  /**
+   * Make new files visible to `git diff`.
+   *
+   * `git diff` reports tracked files only, so a run that *added* files
+   * measured as zero. A QA agent writing `math.test.js` produced "0 files
+   * changed" while the commit it triggered moments later recorded
+   * "1 file changed, 45 insertions" — measured.
+   *
+   * `--intent-to-add` registers the paths in the index without staging their
+   * contents, which is exactly enough for diff to see them. It is safe here
+   * because the caller commits with `git add -A` immediately afterwards, so
+   * the index was going to be written anyway.
+   *
+   * That this went unnoticed is instructive: the caller used to fall back to
+   * `insertions || 45` when the count came back zero, and 45 is about what a
+   * real run produces — so the invented number stood in for the broken
+   * measurement and made it look right.
+   */
   try {
-    const committed = await shortstat(['HEAD~1']);
-    if (committed.trim()) return parseDiffShortStat(committed);
-    return parseDiffShortStat(await shortstat([]));
+    await execFileAsync('git', ['add', '--intent-to-add', '--', '.'], { cwd });
   } catch {
-    // HEAD~1 does not exist on a repo with a single commit — fall back to the
-    // working tree rather than reporting no changes at all.
-    try {
-      return parseDiffShortStat(await shortstat([]));
-    } catch {
-      return { changedFiles: 0, insertions: 0, deletions: 0 };
-    }
+    // Nothing to register, or not a repository. The diff below still runs.
+  }
+
+  try {
+    const working = await shortstat([]);
+    if (working.trim()) return parseDiffShortStat(working);
+
+    // Nothing uncommitted: the work may already have been committed on this
+    // branch, so compare against its parent.
+    return parseDiffShortStat(await shortstat(['HEAD~1']));
+  } catch {
+    // HEAD~1 does not exist on a repository with a single commit.
+    return { changedFiles: 0, insertions: 0, deletions: 0 };
   }
 }
 
