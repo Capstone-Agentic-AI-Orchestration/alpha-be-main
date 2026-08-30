@@ -381,6 +381,20 @@ export class StreamParser {
     // Tool activity. The exact step_type set is not fully documented, so map
     // what is recognisable and record the rest instead of silently dropping it.
     if (kind === 'tool_call' || kind === 'tool_use' || step.tool_name) {
+      /**
+       * One event per tool call, not one per state change.
+       *
+       * Antigravity reports the same step twice — `state: 'ACTIVE'` when the
+       * tool starts and `state: 'DONE'` when it finishes — and this branch had
+       * no state check, so every tool call was recorded twice. A run log read
+       * as though the agent had run each command two times.
+       *
+       * ACTIVE is the one to keep: it is the moment the call is made, which is
+       * what a live run log wants. A step with no state at all still emits, so
+       * a shape that does not use the field is not silently dropped.
+       */
+      if (step.state === 'DONE') return events;
+
       const toolName = String(step.tool_name ?? kind);
       /**
        * Antigravity puts the arguments under `tool_info.parameters`, not

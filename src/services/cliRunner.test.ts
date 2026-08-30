@@ -432,6 +432,13 @@ describe('run mode — Alpha doing the work, not discussing it', () => {
     expect(run({ provider: 'Antigravity' }).env.HOME).toBeTruthy();
   });
 
+  it('lets Antigravity actually run commands, or it cannot test anything', () => {
+    // agy has no granular permission flag. Headless mode auto-denies the
+    // "command" permission, so run_command fails and the turn dies with no
+    // output — which ends every run whose plan includes running the tests.
+    expect(run({ provider: 'Antigravity' }).args).toContain('--dangerously-skip-permissions');
+  });
+
   it('routes Antigravity to the right binary and parser', () => {
     // Previously `isCodex ? 'codex' : 'claude'`, so an Antigravity agent ran as
     // Claude with no model and its stream parsed by the wrong dialect.
@@ -457,5 +464,29 @@ describe('chat mode is unchanged by run mode existing', () => {
   it('keeps codex read-only in chat', () => {
     const { args } = buildTurnInvocation(options({ provider: 'OpenAI', mode: 'chat' }), noMcp);
     expect(valueOf(args, '--sandbox')).toBe('read-only');
+  });
+
+  /**
+   * The permission flag is scoped to runs, and these are the assertions that
+   * keep it there. A run has a branch, a diff and a review gate; a chat has
+   * none of the three, so it must never auto-approve a tool.
+   */
+  it.each(['Anthropic', 'OpenAI', 'Antigravity', 'Google Gemini'] as const)(
+    'never auto-approves tool permissions in a %s chat',
+    provider => {
+      for (const mode of [undefined, 'chat'] as const) {
+        const { args } = buildTurnInvocation(options({ provider, mode }), noMcp);
+        expect(args).not.toContain('--dangerously-skip-permissions');
+        expect(args).not.toContain('--add-dir');
+      }
+    }
+  );
+
+  it('does not give the flag to families that take no such flag', () => {
+    // Only agy needs it; Claude has --permission-mode and codex has --sandbox.
+    for (const provider of ['Anthropic', 'OpenAI'] as const) {
+      const { args } = buildTurnInvocation(options({ provider, mode: 'run' }), noMcp);
+      expect(args).not.toContain('--dangerously-skip-permissions');
+    }
   });
 });

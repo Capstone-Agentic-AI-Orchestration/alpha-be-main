@@ -290,11 +290,14 @@ describe('against a real Antigravity tool transcript', () => {
     return { events, parser };
   };
 
-  it('recognises the tool call', () => {
+  it('records the tool call exactly once, not once per state change', () => {
+    // The fixture carries the same step twice — ACTIVE then DONE. Without a
+    // state check the run log showed every command as though it had been run
+    // two times.
     const { events } = replay();
     const calls = events.filter(e => e.type === 'tool_call');
 
-    expect(calls.length).toBeGreaterThan(0);
+    expect(calls).toHaveLength(1);
     expect(calls[0].toolName).toBe('run_command');
   });
 

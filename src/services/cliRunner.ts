@@ -270,13 +270,42 @@ export function buildTurnInvocation(
         // command. Without this agy expands it as a slash command or skill.
         '--disable-slash-commands',
         /**
-         * Without --add-dir the working directory is outside agy's workspace,
-         * and its file writes land in its own scratch directory instead —
-         * measured. For a chat that is a harmless accident; for a run it would
-         * be fatal, because the run would report success having changed
-         * nothing in the repository it was given.
+         * Run mode: give agy the workspace, and let it act in it.
+         *
+         * `--add-dir` — without it the working directory is outside agy's
+         * workspace and its file writes land in its own scratch directory
+         * instead (measured). For a chat that is a harmless accident; for a run
+         * it is fatal, because the run reports success having changed nothing
+         * in the repository it was given.
+         *
+         * The permission flag — agy has no granular equivalent to Claude's
+         * `--permission-mode`. In headless mode any tool needing the "command"
+         * permission cannot prompt and is auto-denied, so `run_command` fails
+         * and the turn dies producing no output at all. Since step three of the
+         * task prompt is "run existing tests", that ends most real runs, and
+         * every run by Orion, whose entire role is testing. Measured both ways:
+         * denied without it, `v22.18.0` with it.
+         *
+         * Its name overstates what it changes here. A Claude run already
+         * permits arbitrary shell — `acceptEdits` with no `--disallowedTools`
+         * runs `node -v` happily, also measured. So this is parity with the
+         * agents that already have it rather than an escalation.
+         *
+         * Two things it does genuinely widen, worth knowing:
+         *   - agy auto-approves ALL tool requests, and its toolset includes
+         *     browser automation, which a Claude run does not get.
+         *   - a branch and a diff undo file changes, not `npm install` or a
+         *     network call. The review gate protects the repository, not the
+         *     machine. Already true of Claude runs, but true here too.
+         *
+         * A settings-based allow-rule would be narrower, and agy's own error
+         * message suggests one — but `permissions.allow` with `command(node -v)`
+         * and with `command(*)` were both still denied, and no syntax is
+         * documented. Revisit if agy ships a granular flag.
+         *
+         * Chat receives neither flag. Asserted in cliRunner.test.ts.
          */
-        ...(isRun ? ['--add-dir', cwd] : []),
+        ...(isRun ? ['--add-dir', cwd, '--dangerously-skip-permissions'] : []),
         ...(modelName ? ['--model', modelName] : []),
         ...(priorSession ? ['--conversation', priorSession] : []),
         ...customArgs
