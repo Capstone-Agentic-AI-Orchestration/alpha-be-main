@@ -5,6 +5,12 @@ import { runCliTurn } from './cliRunner.js';
 import { ensureWorkspacesRoot } from './workspaceService.js';
 import { resolveAgentLogged } from './personaService.js';
 import { buildEnv } from './customCliArgs.js';
+import {
+  DEFAULT_ASSISTANT,
+  DEFAULT_ASSISTANT_PROMPT,
+  pickDefaultRuntime
+} from './defaultAssistant.js';
+import { describeChatToolPolicy } from './toolPolicy.js';
 import { logInfo } from '../utils/logger.js';
 
 export interface SendMessageParams {
@@ -44,42 +50,35 @@ export class ChatService extends EventEmitter {
     };
     sqliteService.saveChatMessage(userMessage);
 
-    // 2. Resolve who is being addressed.
-    //
-    //    Order: an explicit @mention in THIS message, else whoever the thread
-    //    is already talking to. A thread with no agent and no mention is not an
-    //    error — it is a question addressed to nobody, and it gets a reply
-    //    telling the user how to address someone.
+    /**
+     * 2. Resolve who is being addressed — and only from THIS message.
+     *
+     * An `@mention` used to join that agent to the thread permanently, so every
+     * later message reached them without being addressed. Typing "hello" got a
+     * reply from Ada Lovelace, in character, and when her CLI was unavailable
+     * the user got Ada's error for a message that was never hers.
+     *
+     * Agents speak when spoken to. Anything else Alpha answers itself.
+     */
     const agents = sqliteService.getAgents().filter(a => !a.isArchived);
     const mentioned = this.resolveMentions(content, agents);
 
-    let participants = mentioned.length
-      ? mentioned
-      : agents.filter(a => (thread!.agentIds ?? []).includes(a.id));
-
-    if (!participants.length) {
-      const roster = agents.map(a => `@${a.name.split(' ')[0]}`).join(', ');
-      const hint: ChatMessage = {
-        id: `msg-${Date.now()}-system`,
-        threadId,
-        senderType: 'system',
-        senderName: 'Alpha',
-        content:
-          `No agent is assigned to this conversation yet.\n\n` +
-          `Mention one to start: ${roster || 'no agents configured'}`,
-        timestamp: new Date().toISOString()
-      };
-      sqliteService.saveChatMessage(hint);
-      this.emit('chat_message', hint);
-      return { userMessage, agentMessage: hint };
+    if (!mentioned.length) {
+      const reply = await this.generateDefaultReply(content, threadId);
+      sqliteService.saveChatMessage(reply);
+      this.emit('chat_message', reply);
+      return { userMessage, agentMessage: reply };
     }
 
-    // An @mention joins that agent to the thread for subsequent messages, so
-    // follow-ups do not need to repeat the mention.
-    const roster = [...new Set([...(thread.agentIds ?? []), ...participants.map(a => a.id)])];
+    /**
+     * The thread still records who has taken part, for the roster the UI shows
+     * and for per-agent CLI sessions. It is no longer used to decide who
+     * answers — that is what made a mention permanent.
+     */
+    const roster = [...new Set([...(thread.agentIds ?? []), ...mentioned.map(a => a.id)])];
     sqliteService.setChatThreadAgents(threadId, roster);
 
-    const targetAgent = participants[0];
+    const targetAgent = mentioned[0];
 
     // 3. Generate Agent Response using CLI
     const agentMsgId = `msg-${Date.now()}-agent`;
@@ -101,6 +100,89 @@ export class ChatService extends EventEmitter {
     this.emit('chat_message', agentMessage);
 
     return { userMessage, agentMessage };
+  }
+
+
+  /**
+   * Answer a message that named no agent.
+   *
+   * Alpha replies as itself on the machine's default runtime — no persona, no
+   * agent identity, and no agent's name on a message they were never sent.
+   *
+   * It keeps its own CLI session per thread, keyed by DEFAULT_ASSISTANT.id, so
+   * a plain conversation has continuity without borrowing an agent's transcript.
+   */
+  private async generateDefaultReply(prompt: string, threadId: string): Promise<ChatMessage> {
+    const now = () => new Date().toISOString();
+    const base = {
+      id: `msg-${Date.now()}-alpha`,
+      threadId,
+      senderType: 'agent' as const,
+      senderName: DEFAULT_ASSISTANT.name,
+      // Deliberately no agentId: nothing in the UI should attribute this to a
+      // configured agent, because none was involved.
+      timestamp: now()
+    };
+
+    const runtime = pickDefaultRuntime(sqliteService.getRuntimes());
+    if (!runtime) {
+      return {
+        ...base,
+        senderType: 'system',
+        content: [
+          'No AI runtime is signed in on this machine, so I cannot answer.',
+          '',
+          'Install and sign in to one of the agent CLIs — the Runtimes page shows what it found.'
+        ].join('\n')
+      };
+    }
+
+    const priorSession = sqliteService.getThreadSession(threadId, DEFAULT_ASSISTANT.id);
+
+    logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}`);
+
+    const turn = await runCliTurn({
+      runId: `chat-${Date.now()}`,
+      cwd: ensureWorkspacesRoot(),
+      provider: runtime.provider,
+      modelName: runtime.modelName,
+      // The tool policy still applies: a chat inspects, it does not mutate.
+      systemPrompt: `${DEFAULT_ASSISTANT_PROMPT}
+
+---
+
+${describeChatToolPolicy()}`,
+      personaName: DEFAULT_ASSISTANT.name,
+      prompt,
+      priorSession: priorSession?.cliSessionId ?? null
+    });
+
+    if (turn.sessionId) {
+      sqliteService.setThreadSession(threadId, DEFAULT_ASSISTANT.id, turn.sessionId);
+    }
+
+    if (turn.failureKind) {
+      const cli = turn.bin.replace('.cmd', '');
+      return {
+        ...base,
+        content:
+          `I could not reach the ${runtime.provider} CLI, so I have no answer for you.
+
+` +
+          `Reason: ${turn.failureDetail}
+
+` +
+          `Check that \`${cli}\` is installed and signed in — the Runtimes page shows its status.`,
+        thinkingProcess: turn.thinking
+      };
+    }
+
+    return {
+      ...base,
+      content: turn.content.trim(),
+      thinkingProcess: turn.thinking,
+      toolsExecuted: turn.tools
+    };
   }
 
   /**
