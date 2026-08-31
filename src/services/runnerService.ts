@@ -4,10 +4,10 @@ import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
 import { processManager } from './processManager.js';
 import { StreamParser } from './streamParser.js';
-import { buildTurnInvocation } from './cliRunner.js';
+import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
 import { buildEnv } from './customCliArgs.js';
-import { writeRunMcpConfig } from './mcpConfigService.js';
+import { writeRunMcpConfig, cleanupRunMcpConfig } from './mcpConfigService.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
 import { githubService } from './githubService.js';
@@ -212,6 +212,8 @@ export class RunnerService extends EventEmitter {
         runId,
         cwd,
         mode: 'run',
+        // Keeps the persona out of argv — see TurnInvocation.stdin.
+        personaFile: writeTurnPersona(runId, persona.systemPrompt) ?? undefined,
         provider: persona.modelProvider,
         modelName: persona.modelName,
         systemPrompt: persona.systemPrompt,
@@ -234,6 +236,8 @@ export class RunnerService extends EventEmitter {
       cwd,
       // Agent env first, then the family's isolation overrides — see cliHome.
       env: { ...env, ...invocation.env },
+      // The task description is multi-line, so it cannot travel in argv.
+      stdin: invocation.stdin,
       onStdout: () => {},
       onExit: async (code) => {
         await this.handleProcessExit(runId, cwd, branchName, issue, code);
@@ -287,6 +291,10 @@ Instructions:
   }
 
   private async handleProcessExit(runId: string, cwd: string, branchName: string, issue: Issue, code: number | null) {
+    // The persona file and any MCP config exist only for the duration of the
+    // spawn; leaving them would accumulate a directory per run.
+    cleanupRunMcpConfig(runId);
+
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
     if (!run) return;
 

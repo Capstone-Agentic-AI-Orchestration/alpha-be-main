@@ -61,7 +61,7 @@ describe('buildTurnInvocation — Claude', () => {
 
     expect(family).toBe('claude');
     expect(bin).toMatch(/^claude(\.cmd)?$/);
-    expect(valueOf(args, '-p')).toBe('What does this service do?');
+    expect(args).toContain('-p');
     expect(valueOf(args, '--output-format')).toBe('stream-json');
     expect(args).toContain('--verbose');
   });
@@ -107,6 +107,75 @@ describe('buildTurnInvocation — Claude', () => {
   });
 });
 
+describe('nothing multi-line may travel in argv', () => {
+  /**
+   * On Windows `claude` and `codex` are `.cmd` shims, so cross-spawn runs them
+   * through cmd.exe — whose command line ends at the first newline. A
+   * multi-line argv value was truncated there and every later flag silently
+   * discarded, taking --output-format, --setting-sources and --model with it.
+   */
+  const multiline = 'You are Ada.\n\nAlways answer in one line.';
+
+  // Only the families installed as `.cmd` shims. `agy` is a real executable
+  // and takes a multi-line argument intact — verified against the binary — so
+  // it keeps its prompt in argv.
+  it.each(['Anthropic', 'OpenAI'] as const)(
+    'keeps newlines out of %s argv even with a multi-line persona and prompt',
+    provider => {
+      for (const mode of ['chat', 'run'] as const) {
+        const { args } = buildTurnInvocation(
+          options({
+            provider,
+            mode,
+            systemPrompt: multiline,
+            prompt: 'Do the thing.\nThen stop.',
+            personaFile: provider === 'Anthropic' ? '/runs/x/persona.md' : undefined
+          }),
+          noMcp
+        );
+
+        const offender = args.find(a => /[\r\n]/.test(a));
+        expect(offender, `${provider}/${mode} put a newline in argv`).toBeUndefined();
+      }
+    }
+  );
+
+  it('still gives Antigravity its prompt in argv, since it is not a shim', () => {
+    const { args, stdin } = buildTurnInvocation(
+      options({ provider: 'Antigravity', systemPrompt: multiline }),
+      noMcp
+    );
+
+    expect(stdin).toBeUndefined();
+    expect(valueOf(args, '-p')).toContain('What does this service do?');
+  });
+
+  it('sends the Claude prompt on stdin, not after -p', () => {
+    const { args, stdin } = buildTurnInvocation(options(), noMcp);
+
+    expect(stdin).toBe('What does this service do?');
+    expect(args).toContain('-p');
+    expect(valueOf(args, '-p')).not.toBe('What does this service do?');
+  });
+
+  it('reads the persona from a file when one was written', () => {
+    const { args } = buildTurnInvocation(
+      options({ personaFile: '/runs/x/persona.md', systemPrompt: multiline }),
+      noMcp
+    );
+
+    expect(valueOf(args, '--append-system-prompt-file')).toBe('/runs/x/persona.md');
+    expect(args).not.toContain('--append-system-prompt');
+  });
+
+  it('falls back to the inline flag when no file was written', () => {
+    const { args } = buildTurnInvocation(options({ systemPrompt: 'One line.' }), noMcp);
+
+    expect(valueOf(args, '--append-system-prompt')).toBe('One line.');
+    expect(args).not.toContain('--append-system-prompt-file');
+  });
+});
+
 describe('buildTurnInvocation — Codex', () => {
   const codex = (over: Partial<CliTurnOptions> = {}) =>
     buildTurnInvocation(options({ provider: 'OpenAI', modelName: 'gpt-5-codex', ...over }), noMcp);
@@ -115,29 +184,27 @@ describe('buildTurnInvocation — Codex', () => {
     const { args, family } = codex();
 
     expect(family).toBe('codex');
-    expect(args.at(-1)).toContain('You are Ada.');
-    expect(args.at(-1)).toContain('Stay in character as Ada Lovelace');
-    expect(args.at(-1)).toContain('What does this service do?');
+    expect(codex().stdin).toContain('You are Ada.');
+    expect(codex().stdin).toContain('Stay in character as Ada Lovelace');
+    expect(codex().stdin).toContain('What does this service do?');
   });
 
   it('does not repeat the persona once a session exists', () => {
-    const { args } = codex({ priorSession: 'sess-9' });
-    expect(args.at(-1)).toBe('What does this service do?');
+    expect(codex({ priorSession: 'sess-9' }).stdin).toBe('What does this service do?');
   });
 
-  it('places --model before the -- terminator, or it would be read as prompt text', () => {
+  it('passes the model, with no positional prompt to protect it from', () => {
+    // The prompt used to sit after a `--` terminator, which every flag had to
+    // precede. On stdin there is no terminator and no ordering hazard.
     const { args } = codex();
-
-    const modelAt = args.indexOf('--model');
-    const terminatorAt = args.indexOf('--');
-    expect(modelAt).toBeGreaterThan(-1);
-    expect(modelAt).toBeLessThan(terminatorAt);
     expect(valueOf(args, '--model')).toBe('gpt-5-codex');
+    expect(args).not.toContain('--');
   });
 
-  it('keeps the prompt as the final positional argument', () => {
-    const { args } = codex();
-    expect(args.indexOf('--')).toBe(args.length - 2);
+  it('sends the prompt on stdin rather than as an argument', () => {
+    const { args, stdin } = codex();
+    expect(stdin).toContain('What does this service do?');
+    expect(args.join(' ')).not.toContain('What does this service do?');
   });
 
   it('keeps the sandbox and git-check flags', () => {
@@ -163,11 +230,11 @@ describe('persona re-injection mid-session', () => {
     buildTurnInvocation(options({ provider: 'OpenAI', ...over }), noMcp);
 
   it('omits the persona on a continuing session when nothing changed', () => {
-    expect(codex({ priorSession: 'sess-1' }).args.at(-1)).toBe('What does this service do?');
+    expect(codex({ priorSession: 'sess-1' }).stdin).toBe('What does this service do?');
   });
 
   it('re-injects the persona when it changed under a live session', () => {
-    const prompt = codex({ priorSession: 'sess-1', personaChanged: true }).args.at(-1)!;
+    const prompt = codex({ priorSession: 'sess-1', personaChanged: true }).stdin!;
 
     expect(prompt).toContain('You are Ada.');
     expect(prompt).toContain('What does this service do?');
@@ -176,14 +243,14 @@ describe('persona re-injection mid-session', () => {
   it('words the re-injection as a replacement, not an introduction', () => {
     // Dropped in unannounced, a second persona reads as a duplicate rather than
     // a correction, and the model cannot tell which one now governs.
-    const prompt = codex({ priorSession: 'sess-1', personaChanged: true }).args.at(-1)!;
+    const prompt = codex({ priorSession: 'sess-1', personaChanged: true }).stdin!;
 
     expect(prompt).toContain('Your instructions have been updated');
     expect(prompt).toContain('replaces any earlier instructions');
   });
 
   it('does not add that preamble on a brand new session', () => {
-    const prompt = codex({ priorSession: null }).args.at(-1)!;
+    const prompt = codex({ priorSession: null }).stdin!;
 
     expect(prompt).toContain('You are Ada.');
     expect(prompt).not.toContain('Your instructions have been updated');
@@ -194,7 +261,7 @@ describe('persona re-injection mid-session', () => {
       priorSession: 'sess-1',
       personaChanged: true,
       systemPrompt: ''
-    }).args.at(-1);
+    }).stdin;
 
     expect(prompt).toBe('What does this service do?');
   });
@@ -215,7 +282,9 @@ describe('persona re-injection mid-session', () => {
     );
 
     expect(valueOf(args, '--append-system-prompt')).toBe('You are Ada.');
-    expect(valueOf(args, '-p')).toBe('What does this service do?');
+    expect(
+      buildTurnInvocation(options({ priorSession: 'sess-1', personaChanged: true }), noMcp).stdin
+    ).toBe('What does this service do?');
   });
 });
 
@@ -254,13 +323,13 @@ describe('custom CLI arguments', () => {
     expect(valueOf(args, '--append-system-prompt')).toBe('You are Ada.');
   });
 
-  it('places codex custom flags before the -- terminator', () => {
+  it('appends codex custom flags to the argv', () => {
     const { args } = buildTurnInvocation(
       options({ provider: 'OpenAI', customCliArgs: '--debug' }),
       noMcp
     );
 
-    expect(args.indexOf('--debug')).toBeLessThan(args.indexOf('--'));
+    expect(args).toContain('--debug');
   });
 
   it('adds nothing when the field is empty', () => {
@@ -355,9 +424,10 @@ describe('Codex isolation from the operator config', () => {
     expect(args).toContain('--ignore-user-config');
   });
 
-  it('places it before the -- terminator', () => {
+  it('is a flag, not something the prompt could be mistaken for', () => {
     const { args } = buildTurnInvocation(options({ provider: 'OpenAI' }), noMcp);
-    expect(args.indexOf('--ignore-user-config')).toBeLessThan(args.indexOf('--'));
+    expect(args).toContain('--ignore-user-config');
+    expect(args).not.toContain('--');
   });
 
   it('keeps the read-only sandbox alongside it', () => {

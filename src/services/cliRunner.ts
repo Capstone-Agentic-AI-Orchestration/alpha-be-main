@@ -8,6 +8,9 @@ import { cliHomeEnv } from './cliHome.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
+import { RUNS_DIR } from '../config/env.js';
+import fs from 'node:fs';
+import path from 'node:path';
 import { logError, logInfo } from '../utils/logger.js';
 
 /**
@@ -43,6 +46,15 @@ export interface CliTurnOptions {
   cwd: string;
   /** Defaults to 'chat', so existing callers keep today's read-only behaviour. */
   mode?: TurnMode;
+  /**
+   * Path to a file holding the composed persona.
+   *
+   * Claude takes `--append-system-prompt-file`, which keeps a multi-line
+   * persona out of argv entirely. Callers get one from `writeTurnPersona`.
+   * Without it the persona falls back to the inline flag, which is correct
+   * only when it happens to be single-line.
+   */
+  personaFile?: string;
   /** Agent `modelProvider` value — selects the CLI family. */
   provider: string;
   modelName?: string;
@@ -105,11 +117,53 @@ export interface CliTurnResult {
   failureKind: 'spawn' | 'empty' | null;
 }
 
+
+/**
+ * Write the composed persona to a file for this turn, and return its path.
+ *
+ * Claude takes `--append-system-prompt-file`, and using it is what keeps a
+ * multi-line persona out of a command line that cmd.exe would truncate. Lives
+ * beside the run's MCP config under `~/.alpha/runs/<runId>/`, so
+ * `cleanupRunMcpConfig` removes it with the rest of the directory.
+ *
+ * Returns null when there is no persona, or when the write fails — the caller
+ * then falls back to the inline flag rather than losing the turn.
+ */
+export function writeTurnPersona(runId: string, persona: string): string | null {
+  const text = persona?.trim();
+  if (!text) return null;
+
+  try {
+    const dir = path.join(RUNS_DIR, runId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'persona.md');
+    fs.writeFileSync(file, text, 'utf8');
+    return file;
+  } catch (err: any) {
+    logError('Could not write the turn persona file', err?.message ?? String(err));
+    return null;
+  }
+}
+
 /** Resolved argv for one turn, plus which stream dialect to expect back. */
 interface TurnInvocation {
   bin: string;
   args: string[];
   family: StreamFamily;
+  /**
+   * The prompt, to be written to the child's stdin rather than passed in argv.
+   *
+   * On Windows `claude` and `codex` are `.cmd` shims, so cross-spawn runs them
+   * through cmd.exe — whose command line ends at the first newline. A
+   * multi-line prompt in argv was therefore truncated, and every flag after it
+   * silently discarded: `--output-format stream-json` (so the run parsed plain
+   * text and logged nothing), `--setting-sources ''` (so the operator's own
+   * CLAUDE.md leaked back in), and `--model`. Measured, then fixed here.
+   *
+   * `agy` is a real executable rather than a shim and is unaffected, so it
+   * keeps its prompt in argv where its persona has been verified to apply.
+   */
+  stdin?: string;
   /**
    * Environment overrides for this family, merged over the caller's own.
    *
@@ -245,11 +299,10 @@ export function buildTurnInvocation(
         ...(modelName ? ['--model', modelName] : []),
         // Before the terminator for the same reason --model is.
         ...customArgs,
-        // -- ends option parsing: a prompt that happens to start with a
-        // hyphen is then read as text, not as a codex flag.
-        '--',
-        withPersona(prompt)
-      ]
+      ],
+      // `codex exec` with no positional prompt reads it from stdin, which keeps
+      // the persona-prefixed text out of a command line cmd.exe would truncate.
+      stdin: withPersona(prompt)
     };
   }
 
@@ -319,8 +372,11 @@ export function buildTurnInvocation(
     // under ~/.claude, so the home must stay real.
     env: {},
     bin: isWin ? 'claude.cmd' : 'claude',
+    // `-p` with no value reads the prompt from stdin, which is what keeps a
+    // multi-line task description out of the command line.
+    stdin: prompt,
     args: [
-      '-p', prompt,
+      '-p',
       /**
        * `--append-system-prompt`, NOT `--system-prompt`.
        *
@@ -341,7 +397,19 @@ export function buildTurnInvocation(
        * `systemPrompt ?? ''`, so an agent with no prompt got an EMPTY system
        * prompt — strictly worse than not passing the flag at all.
        */
-      ...(persona ? ['--append-system-prompt', persona] : []),
+      /**
+       * The file form when one was written, the inline form otherwise.
+       *
+       * A persona always contains newlines — every generated file opens
+       * `# Name`, blank line, prose — so inline meant the value was cut at the
+       * first newline and everything after it in argv was lost. See
+       * TurnInvocation.stdin.
+       */
+      ...(options.personaFile
+        ? ['--append-system-prompt-file', options.personaFile]
+        : persona
+          ? ['--append-system-prompt', persona]
+          : []),
       '--output-format', 'stream-json',
       // REQUIRED. Without it the CLI exits 1 with
       // "When using --print, --output-format=stream-json requires --verbose",
@@ -423,7 +491,10 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   }
 
   try {
-    const invocation = buildTurnInvocation(options, mcp);
+    const invocation = buildTurnInvocation(
+      { ...options, personaFile: writeTurnPersona(runId, options.systemPrompt ?? '') ?? undefined },
+      mcp
+    );
     family = invocation.family;
     bin = invocation.bin;
     const args = invocation.args;
@@ -445,6 +516,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
         // Merged over process.env by processManager. Not logged: an agent's
         // env is where its API keys live.
         env: { ...options.env, ...invocation.env },
+        stdin: invocation.stdin,
         onExit: () => resolve()
       });
 

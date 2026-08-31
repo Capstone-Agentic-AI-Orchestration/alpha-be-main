@@ -11,6 +11,18 @@ export interface SpawnOptions {
   args: string[];
   cwd: string;
   env?: Record<string, string>;
+  /**
+   * Text to write to the child's stdin, then close it.
+   *
+   * This is how a multi-line prompt reaches a CLI on Windows. `claude` and
+   * `codex` are installed as `.cmd` shims, which cross-spawn necessarily runs
+   * through cmd.exe — and cmd.exe ends its command line at the first newline,
+   * so a multi-line argv value is truncated there and every argument after it
+   * is discarded. Measured: an inline multi-line `--append-system-prompt`
+   * silently took `--output-format`, `--setting-sources` and `--model` down
+   * with it. See buildTurnInvocation.
+   */
+  stdin?: string;
   onStdout?: (data: Buffer) => void;
   onStderr?: (data: Buffer) => void;
   onExit?: (code: number | null, signal: string | null) => void;
@@ -23,7 +35,7 @@ export class ProcessManager {
    * Spawns a process in a registered allowlisted directory with tree-kill tracking and timeouts.
    */
   spawnProcess(options: SpawnOptions): ChildProcess {
-    const { runId, bin, args, cwd, env, onStdout, onStderr, onExit } = options;
+    const { runId, bin, args, cwd, env, stdin, onStdout, onStderr, onExit } = options;
 
     // 1. Verify working directory allowlist
     if (!sqliteService.isPathAllowed(cwd)) {
@@ -53,11 +65,41 @@ export class ProcessManager {
      * cross-spawn resolves the `.cmd` wrapper itself and passes argv as a real
      * array, so arguments survive verbatim and nothing is interpreted.
      */
+    /**
+     * A batch shim must never be handed a multi-line argument.
+     *
+     * `claude` and `codex` install as `.cmd` wrappers, so cross-spawn runs them
+     * through cmd.exe, whose command line ends at the first newline —
+     * everything after it, including later flags, is silently discarded. That
+     * cost `--output-format stream-json`, `--setting-sources ''` and `--model`
+     * on every Claude turn whose persona or prompt spanned lines, which is all
+     * of them.
+     *
+     * Scoped to shims deliberately. `agy` is a real executable, takes its argv
+     * directly, and its multi-line prompt is verified to arrive intact — so
+     * refusing it here would break a path that works.
+     */
+    const isShim = /\.(cmd|bat)$/i.test(bin);
+    const multiline = isShim ? args.findIndex(a => /[\r\n]/.test(a)) : -1;
+    if (multiline !== -1) {
+      const err = new Error(
+        `Argument ${multiline} for "${bin}" contains a newline. Pass long text on stdin or in a file instead — cmd.exe truncates the command line there and drops every later flag.`
+      );
+      logError(err.message, { runId, bin });
+      throw err;
+    }
+
     const child = crossSpawn(bin, args, {
       cwd,
       env: { ...process.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
     });
+
+    if (stdin !== undefined && child.stdin) {
+      // The CLIs read the prompt until EOF, so the close is what starts the turn.
+      child.stdin.on('error', err => logError(`stdin write failed for ${runId}`, err));
+      child.stdin.end(stdin);
+    }
 
     const resetIdleTimer = () => {
       const entry = this.activeProcesses.get(runId);
