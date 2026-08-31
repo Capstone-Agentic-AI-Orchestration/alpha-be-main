@@ -314,10 +314,25 @@ export class StreamParser {
         const events: ParsedEvent[] = [];
 
         if (r.status && r.status !== 'SUCCESS') {
+          /**
+           * Carry whatever agy said about the failure.
+           *
+           * This used to report only the bare status, so a user was told
+           * "Antigravity run ended with status ERROR" and nothing else — while
+           * the run had emitted an `error_message` step explaining itself,
+           * which the step handler was discarding. Between the two, the reason
+           * was thrown away twice.
+           */
+          const detail = [r.error, r.message, r.response]
+            .map(v => (typeof v === 'string' ? v.trim() : ''))
+            .find(Boolean);
+
           events.push({
             type: 'error',
             stage: this.currentStage,
-            message: `Antigravity run ended with status ${r.status}`
+            message: detail
+              ? `Antigravity run ended with status ${r.status}: ${detail}`
+              : `Antigravity run ended with status ${r.status}`
           });
         } else if (!this.sawAssistantText && typeof r.response === 'string' && r.response.trim()) {
           events.push({ type: 'log', stage: this.currentStage, message: r.response.trim() });
@@ -374,6 +389,31 @@ export class StreamParser {
         const text = this.antigravityText.trim();
         this.antigravityText = '';
         if (text) events.push({ type: 'log', stage: this.currentStage, message: text });
+      }
+      return events;
+    }
+
+    /**
+     * Anything agy says about itself — an error, or a notice.
+     *
+     * `error_message` was landing in the unhandled bucket, so when a turn
+     * failed the only thing that survived was the bare status from the result
+     * event. `system_message` was doing the same. Neither is documented, so
+     * every plausible text field is tried before falling back to the raw
+     * payload: an unrecognised shape should still reach the user, because the
+     * one thing worse than an odd-looking message is no message.
+     */
+    if (kind === 'error_message' || kind === 'system_message') {
+      const text = [step.text, step.text_delta, step.message, step.error, step.content]
+        .map(v => (typeof v === 'string' ? v.trim() : ''))
+        .find(Boolean);
+
+      if (text || kind === 'error_message') {
+        events.push({
+          type: kind === 'error_message' ? 'error' : 'log',
+          stage: this.currentStage,
+          message: text || `Antigravity reported: ${JSON.stringify(step).slice(0, 400)}`
+        });
       }
       return events;
     }
