@@ -3,8 +3,7 @@ export const EXECUTION_LIMITS = {
   IDLE_TIMEOUT_MS: 120 * 1000, // 120 seconds no-output idle timeout
   MAX_TURNS: 25, // 25 turns per task
   MAX_OUTPUT_LINES_FOR_CONTEXT: 100, // Compaction threshold
-  MAX_OUTPUT_CHARS_FOR_CONTEXT: 2000,
-  MAX_RULES_WORD_COUNT: 500
+  MAX_OUTPUT_CHARS_FOR_CONTEXT: 2000
 };
 
 /**
