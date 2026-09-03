@@ -13,7 +13,8 @@ import {
   ChatThread,
   ChatMessage,
   Skill,
-  RuntimeEngine
+  RuntimeEngine,
+  RunUsage
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -21,6 +22,33 @@ import { ensureMemoryScaffold } from './memoryService.js';
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
   fs.mkdirSync(ALPHA_DIR, { recursive: true });
+}
+
+/**
+ * Rebuild a run's token figures from its row.
+ *
+ * Returns undefined — not an object of undefineds — when the CLI reported
+ * nothing, so callers can distinguish an unmeasured run (every run that
+ * predates these columns) from one that genuinely used nothing. Only keys with
+ * a number are copied, so a NULL column never becomes a 0 in the API response.
+ */
+function usageFromRow(r: any): RunUsage | undefined {
+  const usage: RunUsage = {};
+  const columns: Array<[keyof RunUsage, string]> = [
+    ['inputTokens', 'input_tokens'],
+    ['outputTokens', 'output_tokens'],
+    ['cacheReadTokens', 'cache_read_tokens'],
+    ['cacheCreationTokens', 'cache_creation_tokens'],
+    ['thinkingTokens', 'thinking_tokens'],
+    ['costUsd', 'cost_usd'],
+    ['numTurns', 'num_turns']
+  ];
+
+  for (const [key, column] of columns) {
+    if (typeof r[column] === 'number') usage[key] = r[column];
+  }
+
+  return Object.keys(usage).length ? usage : undefined;
 }
 
 export class SQLiteService {
@@ -258,7 +286,29 @@ export class SQLiteService {
       // to any conversation already underway — possibly forever. Comparing this
       // against the current persona is what lets a live session be told its
       // instructions changed. Null on sessions that predate the column.
-      ['thread_sessions', 'persona_hash TEXT']
+      ['thread_sessions', 'persona_hash TEXT'],
+      /**
+       * What a run actually cost.
+       *
+       * The stream parsers have decoded these from every CLI's `result` event
+       * since they were written, and every one was discarded when the turn
+       * ended — so Alpha could not say how many tokens a run used, while the
+       * agent cards showed a hardcoded 620,000 for everyone.
+       *
+       * Deliberately no DEFAULT 0. NULL means the CLI did not report the
+       * figure (codex reports no cache reads, Claude no separate thinking
+       * tokens, Antigravity no cost) and zero means it reported zero. A
+       * default would turn every unmeasured field into a confident zero on a
+       * billing screen, which is the fabrication this codebase keeps having to
+       * remove.
+       */
+      ['prototype_runs', 'input_tokens INTEGER'],
+      ['prototype_runs', 'output_tokens INTEGER'],
+      ['prototype_runs', 'cache_read_tokens INTEGER'],
+      ['prototype_runs', 'cache_creation_tokens INTEGER'],
+      ['prototype_runs', 'thinking_tokens INTEGER'],
+      ['prototype_runs', 'cost_usd REAL'],
+      ['prototype_runs', 'num_turns INTEGER']
     ];
 
     for (const [table, definition] of additions) {
@@ -605,8 +655,61 @@ export class SQLiteService {
   }
 
   // --- Agents ---
+  /**
+   * Per-agent run statistics, computed from the runs table.
+   *
+   * These were four hardcoded constants — 142 runs, 98.4% success, 620,000
+   * tokens, 280ms — returned identically for every agent, including one
+   * created a second ago. The billing screen multiplies that token figure by a
+   * rate to show money, so a brand-new install displayed a bill for work that
+   * never happened.
+   *
+   * Now that runs persist their token counts (see the prototype_runs
+   * migration) these are all answerable from data.
+   */
+  private agentStats(): Map<string, { totalRuns: number; successRate: number; tokensUsed: number; avgLatencyMs: number; costUsd: number }> {
+    const rows = this.db.prepare(`
+      SELECT
+        agent_id,
+        COUNT(*) AS total_runs,
+        SUM(CASE WHEN status IN ('completed', 'awaiting_approval') THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN status IN ('completed', 'awaiting_approval', 'failed') THEN 1 ELSE 0 END) AS judged,
+        SUM(
+          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) +
+          COALESCE(cache_read_tokens, 0) + COALESCE(cache_creation_tokens, 0) +
+          COALESCE(thinking_tokens, 0)
+        ) AS tokens_used,
+        SUM(COALESCE(cost_usd, 0)) AS cost_usd,
+        AVG(
+          CASE WHEN status NOT IN ('running', 'validating')
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000 END
+        ) AS avg_latency_ms
+      FROM prototype_runs
+      GROUP BY agent_id
+    `).all() as any[];
+
+    return new Map(rows.map(r => [
+      r.agent_id,
+      {
+        totalRuns: r.total_runs ?? 0,
+        /**
+         * Judged runs only: cancelled runs are excluded from the denominator
+         * because the operator stopped them, which says nothing about whether
+         * the agent could have succeeded. An agent with no judged runs gets 0
+         * rather than an assumed 100 — the UI should read totalRuns to decide
+         * whether a rate is worth showing at all.
+         */
+        successRate: r.judged ? Math.round((r.succeeded / r.judged) * 1000) / 10 : 0,
+        tokensUsed: r.tokens_used ?? 0,
+        costUsd: r.cost_usd ?? 0,
+        avgLatencyMs: Math.round(r.avg_latency_ms ?? 0)
+      }
+    ]));
+  }
+
   getAgents(): Agent[] {
     const rows = this.db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all() as any[];
+    const stats = this.agentStats();
     return rows.map(r => ({
       ...r,
       isMine: Boolean(r.is_mine),
@@ -620,11 +723,12 @@ export class SQLiteService {
       mcpServers: JSON.parse(r.mcp_servers || '[]'),
       envVars: JSON.parse(r.env_vars || '[]'),
       customCliArgs: r.custom_cli_args,
-      stats: {
-        totalRuns: 142,
-        successRate: 98.4,
-        tokensUsed: 620000,
-        avgLatencyMs: 280
+      stats: stats.get(r.id) ?? {
+        totalRuns: 0,
+        successRate: 0,
+        tokensUsed: 0,
+        costUsd: 0,
+        avgLatencyMs: 0
       },
       machineStatus: 'online',
       workStatus: 'idle',
@@ -852,6 +956,7 @@ export class SQLiteService {
       insertions: r.insertions,
       deletions: r.deletions,
       testSummary: r.test_summary,
+      usage: usageFromRow(r),
       createdAt: r.created_at,
       updatedAt: r.updated_at
     }));
@@ -859,8 +964,8 @@ export class SQLiteService {
 
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, created_at, updated_at)
-      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @createdAt, @updatedAt)
+      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, created_at, updated_at)
+      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @createdAt, @updatedAt)
     `);
     stmt.run({
       id: run.id,
@@ -878,6 +983,18 @@ export class SQLiteService {
       insertions: run.insertions || 0,
       deletions: run.deletions || 0,
       testSummary: run.testSummary || null,
+      /**
+       * `?? null`, never `|| 0`. A reported zero has to survive the round trip
+       * as a zero, and an unreported figure has to stay NULL — the whole point
+       * of the nullable columns. `||` would collapse both into 0.
+       */
+      inputTokens: run.usage?.inputTokens ?? null,
+      outputTokens: run.usage?.outputTokens ?? null,
+      cacheReadTokens: run.usage?.cacheReadTokens ?? null,
+      cacheCreationTokens: run.usage?.cacheCreationTokens ?? null,
+      thinkingTokens: run.usage?.thinkingTokens ?? null,
+      costUsd: run.usage?.costUsd ?? null,
+      numTurns: run.usage?.numTurns ?? null,
       createdAt: run.createdAt || new Date().toISOString(),
       updatedAt: run.updatedAt || new Date().toISOString()
     });

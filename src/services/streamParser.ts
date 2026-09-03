@@ -38,6 +38,12 @@ export interface RunTelemetry {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  /**
+   * Reported by Antigravity only. Claude folds reasoning into output_tokens
+   * and codex does not report it, so this stays undefined for both — which is
+   * the point of it being optional. See models/index.ts RunUsage.
+   */
+  thinkingTokens?: number;
 }
 
 export interface ParsedEvent {
@@ -348,7 +354,15 @@ export class StreamParser {
             durationMs: r.duration_seconds ? Math.round(r.duration_seconds * 1000) : undefined,
             isError: r.status !== undefined && r.status !== 'SUCCESS',
             inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens
+            outputTokens: usage.output_tokens,
+            // Antigravity spells these differently from Claude
+            // (`cache_read_tokens`, not `cache_read_input_tokens`) and is the
+            // only family that separates reasoning tokens out. Both were being
+            // dropped: fixtures/antigravity-tool-sample.jsonl reports 8130
+            // cache reads against 5650 fresh input, so omitting them
+            // understated that turn by more than half.
+            cacheReadTokens: usage.cache_read_tokens,
+            thinkingTokens: usage.thinking_tokens
           }
         });
         return events;
@@ -528,6 +542,12 @@ export class StreamParser {
             sessionId: this.sessionId,
             inputTokens: json.usage?.input_tokens,
             outputTokens: json.usage?.output_tokens,
+            // From codex's documented turn.completed schema. Unverified
+            // against a live stream — the captured fixture only contains a
+            // turn.failed, because this machine's codex is signed out. A wrong
+            // key here reads as undefined, i.e. "not reported", which is the
+            // honest answer anyway; it must never become a zero.
+            cacheReadTokens: json.usage?.cached_input_tokens,
             isError: false
           }
         }];

@@ -129,6 +129,28 @@ export interface PrototypeRunStage {
   completedAt?: string;
 }
 
+/**
+ * Token and cost figures a CLI reported for a run.
+ *
+ * Every field is optional and every one means something different when absent:
+ * the CLI did not report it. `codex` says nothing about cache reads, Claude
+ * does not break thinking tokens out of its output count, and Antigravity
+ * reports no cost at all. A missing figure must stay missing rather than
+ * becoming a zero on a billing screen.
+ *
+ * See services/runUsage.ts for how these are accumulated.
+ */
+export interface RunUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  thinkingTokens?: number;
+  /** What the CLI says the equivalent API call would have cost. */
+  costUsd?: number;
+  numTurns?: number;
+}
+
 export interface PrototypeRun {
   id: string;
   issueId: string;
@@ -145,6 +167,8 @@ export interface PrototypeRun {
   insertions?: number;
   deletions?: number;
   testSummary?: string;
+  /** Undefined when the CLI reported nothing — see RunUsage. */
+  usage?: RunUsage;
   createdAt: string;
   updatedAt: string;
 }

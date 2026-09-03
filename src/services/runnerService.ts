@@ -3,10 +3,11 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
 import { processManager } from './processManager.js';
-import { StreamParser } from './streamParser.js';
+import { StreamParser, RunTelemetry } from './streamParser.js';
 import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
 import { buildEnv } from './customCliArgs.js';
+import { mergeUsage, hasUsage } from './runUsage.js';
 import { writeRunMcpConfig, cleanupRunMcpConfig } from './mcpConfigService.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
@@ -256,6 +257,8 @@ export class RunnerService extends EventEmitter {
           } else if (ev.type === 'tool_call' && ev.toolName) {
             const currentStage = parser.getCurrentStage();
             this.appendLog(runId, currentStage, `[Tool Call] ${ev.toolName}: ${JSON.stringify(ev.toolInput || {})}`);
+          } else if (ev.type === 'result' && ev.telemetry) {
+            this.recordUsage(runId, ev.telemetry);
           }
         }
       });
@@ -267,6 +270,27 @@ export class RunnerService extends EventEmitter {
         this.appendLog(runId, currentStage, `[stderr] ${line}`);
       });
     }
+  }
+
+  /**
+   * Fold a CLI's reported token counts into the run's stored totals.
+   *
+   * Written as the numbers arrive rather than held until exit, so a run that is
+   * cancelled, times out, or is orphaned by a daemon restart still keeps what
+   * it had already spent. Tokens are consumed whether or not the run finishes,
+   * and a cancelled run that reports nothing looks free when it was not.
+   *
+   * Read-then-write with no await in between, so it cannot interleave with the
+   * other writers of this row.
+   */
+  private recordUsage(runId: string, telemetry: RunTelemetry) {
+    const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
+    if (!run) return;
+
+    const usage = mergeUsage(run.usage, telemetry);
+    if (!hasUsage(usage)) return;
+
+    sqliteService.savePrototypeRun({ ...run, usage });
   }
 
   private buildTaskPrompt(issue: Issue, plan: string[]): string {
@@ -361,14 +385,27 @@ ${issue.description}
         this.appendLog(runId, 'review', `Git automation notice: ${gitErr.message || gitErr}`);
       }
 
-      const updatedStages = run.stages.map(s => ({
+      /**
+       * Re-read before composing the final row.
+       *
+       * `run` was loaded at the top of this method — before four advanceStage
+       * calls and before the git commit, push and PR awaits, every one of
+       * which writes this row. Spreading the copy from entry restores the
+       * stages as they were then, and nulls out any token totals recordUsage
+       * wrote while the process was exiting. The `result` event carrying those
+       * totals frequently arrives in the same tick as the exit, so this is the
+       * normal case, not a race.
+       */
+      const current = sqliteService.getPrototypeRuns().find(r => r.id === runId) ?? run;
+
+      const updatedStages = current.stages.map(s => ({
         ...s,
         status: 'success' as const,
         completedAt: s.completedAt || now
       }));
 
       const finalRun: PrototypeRun = {
-        ...run,
+        ...current,
         status: 'awaiting_approval',
         currentStageIndex: 4,
         stages: updatedStages,
