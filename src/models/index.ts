@@ -11,6 +11,9 @@ export type ModelProvider =
   | 'Ollama'
   | 'LM Studio';
 
+/** Mirrors the client's AgentAccessLevel; the two apps share no package. */
+export type AgentAccessLevel = 'everyone' | 'team' | 'admins' | 'private';
+
 export interface Agent {
   id: string;
   name: string;
@@ -31,6 +34,8 @@ export interface Agent {
   envVars?: { key: string; value: string; isSecret?: boolean }[];
   concurrencyLimit?: number;
   isArchived?: boolean;
+  /** Who may use this agent. Absent on rows written before the column existed. */
+  allowedUsers?: AgentAccessLevel;
   createdAt: string;
 }
 
@@ -80,6 +85,15 @@ export interface ProjectResource {
   name: string;
   pathOrUrl: string;
   branchOrMachine?: string;
+  /** Stack the scaffold was generated from. Absent on attached repositories. */
+  stack?: string;
+  /** Repository shape the scaffold used. Absent on attached repositories. */
+  shape?: string;
+  /**
+   * Managed working copy on this machine, when Alpha created or cloned it.
+   * Absent means there is no local checkout yet.
+   */
+  localPath?: string;
 }
 
 export interface Project {
@@ -97,6 +111,12 @@ export interface Project {
   leadName: string;
   leadAgentId?: string;
   resources: ProjectResource[];
+  /**
+   * GitHub organization every repository for this project is created under.
+   * Alpha creates no personal repositories, so without this the project cannot
+   * create one at all.
+   */
+  githubOrg?: string;
   createdAt: string;
 }
 
@@ -112,6 +132,58 @@ export interface PrototypeRunStage {
   logs: string[];
   startedAt?: string;
   completedAt?: string;
+}
+
+/**
+ * Token and cost figures a CLI reported for a run.
+ *
+ * Every field is optional and every one means something different when absent:
+ * the CLI did not report it. `codex` says nothing about cache reads, Claude
+ * does not break thinking tokens out of its output count, and Antigravity
+ * reports no cost at all. A missing figure must stay missing rather than
+ * becoming a zero on a billing screen.
+ *
+ * See services/runUsage.ts for how these are accumulated.
+ */
+export interface RunUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  thinkingTokens?: number;
+  /** What the CLI says the equivalent API call would have cost. */
+  costUsd?: number;
+  numTurns?: number;
+}
+
+/**
+ * One squad working one issue.
+ *
+ * The squad feature existed as CRUD and a button: `triggerSquadRun` incremented
+ * a counter, posted a notification and set a 4.5s timer that marked the run
+ * complete. No process was spawned and no agent was told anything.
+ *
+ * A squad run owns an ordered list of PrototypeRuns — one per member — sharing
+ * a single git branch, executed one after another.
+ */
+export interface SquadRun {
+  id: string;
+  squadId: string;
+  issueId: string;
+  projectId: string;
+  /** The branch every member commits to. Created once, by the first member. */
+  branchName: string;
+  /** Member agent ids in execution order. Leader first when the squad has one. */
+  memberAgentIds: string[];
+  /** Index into memberAgentIds of the member currently running. */
+  currentMemberIndex: number;
+  status: 'running' | 'awaiting_approval' | 'failed' | 'cancelled';
+  mission: string;
+  plan: string[];
+  /** Why the squad stopped early, when it did. */
+  stoppedReason?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PrototypeRun {
@@ -130,6 +202,12 @@ export interface PrototypeRun {
   insertions?: number;
   deletions?: number;
   testSummary?: string;
+  /** Undefined when the CLI reported nothing — see RunUsage. */
+  usage?: RunUsage;
+  /** Set when this run is one member's turn inside a SquadRun. */
+  squadRunId?: string;
+  /** This member's position in the squad's order, 0-based. */
+  squadOrder?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -206,7 +284,24 @@ export interface Skill {
 export interface Squad {
   id: string;
   name: string;
-  topology: 'Sequential' | 'Hierarchical' | 'Consensus';
+  /**
+   * Identity the create form collects and the squad list renders.
+   *
+   * Optional because rows written before these columns existed have none, and
+   * the read path substitutes an empty string rather than null.
+   */
+  description?: string;
+  avatar?: string;
+  color?: string;
+  /**
+   * Stored as sent, not normalised.
+   *
+   * The client's own union is lowercase and includes a `swarm` the daemon has
+   * no behaviour for, so this deliberately does not claim to be exhaustive —
+   * `isSupportedTopology` is what decides whether a squad can actually run, and
+   * it compares case-insensitively for exactly this reason.
+   */
+  topology: string;
   leaderAgentId?: string;
   memberAgentIds: string[];
   mission: string;

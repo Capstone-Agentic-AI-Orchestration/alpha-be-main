@@ -225,3 +225,96 @@ describe('StreamParser — robustness', () => {
     expect(events.some((e) => e.type === 'error')).toBe(true);
   });
 });
+
+describe('Antigravity agent_response completion', () => {
+  const step = (over: Record<string, unknown>) => JSON.stringify({ event: 'step_update', step_update: { step_type: 'agent_response', ...over } });
+
+  it('flushes accumulated text when DONE carries no delta', () => {
+    // The regression: a DONE without its own text_delta used to skip the
+    // branch, be logged as an unhandled type, and drop the whole reply.
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'Hello ' }));
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'world' }));
+    const events = parser.parseLine(step({ state: 'DONE' }));
+
+    expect(events.map(e => e.message)).toEqual(['Hello world']);
+  });
+
+  it('no longer records agent_response as an unhandled type', () => {
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'Hi' }));
+    parser.parseLine(step({ state: 'DONE' }));
+
+    expect(parser.getUnhandledTypes()).not.toContain('antigravity.step.agent_response');
+  });
+
+  it('still flushes when DONE does carry the final delta', () => {
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'PONG' }));
+    const events = parser.parseLine(step({ state: 'DONE', text_delta: '!' }));
+
+    expect(events.map(e => e.message)).toEqual(['PONG!']);
+  });
+
+  it('emits nothing when the step completes with no text at all', () => {
+    const parser = new StreamParser('antigravity');
+    expect(parser.parseLine(step({ state: 'DONE' }))).toEqual([]);
+  });
+
+  it('starts clean for the next response after a flush', () => {
+    const parser = new StreamParser('antigravity');
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'first' }));
+    parser.parseLine(step({ state: 'DONE' }));
+    parser.parseLine(step({ state: 'ACTIVE', text_delta: 'second' }));
+    const events = parser.parseLine(step({ state: 'DONE' }));
+
+    expect(events.map(e => e.message)).toEqual(['second']);
+  });
+});
+
+describe('against a real Antigravity tool transcript', () => {
+  /**
+   * fixtures/antigravity-tool-sample.jsonl is a captured run that carries the
+   * shapes the hand-written sample does not: an agent_response DONE with no
+   * text_delta, and step_type 'tool' whose arguments live under
+   * tool_info.parameters rather than tool_input.
+   */
+  const replay = () => {
+    const file = path.join(process.cwd(), 'fixtures', 'antigravity-tool-sample.jsonl');
+    const parser = new StreamParser('antigravity');
+    const events: ReturnType<StreamParser['parseLine']> = [];
+
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      events.push(...parser.parseLine(line));
+    }
+    return { events, parser };
+  };
+
+  it('records the tool call exactly once, not once per state change', () => {
+    // The fixture carries the same step twice — ACTIVE then DONE. Without a
+    // state check the run log showed every command as though it had been run
+    // two times.
+    const { events } = replay();
+    const calls = events.filter(e => e.type === 'tool_call');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].toolName).toBe('run_command');
+  });
+
+  it('keeps the tool arguments, which live under tool_info.parameters', () => {
+    // Reading only `tool_input` left every Antigravity tool call with an empty
+    // argument object, so the UI chips showed a bare name.
+    const { events } = replay();
+    const call = events.find(e => e.type === 'tool_call')!;
+
+    expect(call.toolInput).toEqual({ CommandLine: 'Get-Location' });
+  });
+
+  it('leaves no unhandled event types', () => {
+    expect(replay().parser.getUnhandledTypes()).toEqual([]);
+  });
+
+  it('picks up the conversation id for resuming', () => {
+    expect(replay().parser.getSessionId()).toBe('conv-sample');
+  });
+});

@@ -38,6 +38,12 @@ export interface RunTelemetry {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  /**
+   * Reported by Antigravity only. Claude folds reasoning into output_tokens
+   * and codex does not report it, so this stays undefined for both — which is
+   * the point of it being optional. See models/index.ts RunUsage.
+   */
+  thinkingTokens?: number;
 }
 
 export interface ParsedEvent {
@@ -314,10 +320,25 @@ export class StreamParser {
         const events: ParsedEvent[] = [];
 
         if (r.status && r.status !== 'SUCCESS') {
+          /**
+           * Carry whatever agy said about the failure.
+           *
+           * This used to report only the bare status, so a user was told
+           * "Antigravity run ended with status ERROR" and nothing else — while
+           * the run had emitted an `error_message` step explaining itself,
+           * which the step handler was discarding. Between the two, the reason
+           * was thrown away twice.
+           */
+          const detail = [r.error, r.message, r.response]
+            .map(v => (typeof v === 'string' ? v.trim() : ''))
+            .find(Boolean);
+
           events.push({
             type: 'error',
             stage: this.currentStage,
-            message: `Antigravity run ended with status ${r.status}`
+            message: detail
+              ? `Antigravity run ended with status ${r.status}: ${detail}`
+              : `Antigravity run ended with status ${r.status}`
           });
         } else if (!this.sawAssistantText && typeof r.response === 'string' && r.response.trim()) {
           events.push({ type: 'log', stage: this.currentStage, message: r.response.trim() });
@@ -333,7 +354,15 @@ export class StreamParser {
             durationMs: r.duration_seconds ? Math.round(r.duration_seconds * 1000) : undefined,
             isError: r.status !== undefined && r.status !== 'SUCCESS',
             inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens
+            outputTokens: usage.output_tokens,
+            // Antigravity spells these differently from Claude
+            // (`cache_read_tokens`, not `cache_read_input_tokens`) and is the
+            // only family that separates reasoning tokens out. Both were being
+            // dropped: fixtures/antigravity-tool-sample.jsonl reports 8130
+            // cache reads against 5650 fresh input, so omitting them
+            // understated that turn by more than half.
+            cacheReadTokens: usage.cache_read_tokens,
+            thinkingTokens: usage.thinking_tokens
           }
         });
         return events;
@@ -350,11 +379,26 @@ export class StreamParser {
     const kind = String(step.step_type ?? '');
 
     // Assistant prose, streamed a fragment at a time.
-    if (kind === 'agent_response' && typeof step.text_delta === 'string' && step.text_delta) {
-      this.sawAssistantText = true;
-      this.antigravityText += step.text_delta;
+    if (kind === 'agent_response') {
+      if (typeof step.text_delta === 'string' && step.text_delta) {
+        this.sawAssistantText = true;
+        this.antigravityText += step.text_delta;
+      }
 
-      // Flush once the step completes so consumers get whole sentences.
+      /**
+       * Flush on DONE whether or not THIS event carried a delta.
+       *
+       * The delta and the completion do not have to arrive together. When a
+       * DONE came through with no `text_delta`, the old condition skipped this
+       * branch entirely: the step fell through to the bottom, was recorded as
+       * an unhandled `antigravity.step.agent_response`, and everything already
+       * accumulated in `antigravityText` was dropped — the agent's whole reply
+       * silently vanished and the turn reported "the CLI produced no output".
+       *
+       * fixtures/antigravity-stream-sample.jsonl happens to carry a delta on
+       * its DONE, which is why the tests never caught this; the unhandled-type
+       * log from a real run is what surfaced it.
+       */
       if (step.state === 'DONE') {
         const text = this.antigravityText.trim();
         this.antigravityText = '';
@@ -363,11 +407,62 @@ export class StreamParser {
       return events;
     }
 
+    /**
+     * Anything agy says about itself — an error, or a notice.
+     *
+     * `error_message` was landing in the unhandled bucket, so when a turn
+     * failed the only thing that survived was the bare status from the result
+     * event. `system_message` was doing the same. Neither is documented, so
+     * every plausible text field is tried before falling back to the raw
+     * payload: an unrecognised shape should still reach the user, because the
+     * one thing worse than an odd-looking message is no message.
+     */
+    if (kind === 'error_message' || kind === 'system_message') {
+      const text = [step.text, step.text_delta, step.message, step.error, step.content]
+        .map(v => (typeof v === 'string' ? v.trim() : ''))
+        .find(Boolean);
+
+      if (text || kind === 'error_message') {
+        events.push({
+          type: kind === 'error_message' ? 'error' : 'log',
+          stage: this.currentStage,
+          message: text || `Antigravity reported: ${JSON.stringify(step).slice(0, 400)}`
+        });
+      }
+      return events;
+    }
+
     // Tool activity. The exact step_type set is not fully documented, so map
     // what is recognisable and record the rest instead of silently dropping it.
     if (kind === 'tool_call' || kind === 'tool_use' || step.tool_name) {
+      /**
+       * One event per tool call, not one per state change.
+       *
+       * Antigravity reports the same step twice — `state: 'ACTIVE'` when the
+       * tool starts and `state: 'DONE'` when it finishes — and this branch had
+       * no state check, so every tool call was recorded twice. A run log read
+       * as though the agent had run each command two times.
+       *
+       * ACTIVE is the one to keep: it is the moment the call is made, which is
+       * what a live run log wants. A step with no state at all still emits, so
+       * a shape that does not use the field is not silently dropped.
+       */
+      if (step.state === 'DONE') return events;
+
       const toolName = String(step.tool_name ?? kind);
-      const mapped = this.mapToolToStage(toolName, step.tool_input ?? {});
+      /**
+       * Antigravity puts the arguments under `tool_info.parameters`, not
+       * `tool_input`.
+       *
+       * Reading only `tool_input` meant every Antigravity tool call carried an
+       * empty argument object: the UI's tool chips showed a bare name with no
+       * detail, and `mapToolToStage` — which decides the run stage by looking
+       * at the arguments — was choosing from nothing. `tool_input` is kept as
+       * a fallback since the schema is not documented and may vary.
+       */
+      const toolInput = step.tool_info?.parameters ?? step.tool_input ?? {};
+
+      const mapped = this.mapToolToStage(toolName, toolInput);
       if (mapped && mapped !== this.currentStage) {
         this.currentStage = mapped;
         events.push({ type: 'stage_transition', stage: mapped });
@@ -376,7 +471,7 @@ export class StreamParser {
         type: 'tool_call',
         stage: this.currentStage,
         toolName,
-        toolInput: step.tool_input ?? {},
+        toolInput,
         message: `Executing ${toolName}`
       });
       return events;
@@ -447,6 +542,12 @@ export class StreamParser {
             sessionId: this.sessionId,
             inputTokens: json.usage?.input_tokens,
             outputTokens: json.usage?.output_tokens,
+            // From codex's documented turn.completed schema. Unverified
+            // against a live stream — the captured fixture only contains a
+            // turn.failed, because this machine's codex is signed out. A wrong
+            // key here reads as undefined, i.e. "not reported", which is the
+            // honest answer anyway; it must never become a zero.
+            cacheReadTokens: json.usage?.cached_input_tokens,
             isError: false
           }
         }];

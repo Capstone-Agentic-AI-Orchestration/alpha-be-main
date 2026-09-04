@@ -10,9 +10,14 @@ import { runRouter } from './controllers/runController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
+import { mcpRouter } from './controllers/mcpController.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { runtimeService } from './services/runtimeService.js';
+import { ensureCatalogSeed } from './services/mcpConfigService.js';
+import { sqliteService } from './services/sqliteService.js';
+import { ensureAgentFiles } from './services/agentFileService.js';
+import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
 
 const app = express();
@@ -78,6 +83,7 @@ app.use('/api', runRouter);
 app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
 app.use('/api', chatRouter);
+app.use('/api', mcpRouter);
 
 app.get('/api/download/desktop', (req, res) => {
   const zipPath = path.resolve('..', 'Alpha-v2-FullPlatform.zip');
@@ -147,6 +153,29 @@ chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', paylo
 server.listen(PORT, HOST, () => {
   logInfo(`Alpha v2 Execution Engine & Backend Daemon running on http://${HOST}:${PORT}`);
   logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  // Write a starter MCP catalog if the user has none, so the file is
+  // discoverable rather than something you have to know to create.
+  ensureCatalogSeed();
+
+  /**
+   * Grow the file layer for installs that predate it.
+   *
+   * Agents created from now on get a persona file at creation time
+   * (sqliteService.createAgent), but an existing alpha.db has rows with no
+   * file — and a user who deleted a file should get it back rather than
+   * silently lose the override. Existing files are never overwritten.
+   *
+   * The global memory tier is scaffolded here too: templates only, and
+   * template-only files contribute nothing to a prompt until someone writes
+   * in them.
+   */
+  try {
+    ensureMemoryScaffold();
+    ensureAgentFiles(sqliteService.getAgents());
+  } catch (err) {
+    logError('Could not initialise the agent file layer:', err);
+  }
 
   // Initial runtime scan in background
   runtimeService.scanRuntimes().catch(err => logError('Initial runtime probe failed:', err));

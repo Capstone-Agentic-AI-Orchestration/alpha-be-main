@@ -44,8 +44,14 @@ export async function checkDirtyWorktree(cwd: string): Promise<boolean> {
  * `issue.identifier`, which arrives in a POST /issues body, and git itself
  * treats some of these characters as syntax: a leading `-` would be read as an
  * option, and `..`, `~`, `^`, `:` are revision operators.
+ *
+ * Exported because the same check guards refs arriving from agent tool calls —
+ * see repoCloneService. Note that `--` is *not* an alternative here: for
+ * `git checkout` it means "the rest are pathspecs", so `checkout -- main`
+ * looks for a file called main instead of switching branch. For a ref, the
+ * only correct defence is rejecting the value.
  */
-function assertSafeBranchName(branchName: string): void {
+export function assertSafeBranchName(branchName: string): void {
   const valid =
     /^[A-Za-z0-9._/-]{1,200}$/.test(branchName) &&
     !branchName.startsWith('-') &&
@@ -63,9 +69,66 @@ function assertSafeBranchName(branchName: string): void {
   }
 }
 
+/**
+ * Move onto a branch that already exists, without touching where it points.
+ *
+ * `createBranch` uses `checkout -B`, which force-resets the branch to HEAD.
+ * That is right for starting fresh work and catastrophic for a squad: member
+ * two calling it would discard every commit member one just made. Squad members
+ * after the first come through here instead.
+ */
+export async function checkoutBranch(cwd: string, branchName: string): Promise<void> {
+  assertSafeBranchName(branchName);
+  await execFileAsync('git', ['checkout', branchName], { cwd });
+}
+
 export async function createBranch(cwd: string, branchName: string): Promise<void> {
   assertSafeBranchName(branchName);
   await execFileAsync('git', ['checkout', '-B', branchName], { cwd });
+}
+
+/**
+ * Turn a directory of files into a git repository with one commit on `main`.
+ *
+ * `gh repo create --source` refuses a directory that is not already a repo with
+ * at least one commit, so this runs before the repository exists on GitHub.
+ *
+ * The branch is set explicitly rather than relying on `init.defaultBranch`,
+ * which varies by machine — a repo that landed on `master` here would disagree
+ * with every base branch Alpha assumes elsewhere.
+ *
+ * Identity is passed per-command instead of being written to the config. The
+ * daemon runs on someone else's machine and a scaffold commit is not a reason
+ * to edit their global git identity; `-c` applies only to this invocation, and
+ * only when they have no identity of their own set.
+ */
+export async function initRepoWithCommit(
+  cwd: string,
+  commitMessage: string,
+  defaultBranch = 'main'
+): Promise<void> {
+  assertSafeBranchName(defaultBranch);
+
+  await execFileAsync('git', ['init', '--initial-branch', defaultBranch], { cwd });
+  await execFileAsync('git', ['add', '--all'], { cwd });
+
+  const identity = (await hasGitIdentity(cwd))
+    ? []
+    : ['-c', 'user.name=Alpha', '-c', 'user.email=alpha@localhost'];
+
+  // `--` stops a message beginning with '-' being read as an option.
+  await execFileAsync('git', [...identity, 'commit', '-m', commitMessage, '--'], { cwd });
+}
+
+async function hasGitIdentity(cwd: string): Promise<boolean> {
+  try {
+    const name = await execFileAsync('git', ['config', '--get', 'user.name'], { cwd });
+    const email = await execFileAsync('git', ['config', '--get', 'user.email'], { cwd });
+    return name.stdout.trim().length > 0 && email.stdout.trim().length > 0;
+  } catch {
+    // `--get` exits non-zero when the key is unset, which is the answer.
+    return false;
+  }
 }
 
 export async function getGitDiffStats(
@@ -74,18 +137,40 @@ export async function getGitDiffStats(
   const shortstat = async (args: string[]) =>
     (await execFileAsync('git', ['diff', '--shortstat', ...args], { cwd })).stdout;
 
+  /**
+   * Make new files visible to `git diff`.
+   *
+   * `git diff` reports tracked files only, so a run that *added* files
+   * measured as zero. A QA agent writing `math.test.js` produced "0 files
+   * changed" while the commit it triggered moments later recorded
+   * "1 file changed, 45 insertions" — measured.
+   *
+   * `--intent-to-add` registers the paths in the index without staging their
+   * contents, which is exactly enough for diff to see them. It is safe here
+   * because the caller commits with `git add -A` immediately afterwards, so
+   * the index was going to be written anyway.
+   *
+   * That this went unnoticed is instructive: the caller used to fall back to
+   * `insertions || 45` when the count came back zero, and 45 is about what a
+   * real run produces — so the invented number stood in for the broken
+   * measurement and made it look right.
+   */
   try {
-    const committed = await shortstat(['HEAD~1']);
-    if (committed.trim()) return parseDiffShortStat(committed);
-    return parseDiffShortStat(await shortstat([]));
+    await execFileAsync('git', ['add', '--intent-to-add', '--', '.'], { cwd });
   } catch {
-    // HEAD~1 does not exist on a repo with a single commit — fall back to the
-    // working tree rather than reporting no changes at all.
-    try {
-      return parseDiffShortStat(await shortstat([]));
-    } catch {
-      return { changedFiles: 0, insertions: 0, deletions: 0 };
-    }
+    // Nothing to register, or not a repository. The diff below still runs.
+  }
+
+  try {
+    const working = await shortstat([]);
+    if (working.trim()) return parseDiffShortStat(working);
+
+    // Nothing uncommitted: the work may already have been committed on this
+    // branch, so compare against its parent.
+    return parseDiffShortStat(await shortstat(['HEAD~1']));
+  } catch {
+    // HEAD~1 does not exist on a repository with a single commit.
+    return { changedFiles: 0, insertions: 0, deletions: 0 };
   }
 }
 

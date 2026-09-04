@@ -9,12 +9,28 @@ export const PORT = Number(process.env.PORT || 3001);
 // every device on the network; opt in explicitly if you really want that.
 export const HOST = process.env.HOST || '127.0.0.1';
 
-export const ALPHA_DIR = path.join(os.homedir(), '.alpha');
+/**
+ * Root for everything Alpha stores on this machine.
+ *
+ * Overridable because these paths are resolved once at import time, which
+ * otherwise leaves any service that touches the filesystem — the persona files
+ * and memory tiers especially — with no way to be exercised except against the
+ * real `~/.alpha`. Tests point this at a temp directory; it also lets an
+ * operator relocate the store off a synced home directory.
+ */
+export const ALPHA_DIR = process.env.ALPHA_HOME || path.join(os.homedir(), '.alpha');
 export const DB_PATH = process.env.SQLITE_DB_PATH || path.join(ALPHA_DIR, 'alpha.db');
 export const LOGS_DIR = path.join(ALPHA_DIR, 'logs');
 export const AUDIT_LOG_PATH = path.join(LOGS_DIR, 'audit.log');
 export const MEMORY_DIR = path.join(ALPHA_DIR, 'memory');
 export const RUNS_DIR = path.join(ALPHA_DIR, 'runs');
+// Hand-editable persona files, one per agent: `<id>.md`. The SQLite `agents`
+// table stays the system of record for structured config; these files own the
+// system prompt prose and override the columns they declare. See agentFileService.
+export const AGENTS_DIR = path.join(ALPHA_DIR, 'agents');
+// Working copies of repositories Alpha created or cloned. One allowlisted root
+// keeps every agent-writable path in a single place that is easy to reason about.
+export const WORKSPACES_DIR = path.join(ALPHA_DIR, 'workspaces');
 
 export const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000,http://localhost:5173';
 

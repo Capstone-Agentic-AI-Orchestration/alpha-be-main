@@ -85,6 +85,79 @@ export interface WorkflowRun {
   updatedAt: string;
 }
 
+/**
+ * A remote repository is addressed as `owner/name`, nothing else.
+ *
+ * The value reaches here from an agent's tool call, and it is interpolated
+ * into a REST path — so a value containing '..' or a query character would
+ * address a different endpoint than the one intended.
+ */
+function assertOwnerRepo(ownerRepo: string): void {
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(ownerRepo) || ownerRepo.includes('..')) {
+    throw new Error(
+      `Invalid repository "${ownerRepo}". Use owner/name, e.g. octocat/hello-world.`
+    );
+  }
+}
+
+/**
+ * Validate and encode a path inside a repository.
+ *
+ * The value is interpolated into a REST path, and both `fetch` and `gh`
+ * resolve `..` segments before the request leaves — so `contents/../../../user`
+ * addresses `/user`, not a file. That escapes the repository surface these
+ * tools are supposed to be limited to, using the operator's own token, and the
+ * caller is an LLM that may be acting on untrusted repository content.
+ *
+ * `?` and `#` are rejected for the same reason: either would let the caller
+ * append query parameters or a fragment to an endpoint chosen elsewhere.
+ * Segments are encoded individually so a legitimate space or `#` in a filename
+ * still resolves, while the separators stay separators.
+ */
+function assertRepoFilePath(filePath: string): string {
+  const invalid =
+    !filePath ||
+    filePath.startsWith('/') ||
+    filePath.includes('..') ||
+    filePath.includes('\\') ||
+    filePath.includes('\0') ||
+    /[?#]/.test(filePath);
+
+  if (invalid) {
+    throw new Error(
+      `Invalid file path "${filePath}". Use a path inside the repository, e.g. src/index.ts.`
+    );
+  }
+
+  return filePath.split('/').map(encodeURIComponent).join('/');
+}
+
+/**
+ * GitHub answers 404 both for "does not exist" and for "exists but your token
+ * cannot see it". Saying so is more useful than repeating the raw status,
+ * because the two have different fixes.
+ */
+function describeRepoLookupFailure(ownerRepo: string, err: any): string {
+  const detail = err?.stderr || err?.message || String(err);
+  if (/404|Not Found/i.test(detail)) {
+    return `Cannot reach ${ownerRepo}. It does not exist, or the signed-in account cannot see it — a private repo needs the owner to grant access.`;
+  }
+  if (/401|403|Bad credentials|rate limit/i.test(detail)) {
+    return `GitHub refused the request for ${ownerRepo}: ${String(detail).trim().slice(0, 200)}`;
+  }
+  return `Failed to read ${ownerRepo}: ${String(detail).trim().slice(0, 200)}`;
+}
+
+export interface RemoteRepoInfo {
+  nameWithOwner: string;
+  url: string;
+  description: string | null;
+  defaultBranch: string;
+  isPrivate: boolean;
+  /** True when the repository has no commits — a fresh `test.git` looks like this. */
+  isEmpty: boolean;
+}
+
 export interface CreateRepoOptions {
   name: string;
   visibility?: 'private' | 'public' | 'internal';
@@ -109,6 +182,16 @@ export interface IGitHubService {
   listOrganizations(): Promise<Array<{ login: string; role: string }>>;
   logout(): Promise<void>;
   listRepositories(limit?: number): Promise<GitHubRepo[]>;
+  /**
+   * Read-only lookups against a REMOTE repository, addressed as `owner/name`.
+   *
+   * These need no working copy, which is what makes them usable from a chat
+   * turn: an agent can answer "can you reach this repo" without Alpha having
+   * cloned anything first.
+   */
+  getRepository(ownerRepo: string): Promise<RemoteRepoInfo>;
+  listBranches(ownerRepo: string, limit?: number): Promise<Array<{ name: string; protected: boolean }>>;
+  getFileContents(ownerRepo: string, filePath: string, ref?: string): Promise<string>;
   createRepository(opts: CreateRepoOptions): Promise<{ url: string; nameWithOwner: string }>;
   cloneRepository(repo: string, intoDir: string): Promise<string>;
   forkRepository(repo: string, cloneInto?: string): Promise<string>;
@@ -308,6 +391,72 @@ export class GhCliGitHubService implements IGitHubService {
       const detail = err?.stderr || err?.message || String(err);
       logError('CLI createRepository failed:', detail);
       throw new Error(`Failed to create repository: ${detail}`);
+    }
+  }
+
+  async getRepository(ownerRepo: string): Promise<RemoteRepoInfo> {
+    assertOwnerRepo(ownerRepo);
+    try {
+      const { stdout } = await execFileAsync('gh', [
+        'api',
+        `repos/${ownerRepo}`,
+        '--jq',
+        '{nameWithOwner: .full_name, url: .html_url, description: .description, defaultBranch: .default_branch, isPrivate: .private, size: .size}'
+      ]);
+      const r = JSON.parse(stdout);
+      return {
+        nameWithOwner: r.nameWithOwner,
+        url: r.url,
+        description: r.description ?? null,
+        defaultBranch: r.defaultBranch,
+        isPrivate: Boolean(r.isPrivate),
+        // GitHub reports size 0 for a repository with no commits. `gh` gives no
+        // clearer signal, and the distinction matters: "reachable but empty" is
+        // a different answer than "cannot reach". `size` itself is not part of
+        // the contract, so it is consumed here rather than passed through.
+        isEmpty: r.size === 0
+      };
+    } catch (err: any) {
+      throw new Error(describeRepoLookupFailure(ownerRepo, err));
+    }
+  }
+
+  async listBranches(ownerRepo: string, limit = 50): Promise<Array<{ name: string; protected: boolean }>> {
+    assertOwnerRepo(ownerRepo);
+    const capped = Math.max(1, Math.min(100, Math.trunc(limit)));
+    try {
+      const { stdout } = await execFileAsync('gh', [
+        'api',
+        `repos/${ownerRepo}/branches?per_page=${capped}`,
+        '--jq',
+        '[.[] | {name: .name, protected: .protected}]'
+      ]);
+      return JSON.parse(stdout);
+    } catch (err: any) {
+      throw new Error(describeRepoLookupFailure(ownerRepo, err));
+    }
+  }
+
+  async getFileContents(ownerRepo: string, filePath: string, ref?: string): Promise<string> {
+    assertOwnerRepo(ownerRepo);
+    const safePath = assertRepoFilePath(filePath);
+    const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+    try {
+      // Raw media type returns the file body directly, so nothing has to be
+      // base64-decoded here and a large file is not doubled in memory.
+      const { stdout } = await execFileAsync('gh', [
+        'api',
+        `repos/${ownerRepo}/contents/${safePath}${query}`,
+        '-H',
+        'Accept: application/vnd.github.raw'
+      ], { maxBuffer: 10 * 1024 * 1024 });
+      return stdout;
+    } catch (err: any) {
+      const detail = err?.stderr || err?.message || String(err);
+      if (/404/.test(detail)) {
+        throw new Error(`Not found: ${filePath} in ${ownerRepo}${ref ? ` at ${ref}` : ''}`);
+      }
+      throw new Error(describeRepoLookupFailure(ownerRepo, err));
     }
   }
 
@@ -813,6 +962,53 @@ export class RestGitHubService implements IGitHubService {
     return { url: repo.html_url, nameWithOwner: repo.full_name };
   }
 
+  async getRepository(ownerRepo: string): Promise<RemoteRepoInfo> {
+    assertOwnerRepo(ownerRepo);
+    try {
+      const r = await this.request(`/repos/${ownerRepo}`);
+      return {
+        nameWithOwner: r.full_name,
+        url: r.html_url,
+        description: r.description ?? null,
+        defaultBranch: r.default_branch,
+        isPrivate: Boolean(r.private),
+        isEmpty: r.size === 0
+      };
+    } catch (err: any) {
+      throw new Error(describeRepoLookupFailure(ownerRepo, err));
+    }
+  }
+
+  async listBranches(ownerRepo: string, limit = 50): Promise<Array<{ name: string; protected: boolean }>> {
+    assertOwnerRepo(ownerRepo);
+    const capped = Math.max(1, Math.min(100, Math.trunc(limit)));
+    try {
+      const rows = await this.request(`/repos/${ownerRepo}/branches?per_page=${capped}`);
+      return (rows ?? []).map((b: any) => ({ name: b.name, protected: Boolean(b.protected) }));
+    } catch (err: any) {
+      throw new Error(describeRepoLookupFailure(ownerRepo, err));
+    }
+  }
+
+  async getFileContents(ownerRepo: string, filePath: string, ref?: string): Promise<string> {
+    assertOwnerRepo(ownerRepo);
+    const safePath = assertRepoFilePath(filePath);
+    const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+    try {
+      // The raw media type returns the body as text rather than a base64 blob.
+      const res = await this.request(`/repos/${ownerRepo}/contents/${safePath}${query}`, {
+        headers: { Accept: 'application/vnd.github.raw' }
+      });
+      return typeof res === 'string' ? res : JSON.stringify(res);
+    } catch (err: any) {
+      const detail = err?.message ?? String(err);
+      if (/404/.test(detail)) {
+        throw new Error(`Not found: ${filePath} in ${ownerRepo}${ref ? ` at ${ref}` : ''}`);
+      }
+      throw new Error(describeRepoLookupFailure(ownerRepo, err));
+    }
+  }
+
   async cloneRepository(repo: string, intoDir: string): Promise<string> {
     const folder = repo.split('/').pop()!;
     const target = path.join(intoDir, folder);
@@ -1014,6 +1210,30 @@ export class GitHubService implements IGitHubService {
       return this.restService.createRepository(opts);
     }
     return this.cliService.createRepository(opts);
+  }
+
+  async getRepository(ownerRepo: string): Promise<RemoteRepoInfo> {
+    const auth = await this.checkAuth();
+    if (auth.mode === 'rest' || auth.mode === 'github_app') {
+      return this.restService.getRepository(ownerRepo);
+    }
+    return this.cliService.getRepository(ownerRepo);
+  }
+
+  async listBranches(ownerRepo: string, limit?: number): Promise<Array<{ name: string; protected: boolean }>> {
+    const auth = await this.checkAuth();
+    if (auth.mode === 'rest' || auth.mode === 'github_app') {
+      return this.restService.listBranches(ownerRepo, limit);
+    }
+    return this.cliService.listBranches(ownerRepo, limit);
+  }
+
+  async getFileContents(ownerRepo: string, filePath: string, ref?: string): Promise<string> {
+    const auth = await this.checkAuth();
+    if (auth.mode === 'rest' || auth.mode === 'github_app') {
+      return this.restService.getFileContents(ownerRepo, filePath, ref);
+    }
+    return this.cliService.getFileContents(ownerRepo, filePath, ref);
   }
 
   async cloneRepository(repo: string, intoDir: string): Promise<string> {

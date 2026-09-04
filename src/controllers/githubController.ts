@@ -1,5 +1,8 @@
 import { Request, Response, Router } from 'express';
 import { githubService } from '../services/githubService.js';
+import { createScaffoldedRepository } from '../services/repoScaffoldService.js';
+import { sqliteService } from '../services/sqliteService.js';
+import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
 
 export const githubRouter = Router();
@@ -151,6 +154,82 @@ githubRouter.post('/github/repos', async (req: Request, res: Response) => {
   } catch (err: any) {
     const msg = err?.message ?? 'Failed to create repository';
     const status = /already exists/i.test(msg) ? 409 : 500;
+    return res.status(status).json({ error: msg });
+  }
+});
+
+/**
+ * POST /api/github/repos/scaffold
+ *
+ * Create an organization repository that starts with a project structure.
+ * Body: { projectId, repoName, stack, org?, visibility?, shape?, includeDocker? }
+ *
+ * The organization is resolved from the project, not from the caller: the first
+ * repository may set it, every later one inherits it. `org` is required at this
+ * layer rather than only in the UI — the daemon listens on localhost and any
+ * process on the machine can post here, so a policy enforced in the form alone
+ * is not enforced at all.
+ */
+githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) => {
+  const { projectId, repoName, stack, org, visibility, shape, includeDocker } = req.body ?? {};
+
+  if (!projectId || typeof projectId !== 'string') {
+    return res.status(400).json({ error: 'A "projectId" is required.' });
+  }
+  if (!repoName || typeof repoName !== 'string') {
+    return res.status(400).json({ error: 'A repository "repoName" is required.' });
+  }
+  if (!stack || !SUPPORTED_STACKS.includes(stack)) {
+    return res.status(400).json({
+      error: `"stack" must be one of: ${SUPPORTED_STACKS.join(', ')}.`
+    });
+  }
+  if (visibility && !['private', 'public'].includes(visibility)) {
+    return res.status(400).json({ error: 'visibility must be private or public.' });
+  }
+
+  const project = sqliteService.getProjects().find(p => p.id === projectId);
+  if (!project) {
+    return res.status(404).json({ error: `Project not found: ${projectId}` });
+  }
+
+  const effectiveOrg = (project.githubOrg || (typeof org === 'string' ? org : '') || '').trim();
+  if (!effectiveOrg) {
+    return res.status(400).json({
+      error:
+        'This project has no GitHub organization set. Choose one — Alpha does not create personal repositories.'
+    });
+  }
+
+  try {
+    const result = await createScaffoldedRepository({
+      projectKey: project.key,
+      repoName,
+      org: effectiveOrg,
+      stack,
+      visibility: visibility ?? 'private',
+      repoShape: shape ?? 'standalone',
+      includeDocker: Boolean(includeDocker),
+      ...(project.description ? { description: project.description } : {})
+    });
+
+    // Remember the organization on first use so later repositories in this
+    // project cannot silently land somewhere else.
+    if (!project.githubOrg) {
+      sqliteService.updateProject(project.id, { githubOrg: effectiveOrg });
+    }
+
+    return res.status(201).json(result);
+  } catch (err: any) {
+    const msg = err?.message ?? 'Failed to scaffold repository';
+    const isConflict = /already exists/i.test(msg);
+    const isClientError =
+      /^Invalid /i.test(msg) || /is not supported yet/i.test(msg) || /is required/i.test(msg);
+
+    let status = 500;
+    if (isConflict) status = 409;
+    else if (isClientError) status = 400;
+
     return res.status(status).json({ error: msg });
   }
 });

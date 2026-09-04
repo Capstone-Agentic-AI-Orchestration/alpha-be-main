@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DB_PATH, ALPHA_DIR } from '../config/env.js';
+import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR } from '../config/env.js';
 import {
   Project,
   Issue,
@@ -13,12 +13,61 @@ import {
   ChatThread,
   ChatMessage,
   Skill,
-  RuntimeEngine
+  RuntimeEngine,
+  RunUsage,
+  SquadRun
 } from '../models/index.js';
+import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
+import { ensureMemoryScaffold } from './memoryService.js';
 
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
   fs.mkdirSync(ALPHA_DIR, { recursive: true });
+}
+
+/**
+ * Rebuild a run's token figures from its row.
+ *
+ * Returns undefined — not an object of undefineds — when the CLI reported
+ * nothing, so callers can distinguish an unmeasured run (every run that
+ * predates these columns) from one that genuinely used nothing. Only keys with
+ * a number are copied, so a NULL column never becomes a 0 in the API response.
+ */
+function usageFromRow(r: any): RunUsage | undefined {
+  const usage: RunUsage = {};
+  const columns: Array<[keyof RunUsage, string]> = [
+    ['inputTokens', 'input_tokens'],
+    ['outputTokens', 'output_tokens'],
+    ['cacheReadTokens', 'cache_read_tokens'],
+    ['cacheCreationTokens', 'cache_creation_tokens'],
+    ['thinkingTokens', 'thinking_tokens'],
+    ['costUsd', 'cost_usd'],
+    ['numTurns', 'num_turns']
+  ];
+
+  for (const [key, column] of columns) {
+    if (typeof r[column] === 'number') usage[key] = r[column];
+  }
+
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+function squadRunFromRow(r: any): SquadRun {
+  return {
+    id: r.id,
+    squadId: r.squad_id,
+    issueId: r.issue_id,
+    projectId: r.project_id,
+    branchName: r.branch_name,
+    memberAgentIds: JSON.parse(r.member_agent_ids || '[]'),
+    currentMemberIndex: r.current_member_index,
+    status: r.status,
+    mission: r.mission,
+    plan: JSON.parse(r.plan || '[]'),
+    stoppedReason: r.stopped_reason ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at
+  };
 }
 
 export class SQLiteService {
@@ -62,6 +111,7 @@ export class SQLiteService {
         lead_name TEXT,
         lead_agent_id TEXT,
         resources TEXT DEFAULT '[]',
+        github_org TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -242,8 +292,79 @@ export class SQLiteService {
 
     const additions: Array<[string, string]> = [
       ['runtimes', "type TEXT DEFAULT 'cloud'"],
-      ['runtimes', 'latency_ms INTEGER DEFAULT 0']
+      ['runtimes', 'latency_ms INTEGER DEFAULT 0'],
+      // Owning GitHub organization. Null on every project created before repo
+      // scaffolding existed, which is why the create form asks when it is unset
+      // rather than assuming one.
+      ['projects', 'github_org TEXT'],
+      // Fingerprint of the persona in force when this CLI session started.
+      //
+      // Only Claude Code receives the persona on every turn (via
+      // --append-system-prompt). `codex` and `agy` take it prepended to the
+      // FIRST message only, so an edit to an agent's persona file was invisible
+      // to any conversation already underway — possibly forever. Comparing this
+      // against the current persona is what lets a live session be told its
+      // instructions changed. Null on sessions that predate the column.
+      ['thread_sessions', 'persona_hash TEXT'],
+      /**
+       * What a run actually cost.
+       *
+       * The stream parsers have decoded these from every CLI's `result` event
+       * since they were written, and every one was discarded when the turn
+       * ended — so Alpha could not say how many tokens a run used, while the
+       * agent cards showed a hardcoded 620,000 for everyone.
+       *
+       * Deliberately no DEFAULT 0. NULL means the CLI did not report the
+       * figure (codex reports no cache reads, Claude no separate thinking
+       * tokens, Antigravity no cost) and zero means it reported zero. A
+       * default would turn every unmeasured field into a confident zero on a
+       * billing screen, which is the fabrication this codebase keeps having to
+       * remove.
+       */
+      ['prototype_runs', 'input_tokens INTEGER'],
+      ['prototype_runs', 'output_tokens INTEGER'],
+      ['prototype_runs', 'cache_read_tokens INTEGER'],
+      ['prototype_runs', 'cache_creation_tokens INTEGER'],
+      ['prototype_runs', 'thinking_tokens INTEGER'],
+      ['prototype_runs', 'cost_usd REAL'],
+      ['prototype_runs', 'num_turns INTEGER'],
+      /**
+       * Which squad run this run is a member's turn in, and where in the order.
+       *
+       * Nullable because most runs are a single agent working alone, which
+       * stays the ordinary case.
+       */
+      ['prototype_runs', 'squad_run_id TEXT'],
+      ['prototype_runs', 'squad_order INTEGER'],
+      /**
+       * Squad identity, which the create form has always collected and the
+       * table has never held.
+       *
+       * `CreateSquadModal` asks for a description and an avatar, and
+       * `SquadsView` renders both — `{squad.avatar}` on the card and in the
+       * header, `squad.description` in the list and in search. The INSERT named
+       * six columns and dropped all three, so a squad you assembled came back
+       * from a reload blank-faced and undescribed while the seeded one looked
+       * fine. Nothing errored: the handler returns the object it was given.
+       */
+      ['squads', 'description TEXT'],
+      ['squads', 'avatar TEXT'],
+      ['squads', 'color TEXT'],
+      /**
+       * Who may use an agent.
+       *
+       * Offered as a dropdown when creating an agent, as a bulk action over a
+       * selection, and as a filter on the roster — all against a column that
+       * did not exist. Every agent therefore read as the default no matter what
+       * was chosen, and the filter could only ever match that default.
+       *
+       * Nullable rather than DEFAULT 'team': a row written before this column
+       * existed genuinely has no answer, and the read path supplies the default
+       * so the two cases stay distinguishable here.
+       */
+      ['agents', 'allowed_users TEXT']
     ];
+
 
     for (const [table, definition] of additions) {
       try {
@@ -253,6 +374,27 @@ export class SQLiteService {
         // Already present — normal on every start after the migration landed.
       }
     }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS squad_runs (
+        id                   TEXT PRIMARY KEY,
+        squad_id             TEXT NOT NULL,
+        issue_id             TEXT NOT NULL,
+        project_id           TEXT NOT NULL,
+        branch_name          TEXT NOT NULL,
+        member_agent_ids     TEXT NOT NULL DEFAULT '[]',
+        current_member_index INTEGER NOT NULL DEFAULT 0,
+        status               TEXT NOT NULL,
+        mission              TEXT NOT NULL DEFAULT '',
+        plan                 TEXT NOT NULL DEFAULT '[]',
+        stopped_reason       TEXT,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL
+      );
+
+      -- After the ALTERs above: this indexes a column they add.
+      CREATE INDEX IF NOT EXISTS idx_runs_squad_run ON prototype_runs(squad_run_id);
+    `);
   }
 
   private seedDefaultsIfEmpty() {
@@ -261,9 +403,18 @@ export class SQLiteService {
 
     const now = new Date().toISOString();
 
-    // Auto-register current workspace in allowed_paths
-    const currentWorkspace = path.resolve('..');
-    this.addAllowedPath(currentWorkspace, 'Alpha-v2 Workspace');
+    /**
+     * Allowlist the managed workspace root, and only that.
+     *
+     * This used to seed `path.resolve('..')` — the directory above the daemon,
+     * i.e. Alpha's own source tree — under the name "Alpha-v2 Workspace". Any
+     * run that resolved there was therefore pre-approved, which is precisely
+     * what let a project with no checkout run an agent inside Alpha itself.
+     *
+     * `isPathAllowed` matches on prefix, so this single entry covers every
+     * repository Alpha clones or scaffolds beneath the root, and nothing else.
+     */
+    this.addAllowedPath(WORKSPACES_DIR, 'Alpha managed workspaces');
 
     // Default Skills
     const defaultSkills: Skill[] = [
@@ -304,7 +455,7 @@ export class SQLiteService {
         systemPrompt: 'You are Ada, a master software architect. Focus on clean interfaces, modular decomposition, and strict type definitions.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-git', 'sk-browser'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -321,7 +472,7 @@ export class SQLiteService {
         systemPrompt: 'You are Kaelen, lead fullstack coder. Write robust, concise, bug-free TypeScript code with zero extraneous comments.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash', 'sk-git'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -338,7 +489,7 @@ export class SQLiteService {
         systemPrompt: 'You are Vesper, code review specialist. Inspect diffs for correctness, performance, and security anti-patterns.',
         autonomyLevel: 'Supervised',
         skills: ['sk-fs', 'sk-git'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -355,7 +506,7 @@ export class SQLiteService {
         systemPrompt: 'You are Orion, QA engineer. Write thorough unit and regression tests with high assertion density.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash'],
-        mcpServers: ['filesystem'],
+        mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
@@ -393,8 +544,16 @@ export class SQLiteService {
       leadType: 'agent',
       leadName: 'Ada Lovelace',
       leadAgentId: 'agent-ada',
+      /**
+       * A repository, and no local checkout.
+       *
+       * The seed used to attach `path.resolve('..')` as a `local_path` — so a
+       * fresh install came with a project whose working copy was Alpha's own
+       * source, and the first agent run edited Alpha. The project now starts in
+       * the honest state: it has a repository, and cloning it is one action
+       * away.
+       */
       resources: [
-        { id: 'res-1', type: 'local_path', name: 'Alpha-v2 Repository', pathOrUrl: currentWorkspace, branchOrMachine: 'main' },
         { id: 'res-2', type: 'github_repo', name: 'GitHub Repository', pathOrUrl: 'https://github.com/LloydLim1/Alpha-v2', branchOrMachine: 'main' }
       ],
       createdAt: now
@@ -521,14 +680,15 @@ export class SQLiteService {
       leadName: r.lead_name,
       leadAgentId: r.lead_agent_id,
       resources: JSON.parse(r.resources || '[]'),
+      githubOrg: r.github_org || undefined,
       createdAt: r.created_at
     }));
   }
 
   createProject(p: Project): Project {
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, created_at)
-      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @createdAt)
+      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_at)
+      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdAt)
     `);
     stmt.run({
       ...p,
@@ -538,6 +698,7 @@ export class SQLiteService {
       leadName: p.leadName || '',
       leadAgentId: p.leadAgentId || null,
       resources: JSON.stringify(p.resources || []),
+      githubOrg: p.githubOrg || null,
       createdAt: p.createdAt || new Date().toISOString()
     });
     return p;
@@ -551,12 +712,14 @@ export class SQLiteService {
       UPDATE projects SET
         name = @name, key = @key, description = @description, color = @color, icon = @icon,
         status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
-        lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources
+        lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
+        github_org = @githubOrg
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
-      resources: JSON.stringify(merged.resources || [])
+      resources: JSON.stringify(merged.resources || []),
+      githubOrg: merged.githubOrg || null
     });
     return merged;
   }
@@ -568,8 +731,61 @@ export class SQLiteService {
   }
 
   // --- Agents ---
+  /**
+   * Per-agent run statistics, computed from the runs table.
+   *
+   * These were four hardcoded constants — 142 runs, 98.4% success, 620,000
+   * tokens, 280ms — returned identically for every agent, including one
+   * created a second ago. The billing screen multiplies that token figure by a
+   * rate to show money, so a brand-new install displayed a bill for work that
+   * never happened.
+   *
+   * Now that runs persist their token counts (see the prototype_runs
+   * migration) these are all answerable from data.
+   */
+  private agentStats(): Map<string, { totalRuns: number; successRate: number; tokensUsed: number; avgLatencyMs: number; costUsd: number }> {
+    const rows = this.db.prepare(`
+      SELECT
+        agent_id,
+        COUNT(*) AS total_runs,
+        SUM(CASE WHEN status IN ('completed', 'awaiting_approval') THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN status IN ('completed', 'awaiting_approval', 'failed') THEN 1 ELSE 0 END) AS judged,
+        SUM(
+          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) +
+          COALESCE(cache_read_tokens, 0) + COALESCE(cache_creation_tokens, 0) +
+          COALESCE(thinking_tokens, 0)
+        ) AS tokens_used,
+        SUM(COALESCE(cost_usd, 0)) AS cost_usd,
+        AVG(
+          CASE WHEN status NOT IN ('running', 'validating')
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000 END
+        ) AS avg_latency_ms
+      FROM prototype_runs
+      GROUP BY agent_id
+    `).all() as any[];
+
+    return new Map(rows.map(r => [
+      r.agent_id,
+      {
+        totalRuns: r.total_runs ?? 0,
+        /**
+         * Judged runs only: cancelled runs are excluded from the denominator
+         * because the operator stopped them, which says nothing about whether
+         * the agent could have succeeded. An agent with no judged runs gets 0
+         * rather than an assumed 100 — the UI should read totalRuns to decide
+         * whether a rate is worth showing at all.
+         */
+        successRate: r.judged ? Math.round((r.succeeded / r.judged) * 1000) / 10 : 0,
+        tokensUsed: r.tokens_used ?? 0,
+        costUsd: r.cost_usd ?? 0,
+        avgLatencyMs: Math.round(r.avg_latency_ms ?? 0)
+      }
+    ]));
+  }
+
   getAgents(): Agent[] {
     const rows = this.db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all() as any[];
+    const stats = this.agentStats();
     return rows.map(r => ({
       ...r,
       isMine: Boolean(r.is_mine),
@@ -583,23 +799,40 @@ export class SQLiteService {
       mcpServers: JSON.parse(r.mcp_servers || '[]'),
       envVars: JSON.parse(r.env_vars || '[]'),
       customCliArgs: r.custom_cli_args,
-      stats: {
-        totalRuns: 142,
-        successRate: 98.4,
-        tokensUsed: 620000,
-        avgLatencyMs: 280
+      // Defaulted on read so a row predating the column behaves like the form's
+      // own default, while the column itself stays nullable to keep "never set"
+      // distinguishable from "deliberately set to team".
+      allowedUsers: r.allowed_users ?? 'team',
+      stats: stats.get(r.id) ?? {
+        totalRuns: 0,
+        successRate: 0,
+        tokensUsed: 0,
+        costUsd: 0,
+        avgLatencyMs: 0
       },
-      machineStatus: 'online',
+      /**
+       * Archiving is a real state, not a UI flourish.
+       *
+       * These three were hardcoded, so an archived agent came back reporting
+       * 'online' and 'idle' like any other. The client set 'offline' locally on
+       * archive and a reload silently undid it — which also meant the roster
+       * could not be trusted about what was actually retired.
+       *
+       * Still synthesised rather than stored: liveness is a property of the
+       * machine and the run queue, not a column. Only the archived case is
+       * knowable from the row.
+       */
+      machineStatus: r.is_archived ? 'offline' : 'online',
       workStatus: 'idle',
-      status: 'idle',
+      status: r.is_archived ? 'offline' : 'idle',
       createdAt: r.created_at
     }));
   }
 
   createAgent(a: Agent): Agent {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, created_at)
-      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @createdAt)
+      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, created_at)
+      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @createdAt)
     `);
     stmt.run({
       ...a,
@@ -611,37 +844,100 @@ export class SQLiteService {
       envVars: JSON.stringify(a.envVars || []),
       customCliArgs: a.customCliArgs || '',
       concurrencyLimit: a.concurrencyLimit ?? 2,
+      // The column is nullable and the field optional, but better-sqlite3 needs
+      // every named parameter bound, so the absence has to be explicit.
+      allowedUsers: a.allowedUsers ?? null,
       createdAt: a.createdAt || new Date().toISOString()
     });
+
+    // Project the new agent to its persona file. Hooked here rather than in the
+    // controller so that seeding (defaultAgents.forEach(createAgent)) produces
+    // files too, and so no future caller can create an agent without one.
+    // 'replace' because there is no prior body to protect on a create.
+    syncAgentFile(a, 'replace');
+    ensureMemoryScaffold({ agentId: a.id });
+
     return a;
   }
 
   updateAgent(id: string, updates: Partial<Agent>): Agent | null {
     const existing = this.getAgents().find(a => a.id === id);
     if (!existing) return null;
-    const merged = { ...existing, ...updates };
+
+    /**
+     * Database row, then the persona file, then what is actually being changed.
+     *
+     * The file layer has to sit in the middle or this method destroys it. The
+     * projection below rewrites the file's frontmatter from `merged`, and
+     * `existing` is the raw database row — so editing any one field in the UI
+     * used to rewrite EVERY frontmatter key from a stale column. An agent whose
+     * file said `model: claude-opus-5` would silently drop back to whatever the
+     * database still held, purely because someone renamed it.
+     *
+     * Layered this way the file keeps what it declares, and an explicit update
+     * still wins — which is what makes editing in the UI write through to the
+     * file rather than fight with it.
+     */
+    let overlay: Partial<Agent> = {};
+    try {
+      overlay = readAgentFile(id) ?? {};
+    } catch {
+      // A broken persona file must not block an update to the row.
+    }
+
+    const merged = { ...existing, ...overlay, ...updates };
     const stmt = this.db.prepare(`
       UPDATE agents SET
         name = @name, role = @role, avatar = @avatar, color = @color, description = @description,
         model_provider = @modelProvider, model_name = @modelName, system_prompt = @systemPrompt,
         autonomy_level = @autonomyLevel, temperature = @temperature, skills = @skills,
         mcp_servers = @mcpServers, custom_cli_args = @customCliArgs, env_vars = @envVars,
-        concurrency_limit = @concurrencyLimit, is_archived = @isArchived
+        concurrency_limit = @concurrencyLimit, is_archived = @isArchived,
+        allowed_users = @allowedUsers
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
       isArchived: merged.isArchived ? 1 : 0,
+      allowedUsers: merged.allowedUsers ?? null,
       skills: JSON.stringify(merged.skills || []),
       mcpServers: JSON.stringify(merged.mcpServers || []),
       envVars: JSON.stringify(merged.envVars || [])
     });
-    return merged;
+
+    /**
+     * Refresh the persona file's frontmatter, but keep its body unless this
+     * update actually changed the system prompt.
+     *
+     * Without that distinction, renaming an agent in the UI would overwrite a
+     * hand-written persona with whatever one-liner is still in the column —
+     * which would make the file layer unusable for its main purpose.
+     */
+    syncAgentFile(merged, 'systemPrompt' in updates ? 'replace' : 'preserve');
+
+    /**
+     * Re-read rather than return `merged`.
+     *
+     * `merged` is built from `existing`, which was read before the write, so its
+     * derived fields still describe the old row. Archiving an agent returned
+     * `status: 'idle'` while the very next GET said `'offline'` — harmless while
+     * the client ignored the response, and wrong the moment it started
+     * reconciling against it.
+     *
+     * Falls back to `merged` only if the row somehow disappeared between the
+     * write and the read, which would mean a concurrent delete.
+     */
+    return this.getAgents().find(a => a.id === id) ?? merged;
   }
 
   deleteAgent(id: string): boolean {
     const stmt = this.db.prepare('DELETE FROM agents WHERE id = ?');
     const res = stmt.run(id);
+
+    // Only when a row really went away, so a delete of an unknown id does not
+    // remove a file that some other agent might still be using.
+    if (res.changes > 0) deleteAgentFile(id);
+
     return res.changes > 0;
   }
 
@@ -769,6 +1065,9 @@ export class SQLiteService {
       insertions: r.insertions,
       deletions: r.deletions,
       testSummary: r.test_summary,
+      usage: usageFromRow(r),
+      squadRunId: r.squad_run_id ?? undefined,
+      squadOrder: r.squad_order ?? undefined,
       createdAt: r.created_at,
       updatedAt: r.updated_at
     }));
@@ -776,8 +1075,8 @@ export class SQLiteService {
 
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, created_at, updated_at)
-      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @createdAt, @updatedAt)
+      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
+      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
     `);
     stmt.run({
       id: run.id,
@@ -795,10 +1094,68 @@ export class SQLiteService {
       insertions: run.insertions || 0,
       deletions: run.deletions || 0,
       testSummary: run.testSummary || null,
+      /**
+       * `?? null`, never `|| 0`. A reported zero has to survive the round trip
+       * as a zero, and an unreported figure has to stay NULL — the whole point
+       * of the nullable columns. `||` would collapse both into 0.
+       */
+      inputTokens: run.usage?.inputTokens ?? null,
+      outputTokens: run.usage?.outputTokens ?? null,
+      cacheReadTokens: run.usage?.cacheReadTokens ?? null,
+      cacheCreationTokens: run.usage?.cacheCreationTokens ?? null,
+      thinkingTokens: run.usage?.thinkingTokens ?? null,
+      costUsd: run.usage?.costUsd ?? null,
+      numTurns: run.usage?.numTurns ?? null,
+      squadRunId: run.squadRunId ?? null,
+      squadOrder: run.squadOrder ?? null,
       createdAt: run.createdAt || new Date().toISOString(),
       updatedAt: run.updatedAt || new Date().toISOString()
     });
     return run;
+  }
+
+  // --- Squad Runs ---
+
+  /**
+   * A squad's turn-by-turn execution over one issue.
+   *
+   * Kept separate from `squads` because a squad is a reusable roster while a
+   * squad run is one attempt at one issue. The member list is copied onto the
+   * run so that editing the squad afterwards cannot rewrite the history of a
+   * run that already happened.
+   */
+  getSquadRuns(): SquadRun[] {
+    const rows = this.db.prepare('SELECT * FROM squad_runs ORDER BY created_at DESC').all() as any[];
+    return rows.map(squadRunFromRow);
+  }
+
+  getSquadRun(id: string): SquadRun | undefined {
+    const row = this.db.prepare('SELECT * FROM squad_runs WHERE id = ?').get(id) as any;
+    return row ? squadRunFromRow(row) : undefined;
+  }
+
+  saveSquadRun(run: SquadRun): SquadRun {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO squad_runs
+        (id, squad_id, issue_id, project_id, branch_name, member_agent_ids,
+         current_member_index, status, mission, plan, stopped_reason, created_at, updated_at)
+      VALUES
+        (@id, @squadId, @issueId, @projectId, @branchName, @memberAgentIds,
+         @currentMemberIndex, @status, @mission, @plan, @stoppedReason, @createdAt, @updatedAt)
+    `).run({
+      ...run,
+      memberAgentIds: JSON.stringify(run.memberAgentIds || []),
+      plan: JSON.stringify(run.plan || []),
+      stoppedReason: run.stoppedReason ?? null
+    });
+    return run;
+  }
+
+  /** The member runs of a squad run, in execution order. */
+  getRunsForSquadRun(squadRunId: string): PrototypeRun[] {
+    return this.getPrototypeRuns()
+      .filter(r => r.squadRunId === squadRunId)
+      .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0));
   }
 
   // --- Squads ---
@@ -807,6 +1164,11 @@ export class SQLiteService {
     return rows.map(r => ({
       id: r.id,
       name: r.name,
+      // Empty string rather than null: the client's Squad type declares these
+      // required, and a squad written before the columns existed has no value.
+      description: r.description ?? '',
+      avatar: r.avatar ?? '',
+      color: r.color ?? '',
       topology: r.topology,
       leaderAgentId: r.leader_agent_id,
       memberAgentIds: JSON.parse(r.member_agent_ids || '[]'),
@@ -818,14 +1180,60 @@ export class SQLiteService {
 
   createSquad(squad: Squad): Squad {
     const stmt = this.db.prepare(`
-      INSERT INTO squads (id, name, topology, leader_agent_id, member_agent_ids, mission, active_runs_count, completed_runs_count)
-      VALUES (@id, @name, @topology, @leaderAgentId, @memberAgentIds, @mission, @activeRunsCount, @completedRunsCount)
+      INSERT INTO squads
+        (id, name, description, avatar, color, topology, leader_agent_id, member_agent_ids, mission, active_runs_count, completed_runs_count)
+      VALUES
+        (@id, @name, @description, @avatar, @color, @topology, @leaderAgentId, @memberAgentIds, @mission, @activeRunsCount, @completedRunsCount)
     `);
     stmt.run({
       ...squad,
+      description: squad.description ?? '',
+      avatar: squad.avatar ?? '',
+      color: squad.color ?? '',
       memberAgentIds: JSON.stringify(squad.memberAgentIds || [])
     });
     return squad;
+  }
+
+  /**
+   * Edit a squad.
+   *
+   * Squads had create and run but no edit or delete, so a squad with the wrong
+   * members or a typo in its name was permanent — while agents, which are the
+   * same kind of object to the user, had full CRUD.
+   *
+   * Re-reads rather than returning the merged object, for the reason
+   * `updateAgent` does: the caller reconciles its local copy against this
+   * response, so it has to be what a subsequent GET would say.
+   */
+  updateSquad(id: string, updates: Partial<Squad>): Squad | null {
+    const existing = this.getSquads().find(s => s.id === id);
+    if (!existing) return null;
+
+    const merged = { ...existing, ...updates };
+    this.db.prepare(`
+      UPDATE squads SET
+        name = @name, description = @description, avatar = @avatar, color = @color,
+        topology = @topology, leader_agent_id = @leaderAgentId,
+        member_agent_ids = @memberAgentIds, mission = @mission
+      WHERE id = @id
+    `).run({
+      ...merged,
+      memberAgentIds: JSON.stringify(merged.memberAgentIds || [])
+    });
+
+    return this.getSquads().find(s => s.id === id) ?? merged;
+  }
+
+  /**
+   * Remove a squad.
+   *
+   * Its past runs are left alone: `squad_runs` is a record of what happened,
+   * and deleting the squad does not un-happen it. The rows keep the id, which
+   * reads as a deleted squad rather than as a missing one.
+   */
+  deleteSquad(id: string): boolean {
+    return this.db.prepare('DELETE FROM squads WHERE id = ?').run(id).changes > 0;
   }
 
   // --- Skills ---
@@ -994,24 +1402,54 @@ export class SQLiteService {
   }
 
   /** The CLI session for this thread + agent ON THIS MACHINE, if any. */
-  getThreadSession(threadId: string, agentId: string): string | null {
+  /**
+   * The CLI session for this thread, with the persona that was in force when it
+   * started.
+   *
+   * `personaHash` is null for sessions created before the column existed, which
+   * callers must read as "unknown", not as "changed" — re-announcing a persona
+   * to every pre-existing conversation on first upgrade would be noise.
+   */
+  getThreadSession(
+    threadId: string,
+    agentId: string
+  ): { cliSessionId: string; personaHash: string | null } | null {
     const row = this.db
       .prepare(
-        'SELECT cli_session_id FROM thread_sessions WHERE thread_id = ? AND machine_id = ? AND agent_id = ?'
+        `SELECT cli_session_id, persona_hash FROM thread_sessions
+         WHERE thread_id = ? AND machine_id = ? AND agent_id = ?`
       )
-      .get(threadId, this.getMachineId(), agentId) as { cli_session_id: string } | undefined;
-    return row?.cli_session_id ?? null;
+      .get(threadId, this.getMachineId(), agentId) as
+      | { cli_session_id: string; persona_hash: string | null }
+      | undefined;
+
+    if (!row) return null;
+    return { cliSessionId: row.cli_session_id, personaHash: row.persona_hash ?? null };
   }
 
-  setThreadSession(threadId: string, agentId: string, cliSessionId: string) {
+  setThreadSession(
+    threadId: string,
+    agentId: string,
+    cliSessionId: string,
+    personaHash: string | null = null
+  ) {
     this.db
       .prepare(
-        `INSERT INTO thread_sessions (thread_id, machine_id, agent_id, cli_session_id, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO thread_sessions (thread_id, machine_id, agent_id, cli_session_id, persona_hash, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id, machine_id, agent_id)
-         DO UPDATE SET cli_session_id = excluded.cli_session_id, updated_at = excluded.updated_at`
+         DO UPDATE SET cli_session_id = excluded.cli_session_id,
+                       persona_hash   = excluded.persona_hash,
+                       updated_at     = excluded.updated_at`
       )
-      .run(threadId, this.getMachineId(), agentId, cliSessionId, new Date().toISOString());
+      .run(
+        threadId,
+        this.getMachineId(),
+        agentId,
+        cliSessionId,
+        personaHash,
+        new Date().toISOString()
+      );
   }
 }
 

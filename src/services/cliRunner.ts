@@ -1,8 +1,17 @@
 import { processManager } from './processManager.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { StreamParser, StreamFamily } from './streamParser.js';
+import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
+import { parseCustomCliArgs } from './customCliArgs.js';
+import { CHAT_ALLOWED_TOOLS, CHAT_DISALLOWED_TOOLS } from './toolPolicy.js';
+import { cliHomeEnv } from './cliHome.js';
 import { RuntimeService } from './runtimeService.js';
-import { logError } from '../utils/logger.js';
+import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
+import { EXECUTION_LIMITS } from '../config/constants.js';
+import { RUNS_DIR } from '../config/env.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { logError, logInfo } from '../utils/logger.js';
 
 /**
  * One turn against whichever agent CLI a provider maps to.
@@ -16,17 +25,36 @@ import { logError } from '../utils/logger.js';
  * turns one into a message in the thread, the builder into an error response.
  */
 
-export interface CliToolRecord {
-  id: string;
-  toolName: string;
-  parameters: Record<string, unknown>;
-  status: 'success';
-  executedAt: string;
-}
+export type { CliToolRecord } from './turnAccumulator.js';
+
+/**
+ * What a turn is for, which decides what it is allowed to do.
+ *
+ * `chat` is a conversation: read-only, because it has no branch, no diff and no
+ * approval gate. `run` is Alpha doing the work on an issue — it has all three,
+ * and editing the repository is the point.
+ *
+ * One builder for both so the provider-specific argv rules exist once. They
+ * previously existed twice: runnerService predates this module and was never
+ * migrated, so every fix here — the persona flag, --model, the isolation from
+ * the operator's own CLI configuration — reached chat and not runs.
+ */
+export type TurnMode = 'chat' | 'run';
 
 export interface CliTurnOptions {
   runId: string;
   cwd: string;
+  /** Defaults to 'chat', so existing callers keep today's read-only behaviour. */
+  mode?: TurnMode;
+  /**
+   * Path to a file holding the composed persona.
+   *
+   * Claude takes `--append-system-prompt-file`, which keeps a multi-line
+   * persona out of argv entirely. Callers get one from `writeTurnPersona`.
+   * Without it the persona falls back to the inline flag, which is correct
+   * only when it happens to be single-line.
+   */
+  personaFile?: string;
   /** Agent `modelProvider` value — selects the CLI family. */
   provider: string;
   modelName?: string;
@@ -36,6 +64,39 @@ export interface CliTurnOptions {
   prompt: string;
   /** CLI session id to continue, or null to start a new one. */
   priorSession: string | null;
+  /**
+   * The persona changed since this session started.
+   *
+   * Only meaningful with `priorSession`. Claude Code receives the persona on
+   * every turn via `--append-system-prompt`, so it picks up edits by itself;
+   * `codex` and `agy` take it prepended to the first message only, which left
+   * an edit invisible to any conversation already underway. When this is set
+   * those families are told, in the next message, that their instructions
+   * changed.
+   */
+  personaChanged?: boolean;
+  /**
+   * Environment for the spawned CLI, from `agent.envVars`.
+   *
+   * Merged over `process.env` by processManager. Never logged — an agent's env
+   * is where its API keys live.
+   */
+  env?: Record<string, string>;
+  /**
+   * Extra CLI flags from `agent.customCliArgs`.
+   *
+   * Parsed and filtered — see `parseCustomCliArgs`. Anything that would widen
+   * what the turn can reach is dropped rather than honoured.
+   */
+  customCliArgs?: string;
+  /**
+   * MCP server names this agent is granted, from `agent.mcpServers`.
+   *
+   * Resolved against the built-ins and the user catalog, then written to a
+   * per-run config. An agent granted nothing gets no `--mcp-config` at all,
+   * which is not the same as getting an empty one.
+   */
+  mcpServers?: string[];
 }
 
 export interface CliTurnResult {
@@ -56,105 +117,413 @@ export interface CliTurnResult {
   failureKind: 'spawn' | 'empty' | null;
 }
 
-export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
-  const { runId, cwd, provider, modelName, systemPrompt, personaName, prompt, priorSession } =
-    options;
 
-  const tools: CliToolRecord[] = [];
-  let content = '';
-  let thinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
+/**
+ * Write the composed persona to a file for this turn, and return its path.
+ *
+ * Claude takes `--append-system-prompt-file`, and using it is what keeps a
+ * multi-line persona out of a command line that cmd.exe would truncate. Lives
+ * beside the run's MCP config under `~/.alpha/runs/<runId>/`, so
+ * `cleanupRunMcpConfig` removes it with the rest of the directory.
+ *
+ * Returns null when there is no persona, or when the write fails — the caller
+ * then falls back to the inline flag rather than losing the turn.
+ */
+export function writeTurnPersona(runId: string, persona: string): string | null {
+  const text = persona?.trim();
+  if (!text) return null;
 
-  let stderr = '';
-  let streamError = '';
+  try {
+    const dir = path.join(RUNS_DIR, runId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'persona.md');
+    fs.writeFileSync(file, text, 'utf8');
+    return file;
+  } catch (err: any) {
+    logError('Could not write the turn persona file', err?.message ?? String(err));
+    return null;
+  }
+}
+
+/** Resolved argv for one turn, plus which stream dialect to expect back. */
+interface TurnInvocation {
+  bin: string;
+  args: string[];
+  family: StreamFamily;
+  /**
+   * The prompt, to be written to the child's stdin rather than passed in argv.
+   *
+   * On Windows `claude` and `codex` are `.cmd` shims, so cross-spawn runs them
+   * through cmd.exe — whose command line ends at the first newline. A
+   * multi-line prompt in argv was therefore truncated, and every flag after it
+   * silently discarded: `--output-format stream-json` (so the run parsed plain
+   * text and logged nothing), `--setting-sources ''` (so the operator's own
+   * CLAUDE.md leaked back in), and `--model`. Measured, then fixed here.
+   *
+   * `agy` is a real executable rather than a shim and is unaffected, so it
+   * keeps its prompt in argv where its persona has been verified to apply.
+   */
+  stdin?: string;
+  /**
+   * Environment overrides for this family, merged over the caller's own.
+   *
+   * Carries the managed home that isolates a CLI from the operator's personal
+   * configuration — see cliHome.
+   */
+  env: Record<string, string>;
+}
+
+/**
+ * Build the argv for one turn.
+ *
+ * Separate from `runCliTurn` because the provider-specific rules below are the
+ * part most likely to need changing, and they are far easier to read — and to
+ * test — without a spawn and a stream loop wrapped around them. Exported for
+ * exactly that: cliRunner.test.ts asserts on the flags rather than on a
+ * subprocess, which is the only way to catch a regression like
+ * `--system-prompt` in place of `--append-system-prompt` without a live CLI.
+ */
+export function buildTurnInvocation(
+  options: CliTurnOptions,
+  mcp: ReturnType<typeof writeRunMcpConfig>
+): TurnInvocation {
+  const { provider, cwd, modelName, systemPrompt, personaName, prompt, priorSession } = options;
+  const isRun = options.mode === 'run';
+
+  /**
+   * The agent's own extra flags, minus anything the runner owns.
+   *
+   * Rejections are logged rather than dropped quietly: a flag someone typed
+   * that silently does nothing is the failure mode this whole field had before
+   * it was read at all.
+   */
+  const custom = parseCustomCliArgs(options.customCliArgs);
+  if (custom.rejected.length) {
+    logError('Ignored custom CLI arguments', custom.rejected.join('; '));
+  }
+  const customArgs = custom.args;
 
   const isWin = process.platform === 'win32';
   const isCodex = provider === 'OpenAI';
   const isAntigravity = provider === 'Antigravity' || provider === 'Google Gemini';
 
-  let family: StreamFamily = 'claude';
-  let bin = isWin ? 'claude.cmd' : 'claude';
+  /**
+   * The persona, already composed by personaService — agent file body plus
+   * whichever memory tiers applied.
+   */
+  const persona = systemPrompt?.trim() ?? '';
 
-  try {
-    let args = [
-      '-p', prompt,
-      '--system-prompt', systemPrompt ?? '',
-      '--output-format', 'stream-json',
-      // REQUIRED. Without it the CLI exits 1 with
-      // "When using --print, --output-format=stream-json requires --verbose",
-      // stdout stays empty, and this method silently returns a canned string.
-      '--verbose',
-      // These turns inspect, they do not mutate. Denying the write tools
-      // outright is safer than bypassPermissions and — unlike leaving them to
-      // prompt — cannot hang a headless process waiting on a TTY that isn't there.
-      '--allowedTools', 'Read', 'Glob', 'Grep',
-      '--disallowedTools', 'Write', 'Edit', 'Bash',
-      // Isolate the agent persona from the operator's personal Claude Code
-      // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
-      // into every reply — output-style directives and all — so Ada answered
-      // in the machine owner's preferred format instead of her own.
-      '--setting-sources', ''
-    ];
+  /**
+   * Only Claude Code takes a persona as a flag.
+   *
+   * `agy` offers `--agent <name>` (a named file in ~/.gemini/agents) and
+   * `codex exec` takes instructions as the prompt argument — neither accepts a
+   * persona inline. Passing nothing meant the persona was silently dropped and
+   * the model answered as itself: an agent labelled "Ada Lovelace" in the UI
+   * replied "I am Antigravity, built by Google DeepMind".
+   *
+   * So for those families the persona is prepended to the message instead — but
+   * only on the FIRST message of a session. Once a session exists the persona is
+   * already in its transcript, and repeating it every turn would grow the
+   * context without adding anything.
+   */
+  const withPersona = (message: string) => {
+    if (!persona) return message;
+    // Already in the transcript and unchanged — repeating it every turn would
+    // grow the context without adding anything.
+    if (priorSession && !options.personaChanged) return message;
+
+    const stayInCharacter = personaName
+      ? `Stay in character as ${personaName} at all times. If asked who or what ` +
+        `you are, answer as ${personaName}, never as the underlying tool or model.\n\n`
+      : '';
 
     /**
-     * Only Claude Code has a `--system-prompt` flag.
+     * Mid-session re-injection is worded as a correction, not an introduction.
      *
-     * `agy` offers `--agent <name>` (a named file in ~/.gemini/agents) and
-     * `codex exec` takes instructions as the prompt argument — neither accepts
-     * a persona inline. Passing nothing meant the persona was silently dropped
-     * and the model answered as itself: an agent labelled "Ada Lovelace" in the
-     * UI replied "I am Antigravity, built by Google DeepMind".
-     *
-     * So for those families the persona is prepended to the message instead —
-     * but only on the FIRST message of a session. Once a session exists the
-     * persona is already in its transcript, and repeating it every turn would
-     * grow the context without adding anything.
+     * Dropping the persona in again unannounced reads, in a transcript that
+     * already contains one, as a duplicate rather than a replacement — and the
+     * model has no way to know which of the two now governs. Saying so
+     * explicitly is what makes an edit to a persona file take effect on a
+     * conversation that is already running.
      */
-    const withPersona = (message: string) =>
-      !priorSession && systemPrompt?.trim()
-        ? `${systemPrompt.trim()}\n\n` +
-          (personaName
-            ? `Stay in character as ${personaName} at all times. If asked who or what ` +
-              `you are, answer as ${personaName}, never as the underlying tool or model.\n\n`
-            : '') +
-          `---\n\n${message}`
-        : message;
+    const preamble =
+      priorSession && options.personaChanged
+        ? 'Your instructions have been updated. Everything below replaces any ' +
+          'earlier instructions in this conversation; follow it from now on.\n\n'
+        : '';
 
-    if (isCodex) {
-      family = 'codex';
-      bin = isWin ? 'codex.cmd' : 'codex';
+    return `${preamble}${persona}\n\n${stayInCharacter}---\n\n${message}`;
+  };
+
+  if (isCodex) {
+    return {
+      family: 'codex',
+      // Left on the real home: codex keeps auth.json under ~/.codex, so
+      // relocating it would sign the user out. See cliHome.
+      env: {},
+      bin: isWin ? 'codex.cmd' : 'codex',
       // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
       // With the prompt first, codex silently ignores everything after it and
       // reports "--skip-git-repo-check was not specified" even though it was.
       //
       // `--skip-git-repo-check` because codex refuses to start outside a git
       // repo, and a chat has no reason to require one.
-      args = [
+      //
+      // Codex resume is `codex exec resume <id>`, a different argv shape — left
+      // out until there is a captured transcript to verify against.
+      args: [
         'exec',
         '--json',
-        '--sandbox', 'read-only',
+        // A run edits the repository it was given; a chat only inspects it.
+        '--sandbox', isRun ? 'workspace-write' : 'read-only',
         '--skip-git-repo-check',
-        // -- ends option parsing: a prompt that happens to start with a
-        // hyphen is then read as text, not as a codex flag.
-        '--',
-        withPersona(prompt)
-      ];
-    } else if (isAntigravity) {
-      // Antigravity ships as a desktop IDE, so `agy` is usually not on PATH;
-      // resolve the install location. Its flags mirror Claude Code's but its
-      // event schema does not — see StreamParser.handleAntigravityEvent.
-      family = 'antigravity';
-      bin = RuntimeService.agyPath();
-      args = ['-p', withPersona(prompt), '--output-format', 'stream-json'];
-      if (modelName) args.push('--model', modelName);
-    }
+        /**
+         * Isolate codex from ~/.codex/config.toml — the operator's own file.
+         *
+         * This is codex's equivalent of --setting-sources for claude, and
+         * without it an Alpha agent inherited everything configured there.
+         * On this machine that meant a `node_repl` MCP server (arbitrary
+         * JavaScript, plus browser control), a `supabase` MCP server pointing
+         * at a live project, eighteen paths marked trust_level = "trusted",
+         * a shell_environment_policy, and a different default model and
+         * reasoning effort — none of it granted by Alpha.
+         *
+         * Credentials are unaffected: they live in ~/.codex/auth.json, not in
+         * config.toml, and codex still reads and attempts to refresh the token
+         * with this flag set.
+         */
+        '--ignore-user-config',
+        // Before the `--`, necessarily: after it, `--model` would be read as
+        // part of the prompt text rather than as a flag.
+        ...(modelName ? ['--model', modelName] : []),
+        // Before the terminator for the same reason --model is.
+        ...customArgs,
+      ],
+      // `codex exec` with no positional prompt reads it from stdin, which keeps
+      // the persona-prefixed text out of a command line cmd.exe would truncate.
+      stdin: withPersona(prompt)
+    };
+  }
 
-    // Apply the resume flag for whichever family we settled on.
-    if (priorSession) {
-      if (family === 'claude') args.push('--resume', priorSession);
-      else if (family === 'antigravity') args.push('--conversation', priorSession);
-      // Codex resume is `codex exec resume <id>`, a different argv shape —
-      // left out until there is a captured transcript to verify against.
-    }
+  if (isAntigravity) {
+    // Antigravity ships as a desktop IDE, so `agy` is usually not on PATH;
+    // resolve the install location. Its flags mirror Claude Code's but its
+    // event schema does not — see StreamParser.handleAntigravityEvent.
+    return {
+      family: 'antigravity',
+      bin: RuntimeService.agyPath(),
+      // Isolates agy from ~/.gemini — the operator's own GEMINI.md, agents,
+      // rules, skills and memory were all being loaded into every Alpha turn.
+      env: cliHomeEnv('antigravity'),
+      args: [
+        '-p', withPersona(prompt),
+        '--output-format', 'stream-json',
+        // A chat message that happens to start with '/' is a message, not a
+        // command. Without this agy expands it as a slash command or skill.
+        '--disable-slash-commands',
+        /**
+         * Run mode: give agy the workspace, and let it act in it.
+         *
+         * `--add-dir` — without it the working directory is outside agy's
+         * workspace and its file writes land in its own scratch directory
+         * instead (measured). For a chat that is a harmless accident; for a run
+         * it is fatal, because the run reports success having changed nothing
+         * in the repository it was given.
+         *
+         * The permission flag — agy has no granular equivalent to Claude's
+         * `--permission-mode`. In headless mode any tool needing the "command"
+         * permission cannot prompt and is auto-denied, so `run_command` fails
+         * and the turn dies producing no output at all. Since step three of the
+         * task prompt is "run existing tests", that ends most real runs, and
+         * every run by Orion, whose entire role is testing. Measured both ways:
+         * denied without it, `v22.18.0` with it.
+         *
+         * Its name overstates what it changes here. A Claude run already
+         * permits arbitrary shell — `acceptEdits` with no `--disallowedTools`
+         * runs `node -v` happily, also measured. So this is parity with the
+         * agents that already have it rather than an escalation.
+         *
+         * Two things it does genuinely widen, worth knowing:
+         *   - agy auto-approves ALL tool requests, and its toolset includes
+         *     browser automation, which a Claude run does not get.
+         *   - a branch and a diff undo file changes, not `npm install` or a
+         *     network call. The review gate protects the repository, not the
+         *     machine. Already true of Claude runs, but true here too.
+         *
+         * A settings-based allow-rule would be narrower, and agy's own error
+         * message suggests one — but `permissions.allow` with `command(node -v)`
+         * and with `command(*)` were both still denied, and no syntax is
+         * documented. Revisit if agy ships a granular flag.
+         *
+         * Chat receives neither flag. Asserted in cliRunner.test.ts.
+         */
+        ...(isRun ? ['--add-dir', cwd, '--dangerously-skip-permissions'] : []),
+        ...(modelName ? ['--model', modelName] : []),
+        ...(priorSession ? ['--conversation', priorSession] : []),
+        ...customArgs
+      ]
+    };
+  }
+
+  return {
+    family: 'claude',
+    // Already isolated by --setting-sources below, and its credentials live
+    // under ~/.claude, so the home must stay real.
+    env: {},
+    bin: isWin ? 'claude.cmd' : 'claude',
+    // `-p` with no value reads the prompt from stdin, which is what keeps a
+    // multi-line task description out of the command line.
+    stdin: prompt,
+    args: [
+      '-p',
+      /**
+       * `--append-system-prompt`, NOT `--system-prompt`.
+       *
+       * `--system-prompt` REPLACES Claude Code's default system prompt outright.
+       * Passing a one-line persona there left the model with that single line as
+       * its entire instruction — no tool-use guidance, no output conventions,
+       * nothing — which is why replies read as generic and unfocused. The CLI's
+       * own help is explicit about the pair:
+       *
+       *   --system-prompt          System prompt to use for the session
+       *   --append-system-prompt   Append a system prompt to the default
+       *
+       * and `--exclude-dynamic-system-prompt-sections` documents the same thing
+       * from the other side: "Only applies with the default system prompt
+       * (ignored with --system-prompt)."
+       *
+       * Omitted entirely when there is no persona. The old code passed
+       * `systemPrompt ?? ''`, so an agent with no prompt got an EMPTY system
+       * prompt — strictly worse than not passing the flag at all.
+       */
+      /**
+       * The file form when one was written, the inline form otherwise.
+       *
+       * A persona always contains newlines — every generated file opens
+       * `# Name`, blank line, prose — so inline meant the value was cut at the
+       * first newline and everything after it in argv was lost. See
+       * TurnInvocation.stdin.
+       */
+      ...(options.personaFile
+        ? ['--append-system-prompt-file', options.personaFile]
+        : persona
+          ? ['--append-system-prompt', persona]
+          : []),
+      '--output-format', 'stream-json',
+      // REQUIRED. Without it the CLI exits 1 with
+      // "When using --print, --output-format=stream-json requires --verbose",
+      // stdout stays empty, and this method silently returns a canned string.
+      '--verbose',
+      /**
+       * A chat inspects; a run edits.
+       *
+       * Chat denies the write tools outright — safer than bypassPermissions and,
+       * unlike leaving them to prompt, cannot hang a headless process waiting on
+       * a TTY that isn't there. MCP tools are namespaced `mcp__<server>__<tool>`
+       * and the allowlist is exhaustive, so without the patterns appended here
+       * the servers would connect and every call against them be denied.
+       *
+       * A run instead takes `acceptEdits`, which applies the edits it decides on
+       * without prompting. Verified to still work alongside `--setting-sources
+       * ''` below: the isolation removes the operator's settings, not the
+       * permission mode given on the command line.
+       */
+      ...(isRun
+        ? ['--permission-mode', 'acceptEdits', '--max-turns', String(EXECUTION_LIMITS.MAX_TURNS)]
+        : [
+            '--allowedTools', ...CHAT_ALLOWED_TOOLS, ...mcpToolPatterns(mcp.serverNames),
+            '--disallowedTools', ...CHAT_DISALLOWED_TOOLS
+          ]),
+      // Isolate the agent persona from the operator's personal Claude Code
+      // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
+      // into every reply — output-style directives and all — so Ada answered
+      // in the machine owner's preferred format instead of her own.
+      '--setting-sources', '',
+      // Honour the agent's configured model. `--model` previously appeared only
+      // in the Antigravity branch, so an agent whose card read `claude-sonnet-5`
+      // ran on whatever the machine's default was — the picker was decorative.
+      ...(modelName ? ['--model', modelName] : []),
+      /**
+       * Attach the run's MCP servers.
+       *
+       * Claude Code only. Neither `agy` nor `codex exec` accepts an MCP config
+       * on the command line, so an agent on those families gets no MCP servers
+       * at all — `agent.mcpServers` does nothing for them yet.
+       *
+       * That is now the truth rather than an understatement. Until
+       * --ignore-user-config was passed, codex did not get "no servers": it got
+       * every server the operator had configured in ~/.codex/config.toml.
+       */
+      ...(mcp.configPath ? ['--mcp-config', mcp.configPath] : []),
+      /**
+       * Unconditional, including when no config was written.
+       *
+       * The flag means "only use MCP servers from --mcp-config", so with no
+       * config given it means none at all — which is exactly what an agent
+       * granted no servers should get. It used to be attached only alongside
+       * `--mcp-config`, which left the zero-server case, the one that needs the
+       * fence most, as the only case without it.
+       *
+       * What that leaked is not the operator's config files. `--setting-sources
+       * ''` already keeps `~/.claude.json` and settings out, and the CLI duly
+       * reported `mcp_servers: []`. It is the *account-level* claude.ai
+       * connectors, which travel with the credentials under `~/.claude` — and
+       * those stay put on purpose, because relocating this family's home would
+       * sign the user out (see cliHome).
+       *
+       * Measured, same argv but for this flag, asking Alpha "do you have mcp
+       * right now":
+       *   without — "several MCP-backed connectors are configured but sitting
+       *     unauthorized: Apollo.io, Canva, Figma, Gmail, Google Calendar,
+       *     Google Drive, Miro"
+       *   with    — "No, no MCP servers are connected right now."
+       *
+       * Nothing was callable either way: the chat allowlist carries an
+       * `mcp__<server>__*` pattern only for servers actually granted. But a
+       * chat user learning which SaaS accounts the machine owner has connected
+       * is a disclosure on its own, and Alpha is meant to be usable by people
+       * who are not the machine owner.
+       */
+      '--strict-mcp-config',
+      ...(priorSession ? ['--resume', priorSession] : []),
+      // Last, so the agent's own flags are visible in argv order — but they
+      // cannot override anything above: parseCustomCliArgs drops every flag
+      // this runner sets. See customCliArgs for why that is a denylist.
+      ...customArgs
+    ]
+  };
+}
+
+export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
+  const { runId, cwd, provider, modelName } = options;
+
+  // Owns the "what is the answer, what is narration" rule — see TurnAccumulator.
+  const turn = new TurnAccumulator();
+  const idleThinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
+
+  let stderr = '';
+
+  // Defaults so the catch block can still report something useful if argv
+  // construction itself fails — RuntimeService.agyPath() throws when the
+  // Antigravity install cannot be located.
+  let family: StreamFamily = 'claude';
+  let bin = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+
+  // Resolve the agent's granted MCP servers into a config for this run only.
+  const mcp = writeRunMcpConfig(runId, options.mcpServers);
+  if (mcp.serverNames.length) {
+    logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
+  }
+
+  try {
+    const invocation = buildTurnInvocation(
+      { ...options, personaFile: writeTurnPersona(runId, options.systemPrompt ?? '') ?? undefined },
+      mcp
+    );
+    family = invocation.family;
+    bin = invocation.bin;
+    const args = invocation.args;
 
     // Same parser the run pipeline uses — tested against real captured
     // transcripts in streamParser.test.ts. The hand-rolled inline parser this
@@ -168,30 +537,18 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
         bin,
         args,
         cwd,
+        // Agent env first, then the family's isolation overrides — a HOME
+        // supplied by an agent's envVars must not defeat the isolation.
+        // Merged over process.env by processManager. Not logged: an agent's
+        // env is where its API keys live.
+        env: { ...options.env, ...invocation.env },
+        stdin: invocation.stdin,
         onExit: () => resolve()
       });
 
       if (child.stdout) {
         createLineBuffer(child.stdout, (line) => {
-          for (const ev of parser.parseLine(line)) {
-            if (ev.type === 'log' && ev.message) {
-              content += (content ? '\n' : '') + ev.message;
-            } else if (ev.type === 'thinking' && ev.thinking) {
-              thinking = ev.thinking;
-            } else if (ev.type === 'error' && ev.message) {
-              // The CLI's own error is far more useful than stderr's first
-              // line, which is often an unrelated warning.
-              streamError = ev.message;
-            } else if (ev.type === 'tool_call' && ev.toolName) {
-              tools.push({
-                id: `tool-${Date.now()}-${tools.length}`,
-                toolName: ev.toolName,
-                parameters: ev.toolInput ?? {},
-                status: 'success',
-                executedAt: new Date().toISOString()
-              });
-            }
-          }
+          for (const ev of parser.parseLine(line)) turn.accept(ev);
         });
       }
 
@@ -207,6 +564,9 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       logError('CLI stream had unhandled event types', unhandled.join(', '));
     }
 
+    const content = turn.getContent();
+    const thinking = turn.getThinking(idleThinking);
+
     if (!content.trim()) {
       // Report the real reason instead of a reassuring placeholder. The old
       // fallback ("All systems and components are aligned") made a failed
@@ -217,15 +577,15 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       // the last line.
       const stderrLines = stderr.split('\n').map(l => l.trim()).filter(Boolean);
       const detail =
-        streamError ||
+        turn.getStreamError() ||
         stderrLines.find(l => /error|fail|not supported|denied/i.test(l)) ||
-        stderrLines[stderrLines.length - 1] ||
+        stderrLines.at(-1) ||
         'the CLI produced no output';
       logError('CLI turn produced no content', detail);
       return {
         content: '',
         thinking,
-        tools,
+        tools: turn.getTools(),
         sessionId: parser.getSessionId() ?? null,
         bin,
         failureDetail: detail,
@@ -236,7 +596,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     return {
       content: content.trim(),
       thinking,
-      tools,
+      tools: turn.getTools(),
       sessionId: parser.getSessionId() ?? null,
       bin,
       failureDetail: null,
@@ -246,12 +606,16 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     logError('Failed to start CLI turn:', err);
     return {
       content: '',
-      thinking,
-      tools,
+      thinking: turn.getThinking(idleThinking),
+      tools: turn.getTools(),
       sessionId: null,
       bin,
       failureDetail: err?.message ?? String(err),
       failureKind: 'spawn'
     };
+  } finally {
+    // The config exists only for the duration of the spawn. Leaving it would
+    // accumulate a directory per turn under ~/.alpha/runs.
+    cleanupRunMcpConfig(runId);
   }
 }
