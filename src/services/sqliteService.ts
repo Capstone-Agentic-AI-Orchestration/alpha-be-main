@@ -14,7 +14,8 @@ import {
   ChatMessage,
   Skill,
   RuntimeEngine,
-  RunUsage
+  RunUsage,
+  SquadRun
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -49,6 +50,24 @@ function usageFromRow(r: any): RunUsage | undefined {
   }
 
   return Object.keys(usage).length ? usage : undefined;
+}
+
+function squadRunFromRow(r: any): SquadRun {
+  return {
+    id: r.id,
+    squadId: r.squad_id,
+    issueId: r.issue_id,
+    projectId: r.project_id,
+    branchName: r.branch_name,
+    memberAgentIds: JSON.parse(r.member_agent_ids || '[]'),
+    currentMemberIndex: r.current_member_index,
+    status: r.status,
+    mission: r.mission,
+    plan: JSON.parse(r.plan || '[]'),
+    stoppedReason: r.stopped_reason ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at
+  };
 }
 
 export class SQLiteService {
@@ -308,8 +327,44 @@ export class SQLiteService {
       ['prototype_runs', 'cache_creation_tokens INTEGER'],
       ['prototype_runs', 'thinking_tokens INTEGER'],
       ['prototype_runs', 'cost_usd REAL'],
-      ['prototype_runs', 'num_turns INTEGER']
+      ['prototype_runs', 'num_turns INTEGER'],
+      /**
+       * Which squad run this run is a member's turn in, and where in the order.
+       *
+       * Nullable because most runs are a single agent working alone, which
+       * stays the ordinary case.
+       */
+      ['prototype_runs', 'squad_run_id TEXT'],
+      ['prototype_runs', 'squad_order INTEGER'],
+      /**
+       * Squad identity, which the create form has always collected and the
+       * table has never held.
+       *
+       * `CreateSquadModal` asks for a description and an avatar, and
+       * `SquadsView` renders both — `{squad.avatar}` on the card and in the
+       * header, `squad.description` in the list and in search. The INSERT named
+       * six columns and dropped all three, so a squad you assembled came back
+       * from a reload blank-faced and undescribed while the seeded one looked
+       * fine. Nothing errored: the handler returns the object it was given.
+       */
+      ['squads', 'description TEXT'],
+      ['squads', 'avatar TEXT'],
+      ['squads', 'color TEXT'],
+      /**
+       * Who may use an agent.
+       *
+       * Offered as a dropdown when creating an agent, as a bulk action over a
+       * selection, and as a filter on the roster — all against a column that
+       * did not exist. Every agent therefore read as the default no matter what
+       * was chosen, and the filter could only ever match that default.
+       *
+       * Nullable rather than DEFAULT 'team': a row written before this column
+       * existed genuinely has no answer, and the read path supplies the default
+       * so the two cases stay distinguishable here.
+       */
+      ['agents', 'allowed_users TEXT']
     ];
+
 
     for (const [table, definition] of additions) {
       try {
@@ -319,6 +374,27 @@ export class SQLiteService {
         // Already present — normal on every start after the migration landed.
       }
     }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS squad_runs (
+        id                   TEXT PRIMARY KEY,
+        squad_id             TEXT NOT NULL,
+        issue_id             TEXT NOT NULL,
+        project_id           TEXT NOT NULL,
+        branch_name          TEXT NOT NULL,
+        member_agent_ids     TEXT NOT NULL DEFAULT '[]',
+        current_member_index INTEGER NOT NULL DEFAULT 0,
+        status               TEXT NOT NULL,
+        mission              TEXT NOT NULL DEFAULT '',
+        plan                 TEXT NOT NULL DEFAULT '[]',
+        stopped_reason       TEXT,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL
+      );
+
+      -- After the ALTERs above: this indexes a column they add.
+      CREATE INDEX IF NOT EXISTS idx_runs_squad_run ON prototype_runs(squad_run_id);
+    `);
   }
 
   private seedDefaultsIfEmpty() {
@@ -723,6 +799,10 @@ export class SQLiteService {
       mcpServers: JSON.parse(r.mcp_servers || '[]'),
       envVars: JSON.parse(r.env_vars || '[]'),
       customCliArgs: r.custom_cli_args,
+      // Defaulted on read so a row predating the column behaves like the form's
+      // own default, while the column itself stays nullable to keep "never set"
+      // distinguishable from "deliberately set to team".
+      allowedUsers: r.allowed_users ?? 'team',
       stats: stats.get(r.id) ?? {
         totalRuns: 0,
         successRate: 0,
@@ -730,17 +810,29 @@ export class SQLiteService {
         costUsd: 0,
         avgLatencyMs: 0
       },
-      machineStatus: 'online',
+      /**
+       * Archiving is a real state, not a UI flourish.
+       *
+       * These three were hardcoded, so an archived agent came back reporting
+       * 'online' and 'idle' like any other. The client set 'offline' locally on
+       * archive and a reload silently undid it — which also meant the roster
+       * could not be trusted about what was actually retired.
+       *
+       * Still synthesised rather than stored: liveness is a property of the
+       * machine and the run queue, not a column. Only the archived case is
+       * knowable from the row.
+       */
+      machineStatus: r.is_archived ? 'offline' : 'online',
       workStatus: 'idle',
-      status: 'idle',
+      status: r.is_archived ? 'offline' : 'idle',
       createdAt: r.created_at
     }));
   }
 
   createAgent(a: Agent): Agent {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, created_at)
-      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @createdAt)
+      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, created_at)
+      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @createdAt)
     `);
     stmt.run({
       ...a,
@@ -752,6 +844,9 @@ export class SQLiteService {
       envVars: JSON.stringify(a.envVars || []),
       customCliArgs: a.customCliArgs || '',
       concurrencyLimit: a.concurrencyLimit ?? 2,
+      // The column is nullable and the field optional, but better-sqlite3 needs
+      // every named parameter bound, so the absence has to be explicit.
+      allowedUsers: a.allowedUsers ?? null,
       createdAt: a.createdAt || new Date().toISOString()
     });
 
@@ -797,12 +892,14 @@ export class SQLiteService {
         model_provider = @modelProvider, model_name = @modelName, system_prompt = @systemPrompt,
         autonomy_level = @autonomyLevel, temperature = @temperature, skills = @skills,
         mcp_servers = @mcpServers, custom_cli_args = @customCliArgs, env_vars = @envVars,
-        concurrency_limit = @concurrencyLimit, is_archived = @isArchived
+        concurrency_limit = @concurrencyLimit, is_archived = @isArchived,
+        allowed_users = @allowedUsers
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
       isArchived: merged.isArchived ? 1 : 0,
+      allowedUsers: merged.allowedUsers ?? null,
       skills: JSON.stringify(merged.skills || []),
       mcpServers: JSON.stringify(merged.mcpServers || []),
       envVars: JSON.stringify(merged.envVars || [])
@@ -818,7 +915,19 @@ export class SQLiteService {
      */
     syncAgentFile(merged, 'systemPrompt' in updates ? 'replace' : 'preserve');
 
-    return merged;
+    /**
+     * Re-read rather than return `merged`.
+     *
+     * `merged` is built from `existing`, which was read before the write, so its
+     * derived fields still describe the old row. Archiving an agent returned
+     * `status: 'idle'` while the very next GET said `'offline'` — harmless while
+     * the client ignored the response, and wrong the moment it started
+     * reconciling against it.
+     *
+     * Falls back to `merged` only if the row somehow disappeared between the
+     * write and the read, which would mean a concurrent delete.
+     */
+    return this.getAgents().find(a => a.id === id) ?? merged;
   }
 
   deleteAgent(id: string): boolean {
@@ -957,6 +1066,8 @@ export class SQLiteService {
       deletions: r.deletions,
       testSummary: r.test_summary,
       usage: usageFromRow(r),
+      squadRunId: r.squad_run_id ?? undefined,
+      squadOrder: r.squad_order ?? undefined,
       createdAt: r.created_at,
       updatedAt: r.updated_at
     }));
@@ -964,8 +1075,8 @@ export class SQLiteService {
 
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, created_at, updated_at)
-      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @createdAt, @updatedAt)
+      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
+      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
     `);
     stmt.run({
       id: run.id,
@@ -995,10 +1106,56 @@ export class SQLiteService {
       thinkingTokens: run.usage?.thinkingTokens ?? null,
       costUsd: run.usage?.costUsd ?? null,
       numTurns: run.usage?.numTurns ?? null,
+      squadRunId: run.squadRunId ?? null,
+      squadOrder: run.squadOrder ?? null,
       createdAt: run.createdAt || new Date().toISOString(),
       updatedAt: run.updatedAt || new Date().toISOString()
     });
     return run;
+  }
+
+  // --- Squad Runs ---
+
+  /**
+   * A squad's turn-by-turn execution over one issue.
+   *
+   * Kept separate from `squads` because a squad is a reusable roster while a
+   * squad run is one attempt at one issue. The member list is copied onto the
+   * run so that editing the squad afterwards cannot rewrite the history of a
+   * run that already happened.
+   */
+  getSquadRuns(): SquadRun[] {
+    const rows = this.db.prepare('SELECT * FROM squad_runs ORDER BY created_at DESC').all() as any[];
+    return rows.map(squadRunFromRow);
+  }
+
+  getSquadRun(id: string): SquadRun | undefined {
+    const row = this.db.prepare('SELECT * FROM squad_runs WHERE id = ?').get(id) as any;
+    return row ? squadRunFromRow(row) : undefined;
+  }
+
+  saveSquadRun(run: SquadRun): SquadRun {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO squad_runs
+        (id, squad_id, issue_id, project_id, branch_name, member_agent_ids,
+         current_member_index, status, mission, plan, stopped_reason, created_at, updated_at)
+      VALUES
+        (@id, @squadId, @issueId, @projectId, @branchName, @memberAgentIds,
+         @currentMemberIndex, @status, @mission, @plan, @stoppedReason, @createdAt, @updatedAt)
+    `).run({
+      ...run,
+      memberAgentIds: JSON.stringify(run.memberAgentIds || []),
+      plan: JSON.stringify(run.plan || []),
+      stoppedReason: run.stoppedReason ?? null
+    });
+    return run;
+  }
+
+  /** The member runs of a squad run, in execution order. */
+  getRunsForSquadRun(squadRunId: string): PrototypeRun[] {
+    return this.getPrototypeRuns()
+      .filter(r => r.squadRunId === squadRunId)
+      .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0));
   }
 
   // --- Squads ---
@@ -1007,6 +1164,11 @@ export class SQLiteService {
     return rows.map(r => ({
       id: r.id,
       name: r.name,
+      // Empty string rather than null: the client's Squad type declares these
+      // required, and a squad written before the columns existed has no value.
+      description: r.description ?? '',
+      avatar: r.avatar ?? '',
+      color: r.color ?? '',
       topology: r.topology,
       leaderAgentId: r.leader_agent_id,
       memberAgentIds: JSON.parse(r.member_agent_ids || '[]'),
@@ -1018,14 +1180,60 @@ export class SQLiteService {
 
   createSquad(squad: Squad): Squad {
     const stmt = this.db.prepare(`
-      INSERT INTO squads (id, name, topology, leader_agent_id, member_agent_ids, mission, active_runs_count, completed_runs_count)
-      VALUES (@id, @name, @topology, @leaderAgentId, @memberAgentIds, @mission, @activeRunsCount, @completedRunsCount)
+      INSERT INTO squads
+        (id, name, description, avatar, color, topology, leader_agent_id, member_agent_ids, mission, active_runs_count, completed_runs_count)
+      VALUES
+        (@id, @name, @description, @avatar, @color, @topology, @leaderAgentId, @memberAgentIds, @mission, @activeRunsCount, @completedRunsCount)
     `);
     stmt.run({
       ...squad,
+      description: squad.description ?? '',
+      avatar: squad.avatar ?? '',
+      color: squad.color ?? '',
       memberAgentIds: JSON.stringify(squad.memberAgentIds || [])
     });
     return squad;
+  }
+
+  /**
+   * Edit a squad.
+   *
+   * Squads had create and run but no edit or delete, so a squad with the wrong
+   * members or a typo in its name was permanent — while agents, which are the
+   * same kind of object to the user, had full CRUD.
+   *
+   * Re-reads rather than returning the merged object, for the reason
+   * `updateAgent` does: the caller reconciles its local copy against this
+   * response, so it has to be what a subsequent GET would say.
+   */
+  updateSquad(id: string, updates: Partial<Squad>): Squad | null {
+    const existing = this.getSquads().find(s => s.id === id);
+    if (!existing) return null;
+
+    const merged = { ...existing, ...updates };
+    this.db.prepare(`
+      UPDATE squads SET
+        name = @name, description = @description, avatar = @avatar, color = @color,
+        topology = @topology, leader_agent_id = @leaderAgentId,
+        member_agent_ids = @memberAgentIds, mission = @mission
+      WHERE id = @id
+    `).run({
+      ...merged,
+      memberAgentIds: JSON.stringify(merged.memberAgentIds || [])
+    });
+
+    return this.getSquads().find(s => s.id === id) ?? merged;
+  }
+
+  /**
+   * Remove a squad.
+   *
+   * Its past runs are left alone: `squad_runs` is a record of what happened,
+   * and deleting the squad does not un-happen it. The rows keep the id, which
+   * reads as a deleted squad rather than as a missing one.
+   */
+  deleteSquad(id: string): boolean {
+    return this.db.prepare('DELETE FROM squads WHERE id = ?').run(id).changes > 0;
   }
 
   // --- Skills ---

@@ -10,6 +10,7 @@ import { runRouter } from './controllers/runController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
+import { mcpRouter } from './controllers/mcpController.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { runtimeService } from './services/runtimeService.js';
@@ -82,6 +83,7 @@ app.use('/api', runRouter);
 app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
 app.use('/api', chatRouter);
+app.use('/api', mcpRouter);
 
 app.get('/api/download/desktop', (req, res) => {
   const zipPath = path.resolve('..', 'Alpha-v2-FullPlatform.zip');

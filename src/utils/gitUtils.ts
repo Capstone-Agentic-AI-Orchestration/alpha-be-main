@@ -69,6 +69,19 @@ export function assertSafeBranchName(branchName: string): void {
   }
 }
 
+/**
+ * Move onto a branch that already exists, without touching where it points.
+ *
+ * `createBranch` uses `checkout -B`, which force-resets the branch to HEAD.
+ * That is right for starting fresh work and catastrophic for a squad: member
+ * two calling it would discard every commit member one just made. Squad members
+ * after the first come through here instead.
+ */
+export async function checkoutBranch(cwd: string, branchName: string): Promise<void> {
+  assertSafeBranchName(branchName);
+  await execFileAsync('git', ['checkout', branchName], { cwd });
+}
+
 export async function createBranch(cwd: string, branchName: string): Promise<void> {
   assertSafeBranchName(branchName);
   await execFileAsync('git', ['checkout', '-B', branchName], { cwd });

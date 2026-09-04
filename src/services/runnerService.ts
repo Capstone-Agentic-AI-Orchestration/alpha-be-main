@@ -6,11 +6,12 @@ import { processManager } from './processManager.js';
 import { StreamParser, RunTelemetry } from './streamParser.js';
 import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
+import { agentReadiness } from './agentReadiness.js';
 import { buildEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
 import { writeRunMcpConfig, cleanupRunMcpConfig } from './mcpConfigService.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
-import { createBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
+import { createBranch, checkoutBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
 import { githubService } from './githubService.js';
 import { supabaseService } from './supabaseService.js';
 import { logInfo, logError } from '../utils/logger.js';
@@ -22,7 +23,37 @@ export interface StartRunParams {
   agentId: string;
   plan: string[];
   scenario?: 'success' | 'test_failure' | 'review_required';
+  /**
+   * Present when this run is one member's turn inside a squad run.
+   *
+   * A squad shares one branch across every member, so the branch is decided by
+   * the squad run and passed in rather than generated per run — and only the
+   * first member may create it. See SquadMemberContext.
+   */
+  squad?: SquadMemberContext;
 }
+
+export interface SquadMemberContext {
+  squadRunId: string;
+  /** 0-based position in the squad's order. */
+  order: number;
+  /** The shared branch. Created by order 0; checked out by everyone after. */
+  branchName: string;
+  /**
+   * What the members before this one did, already written up. Empty for the
+   * first member.
+   *
+   * A written handoff rather than a replayed transcript: the previous member's
+   * actual work is on the branch, which this member can read with its own
+   * tools, so the prompt only has to say what happened and who did it. The
+   * transcript alternative costs 5k-20k tokens per member and mostly restates
+   * what the diff already shows.
+   */
+  handoff: string;
+}
+
+/** Control-flow marker: this member is not the one that opens the PR. */
+class SkipPullRequest extends Error {}
 
 export class RunnerService extends EventEmitter {
   /**
@@ -87,7 +118,13 @@ export class RunnerService extends EventEmitter {
 
     const runId = `run-${Date.now()}`;
     const now = new Date().toISOString();
-    const branchName = `feat/${issue.identifier.toLowerCase()}-${Date.now().toString().slice(-4)}`;
+    /**
+     * A squad's members all commit to the branch the squad run opened. Only a
+     * lone agent gets a fresh one.
+     */
+    const branchName =
+      params.squad?.branchName ??
+      `feat/${issue.identifier.toLowerCase()}-${Date.now().toString().slice(-4)}`;
 
     const stages: PrototypeRunStage[] = [
       { id: 'workspace', label: 'Preparing workspace', description: 'Checking out branch and initializing environment.', status: 'running', logs: [`Target repository: ${cwd}`, `Checking out branch: ${branchName}`], startedAt: now },
@@ -108,6 +145,8 @@ export class RunnerService extends EventEmitter {
       currentStageIndex: 0,
       stages,
       branchName,
+      squadRunId: params.squad?.squadRunId,
+      squadOrder: params.squad?.order,
       createdAt: now,
       updatedAt: now
     };
@@ -147,7 +186,8 @@ export class RunnerService extends EventEmitter {
       project,
       cwd,
       branchName,
-      plan
+      plan,
+      squad: params.squad
     }).catch(err => {
       logError(`Execution error in run ${runId}:`, err);
       this.markRunFailed(runId, err.message);
@@ -164,13 +204,27 @@ export class RunnerService extends EventEmitter {
     cwd: string;
     branchName: string;
     plan: string[];
+    squad?: SquadMemberContext;
   }) {
     const { runId, issue, agent, cwd, branchName, plan } = ctx;
 
-    // 1. Create Git feature branch
+    /**
+     * 1. Get onto the branch — creating it only when this run owns it.
+     *
+     * `createBranch` runs `git checkout -B`, which force-moves the branch to
+     * HEAD. For a lone agent that is correct. For squad member two it would
+     * throw away every commit member one had just made, so anyone after the
+     * first checks out what is already there.
+     */
+    const ownsBranch = !ctx.squad || ctx.squad.order === 0;
     try {
-      await createBranch(cwd, branchName);
-      this.appendLog(runId, 'workspace', `Created and checked out branch: ${branchName}`);
+      if (ownsBranch) {
+        await createBranch(cwd, branchName);
+        this.appendLog(runId, 'workspace', `Created and checked out branch: ${branchName}`);
+      } else {
+        await checkoutBranch(cwd, branchName);
+        this.appendLog(runId, 'workspace', `Continuing on the squad's branch: ${branchName}`);
+      }
     } catch (err: any) {
       this.appendLog(runId, 'workspace', `Git branch checkout notice: ${err.message}`);
     }
@@ -179,7 +233,7 @@ export class RunnerService extends EventEmitter {
     this.advanceStage(runId, 'analysis', 'running');
 
     // 2. Build task prompt with project rules & issue details
-    const prompt = this.buildTaskPrompt(issue, plan);
+    const prompt = this.buildTaskPrompt(issue, plan, ctx.squad?.handoff);
 
     // 3. Prepare run directory for per-run configs
     const runDir = path.join(RUNS_DIR, runId);
@@ -200,6 +254,16 @@ export class RunnerService extends EventEmitter {
      * applies. The tool policy is not: it describes a read-only conversation,
      * and a run is allowed to edit.
      */
+    /**
+     * A run is far more expensive to waste than a chat turn — a workspace is
+     * cloned and a branch cut before the CLI is ever spawned — so check the
+     * pinned model is one the runtime still offers before going further.
+     */
+    const readiness = agentReadiness(agent, sqliteService.getRuntimes());
+    if (readiness.status === 'stale_model') {
+      throw new Error(`${readiness.detail} ${readiness.command ?? ''}`.trim());
+    }
+
     const persona = resolveAgentLogged(agent, {
       projectKey: ctx.project?.key,
       includeToolPolicy: false
@@ -293,7 +357,7 @@ export class RunnerService extends EventEmitter {
     sqliteService.savePrototypeRun({ ...run, usage });
   }
 
-  private buildTaskPrompt(issue: Issue, plan: string[]): string {
+  private buildTaskPrompt(issue: Issue, plan: string[], handoff?: string): string {
     const planSection = plan.length > 0
       ? `\n\nExecution Plan:\n${plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
       : '';
@@ -302,10 +366,20 @@ export class RunnerService extends EventEmitter {
     // through --append-system-prompt (or, on the families without such a flag,
     // prepended by cliRunner), resolved from the persona file and the memory
     // tiers rather than from the one-line database column this used to read.
+    /**
+     * What the members before this one did.
+     *
+     * Placed before the instructions so the agent reads it as established
+     * context rather than as part of its own task.
+     */
+    const handoffSection = handoff ? `
+
+${handoff}` : '';
+
     return `You are working on Issue ${issue.identifier}: ${issue.title}
 
 Description:
-${issue.description}${planSection}
+${issue.description}${planSection}${handoffSection}
 
 Instructions:
 1. First analyze relevant files in the workspace.
@@ -342,6 +416,18 @@ Instructions:
        * or the project had no remote, the run reported that URL as though a
        * pull request existed — pointing at a stranger's project.
        */
+      /**
+       * One pull request per issue, not per agent.
+       *
+       * Each member still commits, which gives a per-agent trail on the shared
+       * branch. Opening a PR is the squad's final act, so members before the
+       * last commit and stop — otherwise a four-member squad would open four
+       * pull requests for the same issue, three of them against unfinished work.
+       */
+      const squadRun = run.squadRunId ? sqliteService.getSquadRun(run.squadRunId) : undefined;
+      const isFinalMember =
+        !squadRun || run.squadOrder === squadRun.memberAgentIds.length - 1;
+
       let prUrl: string | undefined;
       try {
         const isRepo = await isGitRepo(cwd);
@@ -365,7 +451,16 @@ ${issue.description}
 ---
 *Autonomous Pull Request created by Alpha Orchestration Engine.*`;
 
+          if (!isFinalMember) {
+            this.appendLog(
+              runId,
+              'review',
+              `Handing over to the next squad member. The pull request opens when the squad finishes.`
+            );
+          }
+
           try {
+            if (!isFinalMember) throw new SkipPullRequest();
             const createdPr = await githubService.createPullRequest(
               cwd,
               `feat: ${issue.title} [${issue.identifier}]`,
@@ -378,7 +473,9 @@ ${issue.description}
               this.appendLog(runId, 'review', `Created GitHub Pull Request: ${prUrl}`);
             }
           } catch (prErr: any) {
-            this.appendLog(runId, 'review', `PR Note: ${prErr.message || prErr}`);
+            if (!(prErr instanceof SkipPullRequest)) {
+              this.appendLog(runId, 'review', `PR Note: ${prErr.message || prErr}`);
+            }
           }
         }
       } catch (gitErr: any) {

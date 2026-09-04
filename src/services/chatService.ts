@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
-import { ChatMessage, ChatThread } from '../models/index.js';
+import { ChatMessage, ChatThread, Squad } from '../models/index.js';
 import { runCliTurn } from './cliRunner.js';
 import { ensureWorkspacesRoot } from './workspaceService.js';
 import { resolveAgentLogged } from './personaService.js';
@@ -11,6 +11,7 @@ import {
   pickDefaultRuntime
 } from './defaultAssistant.js';
 import { describeChatToolPolicy } from './toolPolicy.js';
+import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
 
 export interface SendMessageParams {
@@ -19,8 +20,76 @@ export interface SendMessageParams {
   senderName?: string;
 }
 
+/**
+ * Match every `@mention` in a message to an agent, or to a whole squad.
+ *
+ * An agent matches on first name (`@Ada`), full name with no space
+ * (`@AdaLovelace`), id (`@agent-ada`) or role (`@Reviewer`) — all things a
+ * person plausibly types.
+ *
+ * A squad matches on its full name with no space or its id, and expands to
+ * its members in execution order. Deliberately NOT on its first word: the
+ * seeded squad is "Alpha Core Execution Squad", and `@Alpha` is both its
+ * first word and the name of the default assistant. Agents are matched
+ * first, so an agent name always wins a tie.
+ *
+ * Returns agents in mention order, de-duplicated, so naming a squad and then
+ * one of its members does not make that member answer twice.
+ */
+export function resolveMentions(content: string, agents: any[], squads: Squad[] = []): any[] {
+  const tokens = [...content.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(m => m[1].toLowerCase());
+  const picked: any[] = [];
+  const add = (agent: any) => {
+    if (agent && !picked.some(p => p.id === agent.id)) picked.push(agent);
+  };
+
+  for (const token of tokens) {
+    const agent = agents.find(a => {
+      const name = String(a.name ?? '').toLowerCase();
+      return (
+        a.id?.toLowerCase() === token ||
+        name.replace(/\s+/g, '') === token ||
+        name.split(/\s+/)[0] === token ||
+        String(a.role ?? '').toLowerCase().replace(/\s+/g, '') === token
+      );
+    });
+    if (agent) {
+      add(agent);
+      continue;
+    }
+
+    const squad = squads.find(sq => {
+      const name = String(sq.name ?? '').toLowerCase();
+      return sq.id?.toLowerCase() === token || name.replace(/\s+/g, '') === token;
+    });
+    if (squad) {
+      for (const id of orderedSquadMembers(squad)) {
+        add(agents.find(a => a.id === id));
+      }
+    }
+  }
+
+  return picked;
+}
+
+export interface SendMessageResult {
+  userMessage: ChatMessage;
+  /**
+   * The first reply. Kept so existing callers that expect exactly one still
+   * work — a lone agent, or Alpha answering an unaddressed message, produces
+   * one element and this is it.
+   */
+  agentMessage: ChatMessage;
+  /**
+   * Every reply, in the order they were produced. Longer than one when a squad
+   * was mentioned: each member answers in turn, having seen what the members
+   * before it said.
+   */
+  agentMessages: ChatMessage[];
+}
+
 export class ChatService extends EventEmitter {
-  async sendMessage(params: SendMessageParams): Promise<{ userMessage: ChatMessage; agentMessage: ChatMessage }> {
+  async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
     const { threadId, content, senderName = 'You' } = params;
     const now = new Date().toISOString();
 
@@ -61,13 +130,14 @@ export class ChatService extends EventEmitter {
      * Agents speak when spoken to. Anything else Alpha answers itself.
      */
     const agents = sqliteService.getAgents().filter(a => !a.isArchived);
-    const mentioned = this.resolveMentions(content, agents);
+    const squads = sqliteService.getSquads();
+    const mentioned = resolveMentions(content, agents, squads);
 
     if (!mentioned.length) {
       const reply = await this.generateDefaultReply(content, threadId);
       sqliteService.saveChatMessage(reply);
       this.emit('chat_message', reply);
-      return { userMessage, agentMessage: reply };
+      return { userMessage, agentMessage: reply, agentMessages: [reply] };
     }
 
     /**
@@ -78,28 +148,46 @@ export class ChatService extends EventEmitter {
     const roster = [...new Set([...(thread.agentIds ?? []), ...mentioned.map(a => a.id)])];
     sqliteService.setChatThreadAgents(threadId, roster);
 
-    const targetAgent = mentioned[0];
+    /**
+     * 3. Everyone addressed answers, in the order they were named.
+     *
+     * One `@agent` is one reply, which is the ordinary case. Naming a squad
+     * expands to its members, and each of them speaks after seeing what the
+     * members before it said — the conversational counterpart of the written
+     * handoff a squad run passes between members.
+     *
+     * Sequential rather than parallel on purpose: PROVIDER_CONCURRENCY caps
+     * Anthropic at 2 concurrent, and a four-member squad answering at once
+     * would spend the whole allowance on a single chat message.
+     */
+    if (mentioned.length > 1) {
+      logInfo(`Chat: ${mentioned.length} agents addressed — answering in sequence`);
+    }
 
-    // 3. Generate Agent Response using CLI
-    const agentMsgId = `msg-${Date.now()}-agent`;
-    const agentResponse = await this.generateAgentReply(targetAgent, content, threadId);
+    const agentMessages: ChatMessage[] = [];
 
-    const agentMessage: ChatMessage = {
-      id: agentMsgId,
-      threadId,
-      senderType: 'agent',
-      senderName: targetAgent.name,
-      agentId: targetAgent.id,
-      content: agentResponse.content,
-      thinkingProcess: agentResponse.thinking,
-      toolsExecuted: agentResponse.tools,
-      timestamp: new Date().toISOString()
-    };
+    for (const [index, agent] of mentioned.entries()) {
+      const priorTurn = agentMessages.length ? describePriorReplies(agentMessages) : undefined;
+      const reply = await this.generateAgentReply(agent, content, threadId, priorTurn);
 
-    sqliteService.saveChatMessage(agentMessage);
-    this.emit('chat_message', agentMessage);
+      const message: ChatMessage = {
+        id: `msg-${Date.now()}-${index}-${agent.id}`,
+        threadId,
+        senderType: 'agent',
+        senderName: agent.name,
+        agentId: agent.id,
+        content: reply.content,
+        thinkingProcess: reply.thinking,
+        toolsExecuted: reply.tools,
+        timestamp: new Date().toISOString()
+      };
 
-    return { userMessage, agentMessage };
+      sqliteService.saveChatMessage(message);
+      this.emit('chat_message', message);
+      agentMessages.push(message);
+    }
+
+    return { userMessage, agentMessage: agentMessages[0], agentMessages };
   }
 
 
@@ -185,32 +273,6 @@ ${describeChatToolPolicy()}`,
     };
   }
 
-  /**
-   * Match every `@mention` in a message to a configured agent.
-   *
-   * Matches on first name (`@Ada`), full name with no space (`@AdaLovelace`),
-   * id (`@agent-ada`) or role (`@Reviewer`), because those are all things a
-   * person plausibly types. Returns them in mention order and de-duplicated.
-   */
-  private resolveMentions(content: string, agents: any[]): any[] {
-    const tokens = [...content.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(m => m[1].toLowerCase());
-    const picked: any[] = [];
-
-    for (const token of tokens) {
-      const hit = agents.find(a => {
-        const name = String(a.name ?? '').toLowerCase();
-        return (
-          a.id?.toLowerCase() === token ||
-          name.replace(/\s+/g, '') === token ||
-          name.split(/\s+/)[0] === token ||
-          String(a.role ?? '').toLowerCase().replace(/\s+/g, '') === token
-        );
-      });
-      if (hit && !picked.some(p => p.id === hit.id)) picked.push(hit);
-    }
-
-    return picked;
-  }
 
   /**
    * One reply from this agent's CLI.
@@ -220,7 +282,12 @@ ${describeChatToolPolicy()}`,
    * here is what is specific to chat: the thread's resumable session, and how
    * a failure is worded to somebody waiting on a message.
    */
-  private async generateAgentReply(agent: any, prompt: string, threadId: string): Promise<{ content: string; thinking?: string; tools: any[] }> {
+  private async generateAgentReply(
+    agent: any,
+    prompt: string,
+    threadId: string,
+    priorTurn?: string
+  ): Promise<{ content: string; thinking?: string; tools: any[] }> {
     /**
      * Resume the CLI's own session so the agent remembers this thread.
      *
@@ -276,6 +343,24 @@ ${describeChatToolPolicy()}`,
       logInfo(`Persona for ${agent.id} changed mid-thread ${threadId} — re-announcing`);
     }
 
+    /**
+     * Refuse the turn when the agent is pinned to a model its CLI has retired.
+     *
+     * Spawning anyway produces the least useful error in the product: `agy`
+     * reports "invalid model selection" and tells the user to check that the
+     * CLI is installed and signed in — which it is, so the advice sends them
+     * to the Runtimes page, where everything looks green. Answering from here
+     * costs nothing (no process, no tokens) and names the actual fix.
+     */
+    const readiness = agentReadiness(agent, sqliteService.getRuntimes());
+    if (readiness.status === 'stale_model') {
+      logInfo(`Refusing turn for ${agent.id}: ${readiness.detail}`);
+      return {
+        content: `${readiness.detail}\n\n${readiness.command ?? ''}`.trim(),
+        tools: []
+      };
+    }
+
     const { env } = buildEnv(agent.envVars);
 
     const turn = await runCliTurn({
@@ -285,7 +370,14 @@ ${describeChatToolPolicy()}`,
       modelName: persona.modelName,
       systemPrompt: persona.systemPrompt,
       personaName: persona.name,
-      prompt,
+      // What squadmates said this turn rides with the message, not the system
+      // prompt: it is true of this turn only, and putting it in the persona
+      // would break the stable cacheable prefix a resumed session depends on.
+      prompt: priorTurn ? `${prompt}
+
+---
+
+${priorTurn}` : prompt,
       priorSession: priorSession?.cliSessionId ?? null,
       personaChanged,
       mcpServers: persona.mcpServers,
@@ -322,3 +414,41 @@ ${describeChatToolPolicy()}`,
 }
 
 export const chatService = new ChatService();
+
+/** Leader first when there is one, then the rest in their configured order. */
+function orderedSquadMembers(squad: Squad): string[] {
+  const members = [...new Set(squad.memberAgentIds ?? [])];
+  const leader = squad.leaderAgentId;
+  if (!leader || !members.includes(leader)) return members;
+  return [leader, ...members.filter(id => id !== leader)];
+}
+
+/**
+ * What the squadmates who have already answered said.
+ *
+ * Truncated per reply because this grows with every member: four agents at
+ * full length would put three long answers into the fourth one's prompt. The
+ * cap keeps a squad chat turn near the CLI's own baseline rather than doubling
+ * it, which is the same reason a squad RUN passes a written handoff instead of
+ * a replayed transcript.
+ */
+const PRIOR_REPLY_CHARS = 800;
+
+function describePriorReplies(messages: ChatMessage[]): string {
+  const lines = messages.map(m => {
+    const body = m.content.length > PRIOR_REPLY_CHARS
+      ? `${m.content.slice(0, PRIOR_REPLY_CHARS)}…`
+      : m.content;
+    return `### ${m.senderName}
+${body}`;
+  });
+
+  return [
+    'Your squadmates have already answered this message:',
+    '',
+    ...lines,
+    '',
+    'Add what your own specialism contributes. Do not repeat what they have already covered,',
+    'and say so plainly if you disagree with them.'
+  ].join('\n');
+}

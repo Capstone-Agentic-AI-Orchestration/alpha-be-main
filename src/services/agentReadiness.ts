@@ -31,6 +31,11 @@ export type AgentReadinessStatus =
   | 'signed_out'
   /** The binary was not found on this machine. */
   | 'not_installed'
+  /**
+   * The CLI is installed and signed in, but the model this agent is pinned to
+   * is not one the CLI offers any more.
+   */
+  | 'stale_model'
   /** No runtime was scanned for this provider, so nothing is known. */
   | 'unknown';
 
@@ -82,6 +87,45 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
 };
 
 /**
+ * Is this agent pinned to a model its CLI has since stopped offering?
+ *
+ * Providers retire model tiers on their own schedule. Antigravity 1.1.25 dropped
+ * the whole `gemini-3.5` family and added `3.8`, which silently invalidated
+ * every agent pinned to a 3.5 model — the run died with "invalid model
+ * selection" and advice to check that the CLI was installed and signed in,
+ * which it was. The model picker cannot prevent this: it constrains the choice
+ * to the live list at the moment of writing, and the pin goes stale afterwards.
+ *
+ * The scan already holds the answer — `runtime.models` is refreshed from
+ * `agy models` on every detect — so this is a comparison, not a new probe.
+ *
+ * Only ever fires on positive evidence. An empty `models` means the scan
+ * learned nothing: a probe that timed out keeps the last known list, and some
+ * runtimes report no models at all. Calling an agent broken on the strength of
+ * a list we do not have would be worse than saying nothing.
+ */
+function staleModel(
+  agent: Pick<Agent, 'modelProvider' | 'modelName'>,
+  runtime: RuntimeEngine,
+  bin: string
+): AgentReadiness | null {
+  const pinned = agent.modelName?.trim();
+  if (!pinned) return null;
+  if (!runtime.models?.length) return null;
+  if (runtime.models.includes(pinned)) return null;
+
+  return {
+    status: 'stale_model',
+    detail:
+      `${bin} no longer offers \`${pinned}\`, so this agent cannot answer. ` +
+      `Edit the agent and pick a current model.`,
+    // Not a shell command, but the same slot the other statuses use for "the
+    // concrete thing that fixes it" — and here that is the list to choose from.
+    command: `Available: ${runtime.models.join(', ')}`
+  };
+}
+
+/**
  * Map a scanned runtime onto the agent that depends on it.
  *
  * `runtimeService` reports `degraded` for a CLI that is present but has no
@@ -89,7 +133,7 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
  * the useful part and is what separates "sign in" from "install".
  */
 export function agentReadiness(
-  agent: Pick<Agent, 'modelProvider'>,
+  agent: Pick<Agent, 'modelProvider' | 'modelName'>,
   runtimes: RuntimeEngine[]
 ): AgentReadiness {
   const cli = PROVIDER_CLI[agent.modelProvider];
@@ -103,8 +147,13 @@ export function agentReadiness(
   }
 
   switch (runtime.status) {
-    case 'online':
+    case 'online': {
+      // Installed and signed in is necessary but not sufficient: the CLI can be
+      // perfectly healthy and still reject the model this agent is pinned to.
+      const stale = staleModel(agent, runtime, cli?.bin ?? runtime.name);
+      if (stale) return stale;
       return { status: 'ready', detail: `${cli?.bin ?? runtime.name} is installed and signed in.` };
+    }
 
     case 'degraded':
       return {

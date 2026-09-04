@@ -454,12 +454,38 @@ export function buildTurnInvocation(
        * That is now the truth rather than an understatement. Until
        * --ignore-user-config was passed, codex did not get "no servers": it got
        * every server the operator had configured in ~/.codex/config.toml.
-       *
-       * `--strict-mcp-config` makes the pruning real: without it the CLI merges
-       * its own configured servers in, and an agent granted one server would
-       * still see every server the operator has installed.
        */
-      ...(mcp.configPath ? ['--mcp-config', mcp.configPath, '--strict-mcp-config'] : []),
+      ...(mcp.configPath ? ['--mcp-config', mcp.configPath] : []),
+      /**
+       * Unconditional, including when no config was written.
+       *
+       * The flag means "only use MCP servers from --mcp-config", so with no
+       * config given it means none at all — which is exactly what an agent
+       * granted no servers should get. It used to be attached only alongside
+       * `--mcp-config`, which left the zero-server case, the one that needs the
+       * fence most, as the only case without it.
+       *
+       * What that leaked is not the operator's config files. `--setting-sources
+       * ''` already keeps `~/.claude.json` and settings out, and the CLI duly
+       * reported `mcp_servers: []`. It is the *account-level* claude.ai
+       * connectors, which travel with the credentials under `~/.claude` — and
+       * those stay put on purpose, because relocating this family's home would
+       * sign the user out (see cliHome).
+       *
+       * Measured, same argv but for this flag, asking Alpha "do you have mcp
+       * right now":
+       *   without — "several MCP-backed connectors are configured but sitting
+       *     unauthorized: Apollo.io, Canva, Figma, Gmail, Google Calendar,
+       *     Google Drive, Miro"
+       *   with    — "No, no MCP servers are connected right now."
+       *
+       * Nothing was callable either way: the chat allowlist carries an
+       * `mcp__<server>__*` pattern only for servers actually granted. But a
+       * chat user learning which SaaS accounts the machine owner has connected
+       * is a disclosure on its own, and Alpha is meant to be usable by people
+       * who are not the machine owner.
+       */
+      '--strict-mcp-config',
       ...(priorSession ? ['--resume', priorSession] : []),
       // Last, so the agent's own flags are visible in argv order — but they
       // cannot override anything above: parseCustomCliArgs drops every flag

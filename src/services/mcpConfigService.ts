@@ -5,15 +5,41 @@ import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import { logError } from '../utils/logger.js';
 
 /**
- * One MCP server as the CLIs expect it: a command to spawn plus its argv.
- * Matches the shape used by `claude --mcp-config` and by
- * `claude_desktop_config.json`, so a server definition can be copied between
- * them unchanged.
+ * One MCP server as the CLIs expect it.
+ *
+ * Two transports, because the ecosystem uses both and neither covers the other:
+ *
+ *   - **stdio** — a command Alpha spawns as a child process. What every
+ *     `npx`-launched server uses, and what the built-in GitHub server is.
+ *   - **http / sse** — a URL the CLI connects to. What the hosted servers use
+ *     (Context7, Supabase, Linear and the rest). Nothing is installed, nothing
+ *     is spawned, and it cannot fail offline mid-run the way `npx -y` can.
+ *
+ * The shapes match `claude --mcp-config` exactly, so a definition can be copied
+ * between Alpha and a hand-written config unchanged. Verified against the CLI:
+ * `{"type":"http","url":"https://mcp.context7.com/mcp"}` reports
+ * `{"name":"context7","status":"connected"}` and exposes its tools.
  */
-export interface McpServerSpec {
+export interface McpStdioServerSpec {
+  /** Optional so a pre-existing stdio entry keeps working without one. */
+  type?: "stdio";
   command: string;
   args?: string[];
   env?: Record<string, string>;
+}
+
+export interface McpHttpServerSpec {
+  type: "http" | "sse";
+  url: string;
+  /** Sent on every request — an Authorization header, typically. */
+  headers?: Record<string, string>;
+}
+
+export type McpServerSpec = McpStdioServerSpec | McpHttpServerSpec;
+
+/** Narrow a spec to the transport it declares. */
+export function isHttpSpec(spec: McpServerSpec): spec is McpHttpServerSpec {
+  return spec.type === "http" || spec.type === "sse";
 }
 
 export interface McpCatalog {
@@ -117,7 +143,7 @@ export function writeRunMcpConfig(runId: string, requested: string[] | undefined
 
   for (const name of names) {
     const spec = available[name];
-    if (spec) mcpServers[name] = spec;
+    if (spec) mcpServers[name] = resolveForPlatform(spec);
     else logError(`Agent requested unknown MCP server "${name}" — skipping.`);
   }
 
@@ -135,6 +161,39 @@ export function writeRunMcpConfig(runId: string, requested: string[] | undefined
   }
 
   return { configPath, serverNames: Object.keys(mcpServers) };
+}
+
+/**
+ * npm ships these as `.cmd` shims on Windows, and a spawn without a shell will
+ * not find them by their bare name.
+ *
+ * Not a general PATHEXT search — that would need to hit the filesystem for every
+ * server on every turn, and would change behaviour based on what happens to be
+ * installed. A named list of the launchers people actually type is predictable
+ * and covers the real cases.
+ */
+const WINDOWS_SHIMS = new Set(['npx', 'npm', 'pnpm', 'pnpx', 'yarn', 'bunx']);
+
+/**
+ * Resolve a catalog entry to the form this machine can actually spawn.
+ *
+ * Applied when writing the per-run config rather than when saving to the
+ * catalog, so the catalog keeps what the user typed. That matters because
+ * `~/.alpha/mcp.json` is a portable, hand-editable file: storing `npx.cmd`
+ * would break it for the same person on a mac, and for anyone they share it
+ * with. Resolution belongs where the process is spawned, not where the
+ * intention is recorded.
+ *
+ * Measured on Windows: `{"command":"npx"}` reports `failed` with no usable
+ * error, and the identical entry as `npx.cmd` reports `connected`. The built-in
+ * GitHub server already carries the same platform branch for `tsx`.
+ */
+function resolveForPlatform(spec: McpServerSpec): McpServerSpec {
+  if (isHttpSpec(spec)) return spec;
+  if (process.platform !== 'win32') return spec;
+  if (!WINDOWS_SHIMS.has(spec.command)) return spec;
+
+  return { ...spec, command: `${spec.command}.cmd` };
 }
 
 /** Best-effort cleanup of a run's config directory. */
@@ -182,4 +241,73 @@ export function ensureCatalogSeed(): void {
   } catch (err: any) {
     logError(`Could not seed ${MCP_CATALOG_PATH}: ${err?.message ?? err}`);
   }
+}
+
+/**
+ * Write the user catalog back to disk.
+ *
+ * Read-modify-write on the whole file rather than patching in place, because
+ * the file carries a `_comment` the seed puts there to explain itself. Parsing
+ * and re-serialising keeps it; appending JSON would not.
+ *
+ * The comment is preserved deliberately: the file is meant to stay hand-editable,
+ * and a user who opens it after the UI has written to it should still find the
+ * explanation of what it is for.
+ */
+function writeCatalog(servers: Record<string, McpServerSpec>): void {
+  let existing: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(MCP_CATALOG_PATH)) {
+      existing = JSON.parse(fs.readFileSync(MCP_CATALOG_PATH, 'utf8')) ?? {};
+    }
+  } catch {
+    // A malformed file is replaced rather than merged into: readCatalog already
+    // treats it as empty, so preserving its bytes would keep a file the rest of
+    // the system is ignoring.
+  }
+
+  fs.mkdirSync(ALPHA_DIR, { recursive: true });
+  fs.writeFileSync(
+    MCP_CATALOG_PATH,
+    JSON.stringify({ ...existing, mcpServers: servers }, null, 2),
+    'utf8'
+  );
+}
+
+/**
+ * Add or replace one user-catalog server.
+ *
+ * Replaces rather than merges: an edit that removes an argument or an env var
+ * has to be able to actually remove it, and a deep merge would silently keep
+ * whatever the previous version declared.
+ */
+export function upsertCatalogServer(name: string, spec: McpServerSpec): void {
+  const servers = readCatalog();
+  servers[name] = spec;
+  writeCatalog(servers);
+}
+
+/**
+ * Remove one user-catalog server.
+ *
+ * Returns false when the name was not in the catalog, which the controller
+ * turns into a 404 rather than a silent success — deleting a built-in, or a
+ * name that was never there, should not report that something was removed.
+ *
+ * Grants are left alone on purpose. An agent still listing a deleted server
+ * loses that tool and keeps working (`writeRunMcpConfig` skips unknown names),
+ * so re-adding the server restores it. Rewriting every agent here would make
+ * a delete destructive and unrecoverable.
+ */
+export function removeCatalogServer(name: string): boolean {
+  const servers = readCatalog();
+  if (!(name in servers)) return false;
+  delete servers[name];
+  writeCatalog(servers);
+  return true;
+}
+
+/** Names that ship with Alpha and cannot be deleted, only shadowed. */
+export function builtinServerNames(): string[] {
+  return Object.keys(BUILTIN_SERVERS);
 }

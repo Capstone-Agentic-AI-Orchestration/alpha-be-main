@@ -282,6 +282,32 @@ dataRouter.post('/squads', (req: Request, res: Response) => {
   res.status(201).json(squad);
 });
 
+/**
+ * Edit and delete, which squads did not have.
+ *
+ * An agent is created, edited, archived and deleted; a squad could only be
+ * created and run. Same kind of object to the person using it, so a typo in a
+ * squad name or a wrong member list was permanent.
+ *
+ * A PUT carries only the fields being changed, like the agent and project
+ * routes above — absent ones are left as they are rather than cleared.
+ */
+dataRouter.put('/squads/:id', (req: Request, res: Response) => {
+  if (req.body?.name !== undefined && !String(req.body.name).trim()) {
+    return res.status(400).json({ error: 'name cannot be empty' });
+  }
+
+  const updated = sqliteService.updateSquad(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'Squad not found' });
+  res.json(updated);
+});
+
+dataRouter.delete('/squads/:id', (req: Request, res: Response) => {
+  const deleted = sqliteService.deleteSquad(req.params.id);
+  if (!deleted) return res.status(404).json({ error: 'Squad not found' });
+  res.json({ success: true });
+});
+
 // --- Skills ---
 dataRouter.get('/skills', (req: Request, res: Response) => {
   res.json(sqliteService.getSkills());

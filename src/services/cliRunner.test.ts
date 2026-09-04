@@ -90,10 +90,19 @@ describe('buildTurnInvocation — Claude', () => {
     expect(args).toContain('mcp__alpha-github');
   });
 
-  it('adds no MCP flags when nothing was granted', () => {
+  /**
+   * The zero-server case is the one that most needs the fence, and it used to
+   * be the only case without it. Without `--strict-mcp-config` the CLI still
+   * surfaced the operator's account-level claude.ai connectors to the model —
+   * measured: it named Apollo.io, Canva, Figma, Gmail, Google Calendar, Google
+   * Drive and Miro to a chat user, unprompted.
+   */
+  it('fences MCP off entirely when nothing was granted', () => {
     const { args } = buildTurnInvocation(options(), noMcp);
+    // No config to point at, but the flag still means "only what --mcp-config
+    // gives you", and it gives nothing.
     expect(args).not.toContain('--mcp-config');
-    expect(args).not.toContain('--strict-mcp-config');
+    expect(args).toContain('--strict-mcp-config');
   });
 
   it('resumes a prior session', () => {
