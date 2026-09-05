@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { WORKSPACES_DIR } from '../config/env.js';
 import { sqliteService } from './sqliteService.js';
+import { Project } from '../models/index.js';
 import { logInfo } from '../utils/logger.js';
 
 /**
@@ -75,6 +76,60 @@ export function projectRepoPath(projectKey: string, repoName: string): string {
 /** True when the directory exists and holds a git repository. */
 export function isExistingCheckout(dir: string): boolean {
   return fs.existsSync(path.join(dir, '.git'));
+}
+
+/**
+ * The directory an agent should work in for this project.
+ *
+ * Lifted out of `runnerService` so a chat turn can answer the same question a
+ * run does. They had different answers: a run resolved the project's working
+ * copy, while a chat was pinned to the workspaces root — so an agent asked to
+ * review the code it had just edited in a run could not see it, and said so.
+ *
+ * A managed checkout wins over a hand-attached folder. If Alpha cloned or
+ * scaffolded the repository, that copy is the one it knows how to refresh.
+ *
+ * Returns null rather than guessing. This used to fall back to
+ * `path.resolve('..')` — the directory above the daemon, which is Alpha's own
+ * source tree — so a project attached only to a GitHub URL ran its agent
+ * inside Alpha itself. A project with nothing checked out has no workspace,
+ * and inventing one is how an agent reads or edits the wrong repository.
+ */
+export interface ProjectWorkspace {
+  dir: string;
+  /** True when Alpha cloned it; false when the user attached it by hand. */
+  managed: boolean;
+}
+
+export function resolveProjectWorkspace(
+  project: Pick<Project, 'name' | 'resources'>
+): ProjectWorkspace | null {
+  const resources = project.resources ?? [];
+  const managed = resources.find(r => r.type === 'github_repo' && r.localPath);
+  const attached = resources.find(r => r.type === 'local_path' || r.type === 'local_dir');
+
+  const dir = managed?.localPath
+    ? path.resolve(managed.localPath)
+    : attached
+      ? path.resolve(attached.pathOrUrl)
+      : null;
+
+  if (!dir) return null;
+  return { dir, managed: Boolean(managed?.localPath) };
+}
+
+/**
+ * Record consent for a hand-attached folder.
+ *
+ * Managed checkouts need nothing: the workspace root is allowlisted once and
+ * `isPathAllowed` matches on prefix. A folder the user chose in the UI is
+ * registered because choosing it is the explicit act of consent — but only a
+ * path that came from the project, never one this code computed.
+ */
+export function allowAttachedWorkspace(workspace: ProjectWorkspace, projectName: string): void {
+  if (workspace.managed) return;
+  if (sqliteService.isPathAllowed(workspace.dir)) return;
+  sqliteService.addAllowedPath(workspace.dir, projectName);
 }
 
 /**

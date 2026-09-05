@@ -21,6 +21,17 @@ beforeEach(async () => {
   vi.resetModules();
   vi.spyOn(console, 'log').mockImplementation(() => {});
   sqlite = (await import('./sqliteService.js')).sqliteService;
+
+  /**
+   * The project and issue these runs hang off.
+   *
+   * Previously borrowed from the seed, which shipped a project and three
+   * issues on every install. It no longer does — that was Alpha's own backlog
+   * appearing on other people's boards — so the fixtures a test needs are the
+   * test's to create. `prototype_runs` has foreign keys to both.
+   */
+  sqlite.createProject({ id: 'proj-alpha', name: 'Test Project', key: 'ALF' });
+  sqlite.createIssue({ id: 'issue-101', title: 'Test issue', projectId: 'proj-alpha' });
 });
 
 afterEach(() => {
@@ -37,7 +48,7 @@ const run = (id: string, usage?: RunUsage): PrototypeRun => ({
   id,
   issueId: 'issue-101',
   projectId: 'proj-alpha',
-  agentId: 'agent-ada',
+  agentId: 'agent-architect',
   status: 'completed',
   plan: [],
   currentStageIndex: 4,
@@ -128,7 +139,7 @@ describe('run usage persistence', () => {
 });
 
 describe('agent stats', () => {
-  const ada = () => sqlite.getAgents().find(a => a.id === 'agent-ada') as any;
+  const ada = () => sqlite.getAgents().find(a => a.id === 'agent-architect') as any;
 
   it('reports zeroes for an agent that has never run', () => {
     // These were hardcoded to 142 runs / 98.4% / 620,000 tokens / 280ms for

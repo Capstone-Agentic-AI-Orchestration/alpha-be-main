@@ -556,10 +556,35 @@ describe('chat mode is unchanged by run mode existing', () => {
       for (const mode of [undefined, 'chat'] as const) {
         const { args } = buildTurnInvocation(options({ provider, mode }), noMcp);
         expect(args).not.toContain('--dangerously-skip-permissions');
-        expect(args).not.toContain('--add-dir');
       }
     }
   );
+
+  /**
+   * Visibility is not capability, and the two flags are no longer bundled.
+   *
+   * `--add-dir` tells agy which directory is its workspace; without it a chat
+   * turn cannot read the directory it is standing in, which is how asking an
+   * agent to review a repository produced "status CANCELED" having read
+   * nothing. `--dangerously-skip-permissions` is the one that auto-approves
+   * tools, and it stays run-only.
+   */
+  it.each(['Antigravity', 'Google Gemini'] as const)(
+    'gives a %s chat its workspace but not permission to act in it',
+    provider => {
+      const { args } = buildTurnInvocation(options({ provider, mode: 'chat' }), noMcp);
+      expect(valueOf(args, '--add-dir')).toBe('/workspaces');
+      expect(args).not.toContain('--dangerously-skip-permissions');
+    }
+  );
+
+  /** Only the agy family takes the flag; the others locate work by cwd alone. */
+  it.each(['Anthropic', 'OpenAI'] as const)('passes no --add-dir to %s', provider => {
+    for (const mode of [undefined, 'chat', 'run'] as const) {
+      const { args } = buildTurnInvocation(options({ provider, mode }), noMcp);
+      expect(args).not.toContain('--add-dir');
+    }
+  });
 
   it('does not give the flag to families that take no such flag', () => {
     // Only agy needs it; Claude has --permission-mode and codex has --sandbox.

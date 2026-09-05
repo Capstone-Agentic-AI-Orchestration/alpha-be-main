@@ -218,6 +218,14 @@ export interface ChatThread {
   lastMessageSnippet: string;
   lastMessageAt: string;
   agentIds: string[];
+  /**
+   * Which project this conversation is about, when it is about one.
+   *
+   * Decides the directory an agent inspects for this thread. Undefined keeps
+   * the managed workspace root, which is right for a conversation about
+   * nothing in particular.
+   */
+  projectId?: string;
   createdAt: string;
 }
 

@@ -6,6 +6,7 @@ import { processManager } from './processManager.js';
 import { StreamParser, RunTelemetry } from './streamParser.js';
 import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
+import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
 import { agentReadiness } from './agentReadiness.js';
 import { buildEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
@@ -72,49 +73,27 @@ export class RunnerService extends EventEmitter {
     if (!project) throw new Error(`Project not found: ${issue.projectId}`);
 
     /**
-     * Resolve the working directory from the project's own resources.
+     * The working directory, from the project's own resources and nothing else.
      *
-     * There is deliberately no fallback. This used to default to
-     * `path.resolve('..')` — the directory above the daemon, which is Alpha's
-     * own source tree — so a project attached only to a GitHub URL ran its
-     * agent inside Alpha itself. Failing loudly is the correct behaviour: a
-     * project with nothing checked out has no workspace, and inventing one is
-     * how an agent edits the wrong repository.
-     *
-     * A managed checkout wins over a hand-attached folder. If Alpha cloned or
-     * scaffolded the repository, that copy is the one it knows how to refresh.
+     * Shared with chat so an agent reviewing a project in conversation looks at
+     * the same directory a run would edit. The reasoning for having no fallback
+     * lives with the resolver — see `resolveProjectWorkspace`.
      */
-    const managed = project.resources.find(r => r.type === 'github_repo' && r.localPath);
-    const attached = project.resources.find(r => r.type === 'local_path' || r.type === 'local_dir');
+    const workspace = resolveProjectWorkspace(project);
 
-    const cwd = managed?.localPath
-      ? path.resolve(managed.localPath)
-      : attached
-        ? path.resolve(attached.pathOrUrl)
-        : null;
-
-    if (!cwd) {
+    if (!workspace) {
       throw new Error(
         `Project "${project.name}" has no working copy. Attach a local folder, or clone one of its repositories, before running an agent.`
       );
     }
 
+    const cwd = workspace.dir;
+
     if (!fs.existsSync(cwd)) {
       throw new Error(`Working copy for "${project.name}" is missing from disk: ${cwd}`);
     }
 
-    /**
-     * Managed checkouts are already covered — the workspace root is allowlisted
-     * once and `isPathAllowed` matches on prefix.
-     *
-     * A hand-attached folder is registered here because choosing it in the UI
-     * is an explicit act of consent. What is gone is registering a *computed*
-     * path: that made the gate in processManager unable to refuse anything,
-     * since whatever this function invented was allowlisted a line later.
-     */
-    if (!managed && attached && !sqliteService.isPathAllowed(cwd)) {
-      sqliteService.addAllowedPath(cwd, project.name);
-    }
+    allowAttachedWorkspace(workspace, project.name);
 
     const runId = `run-${Date.now()}`;
     const now = new Date().toISOString();
