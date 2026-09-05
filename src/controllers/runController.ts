@@ -36,6 +36,53 @@ runRouter.post('/runs/:id/cancel', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Approve or reject a run that is waiting at the review gate.
+ *
+ * The Inbox has had Approve and Request-changes buttons since it was written,
+ * and neither reached the daemon: the run status moved to `validating` in React
+ * state and the issue comment was appended to a local array. Both were gone on
+ * reload, so a run stayed `awaiting_approval` in SQLite forever and the same
+ * notification came back.
+ *
+ * The one part that was real is the PR merge, which the client dispatches
+ * separately through the GitHub route.
+ */
+runRouter.post('/runs/:id/approve', (req: Request, res: Response) => {
+  const { approved } = req.body ?? {};
+  if (typeof approved !== 'boolean') {
+    return res.status(400).json({ error: 'approved must be a boolean' });
+  }
+
+  const run = sqliteService.getPrototypeRuns().find(r => r.id === req.params.id);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+
+  if (run.status !== 'awaiting_approval') {
+    return res.status(409).json({
+      error: `Run is ${run.status}, not awaiting approval.`
+    });
+  }
+
+  const now = new Date().toISOString();
+  const updated = { ...run, status: approved ? ('completed' as const) : ('changes_requested' as any), updatedAt: now };
+  sqliteService.savePrototypeRun(updated);
+
+  // Written to the comments table, not appended to an array in the browser.
+  sqliteService.addIssueComment({
+    id: `comm-${run.id}-${approved ? 'approved' : 'rejected'}`,
+    issueId: run.issueId,
+    authorType: 'system',
+    authorName: 'Alpha Execution Engine',
+    content: approved
+      ? `Review approved. ${run.prUrl ? `Merging ${run.prUrl}.` : 'No pull request to merge.'}`
+      : 'Changes requested. The run stopped at the review gate.',
+    createdAt: now
+  });
+
+  sqliteService.updateIssue(run.issueId, { status: approved ? 'done' : 'todo' });
+  res.json(updated);
+});
+
 runRouter.post('/runs/:id/retry', async (req: Request, res: Response) => {
   try {
     const existing = sqliteService.getPrototypeRuns().find(r => r.id === req.params.id);

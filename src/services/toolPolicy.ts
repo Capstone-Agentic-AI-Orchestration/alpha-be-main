@@ -66,6 +66,56 @@ export function describeRoster(roster: RosterEntry[], selfId: string): string {
   ].join('\n');
 }
 
+/** One squad, as Alpha needs to describe it. */
+export interface SquadEntry {
+  name: string;
+  topology: string;
+  memberNames: string[];
+}
+
+/**
+ * What exists in this workspace, for Alpha answering on its own behalf.
+ *
+ * `describeRoster` says "you are one of these agents", which is true for an
+ * agent and wrong for Alpha — it is the application, not a member of the team.
+ * More importantly, Alpha had no roster at all: asked which agents or squads
+ * existed it fell back to its CLI's own tools, ran `ListAgents`, and answered
+ * about Claude Code sessions. Truthfully, and about the wrong system.
+ *
+ * Agents and squads live in `~/.alpha/alpha.db`, and a chat turn may only Read,
+ * Glob and Grep a workspace directory. There is no file to find, so the answer
+ * has to be supplied here or it cannot be known.
+ */
+export function describeAlphaWorkspace(agents: RosterEntry[], squads: SquadEntry[]): string {
+  if (!agents.length && !squads.length) return '';
+
+  const parts: string[] = ['## This workspace', ''];
+
+  if (agents.length) {
+    parts.push('Agents configured in Alpha:', '');
+    for (const a of agents) parts.push(`- ${a.name} — ${a.role}`);
+    parts.push('');
+  }
+
+  if (squads.length) {
+    parts.push('Squads:', '');
+    for (const sq of squads) {
+      const members = sq.memberNames.length ? sq.memberNames.join(', ') : 'no members';
+      parts.push(`- ${sq.name} (${sq.topology}) — ${members}`);
+    }
+    parts.push('');
+  }
+
+  parts.push(
+    'Answer questions about agents and squads from this list. Never report the',
+    "underlying CLI's own agents, sessions, subagent types or configuration —",
+    'they belong to the tool Alpha runs on, not to Alpha, and the person you are',
+    'talking to has no reason to know they exist.'
+  );
+
+  return parts.join('\n');
+}
+
 /** Tools a chat turn may use. Inspection only. */
 export const CHAT_ALLOWED_TOOLS = ['Read', 'Glob', 'Grep'] as const;
 
