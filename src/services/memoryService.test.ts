@@ -41,11 +41,11 @@ describe('ensureMemoryScaffold', () => {
 
   it('creates the project and agent tiers on request', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    svc.ensureMemoryScaffold({ projectKey: 'ALF', agentId: 'agent-ada' });
+    svc.ensureMemoryScaffold({ projectKey: 'ALF', agentId: 'agent-architect' });
 
     expect(fs.existsSync(memPath('projects', 'ALF', 'rules.md'))).toBe(true);
     expect(fs.existsSync(memPath('projects', 'ALF', 'architecture.md'))).toBe(true);
-    expect(fs.existsSync(memPath('agents', 'agent-ada', 'learnings.md'))).toBe(true);
+    expect(fs.existsSync(memPath('agents', 'agent-architect', 'learnings.md'))).toBe(true);
   });
 
   it('never overwrites an existing file', () => {
@@ -97,9 +97,9 @@ describe('composeMemory', () => {
 
   it('returns nothing when only untouched templates exist', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    svc.ensureMemoryScaffold({ projectKey: 'ALF', agentId: 'agent-ada' });
+    svc.ensureMemoryScaffold({ projectKey: 'ALF', agentId: 'agent-architect' });
 
-    const block = svc.composeMemory({ projectKey: 'ALF', agentId: 'agent-ada' });
+    const block = svc.composeMemory({ projectKey: 'ALF', agentId: 'agent-architect' });
     expect(block.text).toBe('');
     expect(block.sources).toEqual([]);
   });
@@ -115,16 +115,16 @@ describe('composeMemory', () => {
   it('orders tiers global then project then agent', () => {
     write('global/preferences.md', 'GLOBAL_MARKER');
     write('projects/ALF/rules.md', 'PROJECT_MARKER');
-    write('agents/agent-ada/learnings.md', 'AGENT_MARKER');
+    write('agents/agent-architect/learnings.md', 'AGENT_MARKER');
 
-    const { text, sources } = svc.composeMemory({ projectKey: 'ALF', agentId: 'agent-ada' });
+    const { text, sources } = svc.composeMemory({ projectKey: 'ALF', agentId: 'agent-architect' });
 
     expect(text.indexOf('GLOBAL_MARKER')).toBeLessThan(text.indexOf('PROJECT_MARKER'));
     expect(text.indexOf('PROJECT_MARKER')).toBeLessThan(text.indexOf('AGENT_MARKER'));
     expect(sources).toEqual([
       'global/preferences.md',
       'projects/ALF/rules.md',
-      'agents/agent-ada/learnings.md'
+      'agents/agent-architect/learnings.md'
     ]);
   });
 
@@ -169,15 +169,15 @@ describe('composeMemory', () => {
     write('global/preferences.md', bulk);
     write('global/patterns.md', bulk);
     write('global/mistakes.md', bulk);
-    write('agents/agent-ada/learnings.md', `${bulk}\nDROPPED_MARKER`);
+    write('agents/agent-architect/learnings.md', `${bulk}\nDROPPED_MARKER`);
 
-    const { text, totalChars } = svc.composeMemory({ agentId: 'agent-ada' });
+    const { text, totalChars } = svc.composeMemory({ agentId: 'agent-architect' });
 
     expect(totalChars).toBeLessThanOrEqual(MEMORY_LIMITS.MAX_CHARS_TOTAL + 200);
     expect(text).not.toContain('DROPPED_MARKER');
     expect(errors).toHaveBeenCalledWith(
       expect.stringContaining('Memory budget exhausted'),
-      expect.stringContaining('agents/agent-ada/learnings.md')
+      expect.stringContaining('agents/agent-architect/learnings.md')
     );
   });
 
@@ -198,6 +198,6 @@ describe('path helpers', () => {
   it('builds the documented layout', () => {
     expect(svc.globalMemoryDir()).toBe(memPath('global'));
     expect(svc.projectMemoryDir('ALF')).toBe(memPath('projects', 'ALF'));
-    expect(svc.agentMemoryDir('agent-ada')).toBe(memPath('agents', 'agent-ada'));
+    expect(svc.agentMemoryDir('agent-architect')).toBe(memPath('agents', 'agent-architect'));
   });
 });

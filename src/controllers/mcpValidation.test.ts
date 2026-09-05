@@ -78,7 +78,7 @@ describe('toServerSpec', () => {
       env: { TOKEN: 'x' },
       // @ts-expect-error — fields a GET response carries but the file must not
       builtin: true,
-      grantedTo: ['agent-ada'],
+      grantedTo: ['agent-architect'],
       envKeys: ['TOKEN']
     });
 

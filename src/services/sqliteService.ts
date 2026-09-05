@@ -81,6 +81,17 @@ export class SQLiteService {
     this.seedDefaultsIfEmpty();
   }
 
+  /**
+   * Release the database handle.
+   *
+   * Windows will not unlink a file while a connection is open, so a test that
+   * opens the store more than once against one directory cannot clean up after
+   * itself without this. Also the honest way to shut the daemon down.
+   */
+  close(): void {
+    this.db.close();
+  }
+
   private initPragmas() {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('busy_timeout = 5000');
@@ -362,7 +373,20 @@ export class SQLiteService {
        * existed genuinely has no answer, and the read path supplies the default
        * so the two cases stay distinguishable here.
        */
-      ['agents', 'allowed_users TEXT']
+      ['agents', 'allowed_users TEXT'],
+      /**
+       * Which project a conversation is about.
+       *
+       * A run resolved the project's working copy; a chat was pinned to the
+       * workspaces root. So an agent asked in chat to review the repository it
+       * had just edited in a run could not see it — it read an empty managed
+       * root and correctly declined to guess.
+       *
+       * Nullable, and null is the ordinary case: a thread that names no project
+       * keeps the old behaviour and stays in the managed root, which is right
+       * for a conversation that is not about code.
+       */
+      ['chat_threads', 'project_id TEXT']
     ];
 
 
@@ -397,9 +421,49 @@ export class SQLiteService {
     `);
   }
 
+  /**
+   * Have the defaults already been planted in this database?
+   *
+   * Recorded, not inferred. This used to ask `SELECT count(*) FROM projects` —
+   * "is there a project?" standing in for "have we seeded?" — and the two are
+   * different facts. Deleting your last project made the next startup believe
+   * the database was new, so it re-ran the seed and threw
+   * `UNIQUE constraint failed: skills.id` from the constructor, before the
+   * daemon could listen. Alpha would not boot, and the only documented recovery
+   * was deleting alpha.db, which takes every conversation, issue and run with
+   * it.
+   *
+   * A `meta` row cannot be deleted by anything the user does in the product, so
+   * it answers the question it is actually being asked.
+   */
+  private hasSeeded(): boolean {
+    const row = this.db
+      .prepare("SELECT value FROM meta WHERE key = 'seeded_at'")
+      .get() as { value: string } | undefined;
+
+    if (row) return true;
+
+    /**
+     * An install that predates this marker.
+     *
+     * Its defaults are already there — it just never recorded them. Anything in
+     * `skills` is proof, because only the seed writes that table. Marked now so
+     * the check is cheap forever after, and so deleting the last project cannot
+     * resurrect the old behaviour on an existing database.
+     */
+    const seeded = (this.db.prepare('SELECT count(*) as count FROM skills').get() as { count: number }).count > 0;
+    if (seeded) this.markSeeded();
+    return seeded;
+  }
+
+  private markSeeded(): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_at', ?)")
+      .run(new Date().toISOString());
+  }
+
   private seedDefaultsIfEmpty() {
-    const projectCount = this.db.prepare('SELECT count(*) as count FROM projects').get() as { count: number };
-    if (projectCount.count > 0) return;
+    if (this.hasSeeded()) return;
 
     const now = new Date().toISOString();
 
@@ -426,7 +490,7 @@ export class SQLiteService {
     ];
 
     const insertSkill = this.db.prepare(`
-      INSERT INTO skills (id, name, category, permissions, description, is_enabled, command_example)
+      INSERT OR IGNORE INTO skills (id, name, category, permissions, description, is_enabled, command_example)
       VALUES (@id, @name, @category, @permissions, @description, @is_enabled, @command_example)
     `);
     defaultSkills.forEach(s => insertSkill.run({
@@ -440,212 +504,148 @@ export class SQLiteService {
     }));
 
     // Default Agents
+    /**
+     * Named for what they do, not for who they are.
+     *
+     * These shipped as invented people — Ada Lovelace, Kaelen Vance, Vesper Lin,
+     * Orion Cross — which read as a cast rather than a toolkit. On someone
+     * else's install it is worse than decorative: a new collaborator opens the
+     * roster and has to learn five names before knowing which one reviews code.
+     *
+     * A single word also makes the mention usable. `resolveMentions` matches the
+     * first word of a name, so "Ada Lovelace" answered to `@ada` — a token that
+     * says nothing about what it does. `@reviewer` and `@tester` need no
+     * explaining, and read the same way in a chat as on a kanban card.
+     */
     const defaultAgents: Agent[] = [
       {
-        id: 'agent-ada',
-        name: 'Ada Lovelace',
+        id: 'agent-architect',
+        name: 'Architect',
         role: 'Architect',
         avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=128&fit=crop&q=80',
         color: '#6366f1',
-        description: 'System architect specializing in state machines, MVVM architectures, and clean boundaries.',
+        description: 'Designs system structure: interfaces, module boundaries, and state machines.',
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
         modelName: 'claude-sonnet-5',
-        systemPrompt: 'You are Ada, a master software architect. Focus on clean interfaces, modular decomposition, and strict type definitions.',
+        systemPrompt: 'You are the Architect. Focus on clean interfaces, modular decomposition, and strict type definitions. Propose structure before code.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-git', 'sk-browser'],
         mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
-        id: 'agent-kaelen',
-        name: 'Kaelen Vance',
+        id: 'agent-developer',
+        name: 'Developer',
         role: 'Coder',
         avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=128&fit=crop&q=80',
         color: '#10b981',
-        description: 'Lead implementation engineer with expertise in TypeScript, React, and Node.js backend systems.',
+        description: 'Implements features across the stack in TypeScript, React, and Node.',
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
         modelName: 'claude-sonnet-5',
-        systemPrompt: 'You are Kaelen, lead fullstack coder. Write robust, concise, bug-free TypeScript code with zero extraneous comments.',
+        systemPrompt: 'You are the Developer. Write robust, concise TypeScript. Match the surrounding code and add no extraneous comments.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash', 'sk-git'],
         mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
-        id: 'agent-vesper',
-        name: 'Vesper Lin',
+        id: 'agent-reviewer',
+        name: 'Reviewer',
         role: 'Reviewer',
         avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=128&fit=crop&q=80',
         color: '#f59e0b',
-        description: 'Static analysis and security reviewer. Audits injection hazards, memory leaks, and edge-case exceptions.',
+        description: 'Audits diffs for correctness, security, and edge cases before they merge.',
         owner: 'You',
         isMine: true,
         modelProvider: 'OpenAI',
         modelName: 'codex',
-        systemPrompt: 'You are Vesper, code review specialist. Inspect diffs for correctness, performance, and security anti-patterns.',
+        systemPrompt: 'You are the Reviewer. Inspect diffs for correctness, performance, and security anti-patterns. Report findings; do not rewrite the change yourself.',
         autonomyLevel: 'Supervised',
         skills: ['sk-fs', 'sk-git'],
         mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
-        id: 'agent-orion',
-        name: 'Orion Cross',
+        id: 'agent-tester',
+        name: 'Tester',
         role: 'QA Tester',
         avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=128&fit=crop&q=80',
         color: '#ec4899',
-        description: 'Test automation specialist for unit tests, Vitest, Playwright E2E suites, and test coverage.',
+        description: 'Writes unit, regression, and end-to-end tests, and reports coverage gaps.',
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
         modelName: 'claude-sonnet-5',
-        systemPrompt: 'You are Orion, QA engineer. Write thorough unit and regression tests with high assertion density.',
+        systemPrompt: 'You are the Tester. Write thorough unit and regression tests with high assertion density. Name the cases you did not cover.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash'],
         mcpServers: ['alpha-github'],
         createdAt: now
       },
       {
-        id: 'agent-devops',
-        name: 'DevOps Sentinel',
+        id: 'agent-operator',
+        name: 'Operator',
         role: 'DevOps',
         avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=128&fit=crop&q=80',
         color: '#8b5cf6',
-        description: 'CI/CD pipeline and GitHub Actions engineer with automated failure triaging and self-healing.',
+        description: 'Runs CI/CD: diagnoses failing workflows and patches broken builds.',
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
         modelName: 'claude-sonnet-5',
-        systemPrompt: 'You are DevOps Sentinel. Inspect GitHub Actions workflows, diagnose failed run logs, and patch CI builds.',
+        systemPrompt: 'You are the Operator. Inspect CI workflows, diagnose failed run logs, and patch builds. Explain the failure before fixing it.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash', 'sk-git'],
-        mcpServers: ['filesystem', 'github'],
+        // Was ['filesystem', 'github'] — neither exists in the catalog, so this
+        // agent was granted nothing and the runner logged two unknown servers
+        // on every run.
+        mcpServers: ['alpha-github'],
         createdAt: now
       }
     ];
 
     defaultAgents.forEach(a => this.createAgent(a));
 
-    // Default Project
-    const defaultProject: Project = {
-      id: 'proj-alpha',
-      name: 'Alpha Orchestrator',
-      key: 'ALF',
-      description: 'Multi-engine ambient autonomous agent orchestration platform with 5-stage real-time execution.',
-      color: '#6366f1',
-      icon: '⚡',
-      status: 'in_progress',
-      priority: 'high',
-      startDate: now,
-      leadType: 'agent',
-      leadName: 'Ada Lovelace',
-      leadAgentId: 'agent-ada',
-      /**
-       * A repository, and no local checkout.
-       *
-       * The seed used to attach `path.resolve('..')` as a `local_path` — so a
-       * fresh install came with a project whose working copy was Alpha's own
-       * source, and the first agent run edited Alpha. The project now starts in
-       * the honest state: it has a repository, and cloning it is one action
-       * away.
-       */
-      resources: [
-        { id: 'res-2', type: 'github_repo', name: 'GitHub Repository', pathOrUrl: 'https://github.com/LloydLim1/Alpha-v2', branchOrMachine: 'main' }
-      ],
-      createdAt: now
-    };
-
-    this.createProject(defaultProject);
-
-    // Default Issues
-    const defaultIssues: Issue[] = [
-      {
-        id: 'issue-101',
-        identifier: 'ALF-101',
-        title: 'Implement Stream Parser and 5-Stage Lifecycle Mapper',
-        description: 'Connect line-buffered stream-json stdout to the 5-stage state machine (workspace, analysis, implementation, tests, review).',
-        status: 'in_progress',
-        priority: 'urgent',
-        projectId: 'proj-alpha',
-        assignedAgentId: 'agent-kaelen',
-        labels: ['backend', 'streaming', 'core'],
-        subtasks: [
-          { id: 'st-1', title: 'Implement split2 line buffer', completed: true },
-          { id: 'st-2', title: 'Map tool events to stages', completed: true },
-          { id: 'st-3', title: 'Add real git diff statistics', completed: false }
-        ],
-        comments: [
-          {
-            id: 'comm-1',
-            issueId: 'issue-101',
-            authorType: 'agent',
-            authorName: 'Ada Lovelace',
-            agentId: 'agent-ada',
-            content: 'Architecture verified. Stages 1–5 correspond directly with UI Progress Rings.',
-            createdAt: now
-          }
-        ],
-        createdAt: now,
-        updatedAt: now
-      },
-      {
-        id: 'issue-102',
-        identifier: 'ALF-102',
-        title: 'Dynamic Runtime Probe and Account Discovery',
-        description: 'Probe local PATH for Claude Code, Codex, and Gemini. Parse claude auth status and populate model selectors dynamically.',
-        status: 'todo',
-        priority: 'high',
-        projectId: 'proj-alpha',
-        assignedAgentId: 'agent-ada',
-        labels: ['runtimes', 'auth', 'ambient'],
-        subtasks: [
-          { id: 'st-4', title: 'Execute claude auth status', completed: true },
-          { id: 'st-5', title: 'Execute codex doctor', completed: true },
-          { id: 'st-6', title: 'Expose /api/runtimes endpoint', completed: false }
-        ],
-        comments: [],
-        createdAt: now,
-        updatedAt: now
-      },
-      {
-        id: 'issue-103',
-        identifier: 'ALF-103',
-        title: 'CI/CD Self-Healing Workflow with GitHub Actions',
-        description: 'Detect failing GitHub Actions runs, inspect failed logs via gh run view --log-failed, and generate automated fix commits.',
-        status: 'backlog',
-        priority: 'medium',
-        projectId: 'proj-alpha',
-        assignedAgentId: 'agent-devops',
-        labels: ['ci-cd', 'github-actions', 'self-healing'],
-        subtasks: [
-          { id: 'st-7', title: 'Integrate gh run list polling', completed: false },
-          { id: 'st-8', title: 'Log parsing for stack traces', completed: false }
-        ],
-        comments: [],
-        createdAt: now,
-        updatedAt: now
-      }
-    ];
-
-    defaultIssues.forEach(i => this.createIssue(i));
+    /**
+     * No project, and no issues.
+     *
+     * A fresh install used to arrive with a project called 'Alpha Orchestrator',
+     * described as a 'multi-engine ambient autonomous agent orchestration
+     * platform', holding three issues about implementing a stream parser, a
+     * runtime probe and a self-healing CI workflow.
+     *
+     * That is Alpha's own backlog. On the machine it was written on it reads as
+     * seed data; on anyone else's it is a stranger's work appearing on their
+     * board, in a project describing a product they may not be building.
+     *
+     * The distinction this draws is between a template and someone else's data.
+     * Agents, skills and the squad stay because they are scaffolding anyone
+     * would want — Architect, Developer, Reviewer, Tester and Operator are
+     * roles, not opinions about what you are working on. A project and its
+     * issues are the work itself, and only its owner can say what that is.
+     */
 
     // Default Squad
     const defaultSquad: Squad = {
       id: 'squad-core',
       name: 'Alpha Core Execution Squad',
       topology: 'Sequential',
-      leaderAgentId: 'agent-ada',
-      memberAgentIds: ['agent-ada', 'agent-kaelen', 'agent-vesper', 'agent-orion'],
+      leaderAgentId: 'agent-architect',
+      memberAgentIds: ['agent-architect', 'agent-developer', 'agent-reviewer', 'agent-tester'],
       mission: 'Autonomous triage, implementation, and static code review of incoming Capstone issues.',
       activeRunsCount: 0,
       completedRunsCount: 12
     };
 
     this.createSquad(defaultSquad);
+
+    // Last, so a seed that throws part-way is retried rather than recorded as
+    // done. Everything above is idempotent, so the retry is safe.
+    this.markSeeded();
   }
 
   // --- Allowed Paths ---
@@ -685,23 +685,54 @@ export class SQLiteService {
     }));
   }
 
-  createProject(p: Project): Project {
+  /**
+   * Create a project, defaulting everything the caller did not supply.
+   *
+   * `better-sqlite3` requires every named parameter to be bound, so a payload
+   * missing `id` threw `RangeError: Missing named parameter "id"` — which
+   * Express turned into a 500 HTML error page rather than anything a client
+   * could read. The browser happened to work because `AppContext.createProject`
+   * mints an id before posting; every other caller got the crash.
+   *
+   * This is the same defect `createChatThread` documents and already fixed for
+   * the "New Conversation" button. Minting server-side is the correct place:
+   * the client should not have to know the id format to create a row.
+   */
+  createProject(p: Partial<Project>): Project {
+    const now = new Date().toISOString();
+    const complete: Project = {
+      ...p,
+      id: p.id || `proj-${Date.now()}`,
+      name: p.name || 'Untitled Project',
+      key: p.key || `P${Date.now().toString().slice(-4)}`,
+      description: p.description ?? '',
+      color: p.color || '#6366f1',
+      icon: p.icon || '📁',
+      status: p.status || 'in_progress',
+      priority: p.priority || 'medium',
+      targetDate: p.targetDate || '',
+      createdAt: p.createdAt || now
+    } as Project;
+
     const stmt = this.db.prepare(`
       INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_at)
       VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdAt)
     `);
     stmt.run({
-      ...p,
-      startDate: p.startDate || new Date().toISOString(),
-      targetDate: p.targetDate || null,
-      leadType: p.leadType || 'agent',
-      leadName: p.leadName || '',
-      leadAgentId: p.leadAgentId || null,
-      resources: JSON.stringify(p.resources || []),
-      githubOrg: p.githubOrg || null,
-      createdAt: p.createdAt || new Date().toISOString()
+      ...complete,
+      startDate: complete.startDate || now,
+      targetDate: complete.targetDate || null,
+      leadType: complete.leadType || 'agent',
+      leadName: complete.leadName || '',
+      leadAgentId: complete.leadAgentId || null,
+      resources: JSON.stringify(complete.resources || []),
+      githubOrg: complete.githubOrg || null,
+      createdAt: complete.createdAt || now
     });
-    return p;
+
+    // The completed row, not the caller's partial — it now carries the id and
+    // defaults the caller did not send, which is what the client needs back.
+    return complete;
   }
 
   updateProject(id: string, updates: Partial<Project>): Project | null {
@@ -983,27 +1014,76 @@ export class SQLiteService {
     }));
   }
 
-  createIssue(issue: Issue): Issue {
+  /**
+   * The next free `KEY-nnn` for a project.
+   *
+   * Derived from the rows that exist rather than a counter, so it stays correct
+   * after a deletion and needs no extra state. Starts at 101 to match the
+   * seeded issues, which is also why it reads as a number rather than an index.
+   */
+  private nextIssueIdentifier(projectId: string): string {
+    const project = this.getProjects().find(p => p.id === projectId);
+    const key = (project?.key || 'ISS').toUpperCase();
+
+    const used = this.db
+      .prepare('SELECT identifier FROM issues WHERE project_id = ?')
+      .all(projectId) as { identifier: string }[];
+
+    const highest = used.reduce((max, r) => {
+      const n = Number(String(r.identifier).split('-').pop());
+      return Number.isFinite(n) && n > max ? n : max;
+    }, 100);
+
+    return `${key}-${highest + 1}`;
+  }
+
+  /**
+   * Create an issue, defaulting everything the caller did not supply.
+   *
+   * Same defect as `createProject`: `id` and `identifier` were bound but never
+   * defaulted, so a payload without them threw `RangeError: Missing named
+   * parameter` and Express returned a 500 HTML page. Only the browser worked,
+   * because `AppContext` builds both before posting — which also meant the
+   * identifier sequence lived in the client, where a second client would have
+   * happily reused a number.
+   */
+  createIssue(issue: Partial<Issue>): Issue {
+    const now = new Date().toISOString();
+    const projectId = issue.projectId || this.getProjects()[0]?.id || '';
+
+    const complete: Issue = {
+      ...issue,
+      id: issue.id || `issue-${Date.now()}`,
+      identifier: issue.identifier || this.nextIssueIdentifier(projectId),
+      title: issue.title || 'Untitled Issue',
+      description: issue.description ?? '',
+      status: issue.status || 'todo',
+      priority: issue.priority || 'medium',
+      projectId,
+      labels: issue.labels || [],
+      subtasks: issue.subtasks || [],
+      comments: issue.comments || [],
+      createdAt: issue.createdAt || now,
+      updatedAt: issue.updatedAt || now
+    } as Issue;
+
     const stmt = this.db.prepare(`
       INSERT INTO issues (id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_human, labels, subtasks, branch_name, pr_url, created_at, updated_at)
       VALUES (@id, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
-      ...issue,
-      labels: JSON.stringify(issue.labels || []),
-      subtasks: JSON.stringify(issue.subtasks || []),
-      assignedAgentId: issue.assignedAgentId || null,
-      assignedHuman: issue.assignedHuman || null,
-      branchName: issue.branchName || null,
-      prUrl: issue.prUrl || null,
-      createdAt: issue.createdAt || new Date().toISOString(),
-      updatedAt: issue.updatedAt || new Date().toISOString()
+      ...complete,
+      labels: JSON.stringify(complete.labels),
+      subtasks: JSON.stringify(complete.subtasks),
+      assignedAgentId: complete.assignedAgentId || null,
+      assignedHuman: complete.assignedHuman || null,
+      branchName: complete.branchName || null,
+      prUrl: complete.prUrl || null
     });
 
-    if (issue.comments && issue.comments.length > 0) {
-      issue.comments.forEach(c => this.addIssueComment(c));
-    }
-    return issue;
+    for (const c of complete.comments) this.addIssueComment(c);
+
+    return complete;
   }
 
   updateIssue(id: string, updates: Partial<Issue>): Issue | null {
@@ -1309,6 +1389,7 @@ export class SQLiteService {
       lastMessageSnippet: r.last_message_snippet,
       lastMessageAt: r.last_message_at,
       agentIds: JSON.parse(r.agent_ids || '[]'),
+      projectId: r.project_id ?? undefined,
       createdAt: r.created_at
     }));
   }
@@ -1362,15 +1443,19 @@ export class SQLiteService {
       // Deliberately empty: a new conversation is addressed to nobody until the
       // user @-mentions an agent. See chatService.resolveAgent().
       agentIds: thread.agentIds ?? [],
+      projectId: thread.projectId,
       createdAt: thread.createdAt || now
     };
 
     this.db.prepare(`
-      INSERT INTO chat_threads (id, title, last_message_snippet, last_message_at, agent_ids, created_at)
-      VALUES (@id, @title, @lastMessageSnippet, @lastMessageAt, @agentIds, @createdAt)
+      INSERT INTO chat_threads (id, title, last_message_snippet, last_message_at, agent_ids, project_id, created_at)
+      VALUES (@id, @title, @lastMessageSnippet, @lastMessageAt, @agentIds, @projectId, @createdAt)
     `).run({
       ...complete,
-      agentIds: JSON.stringify(complete.agentIds)
+      agentIds: JSON.stringify(complete.agentIds),
+      // Bound explicitly: the column is nullable and the field optional, but
+      // better-sqlite3 requires every named parameter to be present.
+      projectId: complete.projectId ?? null
     });
 
     return complete;
@@ -1380,6 +1465,62 @@ export class SQLiteService {
   setChatThreadAgents(threadId: string, agentIds: string[]) {
     this.db.prepare('UPDATE chat_threads SET agent_ids = ? WHERE id = ?')
       .run(JSON.stringify(agentIds), threadId);
+  }
+
+  /**
+   * Delete a conversation and everything belonging to it.
+   *
+   * `chat_messages` cascades on the foreign key, but `thread_sessions` has no
+   * FK — its primary key is (thread, machine, agent), deliberately, so it can
+   * hold one row per machine. Nothing would clean those up, leaving rows that
+   * point at CLI transcripts for a conversation that no longer exists.
+   *
+   * The CLI's own transcript on disk is left alone. Alpha does not own
+   * `~/.claude/projects/**.jsonl`; it only ever held an id pointing at one, and
+   * deleting a conversation here is not a mandate to reach into another tool's
+   * storage.
+   */
+  deleteChatThread(threadId: string): boolean {
+    const removed = this.db.prepare('DELETE FROM chat_threads WHERE id = ?').run(threadId).changes > 0;
+    if (removed) {
+      this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
+    }
+    return removed;
+  }
+
+  /**
+   * Empty a conversation but keep it.
+   *
+   * The session rows go too. A resumed CLI session still holds the transcript
+   * that was just cleared, so keeping the pointer would have the agent answer
+   * from history the user asked to be rid of — the clear would look done and
+   * not be.
+   */
+  clearChatMessages(threadId: string): number {
+    const exists = this.getChatThreads().some(t => t.id === threadId);
+    if (!exists) return -1;
+
+    const removed = this.db.prepare('DELETE FROM chat_messages WHERE thread_id = ?').run(threadId).changes;
+    this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
+    this.db.prepare("UPDATE chat_threads SET last_message_snippet = '' WHERE id = ?").run(threadId);
+    return removed;
+  }
+
+  /**
+   * Point a conversation at a project, or at nothing.
+   *
+   * Null is a real choice, not a missing argument: it returns the thread to the
+   * managed workspace root, which is where a conversation that is not about
+   * code belongs.
+   */
+  setChatThreadProject(threadId: string, projectId: string | null): ChatThread | null {
+    const exists = this.getChatThreads().some(t => t.id === threadId);
+    if (!exists) return null;
+
+    this.db.prepare('UPDATE chat_threads SET project_id = ? WHERE id = ?')
+      .run(projectId, threadId);
+
+    return this.getChatThreads().find(t => t.id === threadId) ?? null;
   }
 
   // --- CLI session continuity -----------------------------------------------

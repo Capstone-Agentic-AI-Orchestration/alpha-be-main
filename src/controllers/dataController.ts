@@ -1,6 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { sqliteService } from '../services/sqliteService.js';
 import { agentValidationError } from './agentValidation.js';
+import { checkWorkspace } from './workspaceValidation.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
 import {
   AGENT_FILE_MAX_BYTES,
@@ -28,7 +29,35 @@ dataRouter.post('/projects', (req: Request, res: Response) => {
   res.status(201).json(project);
 });
 
+/**
+ * Check a folder before it becomes a project's working copy.
+ *
+ * Separate from the update so the panel can tell someone their path is wrong
+ * while they are still typing it, rather than at the start of an agent run.
+ */
+dataRouter.post('/projects/check-workspace', (req: Request, res: Response) => {
+  res.json(checkWorkspace(req.body?.path));
+});
+
 dataRouter.put('/projects/:id', (req: Request, res: Response) => {
+  /**
+   * A folder that cannot hold a branch is refused here.
+   *
+   * `resolveProjectWorkspace` prefers a managed checkout and falls back to an
+   * attached folder, so a bad `local_path` only bites once a run reaches the
+   * workspace stage — where the failure is caught, logged as a notice, and the
+   * run continues without a branch. Rejecting the attachment is the only point
+   * at which the person can still see which field was wrong.
+   */
+  const attached = (req.body?.resources ?? []).find(
+    (r: any) => r?.type === 'local_path' || r?.type === 'local_dir'
+  );
+
+  if (attached) {
+    const check = checkWorkspace(attached.pathOrUrl);
+    if (!check.ok) return res.status(400).json({ error: check.detail });
+  }
+
   const updated = sqliteService.updateProject(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Project not found' });
   res.json(updated);

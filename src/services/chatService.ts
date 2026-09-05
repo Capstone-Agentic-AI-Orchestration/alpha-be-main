@@ -1,8 +1,13 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import { sqliteService } from './sqliteService.js';
 import { ChatMessage, ChatThread, Squad } from '../models/index.js';
 import { runCliTurn } from './cliRunner.js';
-import { ensureWorkspacesRoot } from './workspaceService.js';
+import {
+  ensureWorkspacesRoot,
+  resolveProjectWorkspace,
+  allowAttachedWorkspace
+} from './workspaceService.js';
 import { resolveAgentLogged } from './personaService.js';
 import { buildEnv } from './customCliArgs.js';
 import {
@@ -86,6 +91,44 @@ export interface SendMessageResult {
    * before it said.
    */
   agentMessages: ChatMessage[];
+}
+
+/**
+ * The directory an agent inspects for this thread.
+ *
+ * A thread that names a project gets that working copy — the same directory a
+ * run would edit, resolved by the same function. Every other thread gets the
+ * managed workspace root, which is what all of them used to get.
+ *
+ * That was the bug: a run resolved the repository, a chat did not, so an agent
+ * asked to review the code it had just changed read an empty managed root and
+ * correctly refused to guess. Measured before this: "Antigravity run ended with
+ * status CANCELED" for any question about a path outside the root.
+ *
+ * Falls back rather than throwing when the project has no checkout or the path
+ * has gone. A run must refuse there because it is about to write; a chat only
+ * reads, and declining to talk because a folder is missing is worse than
+ * answering from the root and saying what is actually visible.
+ */
+function chatWorkspace(threadId: string): string {
+  const root = ensureWorkspacesRoot();
+
+  const thread = sqliteService.getChatThreads().find(t => t.id === threadId);
+  if (!thread?.projectId) return root;
+
+  const project = sqliteService.getProjects().find(p => p.id === thread.projectId);
+  if (!project) return root;
+
+  const workspace = resolveProjectWorkspace(project);
+  if (!workspace || !fs.existsSync(workspace.dir)) {
+    logInfo(`Thread project "${project.name}" has no working copy on disk — using the managed root`);
+    return root;
+  }
+
+  // The same consent record a run makes: a hand-attached folder is registered,
+  // a managed checkout is already covered by the root allowlist entry.
+  allowAttachedWorkspace(workspace, project.name);
+  return workspace.dir;
 }
 
 export class ChatService extends EventEmitter {
@@ -231,7 +274,7 @@ export class ChatService extends EventEmitter {
 
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
-      cwd: ensureWorkspacesRoot(),
+      cwd: chatWorkspace(threadId),
       provider: runtime.provider,
       modelName: runtime.modelName,
       // The tool policy still applies: a chat inspects, it does not mutate.
@@ -365,7 +408,7 @@ ${describeChatToolPolicy()}`,
 
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
-      cwd: ensureWorkspacesRoot(),
+      cwd: chatWorkspace(threadId),
       provider: persona.modelProvider,
       modelName: persona.modelName,
       systemPrompt: persona.systemPrompt,

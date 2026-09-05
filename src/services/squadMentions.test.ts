@@ -13,18 +13,18 @@ import { Squad } from '../models/index.js';
  */
 
 const agents = [
-  { id: 'agent-ada', name: 'Ada Lovelace', role: 'Architect' },
-  { id: 'agent-kaelen', name: 'Kaelen Vance', role: 'Coder' },
-  { id: 'agent-vesper', name: 'Vesper Lin', role: 'Reviewer' },
-  { id: 'agent-orion', name: 'Orion Cross', role: 'QA Tester' }
+  { id: 'agent-architect', name: 'Ada Lovelace', role: 'Architect' },
+  { id: 'agent-developer', name: 'Kaelen Vance', role: 'Coder' },
+  { id: 'agent-reviewer', name: 'Vesper Lin', role: 'Reviewer' },
+  { id: 'agent-tester', name: 'Orion Cross', role: 'QA Tester' }
 ];
 
 const squad = (over: Partial<Squad> = {}): Squad => ({
   id: 'squad-core',
   name: 'Alpha Core Execution Squad',
   topology: 'Sequential',
-  leaderAgentId: 'agent-kaelen',
-  memberAgentIds: ['agent-ada', 'agent-kaelen', 'agent-vesper'],
+  leaderAgentId: 'agent-developer',
+  memberAgentIds: ['agent-architect', 'agent-developer', 'agent-reviewer'],
   mission: 'Triage and implement.',
   activeRunsCount: 0,
   completedRunsCount: 0,
@@ -35,7 +35,7 @@ const ids = (result: any[]) => result.map(a => a.id);
 
 describe('resolveMentions — agents', () => {
   it('still resolves a single agent by first name', () => {
-    expect(ids(resolveMentions('@Ada can you look', agents, []))).toEqual(['agent-ada']);
+    expect(ids(resolveMentions('@Ada can you look', agents, []))).toEqual(['agent-architect']);
   });
 
   it('resolves nobody when no one is named', () => {
@@ -47,12 +47,12 @@ describe('resolveMentions — squads', () => {
   it('expands a squad to its members, leader first', () => {
     // Leader is Kaelen, listed second. Order of address is order of execution.
     expect(ids(resolveMentions('@AlphaCoreExecutionSquad ship it', agents, [squad()])))
-      .toEqual(['agent-kaelen', 'agent-ada', 'agent-vesper']);
+      .toEqual(['agent-developer', 'agent-architect', 'agent-reviewer']);
   });
 
   it('resolves a squad by id', () => {
     expect(ids(resolveMentions('@squad-core ship it', agents, [squad()])))
-      .toEqual(['agent-kaelen', 'agent-ada', 'agent-vesper']);
+      .toEqual(['agent-developer', 'agent-architect', 'agent-reviewer']);
   });
 
   it('does NOT match a squad on its first word', () => {
@@ -67,44 +67,44 @@ describe('resolveMentions — squads', () => {
 
   it('lets an agent name win a tie with a squad name', () => {
     const collides = squad({ id: 'sq-ada', name: 'Ada' });
-    expect(ids(resolveMentions('@Ada thoughts?', agents, [collides]))).toEqual(['agent-ada']);
+    expect(ids(resolveMentions('@Ada thoughts?', agents, [collides]))).toEqual(['agent-architect']);
   });
 
   it('does not make a member answer twice when named alongside their squad', () => {
     const result = resolveMentions('@squad-core and especially @Vesper', agents, [squad()]);
-    expect(ids(result)).toEqual(['agent-kaelen', 'agent-ada', 'agent-vesper']);
+    expect(ids(result)).toEqual(['agent-developer', 'agent-architect', 'agent-reviewer']);
   });
 
   it('skips members that no longer exist rather than yielding undefined', () => {
-    const stale = squad({ memberAgentIds: ['agent-ada', 'agent-deleted'], leaderAgentId: undefined });
-    expect(ids(resolveMentions('@squad-core go', agents, [stale]))).toEqual(['agent-ada']);
+    const stale = squad({ memberAgentIds: ['agent-architect', 'agent-deleted'], leaderAgentId: undefined });
+    expect(ids(resolveMentions('@squad-core go', agents, [stale]))).toEqual(['agent-architect']);
   });
 
   it('keeps two squads in the order they were named', () => {
-    const other = squad({ id: 'sq-qa', name: 'QA Squad', memberAgentIds: ['agent-orion'], leaderAgentId: undefined });
+    const other = squad({ id: 'sq-qa', name: 'QA Squad', memberAgentIds: ['agent-tester'], leaderAgentId: undefined });
     expect(ids(resolveMentions('@sq-qa then @squad-core', agents, [squad(), other])))
-      .toEqual(['agent-orion', 'agent-kaelen', 'agent-ada', 'agent-vesper']);
+      .toEqual(['agent-tester', 'agent-developer', 'agent-architect', 'agent-reviewer']);
   });
 });
 
 describe('orderedMembers', () => {
   it('puts the leader first', () => {
-    expect(orderedMembers(squad())).toEqual(['agent-kaelen', 'agent-ada', 'agent-vesper']);
+    expect(orderedMembers(squad())).toEqual(['agent-developer', 'agent-architect', 'agent-reviewer']);
   });
 
   it('keeps the configured order when there is no leader', () => {
     expect(orderedMembers(squad({ leaderAgentId: undefined })))
-      .toEqual(['agent-ada', 'agent-kaelen', 'agent-vesper']);
+      .toEqual(['agent-architect', 'agent-developer', 'agent-reviewer']);
   });
 
   it('ignores a leader who is not a member', () => {
-    expect(orderedMembers(squad({ leaderAgentId: 'agent-orion' })))
-      .toEqual(['agent-ada', 'agent-kaelen', 'agent-vesper']);
+    expect(orderedMembers(squad({ leaderAgentId: 'agent-tester' })))
+      .toEqual(['agent-architect', 'agent-developer', 'agent-reviewer']);
   });
 
   it('de-duplicates, so nobody runs twice in one squad', () => {
-    expect(orderedMembers(squad({ memberAgentIds: ['agent-ada', 'agent-ada', 'agent-kaelen'] })))
-      .toEqual(['agent-kaelen', 'agent-ada']);
+    expect(orderedMembers(squad({ memberAgentIds: ['agent-architect', 'agent-architect', 'agent-developer'] })))
+      .toEqual(['agent-developer', 'agent-architect']);
   });
 });
 

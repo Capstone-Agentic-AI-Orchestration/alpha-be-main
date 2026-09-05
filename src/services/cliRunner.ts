@@ -356,9 +356,27 @@ export function buildTurnInvocation(
          * and with `command(*)` were both still denied, and no syntax is
          * documented. Revisit if agy ships a granular flag.
          *
-         * Chat receives neither flag. Asserted in cliRunner.test.ts.
+         * ## Why chat now gets --add-dir too
+         *
+         * The two flags grant different things, and only one of them is about
+         * writing. `--add-dir` says "this directory is my workspace" —
+         * visibility. `--dangerously-skip-permissions` auto-approves tool
+         * requests — capability. Chat needs the first and must never have the
+         * second.
+         *
+         * Withholding both meant a chat turn could not read the directory it
+         * was standing in. Once chat resolved a real project workspace instead
+         * of the managed root, that stopped being theoretical: asking an agent
+         * to review the repository returned "Antigravity run ended with status
+         * CANCELED" in eight seconds, having read nothing. The same agent
+         * answered a question about itself perfectly, so the CLI was healthy —
+         * it simply had no workspace.
+         *
+         * Chat is still read-only: CHAT_ALLOWED_TOOLS is Read, Glob and Grep,
+         * and the disallowed list denies Write, Edit and Bash.
          */
-        ...(isRun ? ['--add-dir', cwd, '--dangerously-skip-permissions'] : []),
+        '--add-dir', cwd,
+        ...(isRun ? ['--dangerously-skip-permissions'] : []),
         ...(modelName ? ['--model', modelName] : []),
         ...(priorSession ? ['--conversation', priorSession] : []),
         ...customArgs

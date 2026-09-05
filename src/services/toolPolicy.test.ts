@@ -75,13 +75,13 @@ describe('the policy arrays themselves', () => {
 
 describe('describeRoster', () => {
   const roster = [
-    { id: 'agent-ada', name: 'Ada Lovelace', role: 'Architect' },
-    { id: 'agent-kaelen', name: 'Kaelen Vance', role: 'Coder' },
-    { id: 'agent-orion', name: 'Orion Cross', role: 'QA Tester' }
+    { id: 'agent-architect', name: 'Ada Lovelace', role: 'Architect' },
+    { id: 'agent-developer', name: 'Kaelen Vance', role: 'Coder' },
+    { id: 'agent-tester', name: 'Orion Cross', role: 'QA Tester' }
   ];
 
   it('lists every agent with its role', () => {
-    const text = describeRoster(roster, 'agent-ada');
+    const text = describeRoster(roster, 'agent-architect');
 
     expect(text).toContain('Ada Lovelace — Architect');
     expect(text).toContain('Kaelen Vance — Coder');
@@ -89,29 +89,29 @@ describe('describeRoster', () => {
   });
 
   it('marks which one the agent itself is', () => {
-    expect(describeRoster(roster, 'agent-kaelen')).toContain('Kaelen Vance — Coder (you)');
+    expect(describeRoster(roster, 'agent-developer')).toContain('Kaelen Vance — Coder (you)');
   });
 
   it('marks only one agent as self', () => {
-    const matches = describeRoster(roster, 'agent-ada').match(/\(you\)/g) ?? [];
+    const matches = describeRoster(roster, 'agent-architect').match(/\(you\)/g) ?? [];
     expect(matches).toHaveLength(1);
   });
 
   it('forbids reporting the underlying CLI\'s own agents', () => {
     // The reported bug: an agent recited the machine owner's personal roster,
     // then, once isolated, recited its CLI's internal subagent types instead.
-    const text = describeRoster(roster, 'agent-ada');
+    const text = describeRoster(roster, 'agent-architect');
 
     expect(text).toMatch(/never report the underlying cli/i);
     expect(text).toMatch(/not part of Alpha/i);
   });
 
   it('tells the agent to answer with this list when asked', () => {
-    expect(describeRoster(roster, 'agent-ada')).toMatch(/answer with this list/i);
+    expect(describeRoster(roster, 'agent-architect')).toMatch(/answer with this list/i);
   });
 
   it('is empty when there is no roster, rather than an empty heading', () => {
-    expect(describeRoster([], 'agent-ada')).toBe('');
+    expect(describeRoster([], 'agent-architect')).toBe('');
   });
 
   it('handles an agent that is not itself in the roster', () => {

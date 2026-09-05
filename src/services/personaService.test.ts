@@ -11,7 +11,7 @@ let tmp: string;
 let svc: Service;
 
 const agent = (over: Partial<Agent> = {}): Agent => ({
-  id: 'agent-ada',
+  id: 'agent-architect',
   name: 'Ada Lovelace',
   role: 'Architect',
   avatar: '',
@@ -42,7 +42,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const writeAgentFile = (content: string, id = 'agent-ada') => {
+const writeAgentFile = (content: string, id = 'agent-architect') => {
   fs.mkdirSync(path.join(tmp, 'agents'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'agents', `${id}.md`), content, 'utf8');
 };
@@ -68,7 +68,7 @@ describe('resolveAgent — precedence', () => {
     const resolved = svc.resolveAgent(agent());
     expect(resolved.systemPrompt).toBe('FILE_PROMPT');
     expect(resolved.systemPrompt).not.toContain('DB_PROMPT');
-    expect(resolved.sources).toEqual(['agents/agent-ada.md']);
+    expect(resolved.sources).toEqual(['agents/agent-architect.md']);
   });
 
   it('lets file frontmatter win over database columns', () => {
@@ -110,12 +110,12 @@ describe('resolveAgent — memory composition', () => {
   it('lists memory files in sources alongside the persona origin', () => {
     writeAgentFile('---\nname: Ada\n---\n\nFILE_PROMPT');
     writeMemory('global/preferences.md', 'GLOBAL_RULE');
-    writeMemory('agents/agent-ada/learnings.md', 'AGENT_NOTE');
+    writeMemory('agents/agent-architect/learnings.md', 'AGENT_NOTE');
 
     expect(svc.resolveAgent(agent()).sources).toEqual([
-      'agents/agent-ada.md',
+      'agents/agent-architect.md',
       'global/preferences.md',
-      'agents/agent-ada/learnings.md'
+      'agents/agent-architect/learnings.md'
     ]);
   });
 
@@ -158,7 +158,7 @@ describe('resolveAgentLogged', () => {
 
     expect(resolved.systemPrompt).toBe('FILE_PROMPT');
     expect(logged).toHaveBeenCalledWith(
-      expect.stringContaining('Persona agent-ada'),
+      expect.stringContaining('Persona agent-architect'),
       ...([] as unknown[])
     );
   });

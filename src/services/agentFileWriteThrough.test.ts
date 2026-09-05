@@ -17,7 +17,7 @@ let tmp: string;
 let sqlite: typeof import('./sqliteService.js')['sqliteService'];
 let files: typeof import('./agentFileService.js');
 
-const AGENT = 'agent-ada';
+const AGENT = 'agent-architect';
 
 beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-wt-'));
