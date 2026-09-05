@@ -61,6 +61,9 @@ fixtures/       real CLI transcripts used by tests
 Local state lives outside the repo, under `~/.alpha/`: `alpha.db`, `logs/audit.log`,
 `memory/`, `runs/`.
 
+* `ALPHA_HOME` — Relocates the whole data directory (defaults to `~/.alpha`). Tests use this to point at a temp dir to isolate state.
+* `SQLITE_DB_PATH` — Overrides the database path specifically (defaults to `$ALPHA_HOME/alpha.db`).
+
 ## The stream parser, and why it has a fixture
 
 `claude -p --output-format stream-json --verbose` emits JSONL where
