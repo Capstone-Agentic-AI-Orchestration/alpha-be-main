@@ -386,7 +386,21 @@ export class SQLiteService {
        * keeps the old behaviour and stays in the managed root, which is right
        * for a conversation that is not about code.
        */
-      ['chat_threads', 'project_id TEXT']
+      ['chat_threads', 'project_id TEXT'],
+      /**
+       * The squad assigned to an issue.
+       *
+       * Both halves of this already existed and never met: CreateIssueModal
+       * sends `assignedSquadId` on every issue it creates, and IssuesView reads
+       * it to draw the assignee avatar. The column did not exist, so the value
+       * was dropped by the INSERT and the avatar never resolved — an issue could
+       * be given a squad in the form and would forget by the time it reached the
+       * board.
+       *
+       * Nullable: most issues are one agent working alone, which stays the
+       * ordinary case.
+       */
+      ['issues', 'assigned_squad_id TEXT']
     ];
 
 
@@ -1003,6 +1017,7 @@ export class SQLiteService {
       priority: r.priority,
       projectId: r.project_id,
       assignedAgentId: r.assigned_agent_id,
+      assignedSquadId: r.assigned_squad_id ?? undefined,
       assignedHuman: r.assigned_human,
       labels: JSON.parse(r.labels || '[]'),
       subtasks: JSON.parse(r.subtasks || '[]'),
@@ -1068,14 +1083,15 @@ export class SQLiteService {
     } as Issue;
 
     const stmt = this.db.prepare(`
-      INSERT INTO issues (id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_human, labels, subtasks, branch_name, pr_url, created_at, updated_at)
-      VALUES (@id, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdAt, @updatedAt)
+      INSERT INTO issues (id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, labels, subtasks, branch_name, pr_url, created_at, updated_at)
+      VALUES (@id, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
       ...complete,
       labels: JSON.stringify(complete.labels),
       subtasks: JSON.stringify(complete.subtasks),
       assignedAgentId: complete.assignedAgentId || null,
+      assignedSquadId: complete.assignedSquadId || null,
       assignedHuman: complete.assignedHuman || null,
       branchName: complete.branchName || null,
       prUrl: complete.prUrl || null
@@ -1093,12 +1109,14 @@ export class SQLiteService {
     const stmt = this.db.prepare(`
       UPDATE issues SET
         title = @title, description = @description, status = @status, priority = @priority,
-        project_id = @projectId, assigned_agent_id = @assignedAgentId, assigned_human = @assignedHuman,
+        project_id = @projectId, assigned_agent_id = @assignedAgentId,
+        assigned_squad_id = @assignedSquadId, assigned_human = @assignedHuman,
         labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl, updated_at = @updatedAt
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
+      assignedSquadId: merged.assignedSquadId || null,
       labels: JSON.stringify(merged.labels || []),
       subtasks: JSON.stringify(merged.subtasks || [])
     });

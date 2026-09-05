@@ -69,6 +69,11 @@ export interface Issue {
   priority: IssuePriority;
   projectId: string;
   assignedAgentId?: string;
+  /**
+   * The squad assigned to this issue, when a whole squad owns it rather than
+   * one agent. Absent is the ordinary case.
+   */
+  assignedSquadId?: string;
   assignedHuman?: string;
   labels: string[];
   subtasks: IssueSubtask[];
