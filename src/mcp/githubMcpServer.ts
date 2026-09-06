@@ -131,7 +131,23 @@ interface ToolDef {
   description: string;
   inputSchema: Record<string, unknown>;
   run: (args: Record<string, any>) => Promise<unknown>;
+  /**
+   * Omitted means readable by anyone who can reach this server. Only the two
+   * tools that change a remote carry 'write'.
+   */
+  access?: 'write';
 }
+
+/**
+ * What this turn may do, decided by the daemon and passed in the environment.
+ *
+ * Read here rather than negotiated, because this process cannot be trusted to
+ * ask: it is spawned by the agent's own CLI. Anything other than an explicit
+ * 'write' is read — an absent or misspelled value must not widen access.
+ */
+const ACCESS: 'read' | 'write' = process.env.ALPHA_MCP_ACCESS === 'write' ? 'write' : 'read';
+
+const permitted = (t: ToolDef) => t.access !== 'write' || ACCESS === 'write';
 
 const str = (description: string) => ({ type: 'string', description });
 const int = (description: string, min: number, max: number) => ({
@@ -222,6 +238,7 @@ const TOOLS: Record<string, ToolDef> = {
   },
 
   github_push_branch: {
+    access: 'write',
     description:
       'Commit everything you have changed in this workspace and push it to the branch you are on. Use when your work is ready for others to see. Alpha knows which repository and branch — do not pass a path and do not run git yourself. Refuses to push to the default branch.',
     inputSchema: schema(
@@ -269,6 +286,7 @@ const TOOLS: Record<string, ToolDef> = {
   },
 
   github_open_pull_request: {
+    access: 'write',
     description:
       'Open a pull request for the branch you are working on. Use after github_push_branch, when the work is complete and ready for review. Returns the pull request URL.',
     inputSchema: schema(
@@ -303,6 +321,46 @@ const TOOLS: Record<string, ToolDef> = {
     }
   },
 
+  github_review_pull_request: {
+    description:
+      'Post a code review on a pull request. Use when asked to review work — read the diff first, then say what you found. ' +
+      'State your verdict as the first line: APPROVE, REQUEST CHANGES, or COMMENT, followed by the reasoning and any specific problems. ' +
+      'This posts a review comment; it does not approve or merge anything, and a person still decides at the review gate.',
+    inputSchema: schema(
+      {
+        pull_request: str('Pull request URL, or its number as a string.'),
+        body: str('The review, in markdown. Begin with APPROVE, REQUEST CHANGES, or COMMENT.')
+      },
+      ['pull_request', 'body']
+    ),
+    run: async ({ pull_request, body }) => {
+      const cwd = requireWorkspace();
+
+      try {
+        await githubService.reviewPullRequest(cwd, String(pull_request), body);
+      } catch (err: any) {
+        audit('review_pull_request', String(pull_request), false, String(err?.message ?? err));
+        throw err;
+      }
+
+      /*
+       * The verdict is recorded as Alpha's own fact, not GitHub's. GitHub sees
+       * a comment — it will not accept an approval from the account that opened
+       * the pull request, which is the same account every agent uses. So the
+       * trail that says a reviewer approved lives here, where the identities
+       * are actually distinct.
+       */
+      const firstLine = String(body).trim().split('\n')[0].trim().slice(0, 120);
+      audit('review_pull_request', String(pull_request), true, firstLine);
+
+      return {
+        pull_request,
+        posted: true,
+        note: 'Posted as a review comment. Approval and merge remain with the person at the review gate.'
+      };
+    }
+  },
+
   github_clone_repository: {
     description:
       'Clone a repository onto this machine so its files can be worked on locally. Alpha chooses the destination inside its managed workspace — do not ask for a path and do not run git yourself. Cloning a repository that is already checked out refreshes it instead. Returns the local path.',
@@ -382,12 +440,20 @@ async function handle(msg: any): Promise<void> {
       return reply(id, {});
 
     case 'tools/list':
+      /*
+       * Filtered, not merely refused on call. A tool the agent can see is one
+       * it will plan around and describe to the user before discovering it is
+       * denied — and a run that narrates opening a pull request it cannot open
+       * reads as a lie rather than a limit.
+       */
       return reply(id, {
-        tools: Object.entries(TOOLS).map(([name, t]) => ({
-          name,
-          description: t.description,
-          inputSchema: t.inputSchema
-        }))
+        tools: Object.entries(TOOLS)
+          .filter(([, t]) => permitted(t))
+          .map(([name, t]) => ({
+            name,
+            description: t.description,
+            inputSchema: t.inputSchema
+          }))
       });
 
     case 'tools/call': {
@@ -395,6 +461,22 @@ async function handle(msg: any): Promise<void> {
       const tool = TOOLS[name];
       if (!tool) {
         return reply(id, toolResult(`Unknown tool: ${name}`, true));
+      }
+      /*
+       * Checked again here. The list above is advice to a client that may have
+       * cached an older one; this is the boundary.
+       */
+      if (!permitted(tool)) {
+        audit(name, undefined, false, 'Refused: this agent has read-only remote access.');
+        return reply(
+          id,
+          toolResult(
+            `"${name}" changes a remote, and this turn has read-only access to GitHub. ` +
+              `Commit your work locally and describe what you changed — a person will push it. ` +
+              `Raising an agent's autonomy above Supervised is what grants this.`,
+            true
+          )
+        );
       }
       try {
         const value = await tool.run(params?.arguments ?? {});

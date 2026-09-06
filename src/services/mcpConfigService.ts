@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import { mcpCredentialEnv } from './gitCredentialIsolation.js';
+import { McpAccess } from './autonomyPolicy.js';
 import { logError } from '../utils/logger.js';
 
 /**
@@ -176,7 +177,18 @@ export function writeRunMcpConfig(
    * working directory. A push tool that guesses wrong pushes the wrong
    * repository, so it is told.
    */
-  workspace?: string
+  workspace?: string,
+  /**
+   * What this turn's tools may do to a remote. Handed to the built-in server
+   * in its environment, because the server is the only place that can refuse a
+   * tool call — the CLI's own allow-list works on server names, not tool names,
+   * so `mcp__alpha-github` is all-or-nothing from outside.
+   *
+   * Defaults to 'read'. A caller that forgets to say gets the safe answer, and
+   * an agent that cannot push says so out loud, where a silent extra permission
+   * would not.
+   */
+  access: McpAccess = 'read'
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
   if (!names.length) return { configPath: null, serverNames: [] };
@@ -234,6 +246,7 @@ export function writeRunMcpConfig(
               ...resolved.env,
               ALPHA_WORKSPACE: workspace,
               ALPHA_RUN_ID: runId,
+              ALPHA_MCP_ACCESS: access,
               /**
                * The credentials, given back to this process alone.
                *

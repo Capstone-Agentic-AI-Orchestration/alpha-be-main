@@ -594,3 +594,53 @@ describe('chat mode is unchanged by run mode existing', () => {
     }
   });
 });
+
+/**
+ * The allowlist a run needs, which it never had.
+ *
+ * `--permission-mode acceptEdits` covers edits; MCP tools still ask, and a
+ * headless run has no one to ask. So every MCP call an agent made during a run
+ * stopped and waited — measured in the field as `alpha` 4, `agent` 0 in
+ * remote_actions after the feature had shipped and appeared to work. It looked
+ * like it worked because Alpha's own pipeline pushes and opens the pull request
+ * immediately afterwards, under actor 'alpha'.
+ */
+describe('a run may actually call the MCP tools it was granted', () => {
+  const run = (over: Partial<CliTurnOptions> = {}) =>
+    options({ mode: 'run', ...over });
+
+  it('allowlists the granted servers', () => {
+    const { args } = buildTurnInvocation(run(), {
+      configPath: '/runs/r1/mcp.json',
+      serverNames: ['alpha-github']
+    });
+
+    expect(args).toContain('--allowedTools');
+    expect(args).toContain('mcp__alpha-github');
+  });
+
+  it('still takes acceptEdits, so file edits do not prompt either', () => {
+    const { args } = buildTurnInvocation(run(), {
+      configPath: '/runs/r1/mcp.json',
+      serverNames: ['alpha-github']
+    });
+
+    expect(valueOf(args, '--permission-mode')).toBe('acceptEdits');
+  });
+
+  /**
+   * An empty `--allowedTools` is not the same as no `--allowedTools`: the first
+   * is an exhaustive list of nothing, which would deny the file tools a run
+   * exists to use.
+   */
+  it('omits the flag when no server was granted', () => {
+    const { args } = buildTurnInvocation(run(), noMcp);
+    expect(args).not.toContain('--allowedTools');
+  });
+
+  it('does not borrow the chat denylist', () => {
+    const { args } = buildTurnInvocation(run(), noMcp);
+    // A run edits files; denying Write and Edit would make it pointless.
+    expect(args).not.toContain('--disallowedTools');
+  });
+});

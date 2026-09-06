@@ -15,6 +15,8 @@ import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, checkoutBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
 import { githubService } from './githubService.js';
 import { supabaseService } from './supabaseService.js';
+import { updateIssueAndPush } from './boardWriteThrough.js';
+import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
 import { logInfo, logError } from '../utils/logger.js';
@@ -151,7 +153,7 @@ export class RunnerService extends EventEmitter {
     }
 
     // Update Issue status
-    sqliteService.updateIssue(issueId, {
+    updateIssueAndPush(issueId, {
       status: 'agent_running',
       assignedAgentId: agentId,
       branchName
@@ -295,16 +297,28 @@ export class RunnerService extends EventEmitter {
      * value is a default for everyone working the board, and an agent's is a
      * deliberate exception to it.
      */
+    const access = mcpAccessFor(persona.autonomyLevel, 'run');
     const { env: projectEnv } = buildEnv(ctx.project?.envVars);
     const { env } = buildEnv(agent.envVars);
-    const mcp = writeRunMcpConfig(runId, persona.mcpServers, { ...projectEnv, ...env }, cwd);
+    /*
+     * The agent's autonomy decides whether its tools may touch the remote.
+     * Until now the field was decoration: a Supervised reviewer could push code
+     * and open pull requests exactly like a Semi-Autonomous developer.
+     */
+    const mcp = writeRunMcpConfig(
+      runId,
+      persona.mcpServers,
+      { ...projectEnv, ...env },
+      cwd,
+      access
+    );
 
     /**
      * Built after the MCP config, because it names the tools this run has.
      * Constructing it earlier meant promising a push tool before knowing
      * whether the agent had been granted one.
      */
-    const prompt = this.buildTaskPrompt(issue, plan, ctx.squad?.handoff, mcp.serverNames);
+    const prompt = this.buildTaskPrompt(issue, plan, ctx.squad?.handoff, mcp.serverNames, access);
 
     const invocation = buildTurnInvocation(
       {
@@ -396,7 +410,9 @@ export class RunnerService extends EventEmitter {
     plan: string[],
     handoff?: string,
     /** MCP servers this run actually has, so the prompt promises only those. */
-    mcpServers: string[] = []
+    mcpServers: string[] = [],
+    /** What those servers may do to a remote, which narrows it further. */
+    access: McpAccess = 'read'
   ): string {
     const planSection = plan.length > 0
       ? `\n\nExecution Plan:\n${plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
@@ -428,7 +444,14 @@ ${handoff}` : '';
      * Only stated when the tools are actually granted. Telling an agent to use
      * a tool it does not have is worse than saying nothing.
      */
-    const canPush = mcpServers.includes('alpha-github');
+    /*
+     * Granted the server is not the same as allowed to use it. A Supervised
+     * agent has alpha-github for its read tools while push and
+     * open-pull-request are filtered out of its tool list, so keying this off
+     * the server name alone told that agent to call two tools it could not see
+     * — the precise contradiction this section exists to avoid.
+     */
+    const canPush = mcpServers.includes('alpha-github') && access === 'write';
     const remoteSection = canPush
       ? `
 
@@ -457,6 +480,18 @@ Instructions:
 
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
     if (!run) return;
+
+    /*
+     * Re-derived here rather than carried in from startRun. This method is also
+     * where a process that outlived a restart lands, and a run whose access had
+     * to be reconstructed from state it no longer holds would fall back to the
+     * default — the wrong direction to guess about a permission.
+     */
+    const runAgent = sqliteService.getAgents().find(a => a.id === run.agentId);
+    const access = mcpAccessFor(
+      runAgent ? resolveAgentLogged(runAgent).autonomyLevel : undefined,
+      'run'
+    );
 
     const now = new Date().toISOString();
 
@@ -494,14 +529,23 @@ Instructions:
         const isRepo = await isGitRepo(cwd);
         if (isRepo) {
           const commitMsg = `feat(${issue.identifier.toLowerCase()}): ${issue.title} [${issue.identifier}]`;
-          const committed = await githubService.commitAndPush(cwd, branchName, commitMsg);
-          this.appendLog(
-            runId,
-            'review',
-            committed
-              ? `Committed and pushed: "${commitMsg}" to ${branchName}`
-              : `Nothing left to commit — the agent had already committed its work. Pushed ${branchName}.`
-          );
+          /*
+           * A read-only run commits and stops. Filtering the agent's own push
+           * tool while the pipeline pushed for it left Supervised meaning
+           * nothing: the reviewer's run pushed a branch and opened a duplicate
+           * pull request for a change that was already under review.
+           */
+          const mayPush = access === 'write';
+          const committed = await githubService.commitAndPush(cwd, branchName, commitMsg, mayPush);
+          let commitNote: string;
+          if (!mayPush) {
+            commitNote = `Committed to ${branchName}. Not pushed: this agent has read-only remote access.`;
+          } else if (committed) {
+            commitNote = `Committed and pushed: "${commitMsg}" to ${branchName}`;
+          } else {
+            commitNote = `Nothing left to commit — the agent had already committed its work. Pushed ${branchName}.`;
+          }
+          this.appendLog(runId, 'review', commitNote);
           // Recorded whoever did the committing, so the trail shows the push
           // even when the agent made the commits itself.
           sqliteService.recordRemoteAction({
@@ -509,9 +553,9 @@ Instructions:
             agentId: run.agentId,
             issueId: issue.id,
             actor: 'alpha',
-            action: 'push',
+            action: mayPush ? 'push' : 'commit',
             target: branchName,
-            detail: committed ? commitMsg : 'Already committed by the agent; branch pushed.',
+            detail: commitNote,
             succeeded: true
           });
 
@@ -540,6 +584,9 @@ ${issue.description}
 
           try {
             if (!isFinalMember) throw new SkipPullRequest();
+            // Nothing was pushed, so there is no branch on the remote to open
+            // a pull request against.
+            if (!mayPush) throw new SkipPullRequest();
             const createdPr = await githubService.createPullRequest(
               cwd,
               `feat: ${issue.title} [${issue.identifier}]`,
@@ -665,7 +712,7 @@ ${issue.description}
        * is. squadRunner emits `squad_run_completed` when the last one lands.
        */
       if (isFinalMember) {
-        sqliteService.updateIssue(issue.id, {
+        updateIssueAndPush(issue.id, {
           status: 'review',
           prUrl
         });
@@ -810,7 +857,7 @@ ${issue.description}
     };
 
     sqliteService.savePrototypeRun(failedRun);
-    sqliteService.updateIssue(run.issueId, { status: 'in_progress' });
+    updateIssueAndPush(run.issueId, { status: 'in_progress' });
     this.emit('run_failed', failedRun);
 
     if (supabaseService.isConfigured()) {
@@ -842,7 +889,7 @@ ${issue.description}
     };
 
     sqliteService.savePrototypeRun(cancelledRun);
-    sqliteService.updateIssue(run.issueId, { status: 'in_progress' });
+    updateIssueAndPush(run.issueId, { status: 'in_progress' });
     this.emit('run_cancelled', cancelledRun);
 
     if (supabaseService.isConfigured()) {

@@ -1,4 +1,5 @@
 import { sqliteService } from './sqliteService.js';
+import { updateIssueAndPush } from './boardWriteThrough.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, SquadRun } from '../models/index.js';
 
@@ -101,7 +102,12 @@ export function reconcileInterruptedWork(now = new Date().toISOString()): Reconc
     const issue = sqliteService.getIssues().find(i => i.id === issueId);
     if (!issue || issue.status !== 'agent_running') continue;
 
-    sqliteService.updateIssue(issueId, { status: 'in_progress' });
+    /*
+     * Through the board, not the data layer. A crash leaves the card reading
+     * agent-running for the whole team, and nothing else will ever move it —
+     * the run that would have is the one that died.
+     */
+    updateIssueAndPush(issueId, { status: 'in_progress' });
     sqliteService.addIssueComment({
       id: `comm-interrupted-${issueId}-${Date.parse(now)}`,
       issueId,

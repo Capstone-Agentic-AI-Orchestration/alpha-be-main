@@ -8,6 +8,7 @@ import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
+import { mcpAccessFor } from './autonomyPolicy.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 import { RUNS_DIR } from '../config/env.js';
 import fs from 'node:fs';
@@ -458,7 +459,25 @@ export function buildTurnInvocation(
        * permission mode given on the command line.
        */
       ...(isRun
-        ? ['--permission-mode', 'acceptEdits', '--max-turns', String(EXECUTION_LIMITS.MAX_TURNS)]
+        ? [
+            '--permission-mode', 'acceptEdits',
+            '--max-turns', String(EXECUTION_LIMITS.MAX_TURNS),
+            /*
+             * The same allowlist the chat branch needs, for the same reason,
+             * and its absence here meant no agent had ever completed an MCP
+             * call in a run — 'alpha' 4, 'agent' 0 in remote_actions.
+             *
+             * `acceptEdits` covers edits, not MCP tools: those still ask, and a
+             * headless run has no one to ask. The call did not fail loudly,
+             * either — the agent reported that it had drafted a review and
+             * needed permission to post it, then the turn ended. Alpha's own
+             * pipeline pushes and opens the pull request straight afterwards,
+             * so from the outside the run looked like it had worked.
+             */
+            ...(mcp.serverNames.length
+              ? ['--allowedTools', ...mcpToolPatterns(mcp.serverNames)]
+              : [])
+          ]
         : [
             '--allowedTools', ...CHAT_ALLOWED_TOOLS, ...mcpToolPatterns(mcp.serverNames),
             '--disallowedTools', ...CHAT_DISALLOWED_TOOLS
@@ -539,7 +558,21 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   let bin = process.platform === 'win32' ? 'claude.cmd' : 'claude';
 
   // Resolve the agent's granted MCP servers into a config for this run only.
-  const mcp = writeRunMcpConfig(runId, options.mcpServers, options.mcpEnv, options.cwd);
+  /*
+   * Always read-only here. This function serves chat and the agent builder,
+   * never a run — and a chat turn has no branch, no diff and no approval gate,
+   * so nothing it did to a remote could be reviewed or undone. `mcp__alpha-github`
+   * sat in CHAT_ALLOWED_TOOLS, which made push and open-pull-request reachable
+   * from the sidebar; the allow-list works on server names, so the refusal has
+   * to happen inside the server.
+   */
+  const mcp = writeRunMcpConfig(
+    runId,
+    options.mcpServers,
+    options.mcpEnv,
+    options.cwd,
+    mcpAccessFor(undefined, 'chat')
+  );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
   }
