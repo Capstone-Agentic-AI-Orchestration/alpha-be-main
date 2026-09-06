@@ -15,7 +15,8 @@ import {
   Skill,
   RuntimeEngine,
   RunUsage,
-  SquadRun
+  SquadRun,
+  RemoteAction
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -178,6 +179,33 @@ export class SQLiteService {
         created_at TEXT NOT NULL,
         is_thinking INTEGER DEFAULT 0
       );
+
+      /**
+       * Everything Alpha or an agent did to a remote, and whether it worked.
+       *
+       * Agents can reach GitHub two ways: the MCP tools, and raw git or gh
+       * through Bash, which a run permits. Neither left a record anybody could
+       * read: a push appeared only in the CLI's own scrollback, and Alpha's own
+       * pushes only as a line in a stage log that a failure overwrote.
+       *
+       * No foreign key to runs. An action recorded a moment before a run row is
+       * rewritten must not vanish with it, and the point of an audit trail is
+       * that it outlives the thing it describes.
+       */
+      CREATE TABLE IF NOT EXISTS remote_actions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT,
+        agent_id TEXT,
+        issue_id TEXT,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT,
+        detail TEXT,
+        succeeded INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_remote_actions_run ON remote_actions(run_id);
 
       CREATE TABLE IF NOT EXISTS prototype_runs (
         id TEXT PRIMARY KEY,
@@ -400,7 +428,67 @@ export class SQLiteService {
        * Nullable: most issues are one agent working alone, which stays the
        * ordinary case.
        */
-      ['issues', 'assigned_squad_id TEXT']
+      ['issues', 'assigned_squad_id TEXT'],
+      /**
+       * Per-project environment values, for resolving `${VAR}` in MCP servers.
+       *
+       * The MCP catalog is one global file, so a hosted server appears once —
+       * but the thing it points at is per project. A Supabase MCP entry scoped
+       * with `?project_ref=${SUPABASE_PROJECT_REF}` is the same server for ALF
+       * and AFE and must not be the same Supabase project.
+       *
+       * Same shape and same validation as `agents.env_vars`, deliberately: two
+       * spellings of "environment values for this thing" would be one more
+       * place to look when a variable does not resolve.
+       *
+       * Nullable, and null is the ordinary case — a project that needs no
+       * per-project values resolves everything from the daemon's environment.
+       */
+      ['projects', 'env_vars TEXT'],
+      /**
+       * Who created an issue.
+       *
+       * There was no way to answer that, so "My Issues" filtered on "has any
+       * assignee" instead — which is neither mine nor created by me, and which
+       * one click on a filter chip undid.
+       *
+       * Holds a GitHub login where one is available, an OS username otherwise.
+       * Nullable, and null is correct for every issue that predates this: the
+       * author genuinely was not recorded, and inventing one would be worse
+       * than admitting it.
+       */
+      ['issues', 'created_by TEXT'],
+      /**
+       * The GitHub issue this card is.
+       *
+       * The board is one person's SQLite file, so a second collaborator
+       * installing Alpha gets an empty one and no way to ever see the first.
+       * GitHub already holds shared issues for the six people in this
+       * organisation, so it becomes the board and these two columns are the
+       * link back to it.
+       *
+       * Repository as well as number, because a number is only unique within
+       * one repository and a workspace spans several.
+       *
+       * Nullable: an issue created before the board was shared, or in a project
+       * with no GitHub repository attached, is a local card and stays one.
+       */
+      ['issues', 'github_repo TEXT'],
+      ['issues', 'github_number INTEGER'],
+      ['issues', 'github_url TEXT'],
+      /**
+       * The GitHub comment this one is, when it has reached GitHub.
+       *
+       * Comments are written from ten places — runs, squads, the review gate,
+       * issue creation — and only some of them are an HTTP request, so "push
+       * when a person acts" does not cover them. Null means "not on GitHub
+       * yet", which makes the push a query rather than a hook: send every
+       * comment without an id, record the id it comes back with.
+       *
+       * That is also what stops a loop. A comment pulled from GitHub arrives
+       * with its id already set, so it is never a candidate to be pushed back.
+       */
+      ['issue_comments', 'github_id INTEGER']
     ];
 
 
@@ -695,6 +783,7 @@ export class SQLiteService {
       leadAgentId: r.lead_agent_id,
       resources: JSON.parse(r.resources || '[]'),
       githubOrg: r.github_org || undefined,
+      envVars: JSON.parse(r.env_vars || '[]'),
       createdAt: r.created_at
     }));
   }
@@ -729,8 +818,8 @@ export class SQLiteService {
     } as Project;
 
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_at)
-      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdAt)
+      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, env_vars, created_at)
+      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @envVars, @createdAt)
     `);
     stmt.run({
       ...complete,
@@ -741,6 +830,7 @@ export class SQLiteService {
       leadAgentId: complete.leadAgentId || null,
       resources: JSON.stringify(complete.resources || []),
       githubOrg: complete.githubOrg || null,
+      envVars: JSON.stringify(complete.envVars || []),
       createdAt: complete.createdAt || now
     });
 
@@ -758,13 +848,14 @@ export class SQLiteService {
         name = @name, key = @key, description = @description, color = @color, icon = @icon,
         status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
         lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
-        github_org = @githubOrg
+        github_org = @githubOrg, env_vars = @envVars
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
       resources: JSON.stringify(merged.resources || []),
-      githubOrg: merged.githubOrg || null
+      githubOrg: merged.githubOrg || null,
+      envVars: JSON.stringify(merged.envVars || [])
     });
     return merged;
   }
@@ -1003,6 +1094,7 @@ export class SQLiteService {
         agentId: c.agent_id,
         content: c.content,
         isThinking: Boolean(c.is_thinking),
+        githubId: c.github_id ?? undefined,
         createdAt: c.created_at
       });
       commentsByIssue.set(c.issue_id, list);
@@ -1018,6 +1110,10 @@ export class SQLiteService {
       projectId: r.project_id,
       assignedAgentId: r.assigned_agent_id,
       assignedSquadId: r.assigned_squad_id ?? undefined,
+      createdBy: r.created_by ?? undefined,
+      githubRepo: r.github_repo ?? undefined,
+      githubNumber: r.github_number ?? undefined,
+      githubUrl: r.github_url ?? undefined,
       assignedHuman: r.assigned_human,
       labels: JSON.parse(r.labels || '[]'),
       subtasks: JSON.parse(r.subtasks || '[]'),
@@ -1083,8 +1179,8 @@ export class SQLiteService {
     } as Issue;
 
     const stmt = this.db.prepare(`
-      INSERT INTO issues (id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, labels, subtasks, branch_name, pr_url, created_at, updated_at)
-      VALUES (@id, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdAt, @updatedAt)
+      INSERT INTO issues (id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
+      VALUES (@id, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
       ...complete,
@@ -1094,10 +1190,28 @@ export class SQLiteService {
       assignedSquadId: complete.assignedSquadId || null,
       assignedHuman: complete.assignedHuman || null,
       branchName: complete.branchName || null,
-      prUrl: complete.prUrl || null
+      prUrl: complete.prUrl || null,
+      createdBy: complete.createdBy || null,
+      githubRepo: complete.githubRepo || null,
+      githubNumber: complete.githubNumber ?? null,
+      githubUrl: complete.githubUrl || null
     });
 
-    for (const c of complete.comments) this.addIssueComment(c);
+    /**
+     * Comments arrive from a caller that has no issue id to give them.
+     *
+     * `addIssueComment` binds `@issueId`, and a client composing a comment for
+     * an issue it is in the middle of creating cannot know one. The bind threw
+     * `RangeError: Missing named parameter "issueId"` — after the issue row was
+     * already written. So the issue existed, the request answered 500, and the
+     * browser reported "Issue not saved" about an issue that was saved.
+     *
+     * Filled in here rather than demanded of the caller: this method is the
+     * first moment the id exists.
+     */
+    for (const c of complete.comments) {
+      this.addIssueComment({ ...c, issueId: complete.id });
+    }
 
     return complete;
   }
@@ -1111,12 +1225,17 @@ export class SQLiteService {
         title = @title, description = @description, status = @status, priority = @priority,
         project_id = @projectId, assigned_agent_id = @assignedAgentId,
         assigned_squad_id = @assignedSquadId, assigned_human = @assignedHuman,
-        labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl, updated_at = @updatedAt
+        labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl,
+        github_repo = @githubRepo, github_number = @githubNumber, github_url = @githubUrl,
+        updated_at = @updatedAt
       WHERE id = @id
     `);
     stmt.run({
       ...merged,
       assignedSquadId: merged.assignedSquadId || null,
+      githubRepo: merged.githubRepo || null,
+      githubNumber: merged.githubNumber ?? null,
+      githubUrl: merged.githubUrl || null,
       labels: JSON.stringify(merged.labels || []),
       subtasks: JSON.stringify(merged.subtasks || [])
     });
@@ -1131,14 +1250,15 @@ export class SQLiteService {
 
   addIssueComment(c: IssueComment): IssueComment {
     const stmt = this.db.prepare(`
-      INSERT INTO issue_comments (id, issue_id, author_type, author_name, author_avatar, agent_id, content, is_thinking, created_at)
-      VALUES (@id, @issueId, @authorType, @authorName, @authorAvatar, @agentId, @content, @isThinking, @createdAt)
+      INSERT OR REPLACE INTO issue_comments (id, issue_id, author_type, author_name, author_avatar, agent_id, content, is_thinking, github_id, created_at)
+      VALUES (@id, @issueId, @authorType, @authorName, @authorAvatar, @agentId, @content, @isThinking, @githubId, @createdAt)
     `);
     stmt.run({
       ...c,
       authorAvatar: c.authorAvatar || null,
       agentId: c.agentId || null,
       isThinking: c.isThinking ? 1 : 0,
+      githubId: c.githubId ?? null,
       createdAt: c.createdAt || new Date().toISOString()
     });
     return c;
@@ -1250,6 +1370,67 @@ export class SQLiteService {
   }
 
   /** The member runs of a squad run, in execution order. */
+  // --- Remote actions (audit) ---
+
+  /**
+   * Append one thing done to a remote.
+   *
+   * Never throws. An audit write failing must not take down the push it was
+   * describing — the push already happened, and losing the record of it is the
+   * lesser loss. Written from two processes: the daemon, and the MCP server
+   * that runs as a grandchild of it. WAL and the busy timeout set in
+   * initPragmas are what make that safe.
+   */
+  recordRemoteAction(action: Omit<RemoteAction, 'id' | 'createdAt'> & Partial<Pick<RemoteAction, 'id' | 'createdAt'>>): void {
+    try {
+      const createdAt = action.createdAt ?? new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO remote_actions
+             (id, run_id, agent_id, issue_id, actor, action, target, detail, succeeded, created_at)
+           VALUES (@id, @runId, @agentId, @issueId, @actor, @action, @target, @detail, @succeeded, @createdAt)`
+        )
+        .run({
+          id: action.id ?? `ra-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          runId: action.runId ?? null,
+          agentId: action.agentId ?? null,
+          issueId: action.issueId ?? null,
+          actor: action.actor,
+          action: action.action,
+          target: action.target ?? null,
+          detail: action.detail ?? null,
+          succeeded: action.succeeded ? 1 : 0,
+          createdAt
+        });
+    } catch (err) {
+      console.error('[db] could not record remote action:', err);
+    }
+  }
+
+  /** Oldest first, so a run's remote history reads as a sequence. */
+  getRemoteActions(runId?: string): RemoteAction[] {
+    const rows = runId
+      ? (this.db
+          .prepare('SELECT * FROM remote_actions WHERE run_id = ? ORDER BY created_at ASC')
+          .all(runId) as any[])
+      : (this.db
+          .prepare('SELECT * FROM remote_actions ORDER BY created_at DESC LIMIT 200')
+          .all() as any[]);
+
+    return rows.map(r => ({
+      id: r.id,
+      runId: r.run_id ?? undefined,
+      agentId: r.agent_id ?? undefined,
+      issueId: r.issue_id ?? undefined,
+      actor: r.actor,
+      action: r.action,
+      target: r.target ?? undefined,
+      detail: r.detail ?? undefined,
+      succeeded: r.succeeded === 1,
+      createdAt: r.created_at
+    }));
+  }
+
   getRunsForSquadRun(squadRunId: string): PrototypeRun[] {
     return this.getPrototypeRuns()
       .filter(r => r.squadRunId === squadRunId)

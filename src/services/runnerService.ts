@@ -15,6 +15,8 @@ import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, checkoutBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
 import { githubService } from './githubService.js';
 import { supabaseService } from './supabaseService.js';
+import { isFinalSquadMember } from './squadPosition.js';
+import { workspaceQueue } from './workspaceQueue.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue } from '../models/index.js';
 import { RUNS_DIR } from '../config/env.js';
@@ -105,8 +107,21 @@ export class RunnerService extends EventEmitter {
       params.squad?.branchName ??
       `feat/${issue.identifier.toLowerCase()}-${Date.now().toString().slice(-4)}`;
 
+    /**
+     * Is anything already using this checkout?
+     *
+     * Asked before enqueuing, because the answer decides what this run honestly
+     * is: started, or waiting for a directory somebody else holds.
+     */
+    const queuedBehind = workspaceQueue.depth(cwd);
+    const waitNote = queuedBehind === 1
+      ? 'Waiting for 1 earlier run to finish in this workspace.'
+      : `Waiting for ${queuedBehind} earlier runs to finish in this workspace.`;
+
     const stages: PrototypeRunStage[] = [
-      { id: 'workspace', label: 'Preparing workspace', description: 'Checking out branch and initializing environment.', status: 'running', logs: [`Target repository: ${cwd}`, `Checking out branch: ${branchName}`], startedAt: now },
+      queuedBehind
+        ? { id: 'workspace', label: 'Preparing workspace', description: 'Checking out branch and initializing environment.', status: 'pending', logs: [`Target repository: ${cwd}`, waitNote] }
+        : { id: 'workspace', label: 'Preparing workspace', description: 'Checking out branch and initializing environment.', status: 'running', logs: [`Target repository: ${cwd}`, `Checking out branch: ${branchName}`], startedAt: now },
       { id: 'analysis', label: 'Analyzing context', description: 'Inspecting repository files, dependencies, and requirements.', status: 'pending', logs: [] },
       { id: 'implementation', label: 'Implementing changes', description: 'Applying code edits and generating required files.', status: 'pending', logs: [] },
       { id: 'tests', label: 'Running verification tests', description: 'Executing test suites, linting, and typechecks.', status: 'pending', logs: [] },
@@ -118,7 +133,7 @@ export class RunnerService extends EventEmitter {
       issueId,
       projectId: project.id,
       agentId,
-      status: 'running',
+      status: queuedBehind ? 'queued' : 'running',
       scenario,
       plan,
       currentStageIndex: 0,
@@ -152,25 +167,46 @@ export class RunnerService extends EventEmitter {
       authorName: agent.name,
       authorAvatar: agent.avatar,
       agentId: agent.id,
-      content: `Started autonomous execution for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`.`,
+      // Says what is true right now. A run that is waiting for the workspace
+      // has not started anything, and the comment is a permanent record.
+      content: queuedBehind
+        ? `Queued for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`. ${waitNote}`
+        : `Started autonomous execution for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`.`,
       createdAt: now,
       isThinking: true
     });
 
-    // Execute asynchronously in background
-    this.executeTask({
-      runId,
-      issue,
-      agent,
-      project,
-      cwd,
-      branchName,
-      plan,
-      squad: params.squad
-    }).catch(err => {
-      logError(`Execution error in run ${runId}:`, err);
-      this.markRunFailed(runId, err.message);
-    });
+    /**
+     * Executed in the background, but one at a time per working directory.
+     *
+     * Every run for this project checks out its branch in `cwd`, and `cwd` is
+     * the same directory for all of them. Before the queue, a second run's
+     * `git checkout -B` moved the working tree while the first agent was still
+     * editing it, and both wrote to whichever branch was current. Runs in other
+     * projects are unaffected: they have their own directory and their own
+     * queue.
+     */
+    workspaceQueue
+      .run(cwd, async () => {
+        // Waiting is over; say so before the first stage moves.
+        const queued = sqliteService.getPrototypeRuns().find(r => r.id === runId);
+        if (queued?.status === 'queued') this.markRunStarted(runId);
+
+        await this.executeTask({
+          runId,
+          issue,
+          agent,
+          project,
+          cwd,
+          branchName,
+          plan,
+          squad: params.squad
+        });
+      })
+      .catch(err => {
+        logError(`Execution error in run ${runId}:`, err);
+        this.markRunFailed(runId, err.message);
+      });
 
     return runRecord;
   }
@@ -211,9 +247,6 @@ export class RunnerService extends EventEmitter {
     this.advanceStage(runId, 'workspace', 'success');
     this.advanceStage(runId, 'analysis', 'running');
 
-    // 2. Build task prompt with project rules & issue details
-    const prompt = this.buildTaskPrompt(issue, plan, ctx.squad?.handoff);
-
     // 3. Prepare run directory for per-run configs
     const runDir = path.join(RUNS_DIR, runId);
     fs.mkdirSync(runDir, { recursive: true });
@@ -248,8 +281,30 @@ export class RunnerService extends EventEmitter {
       includeToolPolicy: false
     });
 
+    /**
+     * The agent's MCP servers, which a run never received.
+     *
+     * `writeRunMcpConfig(runId, undefined)` stood here with nothing to say it
+     * was deliberate. Chat passed `persona.mcpServers` and always had, so
+     * granting an agent a server worked when you talked to it and did nothing
+     * when it worked a card — the half of Alpha the grant exists for.
+     *
+     * The environment is layered project-then-agent so one global catalog entry
+     * resolves to this project's Supabase (or database, or workspace). The
+     * agent wins a collision because it is the narrower of the two: a project
+     * value is a default for everyone working the board, and an agent's is a
+     * deliberate exception to it.
+     */
+    const { env: projectEnv } = buildEnv(ctx.project?.envVars);
     const { env } = buildEnv(agent.envVars);
-    const mcp = writeRunMcpConfig(runId, undefined);
+    const mcp = writeRunMcpConfig(runId, persona.mcpServers, { ...projectEnv, ...env }, cwd);
+
+    /**
+     * Built after the MCP config, because it names the tools this run has.
+     * Constructing it earlier meant promising a push tool before knowing
+     * whether the agent had been granted one.
+     */
+    const prompt = this.buildTaskPrompt(issue, plan, ctx.squad?.handoff, mcp.serverNames);
 
     const invocation = buildTurnInvocation(
       {
@@ -336,7 +391,13 @@ export class RunnerService extends EventEmitter {
     sqliteService.savePrototypeRun({ ...run, usage });
   }
 
-  private buildTaskPrompt(issue: Issue, plan: string[], handoff?: string): string {
+  private buildTaskPrompt(
+    issue: Issue,
+    plan: string[],
+    handoff?: string,
+    /** MCP servers this run actually has, so the prompt promises only those. */
+    mcpServers: string[] = []
+  ): string {
     const planSection = plan.length > 0
       ? `\n\nExecution Plan:\n${plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
       : '';
@@ -355,6 +416,28 @@ export class RunnerService extends EventEmitter {
 
 ${handoff}` : '';
 
+    /**
+     * Say that the shell cannot reach GitHub, and what to use instead.
+     *
+     * The credentials are stripped from this process (see
+     * gitCredentialIsolation), so `git push` fails with an authentication
+     * error that reads like a broken machine. An agent that does not know why
+     * retries it, tries `gh auth login`, and burns the turn on a wall it
+     * cannot climb. Naming the working route costs a sentence.
+     *
+     * Only stated when the tools are actually granted. Telling an agent to use
+     * a tool it does not have is worse than saying nothing.
+     */
+    const canPush = mcpServers.includes('alpha-github');
+    const remoteSection = canPush
+      ? `
+
+Pushing your work:
+- \`git\` and \`gh\` in the shell cannot reach GitHub — credentials are deliberately not in this environment.
+- Use the \`github_push_branch\` tool to commit and push, and \`github_open_pull_request\` when the work is ready for review.
+- Local git is unaffected: \`git status\`, \`git diff\` and \`git log\` all work normally.`
+      : '';
+
     return `You are working on Issue ${issue.identifier}: ${issue.title}
 
 Description:
@@ -364,7 +447,7 @@ Instructions:
 1. First analyze relevant files in the workspace.
 2. Implement the required changes cleanly and concisely.
 3. Run existing tests or add new tests to verify your implementation.
-4. Summarize your completed work.`;
+4. Summarize your completed work.${remoteSection}`;
   }
 
   private async handleProcessExit(runId: string, cwd: string, branchName: string, issue: Issue, code: number | null) {
@@ -404,16 +487,33 @@ Instructions:
        * pull requests for the same issue, three of them against unfinished work.
        */
       const squadRun = run.squadRunId ? sqliteService.getSquadRun(run.squadRunId) : undefined;
-      const isFinalMember =
-        !squadRun || run.squadOrder === squadRun.memberAgentIds.length - 1;
+      const isFinalMember = isFinalSquadMember(run, squadRun);
 
       let prUrl: string | undefined;
       try {
         const isRepo = await isGitRepo(cwd);
         if (isRepo) {
           const commitMsg = `feat(${issue.identifier.toLowerCase()}): ${issue.title} [${issue.identifier}]`;
-          await githubService.commitAndPush(cwd, branchName, commitMsg);
-          this.appendLog(runId, 'review', `Committed and pushed: "${commitMsg}" to ${branchName}`);
+          const committed = await githubService.commitAndPush(cwd, branchName, commitMsg);
+          this.appendLog(
+            runId,
+            'review',
+            committed
+              ? `Committed and pushed: "${commitMsg}" to ${branchName}`
+              : `Nothing left to commit — the agent had already committed its work. Pushed ${branchName}.`
+          );
+          // Recorded whoever did the committing, so the trail shows the push
+          // even when the agent made the commits itself.
+          sqliteService.recordRemoteAction({
+            runId,
+            agentId: run.agentId,
+            issueId: issue.id,
+            actor: 'alpha',
+            action: 'push',
+            target: branchName,
+            detail: committed ? commitMsg : 'Already committed by the agent; branch pushed.',
+            succeeded: true
+          });
 
           const prBody = `## Summary of Changes
 Closes ${issue.identifier}: ${issue.title}
@@ -450,15 +550,48 @@ ${issue.description}
             if (createdPr) {
               prUrl = createdPr;
               this.appendLog(runId, 'review', `Created GitHub Pull Request: ${prUrl}`);
+              sqliteService.recordRemoteAction({
+                runId,
+                agentId: run.agentId,
+                issueId: issue.id,
+                actor: 'alpha',
+                action: 'open_pull_request',
+                target: prUrl,
+                detail: `${branchName} into main`,
+                succeeded: true
+              });
             }
           } catch (prErr: any) {
+            // A skipped pull request is a mid-squad handover, not a failure —
+            // recording it as one would put a red line in the trail for a
+            // member that did exactly the right thing.
             if (!(prErr instanceof SkipPullRequest)) {
               this.appendLog(runId, 'review', `PR Note: ${prErr.message || prErr}`);
+              sqliteService.recordRemoteAction({
+                runId,
+                agentId: run.agentId,
+                issueId: issue.id,
+                actor: 'alpha',
+                action: 'open_pull_request',
+                target: branchName,
+                detail: String(prErr?.message ?? prErr),
+                succeeded: false
+              });
             }
           }
         }
       } catch (gitErr: any) {
         this.appendLog(runId, 'review', `Git automation notice: ${gitErr.message || gitErr}`);
+        sqliteService.recordRemoteAction({
+          runId,
+          agentId: run.agentId,
+          issueId: issue.id,
+          actor: 'alpha',
+          action: 'push',
+          target: branchName,
+          detail: String(gitErr?.message ?? gitErr),
+          succeeded: false
+        });
       }
 
       /**
@@ -518,14 +651,31 @@ ${issue.description}
       };
 
       sqliteService.savePrototypeRun(finalRun);
-      sqliteService.updateIssue(issue.id, {
-        status: 'review',
-        prUrl
-      });
+
+      /**
+       * A member finishing is not the squad finishing.
+       *
+       * `isFinalMember` above already stopped the middle of a squad opening
+       * four pull requests for one issue. This line had no such guard, so the
+       * first member to finish moved the card to Review while three agents were
+       * still committing to the shared branch — the board said the work was
+       * ready to look at, and the work had not happened yet.
+       *
+       * A mid-squad member leaves the card in `agent_running`, which is what it
+       * is. squadRunner emits `squad_run_completed` when the last one lands.
+       */
+      if (isFinalMember) {
+        sqliteService.updateIssue(issue.id, {
+          status: 'review',
+          prUrl
+        });
+      }
 
       if (supabaseService.isConfigured()) {
         supabaseService.saveRunToCloud(finalRun).catch(() => {});
-        supabaseService.updateIssueInCloud(issue.id, { status: 'review', prUrl }).catch(() => {});
+        if (isFinalMember) {
+          supabaseService.updateIssueInCloud(issue.id, { status: 'review', prUrl }).catch(() => {});
+        }
         supabaseService.broadcastRunEvent(runId, { type: 'run_completed', payload: finalRun }).catch(() => {});
       }
 
@@ -604,6 +754,38 @@ ${issue.description}
 
     if (supabaseService.isConfigured()) {
       supabaseService.broadcastRunEvent(runId, { type: 'log_chunk', payload: eventPayload }).catch(() => {});
+    }
+  }
+
+  /**
+   * A queued run reaching the front of its workspace queue.
+   *
+   * Only the transition out of `queued` needs announcing: everything after it
+   * is already covered by stage updates. Without this the run would sit at
+   * `queued` in the UI for its whole life, because nothing else ever writes
+   * that field until the run finishes.
+   */
+  private markRunStarted(runId: string) {
+    const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
+    if (!run) return;
+
+    const now = new Date().toISOString();
+    const startedRun: PrototypeRun = {
+      ...run,
+      status: 'running',
+      stages: run.stages.map((s, idx) =>
+        idx === 0
+          ? { ...s, status: 'running' as const, startedAt: s.startedAt || now, logs: [...s.logs, `Checking out branch: ${run.branchName}`] }
+          : s
+      ),
+      updatedAt: now
+    };
+
+    sqliteService.savePrototypeRun(startedRun);
+    this.emit('run_started', startedRun);
+
+    if (supabaseService.isConfigured()) {
+      supabaseService.saveRunToCloud(startedRun).catch(() => {});
     }
   }
 

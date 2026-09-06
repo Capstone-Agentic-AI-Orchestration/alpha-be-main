@@ -127,6 +127,23 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       typecheck: 'tsc --noEmit',
       lint: 'eslint src tests'
     };
+  } else if (stack === 'react') {
+    /**
+     * A browser toolchain, because this is the stack people pick when they
+     * want a web app.
+     *
+     * It used to fall through to the Node defaults below — `tsc` to `dist/`,
+     * `node dist/index.js` to start, `ts-node src/index.ts` to develop. That
+     * builds and runs and is not a web application by any definition.
+     */
+    scripts = {
+      build: 'tsc --noEmit && vite build',
+      start: 'vite preview',
+      dev: 'vite',
+      test: 'jest',
+      typecheck: 'tsc --noEmit',
+      lint: 'eslint src tests'
+    };
   } else if (stack === 'nestjs') {
     scripts = {
       build: 'tsc -p tsconfig.build.json',
@@ -173,6 +190,12 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
     pkg.dependencies['react-dom'] = '^19.0.0';
     pkg.devDependencies['@types/react'] = '^19.0.0';
     pkg.devDependencies['@types/react-dom'] = '^19.0.0';
+  }
+
+  if (stack === 'react') {
+    // Next brings its own bundler; a plain React app has none until given one.
+    pkg.devDependencies['vite'] = '^6.0.0';
+    pkg.devDependencies['@vitejs/plugin-react'] = '^4.3.4';
   }
 
   if (stack === 'nextjs') {
@@ -461,6 +484,73 @@ function buildNextConfig(): string {
 // test, so lint, test, build and typecheck all pass without committing the
 // project to Vite or CRA. The bundler is the developer's choice to add.
 
+/**
+ * The page a browser actually loads.
+ *
+ * Without this the React stack produced a Node program: `dev` ran
+ * `ts-node src/index.ts`, `start` ran `node dist/index.js`, and `App.tsx` sat
+ * beside them with nothing mounting or serving it. It typechecked and its tests
+ * passed, so nothing complained — it simply was not a web app, which is the one
+ * thing someone choosing "React" is asking for.
+ */
+function buildViteIndexHtml(serviceName: string): string {
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '  <head>',
+    '    <meta charset="UTF-8" />',
+    '    <meta name="viewport" content="width=device-width, initial-scale=1.0" />',
+    `    <title>${serviceName}</title>`,
+    '  </head>',
+    '  <body>',
+    '    <div id="root"></div>',
+    '    <script type="module" src="/src/main.tsx"></script>',
+    '  </body>',
+    '</html>',
+    ''
+  ].join('\n');
+}
+
+/** Mounts the component. The missing link between App.tsx and the page. */
+function buildViteMain(): string {
+  return [
+    "import { StrictMode } from 'react';",
+    "import { createRoot } from 'react-dom/client';",
+    "import { App } from './App';",
+    '',
+    "const root = document.getElementById('root');",
+    'if (!root) throw new Error(\'No #root element in index.html\');',
+    '',
+    'createRoot(root).render(',
+    '  <StrictMode>',
+    '    <App />',
+    '  </StrictMode>',
+    ');',
+    ''
+  ].join('\n');
+}
+
+function buildViteConfig(): string {
+  return [
+    "import { defineConfig } from 'vite';",
+    "import react from '@vitejs/plugin-react';",
+    '',
+    'export default defineConfig({',
+    '  plugins: [react()],',
+    '  server: {',
+    '    port: 5173,',
+    '    // Fail rather than silently taking the next port, so the URL printed',
+    '    // is the URL that works.',
+    '    strictPort: true',
+    '  },',
+    '  build: {',
+    "    outDir: 'dist'",
+    '  }',
+    '});',
+    ''
+  ].join('\n');
+}
+
 function buildReactApp(serviceName: string): string {
   return [
     'export interface AppProps {',
@@ -567,10 +657,30 @@ function buildStandaloneScaffold(options: BuildScaffoldOptions): ScaffoldFile[] 
     { path: 'tests/unit/index.spec.ts', content: buildEntrySpec(serviceName, '../../src/index') }
   ];
 
-  // next build runs its own pipeline; only tsc-built stacks need the src-only
-  // emit config.
-  if (stack !== 'nextjs') {
+  /**
+   * Only the stacks that compile with tsc need an emit config.
+   *
+   * `next build` and `vite build` each run their own pipeline, and shipping a
+   * `tsconfig.build.json` neither of them reads is a file that looks load-bearing
+   * and is not.
+   */
+  if (stack !== 'nextjs' && stack !== 'react') {
     files.push({ path: 'tsconfig.build.json', content: buildBuildTsConfig() });
+  }
+
+  /**
+   * A browser app has no service entry point.
+   *
+   * `src/index.ts` exports a SERVICE_NAME constant and `tests/unit/index.spec.ts`
+   * asserts it — right for a Node service, and for React it was the whole
+   * illusion: a file the toolchain treated as the program, next to an App.tsx
+   * nothing rendered. `src/main.tsx` is the entry point here.
+   */
+  if (stack === 'react') {
+    const nodeEntryPoints = new Set(['src/index.ts', 'tests/unit/index.spec.ts']);
+    for (let i = files.length - 1; i >= 0; i -= 1) {
+      if (nodeEntryPoints.has(files[i].path)) files.splice(i, 1);
+    }
   }
 
   if (stack === 'nestjs') {
@@ -586,6 +696,9 @@ function buildStandaloneScaffold(options: BuildScaffoldOptions): ScaffoldFile[] 
     );
   } else if (stack === 'react') {
     files.push(
+      { path: 'index.html', content: buildViteIndexHtml(serviceName) },
+      { path: 'vite.config.ts', content: buildViteConfig() },
+      { path: 'src/main.tsx', content: buildViteMain() },
       { path: 'src/App.tsx', content: buildReactApp(serviceName) },
       { path: 'tests/unit/App.spec.tsx', content: buildReactAppSpec(serviceName, '../../src/App') }
     );

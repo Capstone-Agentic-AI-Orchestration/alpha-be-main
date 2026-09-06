@@ -49,6 +49,13 @@ export interface IssueSubtask {
 }
 
 export interface IssueComment {
+  /**
+   * The GitHub comment id, once this has been published there.
+   *
+   * Absent means local-only and still to be pushed — which is how the sync
+   * knows what to send without a separate queue.
+   */
+  githubId?: number;
   id: string;
   issueId: string;
   authorType: 'user' | 'agent' | 'system';
@@ -67,6 +74,16 @@ export interface Issue {
   description: string;
   status: IssueStatus;
   priority: IssuePriority;
+  /**
+   * Who created this issue — a GitHub login, or an OS username when GitHub is
+   * not signed in. Absent on issues written before Alpha recorded it.
+   */
+  createdBy?: string;
+  /** `owner/repo` of the GitHub issue this is, when the board is shared. */
+  githubRepo?: string;
+  /** Issue number within that repository. Unique only alongside `githubRepo`. */
+  githubNumber?: number;
+  githubUrl?: string;
   projectId: string;
   assignedAgentId?: string;
   /**
@@ -122,7 +139,16 @@ export interface Project {
    * create one at all.
    */
   githubOrg?: string;
-  createdAt: string;
+  createdAt: string;
+  /**
+   * Environment values for work on this project.
+   *
+   * Resolves `${VAR}` in MCP server definitions, so one global catalog entry
+   * can point at a different Supabase project (or database, or workspace) per
+   * Alpha project. Overrides the daemon's own environment; an agent's own
+   * envVars override these in turn.
+   */
+  envVars?: { key: string; value: string; isSecret?: boolean }[];
 }
 
 export type StageId = 'workspace' | 'analysis' | 'implementation' | 'tests' | 'review';
@@ -196,7 +222,12 @@ export interface PrototypeRun {
   issueId: string;
   projectId: string;
   agentId: string;
-  status: 'running' | 'awaiting_approval' | 'validating' | 'failed' | 'completed' | 'cancelled';
+  /**
+   * `queued` means accepted but not started: another run holds this project's
+   * working directory. Reporting it as `running` would be the same untruth as
+   * a run claiming tests it never executed — nothing is executing yet.
+   */
+  status: 'queued' | 'running' | 'awaiting_approval' | 'validating' | 'failed' | 'completed' | 'cancelled';
   scenario?: 'success' | 'test_failure' | 'review_required';
   plan: string[];
   currentStageIndex: number;
@@ -320,4 +351,28 @@ export interface Squad {
   mission: string;
   activeRunsCount: number;
   completedRunsCount: number;
+}
+
+/**
+ * One thing Alpha or an agent did to a remote repository.
+ *
+ * `actor` distinguishes them because the answer to "who pushed this" was
+ * previously unavailable: Alpha's pipeline and the agent it was running both
+ * reached GitHub, and neither left a record the UI could show.
+ */
+export interface RemoteAction {
+  id: string;
+  runId?: string;
+  agentId?: string;
+  issueId?: string;
+  /** `alpha` is the pipeline acting on its own; `user` is a person in the UI. */
+  actor: 'agent' | 'alpha' | 'user';
+  /** What was attempted, e.g. `push`, `open_pull_request`, `merge_pull_request`. */
+  action: string;
+  /** What it acted on — a branch name or a pull request URL. */
+  target?: string;
+  /** One sentence of outcome, or the failure reason. */
+  detail?: string;
+  succeeded: boolean;
+  createdAt: string;
 }

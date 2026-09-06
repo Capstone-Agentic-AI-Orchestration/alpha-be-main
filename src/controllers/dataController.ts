@@ -1,4 +1,7 @@
 import { Request, Response, Router } from 'express';
+import { currentIdentity } from '../services/identityService.js';
+import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
+import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { agentValidationError } from './agentValidation.js';
 import { checkWorkspace } from './workspaceValidation.js';
@@ -18,6 +21,32 @@ import { Agent } from '../models/index.js';
 import { logError, logInfo } from '../utils/logger.js';
 
 export const dataRouter = Router();
+
+/**
+ * Who Alpha thinks you are.
+ *
+ * The browser had no way to ask: `currentUser` was picked from a mock array by
+ * whichever role the switcher was on. This is the GitHub login the org, the
+ * teams and every pull request already use, or the OS username when GitHub is
+ * not signed in — `source` says which, so the UI can be honest about it.
+ */
+dataRouter.get('/me', async (_req: Request, res: Response) => {
+  res.json(await currentIdentity());
+});
+
+/**
+ * Read the shared board down from GitHub.
+ *
+ * Explicit rather than automatic: a sync spawns `gh` once per project and
+ * rewrites cards, and doing that on a timer nobody asked for would make the
+ * board move under someone mid-sentence. The UI calls this on demand.
+ */
+dataRouter.post('/board/sync', async (_req: Request, res: Response) => {
+  const report = await syncBoardFromGitHub();
+  // 200 even with per-project errors: a workspace where one repository is
+  // unreachable still synced the others, and the report says which failed.
+  res.json(report);
+});
 
 // --- Projects ---
 dataRouter.get('/projects', (req: Request, res: Response) => {
@@ -277,15 +306,91 @@ dataRouter.get('/issues', (req: Request, res: Response) => {
   res.json(sqliteService.getIssues());
 });
 
-dataRouter.post('/issues', (req: Request, res: Response) => {
-  const issue = sqliteService.createIssue(req.body);
-  res.status(201).json(issue);
+/**
+ * Create an issue. The daemon owns the identifier and the author.
+ *
+ * The browser used to send both: an identifier built as `issues.length + 101`
+ * — a count of every issue in every project — and a system comment quoting it.
+ * `createIssue` honours a supplied identifier, so `nextIssueIdentifier`, which
+ * numbers per project correctly, never ran for anything made in the UI. The
+ * first issue of a new project came out as TES-107 because six issues happened
+ * to exist elsewhere, and two creates at the same count would collide against
+ * a UNIQUE column.
+ *
+ * Dropping both here rather than trusting the client keeps one authority for
+ * each, and the numbering stays right no matter who is calling.
+ */
+dataRouter.post('/issues', async (req: Request, res: Response) => {
+  const { identifier: _ignored, comments: _alsoIgnored, ...rest } = req.body ?? {};
+
+  const identity = await currentIdentity();
+  const issue = sqliteService.createIssue({ ...rest, createdBy: rest.createdBy || identity.login });
+
+  /**
+   * The opening comment, written where the real identifier is known.
+   *
+   * Composed by the browser before, against the identifier it had guessed — so
+   * it named an issue that did not exist under that name.
+   */
+  sqliteService.addIssueComment({
+    id: `comm-${issue.id}-created`,
+    issueId: issue.id,
+    authorType: 'system',
+    authorName: 'Alpha',
+    content: `${issue.identifier} created by ${identity.login}.`,
+    createdAt: issue.createdAt
+  });
+
+  // Re-read so the response carries the comment rather than making the client
+  // guess at one.
+  let saved = sqliteService.getIssues().find(i => i.id === issue.id) ?? issue;
+
+  /**
+   * Publish it, so it is a card everyone can see rather than a row on one
+   * laptop.
+   *
+   * Awaited rather than fired and forgotten: the response carries the issue
+   * number, and a card that does not know which GitHub issue it is cannot be
+   * updated later. A project with no repository pushes nothing and is fine.
+   */
+  const push = await pushIssue(saved);
+  if (push.patch) {
+    sqliteService.updateIssue(saved.id, push.patch);
+    saved = sqliteService.getIssues().find(i => i.id === saved.id) ?? saved;
+  }
+
+  // 201 with a warning rather than an error: the issue exists locally and
+  // refusing it now would lose work the person already did.
+  res.status(201).json(push.error ? { ...saved, syncWarning: push.error } : saved);
 });
 
-dataRouter.put('/issues/:id', (req: Request, res: Response) => {
+dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
+  const before = sqliteService.getIssues().find(i => i.id === req.params.id);
+  if (!before) return res.status(404).json({ error: 'Issue not found' });
+
   const updated = sqliteService.updateIssue(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Issue not found' });
-  res.json(updated);
+
+  /**
+   * Only when a field GitHub owns actually moved.
+   *
+   * Assigning an agent or attaching a branch is Alpha's own business, and
+   * calling GitHub for it would spend a request to change nothing.
+   */
+  if (!needsPush(before, updated)) return res.json(updated);
+
+  const push = await pushIssue(updated);
+  if (push.patch) sqliteService.updateIssue(updated.id, push.patch);
+
+  const saved = sqliteService.getIssues().find(i => i.id === updated.id) ?? updated;
+  /**
+   * A failed push is reported, never swallowed.
+   *
+   * The local write already happened, so this is not a 4xx — but the browser
+   * has to know, or the board shows a state GitHub never accepted and the next
+   * sync silently reverts it.
+   */
+  res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
 });
 
 dataRouter.delete('/issues/:id', (req: Request, res: Response) => {
