@@ -15,6 +15,9 @@ import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { runtimeService } from './services/runtimeService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
+import { reconcileOnStartup } from './services/startupReconcile.js';
+import { warmIdentity } from './services/identityService.js';
+import { jsonErrorHandler } from './controllers/errorHandler.js';
 import { sqliteService } from './services/sqliteService.js';
 import { ensureAgentFiles } from './services/agentFileService.js';
 import { ensureMemoryScaffold } from './services/memoryService.js';
@@ -85,6 +88,14 @@ app.use('/api', githubRouter);
 app.use('/api', chatRouter);
 app.use('/api', mcpRouter);
 
+/**
+ * Last in the chain, so every route above answers failures as JSON.
+ *
+ * Without it Express returned an HTML page with a stack trace, and the browser
+ * put the whole document into a toast.
+ */
+app.use(jsonErrorHandler);
+
 app.get('/api/download/desktop', (req, res) => {
   const zipPath = path.resolve('..', 'Alpha-v2-FullPlatform.zip');
   if (fs.existsSync(zipPath)) {
@@ -146,6 +157,20 @@ runnerService.on('log_chunk', (data) => broadcast({ type: 'log_chunk', payload: 
 runnerService.on('run_completed', (data) => broadcast({ type: 'run_completed', payload: data }));
 runnerService.on('run_failed', (data) => broadcast({ type: 'run_failed', payload: data }));
 runnerService.on('run_cancelled', (data) => broadcast({ type: 'run_cancelled', payload: data }));
+// A queued run reaching the front of its workspace queue.
+runnerService.on('run_started', (data) => broadcast({ type: 'run_started', payload: data }));
+
+/**
+ * Squad events, which were emitted and never forwarded.
+ *
+ * `squadRunner` raises these on runnerService's emitter, but only the five
+ * run-level names above were subscribed — so a squad run reached the browser
+ * only through its members' stage updates, with nothing saying which member was
+ * working or how many were left.
+ */
+runnerService.on('squad_member_started', (data) => broadcast({ type: 'squad_member_started', payload: data }));
+runnerService.on('squad_run_completed', (data) => broadcast({ type: 'squad_run_completed', payload: data }));
+runnerService.on('squad_run_failed', (data) => broadcast({ type: 'squad_run_failed', payload: data }));
 
 // Subscribe chat events to WebSocket broadcast
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
@@ -153,6 +178,19 @@ chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', paylo
 server.listen(PORT, HOST, () => {
   logInfo(`Alpha v2 Execution Engine & Backend Daemon running on http://${HOST}:${PORT}`);
   logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  /**
+   * Close out anything the previous process was in the middle of.
+   *
+   * First, before any of the optional scaffolding: these rows are what the UI
+   * loads on connect, and a card stuck in Agent Running with no process behind
+   * it is the first thing a returning user sees.
+   */
+  reconcileOnStartup();
+
+  // Resolve who is using this copy, so the first issue anyone creates does not
+  // pay for a `gh` subprocess.
+  warmIdentity();
 
   // Write a starter MCP catalog if the user has none, so the file is
   // discoverable rather than something you have to know to create.
