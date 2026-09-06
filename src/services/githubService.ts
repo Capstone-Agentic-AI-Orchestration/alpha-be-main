@@ -198,7 +198,7 @@ export interface IGitHubService {
   inspectLocalRepo(cwd: string): Promise<RepoInspection>;
   getWorkflowRuns(cwdOrRepo?: string, limit?: number): Promise<WorkflowRun[]>;
   getFailedWorkflowLogs(cwdOrRepo: string, runId: string | number): Promise<string>;
-  commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void>;
+  commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<boolean>;
   createPullRequest(cwd: string, title: string, body: string, base?: string, headBranch?: string): Promise<string>;
   mergePullRequest(cwd: string, prUrlOrNumber: string, method?: 'squash' | 'merge' | 'rebase'): Promise<string>;
   getOAuthLoginUrl(state?: string): { url: string; state: string };
@@ -552,11 +552,40 @@ export class GhCliGitHubService implements IGitHubService {
    * agent-authored message reaches here unmodified. execFile removes the shell,
    * so none of it is interpretable.
    */
-  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
+  /**
+   * Stage everything, commit if there is anything to commit, and push.
+   *
+   * The commit is conditional because "nothing to commit" is not a failure of
+   * this method — its job is to leave the branch pushed, and a branch whose work
+   * is already committed is in exactly that state.
+   *
+   * It used to throw there, and the run pipeline calls this immediately before
+   * opening the pull request inside the same try block. So once an agent could
+   * commit its own work (github_push_branch), the pipeline's commit would fail
+   * on the empty index, jump to the catch, and skip the pull request entirely —
+   * a run that did everything right and opened nothing.
+   *
+   * @returns whether a new commit was created.
+   */
+  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<boolean> {
     assertSafeBranchName(branchName);
     await execFileAsync('git', ['add', '-A'], { cwd });
-    await execFileAsync('git', ['commit', '-m', commitMessage], { cwd });
+
+    // `diff --cached --quiet` exits 1 when the index holds changes. Asking git
+    // is the only reliable test; parsing `status` output is not.
+    let hasStagedChanges = false;
+    try {
+      await execFileAsync('git', ['diff', '--cached', '--quiet'], { cwd });
+    } catch {
+      hasStagedChanges = true;
+    }
+
+    if (hasStagedChanges) {
+      await execFileAsync('git', ['commit', '-m', commitMessage], { cwd });
+    }
+
     await execFileAsync('git', ['push', '-u', 'origin', branchName], { cwd });
+    return hasStagedChanges;
   }
 
   async createPullRequest(
@@ -1106,9 +1135,9 @@ export class RestGitHubService implements IGitHubService {
     }
   }
 
-  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
+  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<boolean> {
     const cli = new GhCliGitHubService();
-    await cli.commitAndPush(cwd, branchName, commitMessage);
+    return cli.commitAndPush(cwd, branchName, commitMessage);
   }
 
   async createPullRequest(cwd: string, title: string, body: string, base = 'main', headBranch?: string): Promise<string> {
@@ -1272,7 +1301,7 @@ export class GitHubService implements IGitHubService {
     return this.cliService.getFailedWorkflowLogs(cwdOrRepo, runId);
   }
 
-  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
+  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<boolean> {
     return this.cliService.commitAndPush(cwd, branchName, commitMessage);
   }
 
