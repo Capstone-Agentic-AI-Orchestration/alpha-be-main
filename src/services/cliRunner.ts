@@ -5,6 +5,7 @@ import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
 import { parseCustomCliArgs } from './customCliArgs.js';
 import { CHAT_ALLOWED_TOOLS, CHAT_DISALLOWED_TOOLS } from './toolPolicy.js';
 import { cliHomeEnv } from './cliHome.js';
+import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
@@ -97,6 +98,15 @@ export interface CliTurnOptions {
    * which is not the same as getting an empty one.
    */
   mcpServers?: string[];
+  /**
+   * Values layered over the daemon's environment when resolving `${VAR}` in
+   * those servers — the project's, then the agent's own.
+   *
+   * Separate from `env`, which is what the CLI process itself is given. A
+   * project's `SUPABASE_PROJECT_REF` belongs in an MCP server's URL, not in
+   * the agent's shell.
+   */
+  mcpEnv?: Record<string, string>;
 }
 
 export interface CliTurnResult {
@@ -529,7 +539,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   let bin = process.platform === 'win32' ? 'claude.cmd' : 'claude';
 
   // Resolve the agent's granted MCP servers into a config for this run only.
-  const mcp = writeRunMcpConfig(runId, options.mcpServers);
+  const mcp = writeRunMcpConfig(runId, options.mcpServers, options.mcpEnv, options.cwd);
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
   }
@@ -555,11 +565,18 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
         bin,
         args,
         cwd,
-        // Agent env first, then the family's isolation overrides — a HOME
-        // supplied by an agent's envVars must not defeat the isolation.
-        // Merged over process.env by processManager. Not logged: an agent's
-        // env is where its API keys live.
-        env: { ...options.env, ...invocation.env },
+        /**
+          * Agent env first, then the family's isolation overrides — a HOME
+          * supplied by an agent's envVars must not defeat the isolation.
+          * Merged over process.env by processManager. Not logged: an agent's
+          * env is where its API keys live.
+          *
+          * Credential isolation goes last for the same reason. An agent whose
+          * envVars set GH_TOKEN would otherwise hand itself back the access
+          * this removes, and the point is that pushing goes through the tool
+          * that can refuse a protected branch and record what it did.
+          */
+        env: { ...options.env, ...invocation.env, ...agentCredentialEnv() },
         stdin: invocation.stdin,
         onExit: () => resolve()
       });

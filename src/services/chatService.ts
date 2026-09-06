@@ -110,6 +110,13 @@ export interface SendMessageResult {
  * reads, and declining to talk because a folder is missing is worse than
  * answering from the root and saying what is actually visible.
  */
+/** The project a thread is pinned to, if any. */
+function threadProject(threadId: string) {
+  const thread = sqliteService.getChatThreads().find(t => t.id === threadId);
+  if (!thread?.projectId) return undefined;
+  return sqliteService.getProjects().find(p => p.id === thread.projectId);
+}
+
 function chatWorkspace(threadId: string): string {
   const root = ensureWorkspacesRoot();
 
@@ -436,6 +443,9 @@ export class ChatService extends EventEmitter {
     }
 
     const { env } = buildEnv(agent.envVars);
+    // A thread pinned to a project resolves that project's MCP values, so
+    // asking an agent about ALF in chat reaches the same Supabase its runs do.
+    const { env: projectEnv } = buildEnv(threadProject(threadId)?.envVars);
 
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
@@ -455,6 +465,7 @@ ${priorTurn}` : prompt,
       priorSession: priorSession?.cliSessionId ?? null,
       personaChanged,
       mcpServers: persona.mcpServers,
+      mcpEnv: { ...projectEnv, ...env },
       env,
       customCliArgs: agent.customCliArgs
     });

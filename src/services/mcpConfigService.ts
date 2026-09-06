@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
+import { mcpCredentialEnv } from './gitCredentialIsolation.js';
 import { logError } from '../utils/logger.js';
 
 /**
@@ -64,7 +65,25 @@ function builtinGithubServer(): McpServerSpec {
   // file. Spawn it with the same node binary the daemon is using rather than
   // whatever `node` resolves to on PATH.
   if (fs.existsSync(compiled)) {
-    return { command: process.execPath, args: [compiled] };
+    /**
+     * Under Electron, `process.execPath` is Alpha.exe — not node.
+     *
+     * The desktop shell runs this daemon inside the Electron main process, so
+     * spawning execPath plainly would launch a second copy of the whole
+     * application (which would then try to bind port 3001, fail, and show an
+     * error dialog) instead of running a stdio MCP server.
+     *
+     * ELECTRON_RUN_AS_NODE is Electron's own switch for exactly this: it makes
+     * the same binary behave as node. It also keeps the asar-aware `fs`, which
+     * matters because in a packaged build `compiled` is a path *inside*
+     * app.asar and a plain node process cannot read from an archive.
+     *
+     * Safe to pass as the child's whole environment if the CLI replaces rather
+     * than merges: githubMcpServer reads no environment variables.
+     */
+    return process.versions.electron
+      ? { command: process.execPath, args: [compiled], env: { ELECTRON_RUN_AS_NODE: '1' } }
+      : { command: process.execPath, args: [compiled] };
   }
 
   // `npm run dev` runs from src through tsx, so the server has to be run the
@@ -134,17 +153,99 @@ export interface RunMcpConfig {
  * than failing the run — an agent referencing a server the user has since
  * deleted should lose that tool, not stop working.
  */
-export function writeRunMcpConfig(runId: string, requested: string[] | undefined): RunMcpConfig {
+export function writeRunMcpConfig(
+  runId: string,
+  requested: string[] | undefined,
+  /**
+   * Values layered over the daemon's own environment when resolving `${VAR}`.
+   *
+   * The catalog is global — one `supabase` entry — but what it points at is
+   * not. A project supplies its own `SUPABASE_PROJECT_REF`, and an agent may
+   * override that again, so the same catalog entry reaches a different Supabase
+   * project depending on which board the card came from.
+   *
+   * Least specific first, so the caller composes them in reading order.
+   */
+  overrides: Record<string, string> = {},
+  /**
+   * The directory this turn is working in.
+   *
+   * Handed to the built-in server explicitly rather than left to process
+   * inheritance. The server is a grandchild — Alpha spawns the agent CLI, the
+   * CLI spawns the server — and nothing in that chain promises to carry a
+   * working directory. A push tool that guesses wrong pushes the wrong
+   * repository, so it is told.
+   */
+  workspace?: string
+): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
   if (!names.length) return { configPath: null, serverNames: [] };
 
   const available = availableServers();
   const mcpServers: Record<string, McpServerSpec> = {};
 
+  /**
+   * Blank overrides are dropped rather than layered.
+   *
+   * A spread would let `SUPABASE_PROJECT_REF: ''` overwrite a perfectly good
+   * machine value with nothing, and the server would then be skipped for a
+   * missing variable the user had actually set. An emptied field in a form
+   * means "I have no value for this", not "use the empty string" — so it falls
+   * through to the layer beneath.
+   */
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value !== '') env[key] = value;
+  }
+
   for (const name of names) {
     const spec = available[name];
-    if (spec) mcpServers[name] = resolveForPlatform(spec);
-    else logError(`Agent requested unknown MCP server "${name}" — skipping.`);
+    if (!spec) {
+      logError(`Agent requested unknown MCP server "${name}" — skipping.`);
+      continue;
+    }
+
+    /**
+     * A server whose credentials are not on this machine is left out.
+     *
+     * The alternative is writing `Bearer ${SUPABASE_ACCESS_TOKEN}` through
+     * verbatim, which authenticates as nobody: the server connects, every tool
+     * answers 401, and the agent spends its turn discovering that. Skipping is
+     * the same treatment an unknown name gets, and for the same reason.
+     */
+    const { spec: resolved, missing } = expandEnvRefs(resolveForPlatform(spec), env);
+    if (missing.length) {
+      logError(
+        `MCP server "${name}" needs ${missing.join(', ')} in the environment — skipping. ` +
+        `Set it where the Alpha daemon runs, then start the run again.`
+      );
+      continue;
+    }
+
+    /**
+     * The built-in server is the only one that acts on the local checkout, and
+     * the only one Alpha can tell where that is.
+     */
+    mcpServers[name] =
+      name === 'alpha-github' && workspace && !isHttpSpec(resolved)
+        ? {
+            ...resolved,
+            env: {
+              ...resolved.env,
+              ALPHA_WORKSPACE: workspace,
+              ALPHA_RUN_ID: runId,
+              /**
+               * The credentials, given back to this process alone.
+               *
+               * It inherits the stripped values from the agent CLI that spawned
+               * it. This is the one place a push is permitted, because it is
+               * the one place Alpha can refuse a protected branch and record
+               * what happened.
+               */
+              ...mcpCredentialEnv()
+            }
+          }
+        : resolved;
   }
 
   if (!Object.keys(mcpServers).length) return { configPath: null, serverNames: [] };
@@ -194,6 +295,69 @@ function resolveForPlatform(spec: McpServerSpec): McpServerSpec {
   if (!WINDOWS_SHIMS.has(spec.command)) return spec;
 
   return { ...spec, command: `${spec.command}.cmd` };
+}
+
+/**
+ * `${VAR}` in a catalog entry, resolved from the environment at spawn time.
+ *
+ * Hosted MCP servers authenticate with a bearer token, and the catalog is a
+ * plain JSON file in the user's home directory. Writing a Supabase personal
+ * access token — which can administer every project in an organisation —
+ * literally into `~/.alpha/mcp.json` would make a hand-editable config file
+ * into a credential store, and Alpha deliberately stores no provider
+ * credentials anywhere else.
+ *
+ * So the catalog holds the *reference* and the environment holds the secret:
+ *
+ *   "headers": { "Authorization": "Bearer ${SUPABASE_ACCESS_TOKEN}" }
+ *
+ * Expanded here rather than left for the CLI to do, for the same reason the
+ * Windows `.cmd` shim is applied here: it has to work identically for all three
+ * CLIs. Claude Code expands `${VAR}` in an MCP config; codex and agy are not
+ * required to, and a config that silently means different things to different
+ * agents is worse than one that means nothing to any of them.
+ *
+ * Applied at write time, so the catalog file stays portable and shareable —
+ * exactly what a reference rather than a secret is for.
+ */
+const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+/** Substitute into every string in a spec, collecting the names that are unset. */
+function expandStrings(value: unknown, env: NodeJS.ProcessEnv, missing: Set<string>): unknown {
+  if (typeof value === 'string') {
+    return value.replace(ENV_REF, (whole, name: string) => {
+      const found = env[name];
+      if (found === undefined || found === '') {
+        missing.add(name);
+        return whole;
+      }
+      return found;
+    });
+  }
+  if (Array.isArray(value)) return value.map(v => expandStrings(v, env, missing));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, expandStrings(v, env, missing)])
+    );
+  }
+  return value;
+}
+
+/**
+ * A spec with its environment references filled in, plus any that could not be.
+ *
+ * `missing` is returned rather than thrown so the caller can decide. It always
+ * decides to skip the server: sending a literal `Bearer ${SUPABASE_ACCESS_TOKEN}`
+ * would authenticate as nobody, and the agent would spend its turn on a tool
+ * that answers 401 to everything.
+ */
+export function expandEnvRefs(
+  spec: McpServerSpec,
+  env: NodeJS.ProcessEnv = process.env
+): { spec: McpServerSpec; missing: string[] } {
+  const missing = new Set<string>();
+  const expanded = expandStrings(spec, env, missing) as McpServerSpec;
+  return { spec: expanded, missing: [...missing] };
 }
 
 /** Best-effort cleanup of a run's config directory. */
