@@ -9,7 +9,33 @@ chatRouter.get('/chat/threads', (req: Request, res: Response) => {
   res.json(sqliteService.getChatThreads());
 });
 
+/**
+ * Create a conversation, idempotently on the id the client chose.
+ *
+ * The client mints the id and posts it, and two things can create the same
+ * thread: this route, and `chatService.sendMessage`, which creates one lazily
+ * when a message arrives for a thread it does not know. The browser writes
+ * optimistically and reconciles — see `persist` — so the POST is not awaited
+ * before the first message can be sent, and either order is reachable. A plain
+ * INSERT loses that race with `UNIQUE constraint failed`, answering 500 about a
+ * thread that exists and is perfectly usable.
+ *
+ * Returning the existing row is honest here in a way the same trick would not
+ * be on the PUT below. A POST asks for the thread to exist; if it already does,
+ * under the same id, nothing was misreported. The PUT asserts a property of a
+ * thread presumed to exist, so its 404 carries information — that the id is
+ * unknown — and creating a row there would manufacture the very thing the
+ * caller got wrong. 201 and 200 keep the difference visible to anyone reading
+ * the wire.
+ */
 chatRouter.post('/chat/threads', (req: Request, res: Response) => {
+  const id = typeof req.body?.id === 'string' ? req.body.id : undefined;
+
+  const existing = id
+    ? sqliteService.getChatThreads().find(t => t.id === id)
+    : undefined;
+  if (existing) return res.status(200).json(existing);
+
   const thread = sqliteService.createChatThread(req.body);
   res.status(201).json(thread);
 });
