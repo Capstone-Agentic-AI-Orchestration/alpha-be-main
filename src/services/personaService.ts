@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Agent, AgentRole, AutonomyLevel, ModelProvider } from '../models/index.js';
 import { readAgentFile } from './agentFileService.js';
 import { composeMemory } from './memoryService.js';
-import { describeChatToolPolicy, describeRoster, RosterEntry } from './toolPolicy.js';
+import { describeChatToolPolicy, describeReplyFormat, describeRoster, RosterEntry } from './toolPolicy.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { logInfo } from '../utils/logger.js';
 
@@ -115,6 +115,12 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
       describeChatToolPolicy(mcpServers, skills, mcpAccessFor(merged.autonomyLevel, 'chat', skills))
     );
     sources.push('tool-policy');
+
+    // What the reply should look like, as opposed to what it may do. Separate
+    // section because it is the one part of the prompt with no bearing on what
+    // the agent can reach.
+    parts.push(describeReplyFormat());
+    sources.push('reply-format');
   }
 
   const systemPrompt = parts.join('\n\n---\n\n');

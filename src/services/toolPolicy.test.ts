@@ -5,6 +5,7 @@ import {
   SKILL_TOOLS,
   chatToolsFor,
   describeChatToolPolicy,
+  describeReplyFormat,
   describeRoster
 } from './toolPolicy.js';
 
@@ -248,5 +249,36 @@ describe('describeRoster', () => {
     const text = describeRoster(roster, 'agent-unknown');
     expect(text).toContain('Ada Lovelace');
     expect(text).not.toContain('(you)');
+  });
+});
+
+describe('describeReplyFormat', () => {
+  const text = describeReplyFormat();
+
+  it('asks for repository-relative paths, and says why', () => {
+    // The reply that prompted this carried six absolute file:/// URLs, one of
+    // them through a UUID directory under the operator's home.
+    expect(text).toMatch(/relative to the project root/i);
+    expect(text).toMatch(/file:\/\//);
+  });
+
+  it('rules out LaTeX, because nothing renders it', () => {
+    expect(text).toMatch(/never LaTeX/i);
+    expect(text).toContain('→');
+  });
+
+  it('asks for scannable paragraphs and at most one heading level', () => {
+    expect(text).toMatch(/short enough to scan/i);
+    expect(text).toMatch(/one level of heading/i);
+  });
+
+  it('is a self-contained markdown section', () => {
+    expect(text.trimStart().startsWith('##')).toBe(true);
+  });
+
+  it('says nothing about what the agent may do', () => {
+    // Capability is the tool policy's subject. Two sections disagreeing about
+    // it is how the agent card came to promise writes the runner denied.
+    expect(text).not.toMatch(/\b(allowed|denied|granted|you may not)\b/i);
   });
 });
