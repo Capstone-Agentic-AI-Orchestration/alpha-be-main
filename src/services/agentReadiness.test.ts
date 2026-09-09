@@ -132,4 +132,15 @@ describe('agentReadiness', () => {
     );
     expect(r.status).toBe('ready');
   });
+
+  it('supports OpenCode provider readiness', () => {
+    const ready = forProvider('OpenCode', 'online');
+    expect(ready.status).toBe('ready');
+    const signedOut = forProvider('OpenCode', 'degraded');
+    expect(signedOut.status).toBe('signed_out');
+    expect(signedOut.command).toBe('opencode auth');
+    const notInstalled = forProvider('OpenCode', 'offline');
+    expect(notInstalled.status).toBe('not_installed');
+    expect(notInstalled.command).toContain('opencode-ai');
+  });
 });

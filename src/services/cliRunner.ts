@@ -301,7 +301,7 @@ export function buildTurnInvocation(
       // Left on the real home: codex keeps auth.json under ~/.codex, so
       // relocating it would sign the user out. See cliHome.
       env: {},
-      bin: isWin ? 'codex.cmd' : 'codex',
+      bin: RuntimeService.codexPath(),
       // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
       // With the prompt first, codex silently ignores everything after it and
       // reports "--skip-git-repo-check was not specified" even though it was.
@@ -433,7 +433,7 @@ export function buildTurnInvocation(
     // Already isolated by --setting-sources below, and its credentials live
     // under ~/.claude, so the home must stay real.
     env: {},
-    bin: isWin ? 'claude.cmd' : 'claude',
+    bin: RuntimeService.claudePath(),
     // `-p` with no value reads the prompt from stdin, which is what keeps a
     // multi-line task description out of the command line.
     stdin: prompt,
