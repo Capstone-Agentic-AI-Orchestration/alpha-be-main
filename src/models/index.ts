@@ -9,7 +9,8 @@ export type ModelProvider =
   | 'Antigravity'
   | 'Google Gemini'
   | 'Ollama'
-  | 'LM Studio';
+  | 'LM Studio'
+  | 'OpenCode';
 
 /** Mirrors the client's AgentAccessLevel; the two apps share no package. */
 export type AgentAccessLevel = 'everyone' | 'team' | 'admins' | 'private';

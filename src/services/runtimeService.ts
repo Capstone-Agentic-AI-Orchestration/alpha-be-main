@@ -6,6 +6,13 @@ import path from 'node:path';
 import { RuntimeEngine, RuntimeStatus } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
 import { logInfo, logError } from '../utils/logger.js';
+import {
+  findClaude,
+  findCodex,
+  findAntigravity,
+  findGemini,
+  findOpenCode
+} from './runtimeDiscovery.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -80,6 +87,7 @@ export class RuntimeService {
       await timed('cloud', () => this.detectCodex()),
       await timed('cloud', () => this.detectAntigravity()),
       await timed('cloud', () => this.detectGemini()),
+      await timed('local', () => this.detectOpenCode()),
       await timed('local', () => this.detectOllama()),
       await timed('local', () => this.detectLMStudio())
     ];
@@ -90,14 +98,35 @@ export class RuntimeService {
     return runtimes;
   }
 
+  static claudePath(): string {
+    return findClaude();
+  }
+
+  static codexPath(): string {
+    return findCodex();
+  }
+
+  static agyPath(): string {
+    return findAntigravity();
+  }
+
+  static geminiPath(): string {
+    return findGemini();
+  }
+
+  static opencodePath(): string {
+    return findOpenCode();
+  }
+
   private async detectClaude(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
+    const bin = RuntimeService.claudePath();
     try {
-      const { stdout: versionOut } = await execAsync('claude --version');
+      const { stdout: versionOut } = await execFileAsync(bin, ['--version']);
       const version = versionOut.trim();
 
       try {
-        const { stdout: authOut } = await execAsync('claude auth status');
+        const { stdout: authOut } = await execFileAsync(bin, ['auth', 'status']);
         const auth = JSON.parse(authOut);
         return {
           id: 'claude',
@@ -141,12 +170,13 @@ export class RuntimeService {
 
   private async detectCodex(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
+    const bin = RuntimeService.codexPath();
     try {
-      const { stdout: versionOut } = await execAsync('codex --version');
+      const { stdout: versionOut } = await execFileAsync(bin, ['--version']);
       const version = versionOut.trim();
 
       try {
-        const { stdout: doctorOut } = await execAsync('codex doctor');
+        const { stdout: doctorOut } = await execFileAsync(bin, ['doctor']);
         const isHealthy = !doctorOut.toLowerCase().includes('error') && !doctorOut.toLowerCase().includes('not logged in');
         return {
           id: 'codex',
@@ -180,28 +210,6 @@ export class RuntimeService {
     }
   }
 
-  /**
-   * Google Antigravity (`agy`).
-   *
-   * Installed as a desktop IDE rather than an npm package, so its CLI is NOT on
-   * PATH by default — which is why a plain `gemini`/`agy` probe reports nothing
-   * even on a machine where Antigravity is installed and signed in. Resolve the
-   * known install location as a fallback.
-   *
-   * `agy models` doubles as the auth probe: it performs a live fetch, so it only
-   * succeeds when the CLI is authenticated, and it returns the real model list.
-   */
-  static agyPath(): string {
-    if (process.env.AGY_PATH) return process.env.AGY_PATH;
-    if (process.platform === 'win32') {
-      return path.join(
-        process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'),
-        'agy', 'bin', 'agy.exe'
-      );
-    }
-    return path.join(os.homedir(), '.local', 'bin', 'agy');
-  }
-
   private async detectAntigravity(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const base: DetectedEngine = {
@@ -213,15 +221,9 @@ export class RuntimeService {
       detectedAt: now
     };
 
-    // Prefer PATH; fall back to the desktop install location.
-    let bin = 'agy';
-    let probe = await runClosedStdin(bin, ['--version'], 15_000);
-    if (!probe.ok) {
-      bin = RuntimeService.agyPath();
-      if (!fs.existsSync(bin)) return base;
-      probe = await runClosedStdin(bin, ['--version'], 15_000);
-      if (!probe.ok) return base;
-    }
+    const bin = RuntimeService.agyPath();
+    const probe = await runClosedStdin(bin, ['--version'], 15_000);
+    if (!probe.ok) return base;
     const version = probe.stdout.trim();
 
     // `agy models` performs a live fetch, so it doubles as the auth probe.
@@ -250,8 +252,9 @@ export class RuntimeService {
 
   private async detectGemini(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
+    const bin = RuntimeService.geminiPath();
     try {
-      const { stdout } = await execAsync('gemini --version');
+      const { stdout } = await execFileAsync(bin, ['--version']);
       return {
         id: 'gemini',
         name: 'Google Gemini CLI',
@@ -268,6 +271,32 @@ export class RuntimeService {
         provider: 'Google Gemini',
         status: 'offline',
         models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+        detectedAt: now
+      };
+    }
+  }
+
+  private async detectOpenCode(): Promise<DetectedEngine> {
+    const now = new Date().toISOString();
+    const bin = RuntimeService.opencodePath();
+    try {
+      const { stdout } = await execFileAsync(bin, ['--version']);
+      return {
+        id: 'opencode',
+        name: 'OpenCode CLI',
+        provider: 'OpenCode',
+        status: 'online',
+        version: stdout.trim(),
+        models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
+        detectedAt: now
+      };
+    } catch {
+      return {
+        id: 'opencode',
+        name: 'OpenCode CLI',
+        provider: 'OpenCode',
+        status: 'offline',
+        models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
         detectedAt: now
       };
     }

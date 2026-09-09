@@ -3,7 +3,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { buildTurnInvocation, CliTurnOptions } from './cliRunner.js';
 
 vi.mock('./runtimeService.js', () => ({
-  RuntimeService: { agyPath: () => '/opt/antigravity/agy' }
+  RuntimeService: {
+    agyPath: () => '/opt/antigravity/agy',
+    claudePath: () => (process.platform === 'win32' ? 'claude.cmd' : 'claude'),
+    codexPath: () => (process.platform === 'win32' ? 'codex.cmd' : 'codex'),
+    geminiPath: () => (process.platform === 'win32' ? 'gemini.cmd' : 'gemini'),
+    opencodePath: () => (process.platform === 'win32' ? 'opencode.cmd' : 'opencode')
+  }
 }));
 
 const noMcp = { configPath: null as string | null, serverNames: [] as string[] };

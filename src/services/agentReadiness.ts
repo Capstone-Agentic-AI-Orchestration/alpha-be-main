@@ -83,6 +83,11 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
     bin: 'lmstudio',
     signIn: 'Start the LM Studio local server',
     install: 'Install LM Studio from lmstudio.ai'
+  },
+  OpenCode: {
+    bin: 'opencode',
+    signIn: 'opencode auth',
+    install: 'npm install -g opencode-ai'
   }
 };
 
