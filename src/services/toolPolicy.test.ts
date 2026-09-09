@@ -1,23 +1,103 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CHAT_ALLOWED_TOOLS,
-  CHAT_DISALLOWED_TOOLS,
+  CHAT_BASE_TOOLS,
+  GRANTABLE_TOOLS,
+  SKILL_TOOLS,
+  chatToolsFor,
   describeChatToolPolicy,
   describeRoster
 } from './toolPolicy.js';
 
+/** The seeded Developer: files and shell, plus GitHub. */
+const DEV_SKILLS = ['sk-fs', 'sk-bash', 'sk-git'];
+
+describe('chatToolsFor', () => {
+  it('grants inspection only to an agent with no skills at all', () => {
+    const { allowed, denied } = chatToolsFor([]);
+
+    expect(allowed).toEqual([...CHAT_BASE_TOOLS]);
+    // The old behaviour, kept as the floor: every mutating tool still denied.
+    for (const tool of ['Write', 'Edit', 'Bash', 'NotebookEdit']) {
+      expect(denied).toContain(tool);
+    }
+  });
+
+  it('treats a missing skills list the same as an empty one', () => {
+    expect(chatToolsFor()).toEqual(chatToolsFor([]));
+  });
+
+  it('grants the file tools to sk-fs, and still no shell', () => {
+    const { allowed, denied } = chatToolsFor(['sk-fs']);
+
+    expect(allowed).toContain('Write');
+    expect(allowed).toContain('Edit');
+    expect(denied).toContain('Bash');
+  });
+
+  it('grants the shell to sk-bash, and still no file tools', () => {
+    const { allowed, denied } = chatToolsFor(['sk-bash']);
+
+    expect(allowed).toContain('Bash');
+    expect(denied).toContain('Write');
+    expect(denied).toContain('Edit');
+  });
+
+  it('grants no CLI tool for sk-git — GitHub is not one', () => {
+    // What sk-git grants is MCP write access, resolved by mcpAccessFor.
+    expect(chatToolsFor(['sk-git'])).toEqual(chatToolsFor([]));
+  });
+
+  it('unions the tools when several skills grant overlapping ones', () => {
+    const { allowed } = chatToolsFor(['sk-bash', 'sk-code-exec']);
+
+    // Both map to Bash; it must appear once, not twice.
+    expect(allowed.filter(t => t === 'Bash')).toHaveLength(1);
+  });
+
+  it('ignores an unknown skill id rather than throwing', () => {
+    // The catalog is seeded data a user can add to, so an id this map has not
+    // been taught must grant nothing — not fail in the middle of a turn.
+    expect(() => chatToolsFor(['sk-not-a-real-skill'])).not.toThrow();
+    expect(chatToolsFor(['sk-not-a-real-skill'])).toEqual(chatToolsFor([]));
+  });
+
+  it('never lists a tool as both allowed and denied', () => {
+    for (const skills of [[], ['sk-fs'], DEV_SKILLS, Object.keys(SKILL_TOOLS)]) {
+      const { allowed, denied } = chatToolsFor(skills);
+      expect(allowed.filter(t => denied.includes(t))).toEqual([]);
+    }
+  });
+
+  it('never denies a base tool, whatever was granted', () => {
+    for (const skills of [[], ['sk-fs'], DEV_SKILLS]) {
+      const { denied } = chatToolsFor(skills);
+      for (const base of CHAT_BASE_TOOLS) expect(denied).not.toContain(base);
+    }
+  });
+
+  it('accounts for every grantable tool in one list or the other', () => {
+    // The denied list is the computed complement, so a tool falling out of both
+    // would be one the runner never names — and therefore one the CLI prompts
+    // about, on a headless process with no TTY to answer.
+    const { allowed, denied } = chatToolsFor(DEV_SKILLS);
+    for (const tool of GRANTABLE_TOOLS) {
+      expect(allowed.includes(tool) || denied.includes(tool)).toBe(true);
+    }
+  });
+});
+
 describe('describeChatToolPolicy', () => {
   it('names every tool that is actually allowed', () => {
-    const text = describeChatToolPolicy();
-    for (const tool of CHAT_ALLOWED_TOOLS) expect(text).toContain(tool);
+    const text = describeChatToolPolicy([], DEV_SKILLS);
+    for (const tool of chatToolsFor(DEV_SKILLS).allowed) expect(text).toContain(tool);
   });
 
   it('names every tool that is actually denied', () => {
-    const text = describeChatToolPolicy();
-    for (const tool of CHAT_DISALLOWED_TOOLS) expect(text).toContain(tool);
+    const text = describeChatToolPolicy([], ['sk-fs']);
+    for (const tool of chatToolsFor(['sk-fs']).denied) expect(text).toContain(tool);
   });
 
-  it('tells the agent what to do instead, not only what it cannot do', () => {
+  it('tells an ungranted agent what to do instead, not only what it cannot do', () => {
     // A model told only what it cannot do still narrates doing it; the reply
     // needs somewhere to go.
     const text = describeChatToolPolicy();
@@ -34,8 +114,30 @@ describe('describeChatToolPolicy', () => {
     const text = describeChatToolPolicy();
 
     expect(text).not.toMatch(/fails rather than asking permission/i);
-    expect(text).toMatch(/do not Write, Edit, Bash/i);
     expect(text).toMatch(/nothing you write here reaches/i);
+  });
+
+  it('keeps the read-only wording for an agent granted nothing', () => {
+    const text = describeChatToolPolicy();
+
+    expect(text).toMatch(/inspection and advice only/i);
+    expect(text).toMatch(/do not Write, Edit/i);
+    expect(text).not.toMatch(/your file edits are real/i);
+  });
+
+  it('tells a granted agent its edits are real and unreviewed', () => {
+    // A model that believes its edits are hypothetical is careless with them.
+    const text = describeChatToolPolicy([], ['sk-fs']);
+
+    expect(text).toMatch(/your file edits are real/i);
+    expect(text).toMatch(/no branch, no diff and no approval/i);
+    expect(text).not.toMatch(/inspection and advice only/i);
+    expect(text).not.toMatch(/do not claim to have created or edited/i);
+  });
+
+  it('stops promising the shell is blocked once sk-bash is granted', () => {
+    expect(describeChatToolPolicy()).toMatch(/shell commands are blocked/i);
+    expect(describeChatToolPolicy([], ['sk-bash'])).not.toMatch(/shell commands are blocked/i);
   });
 
   it('lists the granted MCP servers', () => {
@@ -48,27 +150,55 @@ describe('describeChatToolPolicy', () => {
     expect(describeChatToolPolicy().toLowerCase()).not.toContain('mcp server');
   });
 
+  it('states the GitHub ceiling when alpha-github is granted with write', () => {
+    const text = describeChatToolPolicy(['alpha-github'], DEV_SKILLS, 'write');
+
+    expect(text).toMatch(/push a branch/i);
+    // No level reaches these — they belong to the person at the review gate.
+    expect(text).toMatch(/may not merge, force-push/i);
+  });
+
+  it('says GitHub is read-only when write was not granted', () => {
+    const text = describeChatToolPolicy(['alpha-github'], ['sk-fs'], 'read');
+
+    expect(text).toMatch(/read access only/i);
+    expect(text).not.toMatch(/you may push a branch/i);
+  });
+
+  it('says nothing about GitHub when that server was not granted', () => {
+    expect(describeChatToolPolicy(['filesystem'], DEV_SKILLS, 'write')).not.toMatch(/github/i);
+  });
+
   it('is a self-contained markdown section', () => {
     expect(describeChatToolPolicy().trimStart().startsWith('##')).toBe(true);
   });
 
-  it('does not promise write access anywhere in the text', () => {
+  it('does not promise write access to an agent that has none', () => {
     const text = describeChatToolPolicy();
     expect(text).not.toMatch(/you can (write|edit|run)/i);
   });
 });
 
-describe('the policy arrays themselves', () => {
-  it('never lists a tool as both allowed and denied', () => {
-    const overlap = CHAT_ALLOWED_TOOLS.filter(t =>
-      (CHAT_DISALLOWED_TOOLS as readonly string[]).includes(t)
-    );
-    expect(overlap).toEqual([]);
+describe('the policy map itself', () => {
+  it('never grants a base tool through a skill', () => {
+    // A skill grants something in addition to inspection, never inspection
+    // itself — otherwise the same tool arrives from two places.
+    for (const tools of Object.values(SKILL_TOOLS)) {
+      for (const base of CHAT_BASE_TOOLS) expect(tools).not.toContain(base);
+    }
   });
 
-  it('keeps chat read-only — no mutating tool is allowed', () => {
+  it('lists every skill-granted tool as grantable', () => {
+    // GRANTABLE_TOOLS is what the denied list is computed from, so a tool a
+    // skill grants but this list omits could never be denied to anyone else.
+    for (const tools of Object.values(SKILL_TOOLS)) {
+      for (const tool of tools) expect(GRANTABLE_TOOLS).toContain(tool);
+    }
+  });
+
+  it('accounts for every mutating tool, whether a skill grants it or not', () => {
     for (const mutating of ['Write', 'Edit', 'Bash', 'NotebookEdit']) {
-      expect(CHAT_ALLOWED_TOOLS as readonly string[]).not.toContain(mutating);
+      expect(GRANTABLE_TOOLS).toContain(mutating);
     }
   });
 });

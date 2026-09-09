@@ -198,9 +198,10 @@ export interface IGitHubService {
   inspectLocalRepo(cwd: string): Promise<RepoInspection>;
   getWorkflowRuns(cwdOrRepo?: string, limit?: number): Promise<WorkflowRun[]>;
   getFailedWorkflowLogs(cwdOrRepo: string, runId: string | number): Promise<string>;
-  commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void>;
+  commitAndPush(cwd: string, branchName: string, commitMessage: string, push?: boolean): Promise<boolean>;
   createPullRequest(cwd: string, title: string, body: string, base?: string, headBranch?: string): Promise<string>;
   mergePullRequest(cwd: string, prUrlOrNumber: string, method?: 'squash' | 'merge' | 'rebase'): Promise<string>;
+  reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string>;
   getOAuthLoginUrl(state?: string): { url: string; state: string };
   handleOAuthCallback(code: string, state?: string): Promise<{ success: boolean; username: string; token: string }>;
   getGitHubAppInstallUrl(): string;
@@ -552,11 +553,56 @@ export class GhCliGitHubService implements IGitHubService {
    * agent-authored message reaches here unmodified. execFile removes the shell,
    * so none of it is interpretable.
    */
-  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
+  /**
+   * Stage everything, commit if there is anything to commit, and push.
+   *
+   * The commit is conditional because "nothing to commit" is not a failure of
+   * this method — its job is to leave the branch pushed, and a branch whose work
+   * is already committed is in exactly that state.
+   *
+   * It used to throw there, and the run pipeline calls this immediately before
+   * opening the pull request inside the same try block. So once an agent could
+   * commit its own work (github_push_branch), the pipeline's commit would fail
+   * on the empty index, jump to the catch, and skip the pull request entirely —
+   * a run that did everything right and opened nothing.
+   *
+   * @returns whether a new commit was created.
+   */
+  /**
+   * `push` false commits locally and stops there.
+   *
+   * A run by a read-only agent still wants its work committed — that is how the
+   * diff and the branch exist to look at — but nothing of it should reach the
+   * remote. Splitting the two is the only way to say that: they were one
+   * operation, so a Supervised reviewer's run pushed a branch and opened a
+   * second pull request for a change that was already under review.
+   */
+  async commitAndPush(
+    cwd: string,
+    branchName: string,
+    commitMessage: string,
+    push = true
+  ): Promise<boolean> {
     assertSafeBranchName(branchName);
     await execFileAsync('git', ['add', '-A'], { cwd });
-    await execFileAsync('git', ['commit', '-m', commitMessage], { cwd });
-    await execFileAsync('git', ['push', '-u', 'origin', branchName], { cwd });
+
+    // `diff --cached --quiet` exits 1 when the index holds changes. Asking git
+    // is the only reliable test; parsing `status` output is not.
+    let hasStagedChanges = false;
+    try {
+      await execFileAsync('git', ['diff', '--cached', '--quiet'], { cwd });
+    } catch {
+      hasStagedChanges = true;
+    }
+
+    if (hasStagedChanges) {
+      await execFileAsync('git', ['commit', '-m', commitMessage], { cwd });
+    }
+
+    if (push) {
+      await execFileAsync('git', ['push', '-u', 'origin', branchName], { cwd });
+    }
+    return hasStagedChanges;
   }
 
   async createPullRequest(
@@ -587,6 +633,30 @@ export class GhCliGitHubService implements IGitHubService {
     const { stdout } = await execFileAsync(
       'gh',
       ['pr', 'merge', prUrlOrNumber, `--${method}`, '--delete-branch'],
+      { cwd }
+    );
+    return stdout.trim();
+  }
+
+  /**
+   * Post a review on a pull request, as a comment and never as an approval.
+   *
+   * `--comment` is not a weaker choice made for caution; it is the only one
+   * available. Every agent reaches GitHub through the operator's own `gh`
+   * credentials, so an agent reviewing a pull request an agent opened is one
+   * account acting twice — and GitHub refuses both APPROVE and REQUEST_CHANGES
+   * on your own pull request. Asking for either would fail at the API, so the
+   * verdict travels in the body text and in Alpha's own record instead.
+   *
+   * Approving for real needs the agents to be distinct GitHub identities,
+   * which means a GitHub App — a different piece of work, not a flag here.
+   */
+  async reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string> {
+    assertSafePrRef(prUrlOrNumber);
+    // Body is model-authored free text: safe as argv, not as a command string.
+    const { stdout } = await execFileAsync(
+      'gh',
+      ['pr', 'review', prUrlOrNumber, '--comment', '--body', body],
       { cwd }
     );
     return stdout.trim();
@@ -1106,9 +1176,9 @@ export class RestGitHubService implements IGitHubService {
     }
   }
 
-  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
+  async commitAndPush(cwd: string, branchName: string, commitMessage: string, push = true): Promise<boolean> {
     const cli = new GhCliGitHubService();
-    await cli.commitAndPush(cwd, branchName, commitMessage);
+    return cli.commitAndPush(cwd, branchName, commitMessage, push);
   }
 
   async createPullRequest(cwd: string, title: string, body: string, base = 'main', headBranch?: string): Promise<string> {
@@ -1140,6 +1210,24 @@ export class RestGitHubService implements IGitHubService {
 
     const cli = new GhCliGitHubService();
     return cli.mergePullRequest(cwd, prUrlOrNumber, method);
+  }
+
+  async reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string> {
+    const inspection = await this.inspectLocalRepo(cwd);
+    const prNumberMatch = prUrlOrNumber.match(/\/pull\/(\d+)/) || prUrlOrNumber.match(/^(\d+)$/);
+    if (inspection.ownerRepo && prNumberMatch) {
+      const prNumber = prNumberMatch[1];
+      await this.request(`/repos/${inspection.ownerRepo}/pulls/${prNumber}/reviews`, {
+        method: 'POST',
+        // COMMENT for the same reason as the CLI path: one identity cannot
+        // approve its own pull request.
+        body: JSON.stringify({ event: 'COMMENT', body })
+      });
+      return 'Review posted';
+    }
+
+    const cli = new GhCliGitHubService();
+    return cli.reviewPullRequest(cwd, prUrlOrNumber, body);
   }
 
   startDeviceLogin(): Promise<{ code: string; verificationUrl: string }> {
@@ -1272,8 +1360,8 @@ export class GitHubService implements IGitHubService {
     return this.cliService.getFailedWorkflowLogs(cwdOrRepo, runId);
   }
 
-  async commitAndPush(cwd: string, branchName: string, commitMessage: string): Promise<void> {
-    return this.cliService.commitAndPush(cwd, branchName, commitMessage);
+  async commitAndPush(cwd: string, branchName: string, commitMessage: string, push = true): Promise<boolean> {
+    return this.cliService.commitAndPush(cwd, branchName, commitMessage, push);
   }
 
   async createPullRequest(cwd: string, title: string, body: string, base = 'main', headBranch?: string): Promise<string> {
@@ -1290,6 +1378,14 @@ export class GitHubService implements IGitHubService {
       return this.restService.mergePullRequest(cwd, prUrlOrNumber, method);
     }
     return this.cliService.mergePullRequest(cwd, prUrlOrNumber, method);
+  }
+
+  async reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string> {
+    const auth = await this.checkAuth();
+    if (auth.mode === 'rest' || auth.mode === 'github_app') {
+      return this.restService.reviewPullRequest(cwd, prUrlOrNumber, body);
+    }
+    return this.cliService.reviewPullRequest(cwd, prUrlOrNumber, body);
   }
 
   getOAuthLoginUrl(state?: string): { url: string; state: string } {

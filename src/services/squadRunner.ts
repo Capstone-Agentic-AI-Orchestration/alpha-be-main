@@ -155,6 +155,33 @@ export class SquadRunner {
       currentMemberIndex: index,
       updatedAt: new Date().toISOString()
     });
+
+    /**
+     * The handoff, as an event.
+     *
+     * This is the moment "who is working now" changes, and nothing said so.
+     * `squad_run_completed` and `squad_run_failed` already existed and reached
+     * nobody: they are emitted on runnerService's emitter, but index.ts forwards
+     * only the five run-level names to the WebSocket, so neither was ever sent.
+     * A squad run therefore reached the UI only incidentally, through its
+     * members' stage updates, with no indication of which member they belonged
+     * to or how many remained.
+     *
+     * Emitted on runnerService for the same reason the other two are: it is the
+     * emitter index.ts already listens to.
+     *
+     * The handoff text rides along because it is the reason this member
+     * started: what the ones before it left on the branch.
+     */
+    runnerService.emit('squad_member_started', {
+      squadRunId: squadRun.id,
+      runId: run.id,
+      memberIndex: index,
+      memberCount: squadRun.memberAgentIds.length,
+      agentId: squadRun.memberAgentIds[index],
+      agentName: nameFor(squadRun.memberAgentIds[index]),
+      handoff: this.buildHandoff(squadRun, index)
+    });
   }
 
   /**

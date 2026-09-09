@@ -70,13 +70,31 @@ describe('buildProjectScaffold', () => {
       'jest.config.ts',
       'eslint.config.mjs',
       '.env.example',
-      'src/index.ts',
-      'tests/README.md',
-      'tests/unit/index.spec.ts'
+      'tests/README.md'
     ]) {
       expect(p).toContain(expected);
     }
   });
+
+  /**
+   * A service entry point, for the stacks that are services.
+   *
+   * `src/index.ts` exports a SERVICE_NAME constant and the spec asserts it.
+   * This used to be part of the baseline for every stack including react —
+   * which is how react came to be a Node program with an unmounted App.tsx
+   * beside it: its own toolchain treated that file as the program. A browser
+   * app's entry point is `src/main.tsx`, and it is checked in
+   * scaffoldRunnable.test.ts along with the rest of what makes a stack a web
+   * application rather than a service.
+   */
+  it.each(SUPPORTED_STACKS.filter(s => s !== 'react'))(
+    'emits a service entry point for %s',
+    stack => {
+      const p = paths(buildProjectScaffold({ serviceName: 'billing-api', stack }));
+      expect(p).toContain('src/index.ts');
+      expect(p).toContain('tests/unit/index.spec.ts');
+    }
+  );
 
   it('emits no duplicate paths', () => {
     for (const stack of SUPPORTED_STACKS) {

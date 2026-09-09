@@ -15,7 +15,7 @@ import {
   DEFAULT_ASSISTANT_PROMPT,
   pickDefaultRuntime
 } from './defaultAssistant.js';
-import { describeChatToolPolicy } from './toolPolicy.js';
+import { describeChatToolPolicy, describeAlphaWorkspace } from './toolPolicy.js';
 import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
 
@@ -110,6 +110,13 @@ export interface SendMessageResult {
  * reads, and declining to talk because a folder is missing is worse than
  * answering from the root and saying what is actually visible.
  */
+/** The project a thread is pinned to, if any. */
+function threadProject(threadId: string) {
+  const thread = sqliteService.getChatThreads().find(t => t.id === threadId);
+  if (!thread?.projectId) return undefined;
+  return sqliteService.getProjects().find(p => p.id === thread.projectId);
+}
+
 function chatWorkspace(threadId: string): string {
   const root = ensureWorkspacesRoot();
 
@@ -129,6 +136,35 @@ function chatWorkspace(threadId: string): string {
   // a managed checkout is already covered by the root allowlist entry.
   allowAttachedWorkspace(workspace, project.name);
   return workspace.dir;
+}
+
+/**
+ * The agents and squads Alpha can speak about.
+ *
+ * An agent reply already gets a roster — see `resolveAgentLogged` — and Alpha,
+ * the one you would naturally ask "which squads do I have", got nothing. Asked
+ * about them it reached for its CLI's own tooling, ran `ListAgents`, and
+ * reported on Claude Code sessions instead.
+ *
+ * Squads are included here and not in the agent roster because Alpha is the
+ * only participant that talks about the workspace as a whole; an agent is a
+ * member of it.
+ */
+function describeWorkspaceForAlpha(): string {
+  const agents = sqliteService
+    .getAgents()
+    .filter(a => !a.isArchived)
+    .map(a => ({ id: a.id, name: a.name, role: a.role }));
+
+  const byId = new Map(agents.map(a => [a.id, a.name]));
+
+  const squads = sqliteService.getSquads().map(sq => ({
+    name: sq.name,
+    topology: sq.topology,
+    memberNames: (sq.memberAgentIds ?? []).map(id => byId.get(id) ?? id)
+  }));
+
+  return describeAlphaWorkspace(agents, squads);
 }
 
 export class ChatService extends EventEmitter {
@@ -278,11 +314,13 @@ export class ChatService extends EventEmitter {
       provider: runtime.provider,
       modelName: runtime.modelName,
       // The tool policy still applies: a chat inspects, it does not mutate.
-      systemPrompt: `${DEFAULT_ASSISTANT_PROMPT}
+      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, describeWorkspaceForAlpha(), describeChatToolPolicy()]
+        .filter(Boolean)
+        .join(`
 
 ---
 
-${describeChatToolPolicy()}`,
+`),
       personaName: DEFAULT_ASSISTANT.name,
       prompt,
       priorSession: priorSession?.cliSessionId ?? null
@@ -405,6 +443,9 @@ ${describeChatToolPolicy()}`,
     }
 
     const { env } = buildEnv(agent.envVars);
+    // A thread pinned to a project resolves that project's MCP values, so
+    // asking an agent about ALF in chat reaches the same Supabase its runs do.
+    const { env: projectEnv } = buildEnv(threadProject(threadId)?.envVars);
 
     const turn = await runCliTurn({
       runId: `chat-${Date.now()}`,
@@ -424,6 +465,12 @@ ${priorTurn}` : prompt,
       priorSession: priorSession?.cliSessionId ?? null,
       personaChanged,
       mcpServers: persona.mcpServers,
+      mcpEnv: { ...projectEnv, ...env },
+      // What this agent may actually do this turn. Resolved from the persona
+      // rather than the raw row so a persona file's `skills:` overlay counts,
+      // the same way it does for every other field.
+      skills: persona.skills,
+      autonomyLevel: persona.autonomyLevel,
       env,
       customCliArgs: agent.customCliArgs
     });

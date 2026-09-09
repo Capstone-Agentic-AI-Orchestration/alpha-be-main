@@ -11,11 +11,30 @@
  *   * Alpha handles no token. On the desktop `gh` reads the OS keyring itself;
  *     nothing passes through this process, no config file, no env var.
  *
- * Nothing here mutates GitHub. `github_clone_repository` is the only tool that
- * writes at all, and it writes to this machine — into the managed workspace,
- * at a path Alpha computes. Pushing, opening PRs and merging stay out: those
- * change state other people can see, and they need an approval story this
- * layer does not have.
+ * ## What this server is for, now that it is not read-only
+ *
+ * It used to mutate nothing, on the grounds that pushing and opening pull
+ * requests "need an approval story this layer does not have". The approval
+ * story turned out to be the part that was already there — the review gate,
+ * where a person approves a run and Alpha merges — and the read-only stance was
+ * guarding the wrong door: a run gets `--dangerously-skip-permissions`, so the
+ * agent could already `git push` and `gh pr merge` from Bash, unrecorded.
+ *
+ * So the two mutations here are the ones tied to the local checkout, and only
+ * those. `github_push_branch` and `github_open_pull_request` need to know which
+ * directory this turn is working in, which no remote server can know. Anything
+ * purely remote — issues, reviews, workflow reruns — belongs to GitHub's own
+ * MCP server, registered in the catalog as `github-read` / `github-write`,
+ * which is maintained by GitHub and covers far more than this could.
+ *
+ * Merging is still absent, deliberately. It is the one irreversible act, and it
+ * belongs to the person at the review gate rather than to the agent that wrote
+ * the code. Pushing to a protected branch is refused for the same reason: every
+ * other guard in Alpha assumes work arrives by pull request.
+ *
+ * Alpha still handles no token for any of this — `gh` reads the OS keyring
+ * itself. That is the property the hosted GitHub server gives up, and the
+ * reason this one continues to exist alongside it.
  *
  * The JSON-RPC is hand-rolled rather than taken from @modelcontextprotocol/sdk
  * because that package is ESM-only and this backend compiles to CommonJS. The
@@ -29,6 +48,80 @@ import { createInterface } from 'node:readline';
 
 import { githubService } from '../services/githubService.js';
 import { cloneToWorkspace } from '../services/repoCloneService.js';
+import { getCurrentBranch } from '../utils/gitUtils.js';
+import { sqliteService } from '../services/sqliteService.js';
+
+/**
+ * Record a mutation where the UI can find it.
+ *
+ * Written straight to alpha.db from this process rather than reported back to
+ * the daemon. This server is a grandchild of the daemon with no channel to it —
+ * its stdout belongs to the MCP protocol — and the database is already the
+ * shared store. WAL mode and the busy timeout in initPragmas are what make a
+ * second writer safe.
+ *
+ * The run id comes from the environment because that is the only thing tying
+ * this process to the work it is doing; the agent and issue are read from the
+ * run, so a caller cannot misattribute an action to someone else.
+ */
+function audit(action: string, target: string | undefined, succeeded: boolean, detail?: string) {
+  const runId = process.env.ALPHA_RUN_ID;
+  const run = runId ? sqliteService.getPrototypeRuns().find(r => r.id === runId) : undefined;
+
+  sqliteService.recordRemoteAction({
+    runId,
+    agentId: run?.agentId,
+    issueId: run?.issueId,
+    actor: 'agent',
+    action,
+    target,
+    detail,
+    succeeded
+  });
+}
+
+/**
+ * The checkout this turn is working in.
+ *
+ * Supplied by `writeRunMcpConfig` in the server's own environment rather than
+ * inherited: this process is a grandchild of Alpha — Alpha spawns the agent
+ * CLI, the CLI spawns this — and nothing in that chain promises to carry a
+ * working directory. A push tool that guesses wrong pushes the wrong
+ * repository.
+ */
+function requireWorkspace(): string {
+  const cwd = process.env.ALPHA_WORKSPACE;
+  if (!cwd) {
+    throw new Error(
+      'This turn has no workspace, so there is nothing to commit or push. ' +
+        'Local changes need a project with a working copy on this machine.'
+    );
+  }
+  return cwd;
+}
+
+/**
+ * Branches an agent must never push to directly.
+ *
+ * Checked by name as well as by asking the remote, because the remote lookup
+ * needs a network call and a resolvable `owner/repo`, and neither is
+ * guaranteed. A guard that silently stops working when the remote is
+ * unreachable is not a guard.
+ */
+const PROTECTED_BRANCH_NAMES = new Set(['main', 'master', 'develop', 'trunk']);
+
+/** The branch pull requests target, when it can be determined. */
+async function remoteDefaultBranch(cwd: string): Promise<string | undefined> {
+  try {
+    const { ownerRepo } = await githubService.inspectLocalRepo(cwd);
+    if (!ownerRepo) return undefined;
+    return (await githubService.getRepository(ownerRepo)).defaultBranch;
+  } catch {
+    // No remote, no network, or a private repo the account cannot read. The
+    // name check below still applies.
+    return undefined;
+  }
+}
 
 /** Newest protocol version this server implements. */
 const PROTOCOL_VERSION = '2025-06-18';
@@ -38,7 +131,23 @@ interface ToolDef {
   description: string;
   inputSchema: Record<string, unknown>;
   run: (args: Record<string, any>) => Promise<unknown>;
+  /**
+   * Omitted means readable by anyone who can reach this server. Only the two
+   * tools that change a remote carry 'write'.
+   */
+  access?: 'write';
 }
+
+/**
+ * What this turn may do, decided by the daemon and passed in the environment.
+ *
+ * Read here rather than negotiated, because this process cannot be trusted to
+ * ask: it is spawned by the agent's own CLI. Anything other than an explicit
+ * 'write' is read — an absent or misspelled value must not widen access.
+ */
+const ACCESS: 'read' | 'write' = process.env.ALPHA_MCP_ACCESS === 'write' ? 'write' : 'read';
+
+const permitted = (t: ToolDef) => t.access !== 'write' || ACCESS === 'write';
 
 const str = (description: string) => ({ type: 'string', description });
 const int = (description: string, min: number, max: number) => ({
@@ -128,6 +237,130 @@ const TOOLS: Record<string, ToolDef> = {
     run: ({ repo, runId }) => githubService.getFailedWorkflowLogs(repo, runId)
   },
 
+  github_push_branch: {
+    access: 'write',
+    description:
+      'Commit everything you have changed in this workspace and push it to the branch you are on. Use when your work is ready for others to see. Alpha knows which repository and branch — do not pass a path and do not run git yourself. Refuses to push to the default branch.',
+    inputSchema: schema(
+      { message: str('Commit message. One line, imperative, describing what changed.') },
+      ['message']
+    ),
+    run: async ({ message }) => {
+      const cwd = requireWorkspace();
+      const branch = await getCurrentBranch(cwd);
+
+      /**
+       * Never the default branch.
+       *
+       * Every other guard in Alpha assumes work arrives by pull request — the
+       * review gate, the diff shown for approval, the one-PR-per-issue rule.
+       * An agent pushing straight to main walks past all of them, and nothing
+       * downstream would notice.
+       */
+      const defaultBranch = await remoteDefaultBranch(cwd);
+      if (PROTECTED_BRANCH_NAMES.has(branch) || (defaultBranch && branch === defaultBranch)) {
+        audit('push', branch, false, 'Refused: protected branch.');
+        throw new Error(
+          `Refusing to push to "${branch}", which is a protected branch. Work reaches it by pull request. ` +
+            `You are on the wrong branch — Alpha put you on a feature branch for this task.`
+        );
+      }
+
+      let committed: boolean;
+      try {
+        committed = await githubService.commitAndPush(cwd, branch, message);
+      } catch (err: any) {
+        audit('push', branch, false, String(err?.message ?? err));
+        throw err;
+      }
+
+      audit('push', branch, true, committed ? message : 'Nothing new to commit; branch pushed.');
+      return {
+        branch,
+        committed,
+        note: committed
+          ? `Committed and pushed to ${branch}.`
+          : `Nothing left to commit — ${branch} was already up to date and has been pushed.`
+      };
+    }
+  },
+
+  github_open_pull_request: {
+    access: 'write',
+    description:
+      'Open a pull request for the branch you are working on. Use after github_push_branch, when the work is complete and ready for review. Returns the pull request URL.',
+    inputSchema: schema(
+      {
+        title: str('Pull request title. One line, describing the change.'),
+        body: str('Pull request description: what changed and why, in markdown.'),
+        base: str('Branch to merge into. Defaults to the repository default branch.')
+      },
+      ['title', 'body']
+    ),
+    run: async ({ title, body, base }) => {
+      const cwd = requireWorkspace();
+      const head = await getCurrentBranch(cwd);
+      const target = base || (await remoteDefaultBranch(cwd)) || 'main';
+
+      if (head === target) {
+        throw new Error(
+          `Cannot open a pull request from "${head}" into itself. Your changes need to be on a feature branch.`
+        );
+      }
+
+      let url: string;
+      try {
+        url = await githubService.createPullRequest(cwd, title, body, target, head);
+      } catch (err: any) {
+        audit('open_pull_request', head, false, String(err?.message ?? err));
+        throw err;
+      }
+
+      audit('open_pull_request', url, true, `${head} into ${target}`);
+      return { url, head, base: target };
+    }
+  },
+
+  github_review_pull_request: {
+    description:
+      'Post a code review on a pull request. Use when asked to review work — read the diff first, then say what you found. ' +
+      'State your verdict as the first line: APPROVE, REQUEST CHANGES, or COMMENT, followed by the reasoning and any specific problems. ' +
+      'This posts a review comment; it does not approve or merge anything, and a person still decides at the review gate.',
+    inputSchema: schema(
+      {
+        pull_request: str('Pull request URL, or its number as a string.'),
+        body: str('The review, in markdown. Begin with APPROVE, REQUEST CHANGES, or COMMENT.')
+      },
+      ['pull_request', 'body']
+    ),
+    run: async ({ pull_request, body }) => {
+      const cwd = requireWorkspace();
+
+      try {
+        await githubService.reviewPullRequest(cwd, String(pull_request), body);
+      } catch (err: any) {
+        audit('review_pull_request', String(pull_request), false, String(err?.message ?? err));
+        throw err;
+      }
+
+      /*
+       * The verdict is recorded as Alpha's own fact, not GitHub's. GitHub sees
+       * a comment — it will not accept an approval from the account that opened
+       * the pull request, which is the same account every agent uses. So the
+       * trail that says a reviewer approved lives here, where the identities
+       * are actually distinct.
+       */
+      const firstLine = String(body).trim().split('\n')[0].trim().slice(0, 120);
+      audit('review_pull_request', String(pull_request), true, firstLine);
+
+      return {
+        pull_request,
+        posted: true,
+        note: 'Posted as a review comment. Approval and merge remain with the person at the review gate.'
+      };
+    }
+  },
+
   github_clone_repository: {
     description:
       'Clone a repository onto this machine so its files can be worked on locally. Alpha chooses the destination inside its managed workspace — do not ask for a path and do not run git yourself. Cloning a repository that is already checked out refreshes it instead. Returns the local path.',
@@ -207,12 +440,20 @@ async function handle(msg: any): Promise<void> {
       return reply(id, {});
 
     case 'tools/list':
+      /*
+       * Filtered, not merely refused on call. A tool the agent can see is one
+       * it will plan around and describe to the user before discovering it is
+       * denied — and a run that narrates opening a pull request it cannot open
+       * reads as a lie rather than a limit.
+       */
       return reply(id, {
-        tools: Object.entries(TOOLS).map(([name, t]) => ({
-          name,
-          description: t.description,
-          inputSchema: t.inputSchema
-        }))
+        tools: Object.entries(TOOLS)
+          .filter(([, t]) => permitted(t))
+          .map(([name, t]) => ({
+            name,
+            description: t.description,
+            inputSchema: t.inputSchema
+          }))
       });
 
     case 'tools/call': {
@@ -220,6 +461,22 @@ async function handle(msg: any): Promise<void> {
       const tool = TOOLS[name];
       if (!tool) {
         return reply(id, toolResult(`Unknown tool: ${name}`, true));
+      }
+      /*
+       * Checked again here. The list above is advice to a client that may have
+       * cached an older one; this is the boundary.
+       */
+      if (!permitted(tool)) {
+        audit(name, undefined, false, 'Refused: this agent has read-only remote access.');
+        return reply(
+          id,
+          toolResult(
+            `"${name}" changes a remote, and this turn has read-only access to GitHub. ` +
+              `Commit your work locally and describe what you changed — a person will push it. ` +
+              `Raising an agent's autonomy above Supervised is what grants this.`,
+            true
+          )
+        );
       }
       try {
         const value = await tool.run(params?.arguments ?? {});

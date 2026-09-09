@@ -318,8 +318,16 @@ describe('custom CLI arguments', () => {
       args.indexOf('--disallowedTools')
     );
     expect(allowed).toEqual(['Read', 'Glob', 'Grep']);
-    expect(args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--setting-sources')))
-      .toEqual(['Write', 'Edit', 'Bash']);
+
+    // The denied list is the complement of what the agent's skills granted, and
+    // this agent was granted none — so every mutating tool is on it.
+    const denied = args.slice(
+      args.indexOf('--disallowedTools') + 1,
+      args.indexOf('--setting-sources')
+    );
+    for (const tool of ['Write', 'Edit', 'Bash', 'NotebookEdit']) {
+      expect(denied).toContain(tool);
+    }
   });
 
   it('cannot replace the composed persona', () => {
@@ -591,6 +599,172 @@ describe('chat mode is unchanged by run mode existing', () => {
     for (const provider of ['Anthropic', 'OpenAI'] as const) {
       const { args } = buildTurnInvocation(options({ provider, mode: 'run' }), noMcp);
       expect(args).not.toContain('--dangerously-skip-permissions');
+    }
+  });
+});
+
+/**
+ * The allowlist a run needs, which it never had.
+ *
+ * `--permission-mode acceptEdits` covers edits; MCP tools still ask, and a
+ * headless run has no one to ask. So every MCP call an agent made during a run
+ * stopped and waited — measured in the field as `alpha` 4, `agent` 0 in
+ * remote_actions after the feature had shipped and appeared to work. It looked
+ * like it worked because Alpha's own pipeline pushes and opens the pull request
+ * immediately afterwards, under actor 'alpha'.
+ */
+describe('a run may actually call the MCP tools it was granted', () => {
+  const run = (over: Partial<CliTurnOptions> = {}) =>
+    options({ mode: 'run', ...over });
+
+  it('allowlists the granted servers', () => {
+    const { args } = buildTurnInvocation(run(), {
+      configPath: '/runs/r1/mcp.json',
+      serverNames: ['alpha-github']
+    });
+
+    expect(args).toContain('--allowedTools');
+    expect(args).toContain('mcp__alpha-github');
+  });
+
+  it('still takes acceptEdits, so file edits do not prompt either', () => {
+    const { args } = buildTurnInvocation(run(), {
+      configPath: '/runs/r1/mcp.json',
+      serverNames: ['alpha-github']
+    });
+
+    expect(valueOf(args, '--permission-mode')).toBe('acceptEdits');
+  });
+
+  /**
+   * An empty `--allowedTools` is not the same as no `--allowedTools`: the first
+   * is an exhaustive list of nothing, which would deny the file tools a run
+   * exists to use.
+   */
+  it('omits the flag when no server was granted', () => {
+    const { args } = buildTurnInvocation(run(), noMcp);
+    expect(args).not.toContain('--allowedTools');
+  });
+
+  it('does not borrow the chat denylist', () => {
+    const { args } = buildTurnInvocation(run(), noMcp);
+    // A run edits files; denying Write and Edit would make it pointless.
+    expect(args).not.toContain('--disallowedTools');
+  });
+});
+
+/**
+ * Skills decide what a chat turn may do.
+ *
+ * The behaviour these pin down is the one the operator asked for and the one
+ * most easily lost: an agent holding `sk-fs` edits real files from the sidebar.
+ * The argv is where that is granted, so the argv is where it is asserted —
+ * `chatToolsFor` has its own unit tests, but nothing else proves the runner
+ * actually passes what it computed.
+ */
+describe('chat capability from skills', () => {
+  /** Tools between --allowedTools and the next flag. */
+  const allowedIn = (args: string[]) =>
+    args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--disallowedTools'));
+
+  const deniedIn = (args: string[]) =>
+    args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--setting-sources'));
+
+  it('gives an agent granted nothing exactly what chat had before', () => {
+    const { args } = buildTurnInvocation(options({ skills: [] }), noMcp);
+
+    expect(allowedIn(args)).toEqual(['Read', 'Glob', 'Grep']);
+    expect(deniedIn(args)).toContain('Write');
+    expect(deniedIn(args)).toContain('Bash');
+  });
+
+  it('treats an agent with no skills field as granted nothing', () => {
+    // Every caller not yet taught to pass them keeps the old behaviour rather
+    // than silently gaining write.
+    const { args } = buildTurnInvocation(options(), noMcp);
+    expect(allowedIn(args)).toEqual(['Read', 'Glob', 'Grep']);
+  });
+
+  it('lets an agent granted sk-fs edit files', () => {
+    const { args } = buildTurnInvocation(options({ skills: ['sk-fs'] }), noMcp);
+
+    expect(allowedIn(args)).toContain('Write');
+    expect(allowedIn(args)).toContain('Edit');
+    expect(deniedIn(args)).not.toContain('Write');
+    // The shell is a separate grant and was not made.
+    expect(deniedIn(args)).toContain('Bash');
+  });
+
+  it('lets an agent granted sk-bash run commands', () => {
+    const { args } = buildTurnInvocation(options({ skills: ['sk-bash'] }), noMcp);
+
+    expect(allowedIn(args)).toContain('Bash');
+    expect(deniedIn(args)).toContain('Write');
+  });
+
+  it('still denies what was not granted, so the CLI refuses instead of prompting', () => {
+    // An ungranted tool absent from BOTH lists is refused by prompting, and a
+    // headless process has no TTY to answer — the turn hangs rather than fails.
+    const { args } = buildTurnInvocation(options({ skills: ['sk-fs'] }), noMcp);
+    expect(deniedIn(args)).toContain('NotebookEdit');
+  });
+
+  it('keeps custom CLI args from granting a tool the skills did not', () => {
+    const { args } = buildTurnInvocation(
+      options({ skills: ['sk-fs'], customCliArgs: '--allowedTools Bash' }),
+      noMcp
+    );
+
+    expect(allowedIn(args)).not.toContain('Bash');
+    expect(deniedIn(args)).toContain('Bash');
+  });
+});
+
+describe('chat capability reaching the other CLI families', () => {
+  it('keeps the codex sandbox read-only for an agent granted nothing', () => {
+    const { args } = buildTurnInvocation(
+      options({ provider: 'OpenAI', skills: [] }),
+      noMcp
+    );
+    expect(valueOf(args, '--sandbox')).toBe('read-only');
+  });
+
+  it('opens the codex sandbox for an agent granted sk-fs', () => {
+    // codex enforces this itself, rather than a prompt asking nicely.
+    const { args } = buildTurnInvocation(
+      options({ provider: 'OpenAI', skills: ['sk-fs'] }),
+      noMcp
+    );
+    expect(valueOf(args, '--sandbox')).toBe('workspace-write');
+  });
+
+  it('withholds the agy permission flag from an agent granted nothing', () => {
+    const { args } = buildTurnInvocation(
+      options({ provider: 'Antigravity', skills: [] }),
+      noMcp
+    );
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
+
+  it('gives agy the permission flag once a write skill is granted', () => {
+    // agy auto-denies in headless mode, so without this the turn dies producing
+    // nothing rather than making the edit it was just told it could make.
+    const { args } = buildTurnInvocation(
+      options({ provider: 'Antigravity', skills: ['sk-fs'] }),
+      noMcp
+    );
+    expect(args).toContain('--dangerously-skip-permissions');
+  });
+
+  it('still gives agy the workspace either way', () => {
+    // --add-dir is visibility, not capability: without it a chat turn cannot
+    // read the directory it is standing in.
+    for (const skills of [[], ['sk-fs']]) {
+      const { args } = buildTurnInvocation(
+        options({ provider: 'Antigravity', skills }),
+        noMcp
+      );
+      expect(args).toContain('--add-dir');
     }
   });
 });
