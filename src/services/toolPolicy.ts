@@ -281,3 +281,46 @@ export function describeChatToolPolicy(
 
   return lines.join('\n');
 }
+
+/**
+ * How a reply should be shaped, for a chat window rather than a terminal.
+ *
+ * The bubble renders markdown now, which removed most of what made a long reply
+ * unreadable — the syntax was being shown as literal characters, and one
+ * measured reply was 37% link targets by weight. This is the other half: what
+ * the renderer cannot fix, because it is in the text rather than in how the
+ * text is displayed.
+ *
+ * Three things, each observed in a real transcript:
+ *
+ *   absolute paths   Replies carried `file:///C:/Users/<name>/.alpha/cli-home/
+ *                    antigravity.gemini/antigravity-cli/brain/70e096c7-6b00-
+ *                    4289-8457-6efa65ccb743/architecture_overview.md`. Rendered
+ *                    they collapse to a chip, but they still cost tokens, still
+ *                    name a machine and a user, and mean nothing to a reader who
+ *                    thinks in repository paths.
+ *
+ *   LaTeX            `$\rightarrow$` for an arrow, twice in one reply. There is
+ *                    no math renderer and no reason to add one for arrows.
+ *
+ *   one long line    478 characters unbroken. It wraps, but a paragraph that
+ *                    long is a wall whichever width it is poured into.
+ *
+ * Worded as preferences with reasons rather than prohibitions. A model told
+ * "never" about formatting tends to spend its opening sentence acknowledging
+ * the rule, which costs more than the habit did.
+ */
+export function describeReplyFormat(): string {
+  return [
+    '## How to write your reply',
+    '',
+    'This is rendered as markdown in a chat panel, not printed to a terminal.',
+    '',
+    'Refer to a file by its path relative to the project root, in backticks — `src/ContactForm.tsx`.',
+    'Absolute paths and `file://` URLs are noise to the reader: they name this machine rather than the repository, and the person reading already knows which project they are in.',
+    '',
+    'Write arrows and symbols as plain characters — use → and ×, never LaTeX like $\\rightarrow$. Nothing here renders math.',
+    '',
+    'Keep paragraphs short enough to scan. Prefer a list to a long sentence with several clauses in it, and use at most one level of heading — a reply is not a document.'
+  ].join('\n');
+}
