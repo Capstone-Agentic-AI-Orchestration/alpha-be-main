@@ -19,6 +19,7 @@ import { resolveAgent } from '../services/personaService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
 import { Agent } from '../models/index.js';
 import { logError, logInfo } from '../utils/logger.js';
+import { SKILL_TOOLS } from '../services/toolPolicy.js';
 
 export const dataRouter = Router();
 
@@ -443,8 +444,25 @@ dataRouter.delete('/squads/:id', (req: Request, res: Response) => {
 });
 
 // --- Skills ---
+/*
+ * Each skill carries the tools it actually grants a chat turn.
+ *
+ * Served rather than mirrored in the frontend. The bug this closes was a panel
+ * describing capability the runner never handed over; hard-coding the same map
+ * on the other side of the wire rebuilds that the first time one copy is edited
+ * and the other is not. SKILL_TOOLS stays the only place it is written down.
+ *
+ * Empty for a skill that grants no CLI tool — `sk-git` grants MCP write access,
+ * which is resolved per agent from its autonomy level and cannot be read off
+ * the skill alone.
+ */
 dataRouter.get('/skills', (req: Request, res: Response) => {
-  res.json(sqliteService.getSkills());
+  res.json(
+    sqliteService.getSkills().map(skill => ({
+      ...skill,
+      grantedTools: SKILL_TOOLS[skill.id] ?? []
+    }))
+  );
 });
 
 dataRouter.put('/skills/:id', (req: Request, res: Response) => {

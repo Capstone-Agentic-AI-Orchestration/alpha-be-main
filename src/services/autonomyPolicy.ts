@@ -23,20 +23,44 @@ import { AutonomyLevel } from '../models/index.js';
  *   (none)  merge, force-push, push to a protected branch. No level reaches
  *           these. They belong to the person at the review gate.
  *
- * A chat turn is always `read` regardless of the agent, and that is the hole
- * this closes rather than a policy choice: chat had `mcp__alpha-github` in its
- * allowed tools, so an agent asked a question in the sidebar could push a
- * branch and open a pull request — with no branch of its own, no diff, and no
- * approval gate, none of which a chat turn has. toolPolicy already said chat
- * must be read-only; its MCP tools had simply never been included in that.
+ * ## Chat was once always read, and no longer is
+ *
+ * It was pinned to `read` because chat had `mcp__alpha-github` in its allowed
+ * tools with nothing qualifying it, so an agent asked a question in the sidebar
+ * could push a branch and open a pull request — with no branch of its own, no
+ * diff, and no approval gate, none of which a chat turn has.
+ *
+ * What that pin lacked was a way to say *which* agents. It is back to being a
+ * policy question rather than a blanket answer, and now takes two keys instead
+ * of one:
+ *
+ *   the skill    `sk-git` — was this agent handed GitHub at all, deliberately,
+ *                on its own card
+ *   the level    `autonomyLevel` — and is it trusted to write to a remote
+ *
+ * Both, or it reads. That keeps the seeded Reviewer honest: it holds `sk-git`
+ * and is Supervised, so it may read a repository and say what it thinks about
+ * one, which is its whole job, and may not push — exactly what its card claims.
+ *
+ * A run is unchanged, and deliberately does not consult skills. Runs already
+ * have the gate chat lacks (a branch, a diff, `awaiting_approval`), and the
+ * seeded Tester holds no `sk-git` while its runs legitimately push through
+ * Alpha's own pipeline. Narrowing that here would break a working path to fix
+ * nothing.
  */
 export type McpAccess = 'read' | 'write';
 
+/** The skill that grants GitHub write. See SKILL_TOOLS in toolPolicy. */
+export const GITHUB_WRITE_SKILL = 'sk-git';
+
 export function mcpAccessFor(
   autonomy: AutonomyLevel | undefined,
-  mode: 'run' | 'chat'
+  mode: 'run' | 'chat',
+  skills: string[] = []
 ): McpAccess {
-  if (mode === 'chat') return 'read';
+  // Chat needs the grant to be explicit on the agent itself; a run inherits it
+  // from the pipeline that will review the result.
+  if (mode === 'chat' && !skills.includes(GITHUB_WRITE_SKILL)) return 'read';
 
   switch (autonomy) {
     case 'Semi-Autonomous (Requires Approval)':

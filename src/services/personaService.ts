@@ -4,6 +4,7 @@ import { Agent, AgentRole, AutonomyLevel, ModelProvider } from '../models/index.
 import { readAgentFile } from './agentFileService.js';
 import { composeMemory } from './memoryService.js';
 import { describeChatToolPolicy, describeRoster, RosterEntry } from './toolPolicy.js';
+import { mcpAccessFor } from './autonomyPolicy.js';
 import { logInfo } from '../utils/logger.js';
 
 /**
@@ -54,8 +55,9 @@ export interface ResolveOptions {
   /** Skip the memory tiers — used by callers that are not a persona run. */
   includeMemory?: boolean;
   /**
-   * Append the read-only tool constraint. On for chat turns, where the seeded
-   * personas otherwise promise writes the runner denies — see toolPolicy.
+   * Append the tool constraint. On for chat turns, where a persona otherwise
+   * describes capability the runner does not actually hand over — in either
+   * direction, now that skills grant it per agent. See toolPolicy.
    */
   includeToolPolicy?: boolean;
   /**
@@ -79,6 +81,7 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
   const overlay = readAgentFile(agent.id);
   const merged = { ...agent, ...(overlay ?? {}) };
   const mcpServers = merged.mcpServers ?? [];
+  const skills = merged.skills ?? [];
 
   const sources: string[] = [overlay ? `agents/${agent.id}.md` : 'alpha.db'];
 
@@ -106,7 +109,11 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
     // Last, so it is the nearest thing to the turn itself. A persona that says
     // "write the code" and a constraint that says "you cannot" resolve in
     // favour of whichever came last, and the constraint is the true one.
-    parts.push(describeChatToolPolicy(mcpServers));
+    // The same three inputs the runner builds its argv from, so the sentence
+    // the agent reads and the flags it runs under cannot disagree.
+    parts.push(
+      describeChatToolPolicy(mcpServers, skills, mcpAccessFor(merged.autonomyLevel, 'chat', skills))
+    );
     sources.push('tool-policy');
   }
 
@@ -121,7 +128,7 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
     modelName: merged.modelName,
     autonomyLevel: merged.autonomyLevel,
     temperature: merged.temperature,
-    skills: merged.skills ?? [],
+    skills,
     mcpServers,
     sources
   };

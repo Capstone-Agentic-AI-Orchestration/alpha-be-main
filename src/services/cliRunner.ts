@@ -3,12 +3,13 @@ import { createLineBuffer } from '../utils/lineBuffer.js';
 import { StreamParser, StreamFamily } from './streamParser.js';
 import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
 import { parseCustomCliArgs } from './customCliArgs.js';
-import { CHAT_ALLOWED_TOOLS, CHAT_DISALLOWED_TOOLS } from './toolPolicy.js';
+import { chatToolsFor } from './toolPolicy.js';
 import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
+import { AutonomyLevel } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 import { RUNS_DIR } from '../config/env.js';
 import fs from 'node:fs';
@@ -108,6 +109,21 @@ export interface CliTurnOptions {
    * the agent's shell.
    */
   mcpEnv?: Record<string, string>;
+  /**
+   * Skills granted to this agent, from `agent.skills`.
+   *
+   * On a chat turn these ARE the capability: `chatToolsFor` turns them into the
+   * allowed and denied lists, so an agent holding `sk-fs` may edit files and one
+   * holding nothing may not. A run ignores them — see autonomyPolicy.
+   */
+  skills?: string[];
+  /**
+   * The agent's autonomy level, for what its MCP tools may do to a remote.
+   *
+   * Paired with `sk-git` on a chat turn: the skill says GitHub was granted, this
+   * says whether the agent is trusted to write to it.
+   */
+  autonomyLevel?: AutonomyLevel;
 }
 
 export interface CliTurnResult {
@@ -201,6 +217,18 @@ export function buildTurnInvocation(
   const { provider, cwd, modelName, systemPrompt, personaName, prompt, priorSession } = options;
   const isRun = options.mode === 'run';
 
+  /*
+   * What this chat turn was granted, resolved from the agent's own skills.
+   *
+   * Computed for both modes because two provider branches below need to know
+   * whether a turn can write at all, and a run always can. `canWrite` is the
+   * question those branches actually ask — not "is this a run" as it used to be,
+   * which is now the wrong question for a chat granted `sk-fs`.
+   */
+  const chatTools = chatToolsFor(options.skills);
+  const canWrite = isRun || chatTools.allowed.some(t => t === 'Write' || t === 'Edit');
+  const canRunShell = isRun || chatTools.allowed.includes('Bash');
+
   /**
    * The agent's own extra flags, minus anything the runner owns.
    *
@@ -286,8 +314,10 @@ export function buildTurnInvocation(
       args: [
         'exec',
         '--json',
-        // A run edits the repository it was given; a chat only inspects it.
-        '--sandbox', isRun ? 'workspace-write' : 'read-only',
+        // A run edits the repository it was given; so does a chat whose agent
+        // was granted `sk-fs`. Without the skill the sandbox stays read-only,
+        // which is codex's own enforcement rather than a prompt asking nicely.
+        '--sandbox', canWrite ? 'workspace-write' : 'read-only',
         '--skip-git-repo-check',
         /**
          * Isolate codex from ~/.codex/config.toml — the operator's own file.
@@ -383,11 +413,14 @@ export function buildTurnInvocation(
          * answered a question about itself perfectly, so the CLI was healthy —
          * it simply had no workspace.
          *
-         * Chat is still read-only: CHAT_ALLOWED_TOOLS is Read, Glob and Grep,
-         * and the disallowed list denies Write, Edit and Bash.
+         * Chat is read-only for an agent granted no skills: the allowed list is
+         * Read, Glob and Grep, and the denied list names every mutating tool.
+         * An agent granted `sk-fs` or `sk-bash` gets the flag here too, because
+         * agy auto-denies in headless mode and would otherwise die producing
+         * nothing rather than making the edit it was just told it could make.
          */
         '--add-dir', cwd,
-        ...(isRun ? ['--dangerously-skip-permissions'] : []),
+        ...(canWrite || canRunShell ? ['--dangerously-skip-permissions'] : []),
         ...(modelName ? ['--model', modelName] : []),
         ...(priorSession ? ['--conversation', priorSession] : []),
         ...customArgs
@@ -479,8 +512,14 @@ export function buildTurnInvocation(
               : [])
           ]
         : [
-            '--allowedTools', ...CHAT_ALLOWED_TOOLS, ...mcpToolPatterns(mcp.serverNames),
-            '--disallowedTools', ...CHAT_DISALLOWED_TOOLS
+            /*
+             * Built from the agent's skills rather than a fixed list. Both
+             * halves matter: the allowed list is exhaustive, and the denied list
+             * is what turns an ungranted tool into a clean refusal instead of a
+             * prompt no headless process can answer. See toolPolicy.
+             */
+            '--allowedTools', ...chatTools.allowed, ...mcpToolPatterns(mcp.serverNames),
+            '--disallowedTools', ...chatTools.denied
           ]),
       // Isolate the agent persona from the operator's personal Claude Code
       // configuration. Without this the host's ~/.claude/CLAUDE.md is loaded
@@ -559,19 +598,22 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
 
   // Resolve the agent's granted MCP servers into a config for this run only.
   /*
-   * Always read-only here. This function serves chat and the agent builder,
-   * never a run — and a chat turn has no branch, no diff and no approval gate,
-   * so nothing it did to a remote could be reviewed or undone. `mcp__alpha-github`
-   * sat in CHAT_ALLOWED_TOOLS, which made push and open-pull-request reachable
-   * from the sidebar; the allow-list works on server names, so the refusal has
-   * to happen inside the server.
+   * Chat access, resolved per agent. This function serves chat and the agent
+   * builder, never a run.
+   *
+   * It used to pass a flat `read` for everyone. The refusal has to happen inside
+   * the server either way — the allow-list works on server names, so
+   * `mcp__alpha-github` either grants every tool the server exposes or none —
+   * which is why this is an argument to the config writer and not a flag.
+   * mcpAccessFor now decides it from the agent's own `sk-git` and autonomy
+   * level; an agent holding neither still gets exactly what it got before.
    */
   const mcp = writeRunMcpConfig(
     runId,
     options.mcpServers,
     options.mcpEnv,
     options.cwd,
-    mcpAccessFor(undefined, 'chat')
+    mcpAccessFor(options.autonomyLevel, options.mode === 'run' ? 'run' : 'chat', options.skills)
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);

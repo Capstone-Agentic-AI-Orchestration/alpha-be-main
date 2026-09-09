@@ -466,6 +466,11 @@ ${priorTurn}` : prompt,
       personaChanged,
       mcpServers: persona.mcpServers,
       mcpEnv: { ...projectEnv, ...env },
+      // What this agent may actually do this turn. Resolved from the persona
+      // rather than the raw row so a persona file's `skills:` overlay counts,
+      // the same way it does for every other field.
+      skills: persona.skills,
+      autonomyLevel: persona.autonomyLevel,
       env,
       customCliArgs: agent.customCliArgs
     });

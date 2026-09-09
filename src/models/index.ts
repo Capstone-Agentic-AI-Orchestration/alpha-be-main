@@ -139,7 +139,8 @@ export interface Project {
    * create one at all.
    */
   githubOrg?: string;
-  createdAt: string;
+  createdAt: string;
+
   /**
    * Environment values for work on this project.
    *
@@ -323,6 +324,15 @@ export interface Skill {
   description: string;
   isEnabled: boolean;
   commandExample?: string;
+  /**
+   * CLI tools this skill grants a chat turn, from SKILL_TOOLS.
+   *
+   * Attached by the API rather than stored: the mapping is policy, not data, and
+   * a copy in the database would be one more thing to drift out of step with the
+   * runner. Empty means the skill grants no CLI tool — which is not the same as
+   * granting nothing, `sk-git` being the case that matters.
+   */
+  grantedTools?: readonly string[];
 }
 
 export interface Squad {
