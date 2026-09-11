@@ -1,4 +1,24 @@
-export type AgentRole = 'Architect' | 'Coder' | 'Reviewer' | 'QA Tester' | 'DevOps' | 'Triager' | 'Researcher';
+export type AgentRole =
+  | 'Architect'
+  | 'Coder'
+  | 'Reviewer'
+  | 'QA Tester'
+  | 'DevOps'
+  | 'DevOps Engineer'
+  | 'Triager'
+  | 'Researcher'
+  | 'Research Agent'
+  | 'Architecture Agent'
+  | 'Manager Agent'
+  | 'Database Agent'
+  | 'Backend Agent'
+  | 'Frontend Agent'
+  | 'Mobile Agent'
+  | 'Security / Code Quality Agent'
+  | 'Validation / Checking Agent'
+  | 'GitHub Finalization Agent';
+
+export type AgentPhase = 'Planning' | 'Development' | 'Validation' | 'Finalization';
 
 export type AutonomyLevel = 'Supervised' | 'Semi-Autonomous (Requires Approval)' | 'Full Autonomy';
 
@@ -37,6 +57,14 @@ export interface Agent {
   isArchived?: boolean;
   /** Who may use this agent. Absent on rows written before the column existed. */
   allowedUsers?: AgentAccessLevel;
+  /** Stable key for an official, locally seeded template. */
+  templateKey?: string;
+  /** Template revision used when this local instance was created. */
+  templateVersion?: number;
+  /** Delivery phase for a paper-aligned official role. */
+  phase?: AgentPhase;
+  /** True only for Alpha's built-in, idempotently seeded role instances. */
+  isSeeded?: boolean;
   createdAt: string;
 }
 

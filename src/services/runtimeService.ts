@@ -184,7 +184,7 @@ export class RuntimeService {
           provider: 'OpenAI',
           status: isHealthy ? 'online' : 'degraded',
           version,
-          models: ['codex', 'o3', 'gpt-4o'],
+          models: ['gpt-5.6-sol', 'o3', 'gpt-4o'],
           detectedAt: now
         };
       } catch {
@@ -194,7 +194,7 @@ export class RuntimeService {
           provider: 'OpenAI',
           status: 'online',
           version,
-          models: ['codex', 'o3', 'gpt-4o'],
+          models: ['gpt-5.6-sol', 'o3', 'gpt-4o'],
           detectedAt: now
         };
       }
@@ -204,7 +204,7 @@ export class RuntimeService {
         name: 'OpenAI Codex CLI',
         provider: 'OpenAI',
         status: 'offline',
-        models: ['codex', 'o3', 'gpt-4o'],
+        models: ['gpt-5.6-sol', 'o3', 'gpt-4o'],
         detectedAt: now
       };
     }

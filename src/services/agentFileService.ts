@@ -69,8 +69,19 @@ const ROLES: readonly AgentRole[] = [
   'Reviewer',
   'QA Tester',
   'DevOps',
+  'DevOps Engineer',
   'Triager',
-  'Researcher'
+  'Researcher',
+  'Research Agent',
+  'Architecture Agent',
+  'Manager Agent',
+  'Database Agent',
+  'Backend Agent',
+  'Frontend Agent',
+  'Mobile Agent',
+  'Security / Code Quality Agent',
+  'Validation / Checking Agent',
+  'GitHub Finalization Agent'
 ];
 
 const PROVIDERS: readonly ModelProvider[] = [

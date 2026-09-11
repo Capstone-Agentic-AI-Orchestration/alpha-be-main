@@ -42,7 +42,7 @@ Reply in two parts, in this order:
 
 Rules for the block:
   - Include it in EVERY reply, even when nothing changed — omit only the keys you are not changing.
-  - "role" must be one of: Architect, Coder, Reviewer, QA Tester, DevOps Engineer, Researcher, Triager.
+  - "role" must be one of: Architect, Coder, Reviewer, QA Tester, DevOps Engineer, Researcher, Triager, Research Agent, Architecture Agent, Manager Agent, Database Agent, Backend Agent, Frontend Agent, Mobile Agent, Security / Code Quality Agent, Validation / Checking Agent, GitHub Finalization Agent.
   - "access" must be one of: everyone, team, admins, private.
   - "model" must be an id from available_models, and "skill_ids" must all come from available_skills. Never invent one.
   - "description" is one line, at most 255 characters.

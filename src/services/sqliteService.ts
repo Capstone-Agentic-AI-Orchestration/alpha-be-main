@@ -20,6 +20,11 @@ import {
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
+import {
+  agentFromOfficialTemplate,
+  LEGACY_TEMPLATE_MAPPINGS,
+  OFFICIAL_AGENT_TEMPLATES
+} from './officialAgentTemplates.js';
 
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
@@ -80,6 +85,7 @@ export class SQLiteService {
     this.initTables();
     this.migrate();
     this.seedDefaultsIfEmpty();
+    this.ensureOfficialAgents();
   }
 
   /**
@@ -402,6 +408,14 @@ export class SQLiteService {
        * so the two cases stay distinguishable here.
        */
       ['agents', 'allowed_users TEXT'],
+      // Official templates are product scaffolding, not a copy of somebody's
+      // work. These nullable columns let a local agent be linked to the
+      // template that created it without treating every manually created agent
+      // as a system record.
+      ['agents', 'template_key TEXT'],
+      ['agents', 'template_version INTEGER'],
+      ['agents', 'phase TEXT'],
+      ['agents', 'is_seeded INTEGER DEFAULT 0'],
       /**
        * Which project a conversation is about.
        *
@@ -520,6 +534,8 @@ export class SQLiteService {
 
       -- After the ALTERs above: this indexes a column they add.
       CREATE INDEX IF NOT EXISTS idx_runs_squad_run ON prototype_runs(squad_run_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_template_key
+        ON agents(template_key) WHERE template_key IS NOT NULL;
     `);
   }
 
@@ -562,6 +578,73 @@ export class SQLiteService {
     this.db
       .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_at', ?)")
       .run(new Date().toISOString());
+  }
+
+  /**
+   * Seed Alpha's approved role catalogue without treating a restart as a reset.
+   *
+   * The former five records are recognised by their stable ids and linked to a
+   * matching template only; no user-facing or persona field is rewritten. The
+   * old full-stack Developer intentionally remains a legacy custom agent while
+   * Backend and Frontend are seeded as separate official roles.
+   */
+  private ensureOfficialAgents(): void {
+    const linkLegacy = this.db.transaction(() => {
+      const stmt = this.db.prepare(`
+        UPDATE agents
+        SET template_key = @templateKey,
+            template_version = @templateVersion,
+            phase = @phase,
+            is_seeded = 1
+        WHERE id = @id AND template_key IS NULL
+      `);
+
+      for (const [id, key] of Object.entries(LEGACY_TEMPLATE_MAPPINGS)) {
+        const template = OFFICIAL_AGENT_TEMPLATES.find(item => item.key === key);
+        if (!template) continue;
+        stmt.run({
+          id,
+          templateKey: template.key,
+          templateVersion: template.version,
+          phase: template.phase
+        });
+      }
+    });
+
+    linkLegacy();
+
+    const existing = new Set(
+      (this.db.prepare('SELECT template_key FROM agents WHERE template_key IS NOT NULL').all() as Array<{ template_key: string }>)
+        .map(row => row.template_key)
+    );
+    const existingIds = new Set(
+      (this.db.prepare('SELECT id FROM agents').all() as Array<{ id: string }>).map(row => row.id)
+    );
+    const now = new Date().toISOString();
+
+    for (const template of OFFICIAL_AGENT_TEMPLATES) {
+      if (existing.has(template.key)) continue;
+
+      // An installation may already have a manually created agent whose id
+      // happens to match a new official role. That record is its owner's work,
+      // not evidence that it is the template. Preserve it and give the seeded
+      // record a deterministic alternate id instead of failing startup.
+      const seeded = agentFromOfficialTemplate(template, now);
+      if (existingIds.has(seeded.id)) {
+        const baseId = `${seeded.id}-official`;
+        let candidateId = baseId;
+        let suffix = 2;
+        while (existingIds.has(candidateId)) {
+          candidateId = `${baseId}-${suffix}`;
+          suffix += 1;
+        }
+        seeded.id = candidateId;
+      }
+
+      this.createAgent(seeded);
+      existing.add(template.key);
+      existingIds.add(seeded.id);
+    }
   }
 
   private seedDefaultsIfEmpty() {
@@ -710,7 +793,9 @@ export class SQLiteService {
       }
     ];
 
-    defaultAgents.forEach(a => this.createAgent(a));
+    // The pre-template seed stays here only as migration reference for old
+    // databases. New installs receive OFFICIAL_AGENT_TEMPLATES below.
+    void defaultAgents;
 
     /**
      * No project, and no issues.
@@ -736,9 +821,9 @@ export class SQLiteService {
       id: 'squad-core',
       name: 'Alpha Core Execution Squad',
       topology: 'Sequential',
-      leaderAgentId: 'agent-architect',
-      memberAgentIds: ['agent-architect', 'agent-developer', 'agent-reviewer', 'agent-tester'],
-      mission: 'Autonomous triage, implementation, and static code review of incoming Capstone issues.',
+      leaderAgentId: 'agent-manager',
+      memberAgentIds: ['agent-research', 'agent-architect', 'agent-manager', 'agent-backend', 'agent-frontend', 'agent-reviewer', 'agent-tester'],
+      mission: 'Research, plan, build, review, and validate approved project work.',
       activeRunsCount: 0,
       completedRunsCount: 12
     };
@@ -939,6 +1024,10 @@ export class SQLiteService {
       // own default, while the column itself stays nullable to keep "never set"
       // distinguishable from "deliberately set to team".
       allowedUsers: r.allowed_users ?? 'team',
+      templateKey: r.template_key ?? undefined,
+      templateVersion: r.template_version ?? undefined,
+      phase: r.phase ?? undefined,
+      isSeeded: Boolean(r.is_seeded),
       stats: stats.get(r.id) ?? {
         totalRuns: 0,
         successRate: 0,
@@ -967,8 +1056,8 @@ export class SQLiteService {
 
   createAgent(a: Agent): Agent {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, created_at)
-      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @createdAt)
+      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, template_key, template_version, phase, is_seeded, created_at)
+      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @templateKey, @templateVersion, @phase, @isSeeded, @createdAt)
     `);
     stmt.run({
       ...a,
@@ -983,6 +1072,10 @@ export class SQLiteService {
       // The column is nullable and the field optional, but better-sqlite3 needs
       // every named parameter bound, so the absence has to be explicit.
       allowedUsers: a.allowedUsers ?? null,
+      templateKey: a.templateKey ?? null,
+      templateVersion: a.templateVersion ?? null,
+      phase: a.phase ?? null,
+      isSeeded: a.isSeeded ? 1 : 0,
       createdAt: a.createdAt || new Date().toISOString()
     });
 
