@@ -157,6 +157,12 @@ describe('readAgentFile', () => {
     expect(overlay?.modelProvider).toBe('Anthropic');
   });
 
+  it('accepts the official delivery roles in persona files', () => {
+    writeFile('---\nrole: backend agent\n---\n\nPersona.');
+
+    expect(svc.readAgentFile('agent-architect')?.role).toBe('Backend Agent');
+  });
+
   it('drops an unrecognised role rather than passing it through', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     writeFile('---\nname: Ada\nrole: Wizard\n---\n\nPersona.');

@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { OFFICIAL_AGENT_TEMPLATES } from './officialAgentTemplates.js';
 
 /**
  * Seeding must happen exactly once, and must not be inferred.
@@ -56,7 +57,12 @@ describe('seeding runs once', () => {
   it('plants the defaults on a fresh database', async () => {
     const svc = await startDaemon();
     expect(svc.getSkills()).toHaveLength(5);
-    expect(svc.getAgents()).toHaveLength(5);
+    const agents = svc.getAgents();
+    expect(agents).toHaveLength(10);
+    expect(agents.map(agent => agent.templateKey).sort()).toEqual(
+      OFFICIAL_AGENT_TEMPLATES.map(template => template.key).sort()
+    );
+    expect(agents.every(agent => agent.isSeeded)).toBe(true);
   });
 
   /**
@@ -93,14 +99,14 @@ describe('seeding runs once', () => {
     const second = await startDaemon();
     expect(second.getProjects()).toHaveLength(0);
     expect(second.getSkills()).toHaveLength(5);
-    expect(second.getAgents()).toHaveLength(5);
+    expect(second.getAgents()).toHaveLength(10);
   });
 
   it('does not duplicate anything on an ordinary restart', async () => {
     await startDaemon();
     const svc = await startDaemon();
     expect(svc.getSkills()).toHaveLength(5);
-    expect(svc.getAgents()).toHaveLength(5);
+    expect(svc.getAgents()).toHaveLength(10);
     expect(svc.getSquads()).toHaveLength(1);
   });
 
@@ -122,5 +128,62 @@ describe('seeding runs once', () => {
     const marker = check.prepare("SELECT value FROM meta WHERE key = 'seeded_at'").get();
     check.close();
     expect(marker).toBeTruthy();
+  });
+
+  it('links legacy roles without overwriting their persona or configuration', async () => {
+    const first = await startDaemon();
+    first.close();
+
+    const db = new Database(dbPath());
+    db.prepare(`
+      UPDATE agents
+      SET name = 'My Architecture Lead',
+          system_prompt = 'Keep this local persona.',
+          template_key = NULL,
+          template_version = NULL,
+          phase = NULL,
+          is_seeded = 0
+      WHERE id = 'agent-architect'
+    `).run();
+    db.close();
+
+    const second = await startDaemon();
+    const architect = second.getAgents().find(agent => agent.id === 'agent-architect');
+    expect(architect).toMatchObject({
+      name: 'My Architecture Lead',
+      systemPrompt: 'Keep this local persona.',
+      templateKey: 'architecture',
+      templateVersion: 1,
+      phase: 'Planning',
+      isSeeded: true
+    });
+    expect(second.getAgents()).toHaveLength(10);
+  });
+
+  it('keeps a custom agent when its id collides with a newly seeded role', async () => {
+    const first = await startDaemon();
+    first.close();
+
+    const db = new Database(dbPath());
+    db.prepare(`
+      UPDATE agents
+      SET name = 'My existing Research Helper',
+          template_key = NULL,
+          template_version = NULL,
+          phase = NULL,
+          is_seeded = 0
+      WHERE id = 'agent-research'
+    `).run();
+    db.close();
+
+    const second = await startDaemon();
+    expect(second.getAgents().find(agent => agent.id === 'agent-research')).toMatchObject({
+      name: 'My existing Research Helper',
+      templateKey: undefined,
+      isSeeded: false
+    });
+    const officialResearch = second.getAgents().find(agent => agent.templateKey === 'research');
+    expect(officialResearch?.id).toBe('agent-research-official');
+    expect(second.getAgents()).toHaveLength(11);
   });
 });

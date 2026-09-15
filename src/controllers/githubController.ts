@@ -103,6 +103,35 @@ githubRouter.get('/github/runs', async (req: Request, res: Response) => {
   res.json(runs);
 });
 
+githubRouter.post('/github/dispatch', async (req: Request, res: Response) => {
+  const { cwd, workflow, ref, inputs } = req.body ?? {};
+  if (!cwd || typeof cwd !== 'string') {
+    return res.status(400).json({ error: 'A project workspace "cwd" is required.' });
+  }
+  if (workflow !== undefined && typeof workflow !== 'string') {
+    return res.status(400).json({ error: 'Workflow must be a string when provided.' });
+  }
+  if (ref !== undefined && typeof ref !== 'string') {
+    return res.status(400).json({ error: 'Workflow ref must be a string when provided.' });
+  }
+  if (inputs !== undefined &&
+      (inputs === null || typeof inputs !== 'object' || Array.isArray(inputs) ||
+       Object.values(inputs).some(value => typeof value !== 'string'))) {
+    return res.status(400).json({ error: 'Workflow inputs must be an object of string values.' });
+  }
+
+  try {
+    const result = await githubService.dispatchWorkflow({ cwd, workflow, ref, inputs });
+    return res.status(201).json(result);
+  } catch (err: any) {
+    const detail = err?.message || 'Failed to dispatch GitHub Actions workflow';
+    const status = /not a Git repository|no GitHub repository|No (active )?GitHub Actions workflow|not a valid/i.test(detail)
+      ? 400
+      : 502;
+    return res.status(status).json({ error: detail });
+  }
+});
+
 githubRouter.get('/github/runs/:id/logs', async (req: Request, res: Response) => {
   const cwd = (req.query.cwd as string) || path.resolve('..');
   const logs = await githubService.getFailedWorkflowLogs(cwd, req.params.id);

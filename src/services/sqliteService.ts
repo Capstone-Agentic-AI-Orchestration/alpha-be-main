@@ -15,11 +15,18 @@ import {
   Skill,
   RuntimeEngine,
   RunUsage,
+  AnalyticsData,
   SquadRun,
   RemoteAction
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
+import {
+  agentFromOfficialTemplate,
+  LEGACY_TEMPLATE_MAPPINGS,
+  OFFICIAL_AGENT_TEMPLATES
+} from './officialAgentTemplates.js';
+import { discoverInstalledSkills } from './skillDiscoveryService.js';
 
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
@@ -80,6 +87,7 @@ export class SQLiteService {
     this.initTables();
     this.migrate();
     this.seedDefaultsIfEmpty();
+    this.ensureOfficialAgents();
   }
 
   /**
@@ -138,6 +146,7 @@ export class SQLiteService {
         is_mine INTEGER DEFAULT 1,
         model_provider TEXT NOT NULL,
         model_name TEXT NOT NULL,
+        reasoning_effort TEXT,
         system_prompt TEXT DEFAULT '',
         autonomy_level TEXT NOT NULL,
         temperature REAL DEFAULT 0.7,
@@ -245,7 +254,10 @@ export class SQLiteService {
         permissions TEXT NOT NULL,
         description TEXT NOT NULL,
         is_enabled INTEGER DEFAULT 1,
-        command_example TEXT
+        command_example TEXT,
+        source TEXT DEFAULT 'builtin',
+        path TEXT,
+        installed INTEGER DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS runtimes (
@@ -255,6 +267,7 @@ export class SQLiteService {
         status TEXT NOT NULL,
         type TEXT DEFAULT 'cloud',
         latency_ms INTEGER DEFAULT 0,
+        endpoint TEXT,
         version TEXT,
         is_default INTEGER DEFAULT 0,
         models TEXT DEFAULT '[]',
@@ -332,6 +345,10 @@ export class SQLiteService {
     const additions: Array<[string, string]> = [
       ['runtimes', "type TEXT DEFAULT 'cloud'"],
       ['runtimes', 'latency_ms INTEGER DEFAULT 0'],
+      ['runtimes', 'endpoint TEXT'],
+      ['skills', "source TEXT DEFAULT 'builtin'"],
+      ['skills', 'path TEXT'],
+      ['skills', 'installed INTEGER DEFAULT 0'],
       // Owning GitHub organization. Null on every project created before repo
       // scaffolding existed, which is why the create form asks when it is unset
       // rather than assuming one.
@@ -402,6 +419,15 @@ export class SQLiteService {
        * so the two cases stay distinguishable here.
        */
       ['agents', 'allowed_users TEXT'],
+      ['agents', 'reasoning_effort TEXT'],
+      // Official templates are product scaffolding, not a copy of somebody's
+      // work. These nullable columns let a local agent be linked to the
+      // template that created it without treating every manually created agent
+      // as a system record.
+      ['agents', 'template_key TEXT'],
+      ['agents', 'template_version INTEGER'],
+      ['agents', 'phase TEXT'],
+      ['agents', 'is_seeded INTEGER DEFAULT 0'],
       /**
        * Which project a conversation is about.
        *
@@ -520,6 +546,8 @@ export class SQLiteService {
 
       -- After the ALTERs above: this indexes a column they add.
       CREATE INDEX IF NOT EXISTS idx_runs_squad_run ON prototype_runs(squad_run_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_template_key
+        ON agents(template_key) WHERE template_key IS NOT NULL;
     `);
   }
 
@@ -562,6 +590,73 @@ export class SQLiteService {
     this.db
       .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_at', ?)")
       .run(new Date().toISOString());
+  }
+
+  /**
+   * Seed Alpha's approved role catalogue without treating a restart as a reset.
+   *
+   * The former five records are recognised by their stable ids and linked to a
+   * matching template only; no user-facing or persona field is rewritten. The
+   * old full-stack Developer intentionally remains a legacy custom agent while
+   * Backend and Frontend are seeded as separate official roles.
+   */
+  private ensureOfficialAgents(): void {
+    const linkLegacy = this.db.transaction(() => {
+      const stmt = this.db.prepare(`
+        UPDATE agents
+        SET template_key = @templateKey,
+            template_version = @templateVersion,
+            phase = @phase,
+            is_seeded = 1
+        WHERE id = @id AND template_key IS NULL
+      `);
+
+      for (const [id, key] of Object.entries(LEGACY_TEMPLATE_MAPPINGS)) {
+        const template = OFFICIAL_AGENT_TEMPLATES.find(item => item.key === key);
+        if (!template) continue;
+        stmt.run({
+          id,
+          templateKey: template.key,
+          templateVersion: template.version,
+          phase: template.phase
+        });
+      }
+    });
+
+    linkLegacy();
+
+    const existing = new Set(
+      (this.db.prepare('SELECT template_key FROM agents WHERE template_key IS NOT NULL').all() as Array<{ template_key: string }>)
+        .map(row => row.template_key)
+    );
+    const existingIds = new Set(
+      (this.db.prepare('SELECT id FROM agents').all() as Array<{ id: string }>).map(row => row.id)
+    );
+    const now = new Date().toISOString();
+
+    for (const template of OFFICIAL_AGENT_TEMPLATES) {
+      if (existing.has(template.key)) continue;
+
+      // An installation may already have a manually created agent whose id
+      // happens to match a new official role. That record is its owner's work,
+      // not evidence that it is the template. Preserve it and give the seeded
+      // record a deterministic alternate id instead of failing startup.
+      const seeded = agentFromOfficialTemplate(template, now);
+      if (existingIds.has(seeded.id)) {
+        const baseId = `${seeded.id}-official`;
+        let candidateId = baseId;
+        let suffix = 2;
+        while (existingIds.has(candidateId)) {
+          candidateId = `${baseId}-${suffix}`;
+          suffix += 1;
+        }
+        seeded.id = candidateId;
+      }
+
+      this.createAgent(seeded);
+      existing.add(template.key);
+      existingIds.add(seeded.id);
+    }
   }
 
   private seedDefaultsIfEmpty() {
@@ -710,7 +805,9 @@ export class SQLiteService {
       }
     ];
 
-    defaultAgents.forEach(a => this.createAgent(a));
+    // The pre-template seed stays here only as migration reference for old
+    // databases. New installs receive OFFICIAL_AGENT_TEMPLATES below.
+    void defaultAgents;
 
     /**
      * No project, and no issues.
@@ -736,9 +833,9 @@ export class SQLiteService {
       id: 'squad-core',
       name: 'Alpha Core Execution Squad',
       topology: 'Sequential',
-      leaderAgentId: 'agent-architect',
-      memberAgentIds: ['agent-architect', 'agent-developer', 'agent-reviewer', 'agent-tester'],
-      mission: 'Autonomous triage, implementation, and static code review of incoming Capstone issues.',
+      leaderAgentId: 'agent-manager',
+      memberAgentIds: ['agent-research', 'agent-architect', 'agent-manager', 'agent-backend', 'agent-frontend', 'agent-reviewer', 'agent-tester'],
+      mission: 'Research, plan, build, review, and validate approved project work.',
       activeRunsCount: 0,
       completedRunsCount: 12
     };
@@ -928,6 +1025,7 @@ export class SQLiteService {
       isArchived: Boolean(r.is_archived),
       modelProvider: r.model_provider,
       modelName: r.model_name,
+      reasoningEffort: r.reasoning_effort ?? undefined,
       systemPrompt: r.system_prompt,
       autonomyLevel: r.autonomy_level,
       concurrencyLimit: r.concurrency_limit,
@@ -939,6 +1037,10 @@ export class SQLiteService {
       // own default, while the column itself stays nullable to keep "never set"
       // distinguishable from "deliberately set to team".
       allowedUsers: r.allowed_users ?? 'team',
+      templateKey: r.template_key ?? undefined,
+      templateVersion: r.template_version ?? undefined,
+      phase: r.phase ?? undefined,
+      isSeeded: Boolean(r.is_seeded),
       stats: stats.get(r.id) ?? {
         totalRuns: 0,
         successRate: 0,
@@ -967,8 +1069,8 @@ export class SQLiteService {
 
   createAgent(a: Agent): Agent {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, created_at)
-      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @createdAt)
+      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, template_key, template_version, phase, is_seeded, created_at)
+      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @reasoningEffort, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @templateKey, @templateVersion, @phase, @isSeeded, @createdAt)
     `);
     stmt.run({
       ...a,
@@ -979,10 +1081,15 @@ export class SQLiteService {
       mcpServers: JSON.stringify(a.mcpServers || []),
       envVars: JSON.stringify(a.envVars || []),
       customCliArgs: a.customCliArgs || '',
+      reasoningEffort: a.reasoningEffort ?? null,
       concurrencyLimit: a.concurrencyLimit ?? 2,
       // The column is nullable and the field optional, but better-sqlite3 needs
       // every named parameter bound, so the absence has to be explicit.
       allowedUsers: a.allowedUsers ?? null,
+      templateKey: a.templateKey ?? null,
+      templateVersion: a.templateVersion ?? null,
+      phase: a.phase ?? null,
+      isSeeded: a.isSeeded ? 1 : 0,
       createdAt: a.createdAt || new Date().toISOString()
     });
 
@@ -1025,7 +1132,7 @@ export class SQLiteService {
     const stmt = this.db.prepare(`
       UPDATE agents SET
         name = @name, role = @role, avatar = @avatar, color = @color, description = @description,
-        model_provider = @modelProvider, model_name = @modelName, system_prompt = @systemPrompt,
+        model_provider = @modelProvider, model_name = @modelName, reasoning_effort = @reasoningEffort, system_prompt = @systemPrompt,
         autonomy_level = @autonomyLevel, temperature = @temperature, skills = @skills,
         mcp_servers = @mcpServers, custom_cli_args = @customCliArgs, env_vars = @envVars,
         concurrency_limit = @concurrencyLimit, is_archived = @isArchived,
@@ -1036,6 +1143,7 @@ export class SQLiteService {
       ...merged,
       isArchived: merged.isArchived ? 1 : 0,
       allowedUsers: merged.allowedUsers ?? null,
+      reasoningEffort: merged.reasoningEffort ?? null,
       skills: JSON.stringify(merged.skills || []),
       mcpServers: JSON.stringify(merged.mcpServers || []),
       envVars: JSON.stringify(merged.envVars || [])
@@ -1291,6 +1399,145 @@ export class SQLiteService {
     }));
   }
 
+  /**
+   * Aggregate the run records that actually exist on this machine.
+   *
+   * Analytics used to be a frontend seed object, so a fresh install showed
+   * millions of tokens and a 98.4% success rate before a single run happened.
+   * Keep the aggregation here beside the persisted usage columns: missing CLI
+   * telemetry stays unmeasured, while run counts and statuses remain useful.
+   */
+  getAnalytics(now = new Date()): AnalyticsData {
+    const cutoffMs = now.getTime() - 24 * 60 * 60 * 1000;
+    const runs = this.getPrototypeRuns().filter(run => {
+      const createdMs = Date.parse(run.createdAt);
+      return Number.isFinite(createdMs) && createdMs >= cutoffMs && createdMs <= now.getTime();
+    });
+    const agents = new Map(this.getAgents().map(agent => [agent.id, agent]));
+    const terminalStatuses = new Set<string>(['completed', 'failed', 'cancelled', 'changes_requested']);
+
+    const tokenParts = (run: PrototypeRun) => {
+      const usage = run.usage;
+      if (!usage) return null;
+      const promptTokens = (usage.inputTokens ?? 0) +
+        (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+      const completionTokens = (usage.outputTokens ?? 0) + (usage.thinkingTokens ?? 0);
+      const hasTokens = [
+        usage.inputTokens,
+        usage.outputTokens,
+        usage.cacheReadTokens,
+        usage.cacheCreationTokens,
+        usage.thinkingTokens
+      ].some(value => typeof value === 'number');
+      if (!hasTokens) return null;
+      return {
+        promptTokens,
+        completionTokens,
+        tokens: promptTokens + completionTokens,
+        cost: typeof usage.costUsd === 'number' ? usage.costUsd : 0
+      };
+    };
+
+    const totalTokens = runs.reduce((sum, run) => sum + (tokenParts(run)?.tokens ?? 0), 0);
+    const totalCost = runs.reduce((sum, run) => sum + (tokenParts(run)?.cost ?? 0), 0);
+    const judged = runs.filter(run => terminalStatuses.has(run.status));
+    const completed = judged.filter(run => run.status === 'completed').length;
+    const durations = runs
+      .map(run => Date.parse(run.updatedAt) - Date.parse(run.createdAt))
+      .filter(duration => Number.isFinite(duration) && duration >= 0);
+
+    const bucketMs = 3 * 60 * 60 * 1000;
+    const baseMs = Math.floor(cutoffMs / bucketMs) * bucketMs;
+    const buckets = Array.from({ length: 8 }, (_, index) => ({
+      startMs: baseMs + index * bucketMs,
+      promptTokens: 0,
+      completionTokens: 0,
+      cost: 0
+    }));
+    for (const run of runs) {
+      const parts = tokenParts(run);
+      if (!parts) continue;
+      const index = Math.floor((Date.parse(run.createdAt) - baseMs) / bucketMs);
+      if (index < 0 || index >= buckets.length) continue;
+      buckets[index].promptTokens += parts.promptTokens;
+      buckets[index].completionTokens += parts.completionTokens;
+      buckets[index].cost += parts.cost;
+    }
+
+    const formatHour = (timestamp: number) => {
+      const hour = new Date(timestamp).getHours();
+      return `${String(hour).padStart(2, '0')}:00`;
+    };
+
+    const agentTotals = new Map<string, {
+      tokens: number;
+      cost: number;
+      runs: number;
+      judged: number;
+      completed: number;
+    }>();
+    const modelTotals = new Map<string, { calls: number; cost: number }>();
+
+    for (const run of runs) {
+      const parts = tokenParts(run);
+      const current = agentTotals.get(run.agentId) ?? {
+        tokens: 0,
+        cost: 0,
+        runs: 0,
+        judged: 0,
+        completed: 0
+      };
+      current.tokens += parts?.tokens ?? 0;
+      current.cost += parts?.cost ?? 0;
+      current.runs += 1;
+      if (terminalStatuses.has(run.status)) current.judged += 1;
+      if (run.status === 'completed') current.completed += 1;
+      agentTotals.set(run.agentId, current);
+
+      const modelName = agents.get(run.agentId)?.modelName || 'Unknown model';
+      const model = modelTotals.get(modelName) ?? { calls: 0, cost: 0 };
+      model.calls += 1;
+      model.cost += parts?.cost ?? 0;
+      modelTotals.set(modelName, model);
+    }
+
+    return {
+      totalTokens24h: totalTokens,
+      totalCost24h: Math.round(totalCost * 100) / 100,
+      avgLatencyMs: durations.length
+        ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length)
+        : 0,
+      totalAgentRuns: runs.length,
+      successRate: judged.length ? Math.round((completed / judged.length) * 1000) / 10 : 0,
+      tokenTimeline: buckets.some(bucket => bucket.promptTokens > 0 || bucket.completionTokens > 0)
+        ? buckets.map(bucket => ({
+            hour: formatHour(bucket.startMs),
+            promptTokens: bucket.promptTokens,
+            completionTokens: bucket.completionTokens,
+            cost: Math.round(bucket.cost * 100) / 100
+          }))
+        : [],
+      agentBreakdown: [...agentTotals.entries()]
+        .map(([agentId, values]) => ({
+          agentId,
+          agentName: agents.get(agentId)?.name || agentId,
+          tokens: values.tokens,
+          cost: Math.round(values.cost * 100) / 100,
+          runs: values.runs,
+          efficiency: values.judged ? Math.round((values.completed / values.judged) * 1000) / 10 : 0
+        }))
+        .sort((a, b) => b.tokens - a.tokens),
+      modelBreakdown: [...modelTotals.entries()]
+        .map(([modelName, values]) => ({
+          modelName,
+          percentage: runs.length ? Math.round((values.calls / runs.length) * 1000) / 10 : 0,
+          cost: Math.round(values.cost * 100) / 100,
+          totalCalls: values.calls
+        }))
+        .sort((a, b) => b.totalCalls - a.totalCalls)
+    };
+  }
+
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
@@ -1525,8 +1772,61 @@ export class SQLiteService {
       permissions: r.permissions,
       description: r.description,
       isEnabled: Boolean(r.is_enabled),
-      commandExample: r.command_example
+      commandExample: r.command_example,
+      source: r.source || 'builtin',
+      path: r.path || undefined,
+      installed: Boolean(r.installed)
     }));
+  }
+
+  /**
+   * Refresh the filesystem-backed skill catalog.
+   *
+   * Built-in Alpha capabilities remain in SQLite. Detected rows are upserted so
+   * a user's enable/disable choice survives rescans, while rows whose files
+   * disappeared are marked absent and left out of the API result on this scan.
+   */
+  scanSkills(): Skill[] {
+    const discovered = discoverInstalledSkills();
+    const resetDetected = this.db.prepare(
+      "UPDATE skills SET installed = 0 WHERE COALESCE(source, 'builtin') <> 'builtin'"
+    );
+    const upsert = this.db.prepare(`
+      INSERT INTO skills
+        (id, name, category, permissions, description, is_enabled, command_example, source, path, installed)
+      VALUES
+        (@id, @name, @category, @permissions, @description, @isEnabled, @commandExample, @source, @path, 1)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        category = excluded.category,
+        permissions = excluded.permissions,
+        description = excluded.description,
+        source = excluded.source,
+        path = excluded.path,
+        installed = 1
+    `);
+
+    const refresh = this.db.transaction(() => {
+      resetDetected.run();
+      for (const skill of discovered) {
+        upsert.run({
+          id: skill.id,
+          name: skill.name,
+          category: skill.category,
+          permissions: skill.permissions,
+          description: skill.description,
+          // The scanner only discovers definitions; it does not grant a tool.
+          // Keep them enabled in the catalog until the user explicitly changes it.
+          isEnabled: 1,
+          commandExample: skill.commandExample || null,
+          source: skill.source,
+          path: skill.path
+        });
+      }
+    });
+    refresh();
+
+    return this.getSkills().filter(skill => skill.source === 'builtin' || skill.installed);
   }
 
   setSkillEnabled(id: string, isEnabled: boolean) {
@@ -1546,6 +1846,7 @@ export class SQLiteService {
       // scan always supplies both.
       type: r.type ?? 'cloud',
       latencyMs: r.latency_ms ?? 0,
+      endpoint: r.endpoint || undefined,
       version: r.version,
       isDefault: Boolean(r.is_default),
       models: JSON.parse(r.models || '[]'),
@@ -1556,8 +1857,8 @@ export class SQLiteService {
 
   saveRuntimes(runtimes: RuntimeEngine[]) {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO runtimes (id, name, provider, status, type, latency_ms, version, is_default, models, account, detected_at)
-      VALUES (@id, @name, @provider, @status, @type, @latencyMs, @version, @isDefault, @models, @account, @detectedAt)
+      INSERT OR REPLACE INTO runtimes (id, name, provider, status, type, latency_ms, endpoint, version, is_default, models, account, detected_at)
+      VALUES (@id, @name, @provider, @status, @type, @latencyMs, @endpoint, @version, @isDefault, @models, @account, @detectedAt)
     `);
     const tx = this.db.transaction((list: RuntimeEngine[]) => {
       for (const r of list) {
@@ -1568,6 +1869,7 @@ export class SQLiteService {
           status: r.status,
           type: r.type,
           latencyMs: r.latencyMs,
+          endpoint: r.endpoint || null,
           version: r.version || null,
           isDefault: r.isDefault ? 1 : 0,
           models: JSON.stringify(r.models || []),

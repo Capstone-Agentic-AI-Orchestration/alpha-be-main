@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 
-import { Agent, AgentRole, AutonomyLevel, ModelProvider } from '../models/index.js';
+import {
+  Agent,
+  AgentRole,
+  AutonomyLevel,
+  ModelProvider,
+  ReasoningEffort
+} from '../models/index.js';
 import { readAgentFile } from './agentFileService.js';
 import { composeMemory } from './memoryService.js';
 import { describeChatToolPolicy, describeReplyFormat, describeRoster, RosterEntry } from './toolPolicy.js';
@@ -32,6 +38,7 @@ export interface ResolvedPersona {
   role: AgentRole;
   modelProvider: ModelProvider;
   modelName: string;
+  reasoningEffort?: ReasoningEffort;
   autonomyLevel: AutonomyLevel;
   temperature?: number;
   skills: string[];
@@ -132,6 +139,7 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
     role: merged.role,
     modelProvider: merged.modelProvider,
     modelName: merged.modelName,
+    reasoningEffort: merged.reasoningEffort ?? undefined,
     autonomyLevel: merged.autonomyLevel,
     temperature: merged.temperature,
     skills,

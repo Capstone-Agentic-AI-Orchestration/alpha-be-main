@@ -62,6 +62,11 @@ describe('buildTurnInvocation — Claude', () => {
     expect(args).not.toContain('--model');
   });
 
+  it('passes the selected effort through Claude Code', () => {
+    const { args } = buildTurnInvocation(options({ reasoningEffort: 'high' }), noMcp);
+    expect(valueOf(args, '--effort')).toBe('high');
+  });
+
   it('keeps the flags that make stream-json work at all', () => {
     const { args, bin, family } = buildTurnInvocation(options(), noMcp);
 
@@ -214,6 +219,11 @@ describe('buildTurnInvocation — Codex', () => {
     const { args } = codex();
     expect(valueOf(args, '--model')).toBe('gpt-5-codex');
     expect(args).not.toContain('--');
+  });
+
+  it('passes Codex reasoning as a config override', () => {
+    const { args } = codex({ reasoningEffort: 'xhigh' });
+    expect(valueOf(args, '--config')).toBe('model_reasoning_effort="xhigh"');
   });
 
   it('sends the prompt on stdin rather than as an argument', () => {
@@ -384,10 +394,24 @@ describe('buildTurnInvocation — Antigravity', () => {
     expect(valueOf(args, '--conversation')).toBe('conv-3');
   });
 
+  it('passes the selected effort through Antigravity', () => {
+    const { args } = agy({ reasoningEffort: 'medium' });
+    expect(valueOf(args, '--effort')).toBe('medium');
+  });
+
   it('treats Google Gemini as the same family', () => {
     expect(buildTurnInvocation(options({ provider: 'Google Gemini' }), noMcp).family).toBe(
       'antigravity'
     );
+  });
+
+  it('does not invent an effort flag for runtimes without one', () => {
+    const { args } = buildTurnInvocation(
+      options({ provider: 'Ollama', modelName: 'llama3.2', reasoningEffort: 'high' }),
+      noMcp
+    );
+    expect(args).not.toContain('--effort');
+    expect(args).not.toContain('--config');
   });
 });
 

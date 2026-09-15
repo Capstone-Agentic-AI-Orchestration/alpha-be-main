@@ -16,6 +16,17 @@
  */
 export const AGENT_DESCRIPTION_MAX_LENGTH = 255;
 
+const REASONING_EFFORTS = new Set([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra'
+]);
+
 /** The reason this agent payload is invalid, or null when it is fine. */
 export function agentValidationError(
   body: any,
@@ -30,6 +41,11 @@ export function agentValidationError(
     // costs the database, not twice that.
     if ([...String(body.description)].length > AGENT_DESCRIPTION_MAX_LENGTH) {
       return `description exceeds ${AGENT_DESCRIPTION_MAX_LENGTH} characters`;
+    }
+  }
+  if (body?.reasoningEffort !== undefined && body.reasoningEffort !== null) {
+    if (typeof body.reasoningEffort !== 'string' || !REASONING_EFFORTS.has(body.reasoningEffort)) {
+      return 'reasoningEffort must be one of: none, minimal, low, medium, high, xhigh, max, ultra';
     }
   }
   return null;
