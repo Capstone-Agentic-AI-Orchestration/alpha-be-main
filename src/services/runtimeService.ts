@@ -1,11 +1,10 @@
-import { exec, execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import crossSpawn from 'cross-spawn';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RuntimeEngine, RuntimeStatus } from '../models/index.js';
+import { RuntimeEngine } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
-import { logInfo, logError } from '../utils/logger.js';
+import { logInfo } from '../utils/logger.js';
 import {
   findClaude,
   findCodex,
@@ -13,9 +12,6 @@ import {
   findGemini,
   findOpenCode
 } from './runtimeDiscovery.js';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
 
 /**
  * Run a CLI with stdin CLOSED and capture stdout.
@@ -33,9 +29,12 @@ function runClosedStdin(
   timeoutMs = 30_000
 ): Promise<{ ok: boolean; stdout: string; timedOut: boolean }> {
   return new Promise(resolve => {
-    let child: ReturnType<typeof spawn>;
+    let child: ReturnType<typeof crossSpawn>;
     try {
-      child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      // Windows installs commonly expose `.cmd` shims. cross-spawn resolves
+      // those wrappers consistently, whereas Node's native spawn can report
+      // ENOENT/EINVAL even when the same command works in the user's shell.
+      child = crossSpawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch {
       resolve({ ok: false, stdout: '', timedOut: false });
       return;
@@ -60,6 +59,102 @@ function runClosedStdin(
 
 /** What a detector reports. scanRuntimes() stamps `type` and `latencyMs`. */
 type DetectedEngine = Omit<RuntimeEngine, 'type' | 'latencyMs'>;
+
+/**
+ * Used only when neither Codex nor a local OpenAI-compatible catalog can
+ * answer. The list is deliberately conservative: advertising a model that the
+ * current account cannot actually run is worse than showing a short list and
+ * explaining that the catalog is unavailable.
+ */
+const CODEX_FALLBACK_MODELS = ['gpt-5.6-sol', 'o3', 'gpt-4o'];
+const DEFAULT_OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
+
+function localBaseUrl(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    const host = parsed.hostname.toLowerCase();
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (!['127.0.0.1', 'localhost', '::1'].includes(host)) return undefined;
+    return value.trim().replace(/\/+$/, '');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Codex itself does not expose a stable `models` subcommand. When it has been
+ * wired through OpenCodex (or another local OpenAI-compatible gateway), the
+ * gateway's `/v1/models` endpoint is the authoritative catalog instead.
+ *
+ * Read the same user-level config that Codex uses, but only ever probe a
+ * loopback URL. This prevents a runtime scan from unexpectedly calling a
+ * remote endpoint or leaking credentials while still discovering the local
+ * OpenCodex catalog automatically.
+ */
+function codexCatalogBases(): string[] {
+  const configured: string[] = [
+    process.env.OPENAI_BASE_URL,
+    process.env.OPENAI_API_BASE,
+    process.env.CODEX_OPENAI_BASE_URL
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  const codexHome = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
+  const configPath = path.join(codexHome, 'config.toml');
+  try {
+    const config = fs.readFileSync(configPath, 'utf8');
+    const match = config.match(/^\s*openai_base_url\s*=\s*["']([^"']+)["']/im);
+    if (match?.[1]) configured.push(match[1]);
+  } catch {
+    // A missing or protected Codex config is normal on a fresh machine.
+  }
+
+  configured.push(DEFAULT_OPENCODEX_BASE_URL);
+
+  return Array.from(
+    new Set(
+      configured
+        .map(localBaseUrl)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+}
+
+function catalogModelIds(payload: unknown): string[] {
+  const data = (payload as { data?: unknown })?.data;
+  const models = (payload as { models?: unknown })?.models;
+  const rows = Array.isArray(data) ? data : Array.isArray(models) ? models : Array.isArray(payload) ? payload : [];
+
+  return Array.from(
+    new Set(
+      rows
+        .map(item => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item === 'object' && 'id' in item) {
+            const id = (item as { id?: unknown }).id;
+            return typeof id === 'string' ? id : '';
+          }
+          return '';
+        })
+        .map(id => id.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+async function discoverCodexCatalog(): Promise<{ models: string[]; endpoint?: string }> {
+  for (const base of codexCatalogBases()) {
+    try {
+      const response = await fetch(`${base}/models`, { signal: AbortSignal.timeout(1500) });
+      if (!response.ok) continue;
+      const models = catalogModelIds(await response.json());
+      if (models.length) return { models, endpoint: base };
+    } catch {
+      // The gateway is optional; fall back to the small known-safe list.
+    }
+  }
+  return { models: [] };
+}
 
 export class RuntimeService {
   /**
@@ -121,42 +216,8 @@ export class RuntimeService {
   private async detectClaude(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.claudePath();
-    try {
-      const { stdout: versionOut } = await execFileAsync(bin, ['--version']);
-      const version = versionOut.trim();
-
-      try {
-        const { stdout: authOut } = await execFileAsync(bin, ['auth', 'status']);
-        const auth = JSON.parse(authOut);
-        return {
-          id: 'claude',
-          name: 'Claude Code CLI',
-          provider: 'Anthropic',
-          status: auth.loggedIn ? 'online' : 'degraded',
-          version,
-          isDefault: true,
-          models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
-          account: {
-            email: auth.email,
-            org: auth.orgName,
-            billing: auth.authMethod === 'claude.ai' ? 'subscription' : 'api',
-            plan: auth.subscriptionType
-          },
-          detectedAt: now
-        };
-      } catch {
-        return {
-          id: 'claude',
-          name: 'Claude Code CLI',
-          provider: 'Anthropic',
-          status: 'degraded',
-          version,
-          isDefault: true,
-          models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
-          detectedAt: now
-        };
-      }
-    } catch {
+    const versionProbe = await runClosedStdin(bin, ['--version'], 15_000);
+    if (!versionProbe.ok) {
       return {
         id: 'claude',
         name: 'Claude Code CLI',
@@ -166,48 +227,75 @@ export class RuntimeService {
         detectedAt: now
       };
     }
+
+    const version = versionProbe.stdout.trim();
+    const authProbe = await runClosedStdin(bin, ['auth', 'status'], 15_000);
+    try {
+      const auth = JSON.parse(authProbe.stdout);
+      return {
+        id: 'claude',
+        name: 'Claude Code CLI',
+        provider: 'Anthropic',
+        status: auth.loggedIn ? 'online' : 'degraded',
+        version,
+        isDefault: true,
+        models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+        account: {
+          email: auth.email,
+          org: auth.orgName,
+          billing: auth.authMethod === 'claude.ai' ? 'subscription' : 'api',
+          plan: auth.subscriptionType
+        },
+        detectedAt: now
+      };
+    } catch {
+      return {
+        id: 'claude',
+        name: 'Claude Code CLI',
+        provider: 'Anthropic',
+        status: 'degraded',
+        version,
+        isDefault: true,
+        models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+        detectedAt: now
+      };
+    }
   }
 
   private async detectCodex(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.codexPath();
-    try {
-      const { stdout: versionOut } = await execFileAsync(bin, ['--version']);
-      const version = versionOut.trim();
-
-      try {
-        const { stdout: doctorOut } = await execFileAsync(bin, ['doctor']);
-        const isHealthy = !doctorOut.toLowerCase().includes('error') && !doctorOut.toLowerCase().includes('not logged in');
-        return {
-          id: 'codex',
-          name: 'OpenAI Codex CLI',
-          provider: 'OpenAI',
-          status: isHealthy ? 'online' : 'degraded',
-          version,
-          models: ['gpt-5.6-sol', 'o3', 'gpt-4o'],
-          detectedAt: now
-        };
-      } catch {
-        return {
-          id: 'codex',
-          name: 'OpenAI Codex CLI',
-          provider: 'OpenAI',
-          status: 'online',
-          version,
-          models: ['gpt-5.6-sol', 'o3', 'gpt-4o'],
-          detectedAt: now
-        };
-      }
-    } catch {
+    const catalog = await discoverCodexCatalog();
+    const models = catalog.models.length ? catalog.models : CODEX_FALLBACK_MODELS;
+    const versionProbe = await runClosedStdin(bin, ['--version'], 15_000);
+    if (!versionProbe.ok) {
       return {
         id: 'codex',
         name: 'OpenAI Codex CLI',
         provider: 'OpenAI',
         status: 'offline',
-        models: ['gpt-5.6-sol', 'o3', 'gpt-4o'],
+        models,
+        endpoint: catalog.endpoint,
         detectedAt: now
       };
     }
+
+    const version = versionProbe.stdout.trim();
+    const doctorProbe = await runClosedStdin(bin, ['doctor'], 30_000);
+    const doctorOut = doctorProbe.stdout.toLowerCase();
+    const isHealthy = doctorProbe.ok && !doctorOut.includes('error') && !doctorOut.includes('not logged in');
+    return {
+      id: 'codex',
+      name: 'OpenAI Codex CLI',
+      provider: 'OpenAI',
+      // A versioned CLI that cannot answer its optional doctor command is still
+      // installed; report it as online rather than pretending it is absent.
+      status: doctorProbe.ok ? (isHealthy ? 'online' : 'degraded') : 'online',
+      version,
+      models,
+      endpoint: catalog.endpoint,
+      detectedAt: now
+    };
   }
 
   private async detectAntigravity(): Promise<DetectedEngine> {
@@ -253,53 +341,51 @@ export class RuntimeService {
   private async detectGemini(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.geminiPath();
-    try {
-      const { stdout } = await execFileAsync(bin, ['--version']);
+    const probe = await runClosedStdin(bin, ['--version'], 15_000);
+    if (probe.ok) {
       return {
         id: 'gemini',
         name: 'Google Gemini CLI',
         provider: 'Google Gemini',
         status: 'online',
-        version: stdout.trim(),
-        models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
-        detectedAt: now
-      };
-    } catch {
-      return {
-        id: 'gemini',
-        name: 'Google Gemini CLI',
-        provider: 'Google Gemini',
-        status: 'offline',
+        version: probe.stdout.trim(),
         models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
         detectedAt: now
       };
     }
+    return {
+      id: 'gemini',
+      name: 'Google Gemini CLI',
+      provider: 'Google Gemini',
+      status: 'offline',
+      models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+      detectedAt: now
+    };
   }
 
   private async detectOpenCode(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.opencodePath();
-    try {
-      const { stdout } = await execFileAsync(bin, ['--version']);
+    const probe = await runClosedStdin(bin, ['--version'], 15_000);
+    if (probe.ok) {
       return {
         id: 'opencode',
         name: 'OpenCode CLI',
         provider: 'OpenCode',
         status: 'online',
-        version: stdout.trim(),
-        models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
-        detectedAt: now
-      };
-    } catch {
-      return {
-        id: 'opencode',
-        name: 'OpenCode CLI',
-        provider: 'OpenCode',
-        status: 'offline',
+        version: probe.stdout.trim(),
         models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
         detectedAt: now
       };
     }
+    return {
+      id: 'opencode',
+      name: 'OpenCode CLI',
+      provider: 'OpenCode',
+      status: 'offline',
+      models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
+      detectedAt: now
+    };
   }
 
   private async detectOllama(): Promise<DetectedEngine> {

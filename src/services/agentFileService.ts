@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { AGENTS_DIR } from '../config/env.js';
-import { Agent, AgentRole, AutonomyLevel, ModelProvider } from '../models/index.js';
+import {
+  Agent,
+  AgentRole,
+  AutonomyLevel,
+  ModelProvider,
+  ReasoningEffort
+} from '../models/index.js';
 import {
   parseFrontmatter,
   serializeFrontmatter,
@@ -48,6 +54,7 @@ const FILE_KEYS = {
   description: 'description',
   provider: 'modelProvider',
   model: 'modelName',
+  reasoning: 'reasoningEffort',
   autonomy: 'autonomyLevel',
   temperature: 'temperature',
   skills: 'skills',
@@ -99,6 +106,17 @@ const AUTONOMY_LEVELS: readonly AutonomyLevel[] = [
   'Full Autonomy'
 ];
 
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra'
+];
+
 /**
  * Fields a persona file may override.
  *
@@ -114,6 +132,7 @@ export interface AgentFileOverlay {
   description?: string;
   modelProvider?: ModelProvider;
   modelName?: string;
+  reasoningEffort?: ReasoningEffort;
   autonomyLevel?: AutonomyLevel;
   temperature?: number;
   skills?: string[];
@@ -240,6 +259,7 @@ export function parseAgentFileContent(raw: string): {
     description: asString(data.description),
     modelProvider: asUnion(data.provider, PROVIDERS, 'provider', warnings),
     modelName: asString(data.model),
+    reasoningEffort: asUnion(data.reasoning, REASONING_EFFORTS, 'reasoning', warnings),
     autonomyLevel: asUnion(data.autonomy, AUTONOMY_LEVELS, 'autonomy', warnings),
     temperature: asTemperature(data.temperature, warnings),
     skills: asStringList(data.skills),
@@ -502,6 +522,7 @@ export function agentFromFileContent(
      * what the agent was built for. Nothing runs until a model is chosen anyway.
      */
     modelName: overlay?.modelName ?? '',
+    reasoningEffort: overlay?.reasoningEffort,
     systemPrompt: overlay?.systemPrompt ?? '',
     autonomyLevel: overlay?.autonomyLevel ?? 'Semi-Autonomous (Requires Approval)',
     temperature: overlay?.temperature,

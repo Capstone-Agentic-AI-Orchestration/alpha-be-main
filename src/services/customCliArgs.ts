@@ -60,6 +60,11 @@ const RESERVED_FLAGS = new Set([
 
   // Session and model are decided from the agent record.
   '--model', '-m',
+  '--effort', '--reasoning-effort',
+  // Codex uses -c/--config for model and reasoning settings. Letting custom
+  // config through could silently override the agent's selected effort or
+  // sandbox policy.
+  '--config', '-c',
   '--resume', '-r', '--continue',
   '--conversation',
   '--fork-session',

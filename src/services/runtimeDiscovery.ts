@@ -35,6 +35,38 @@ function findOnPath(binaryName: string): string | null {
 }
 
 /**
+ * Find a binary in a versioned per-user installation directory.
+ *
+ * Desktop installers commonly put the executable below a directory whose
+ * name changes on every upgrade. Returning the absolute path matters here:
+ * the daemon is not guaranteed to inherit the same PATH as the user's shell.
+ */
+function findInVersionedDirectories(baseDir: string, relativePath: string): string | null {
+  if (!baseDir || !fs.existsSync(baseDir)) return null;
+
+  try {
+    const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+    const directories = entries
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+
+    for (const directory of directories) {
+      const candidate = path.join(baseDir, directory, relativePath);
+      try {
+        if (fs.statSync(candidate).isFile()) return candidate;
+      } catch {
+        // A directory can disappear during an upgrade; keep looking.
+      }
+    }
+  } catch {
+    // Directory unreadable; the ordinary candidates still get a chance.
+  }
+
+  return null;
+}
+
+/**
  * Dynamically find Claude Code executable inside macOS Application Support.
  * Claude Code desktop installs inside versioned directories, e.g.:
  * ~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
@@ -74,8 +106,15 @@ export function findClaude(): string {
   }
 
   const defaultName = isWin ? 'claude.cmd' : 'claude';
-  if (findOnPath('claude')) {
-    return defaultName;
+  const onPath = findOnPath('claude');
+  if (onPath) return onPath;
+
+  if (isWin) {
+    const versioned = findInVersionedDirectories(
+      path.join(process.env.LOCALAPPDATA || '', 'fnm_multishells'),
+      'claude.cmd'
+    );
+    if (versioned) return versioned;
   }
 
   // macOS Desktop App Bundle
@@ -115,8 +154,15 @@ export function findCodex(): string {
   }
 
   const defaultName = isWin ? 'codex.cmd' : 'codex';
-  if (findOnPath('codex')) {
-    return defaultName;
+  const onPath = findOnPath('codex');
+  if (onPath) return onPath;
+
+  if (isWin) {
+    const versioned = findInVersionedDirectories(
+      path.join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin'),
+      'codex.exe'
+    );
+    if (versioned) return versioned;
   }
 
   const candidates = isWin
@@ -153,9 +199,8 @@ export function findAntigravity(): string {
   }
 
   const defaultName = isWin ? 'agy.exe' : 'agy';
-  if (findOnPath('agy')) {
-    return defaultName;
-  }
+  const onPath = findOnPath('agy');
+  if (onPath) return onPath;
 
   const candidates = isWin
     ? [
@@ -195,9 +240,8 @@ export function findGemini(): string {
   }
 
   const defaultName = isWin ? 'gemini.cmd' : 'gemini';
-  if (findOnPath('gemini')) {
-    return defaultName;
-  }
+  const onPath = findOnPath('gemini');
+  if (onPath) return onPath;
 
   const candidates = isWin
     ? [
@@ -231,9 +275,8 @@ export function findOpenCode(): string {
   }
 
   const defaultName = isWin ? 'opencode.cmd' : 'opencode';
-  if (findOnPath('opencode')) {
-    return defaultName;
-  }
+  const onPath = findOnPath('opencode');
+  if (onPath) return onPath;
 
   const candidates = isWin
     ? [

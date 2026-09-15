@@ -9,7 +9,7 @@ import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
-import { AutonomyLevel } from '../models/index.js';
+import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 import { RUNS_DIR } from '../config/env.js';
 import fs from 'node:fs';
@@ -61,6 +61,8 @@ export interface CliTurnOptions {
   /** Agent `modelProvider` value — selects the CLI family. */
   provider: string;
   modelName?: string;
+  /** Optional effort override; omitted means the model/runtime default. */
+  reasoningEffort?: ReasoningEffort;
   systemPrompt?: string;
   /** Name the persona should answer to on families without `--system-prompt`. */
   personaName?: string;
@@ -200,6 +202,43 @@ interface TurnInvocation {
   env: Record<string, string>;
 }
 
+/** Translate the stored effort into the flag syntax of the selected CLI. */
+function reasoningArgs(provider: string, effort?: ReasoningEffort): string[] {
+  if (!effort) return [];
+
+  if (provider === 'OpenAI') {
+    // Codex exposes reasoning through its config surface rather than --effort.
+    // Quote the TOML string so values remain safe even when the field came from
+    // an imported persona file.
+    const supported: ReasoningEffort[] = [
+      'none',
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ];
+    return supported.includes(effort)
+      ? ['--config', `model_reasoning_effort=${JSON.stringify(effort)}`]
+      : [];
+  }
+
+  if (provider === 'Antigravity' || provider === 'Google Gemini') {
+    return ['low', 'medium', 'high'].includes(effort) ? ['--effort', effort] : [];
+  }
+
+  if (provider === 'Anthropic') {
+    return ['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)
+      ? ['--effort', effort]
+      : [];
+  }
+
+  // Ollama, LM Studio, and OpenCode do not share a portable effort flag. Auto
+  // is the honest choice for those runtimes.
+  return [];
+}
+
 /**
  * Build the argv for one turn.
  *
@@ -214,7 +253,16 @@ export function buildTurnInvocation(
   options: CliTurnOptions,
   mcp: ReturnType<typeof writeRunMcpConfig>
 ): TurnInvocation {
-  const { provider, cwd, modelName, systemPrompt, personaName, prompt, priorSession } = options;
+  const {
+    provider,
+    cwd,
+    modelName,
+    reasoningEffort,
+    systemPrompt,
+    personaName,
+    prompt,
+    priorSession
+  } = options;
   const isRun = options.mode === 'run';
 
   /*
@@ -338,6 +386,7 @@ export function buildTurnInvocation(
         // Before the `--`, necessarily: after it, `--model` would be read as
         // part of the prompt text rather than as a flag.
         ...(modelName ? ['--model', modelName] : []),
+        ...reasoningArgs(provider, reasoningEffort),
         // Before the terminator for the same reason --model is.
         ...customArgs,
       ],
@@ -422,6 +471,7 @@ export function buildTurnInvocation(
         '--add-dir', cwd,
         ...(canWrite || canRunShell ? ['--dangerously-skip-permissions'] : []),
         ...(modelName ? ['--model', modelName] : []),
+        ...reasoningArgs(provider, reasoningEffort),
         ...(priorSession ? ['--conversation', priorSession] : []),
         ...customArgs
       ]
@@ -530,6 +580,7 @@ export function buildTurnInvocation(
       // in the Antigravity branch, so an agent whose card read `claude-sonnet-5`
       // ran on whatever the machine's default was — the picker was decorative.
       ...(modelName ? ['--model', modelName] : []),
+      ...reasoningArgs(provider, reasoningEffort),
       /**
        * Attach the run's MCP servers.
        *

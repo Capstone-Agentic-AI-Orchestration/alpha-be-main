@@ -32,6 +32,23 @@ export type ModelProvider =
   | 'LM Studio'
   | 'OpenCode';
 
+/**
+ * Reasoning controls exposed by the supported CLI families.
+ *
+ * The empty/undefined value means "Auto" and lets the selected runtime choose
+ * its model default. The values are intentionally a superset because Codex,
+ * Claude Code, and Antigravity expose different subsets of this same concept.
+ */
+export type ReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra';
+
 /** Mirrors the client's AgentAccessLevel; the two apps share no package. */
 export type AgentAccessLevel = 'everyone' | 'team' | 'admins' | 'private';
 
@@ -46,6 +63,8 @@ export interface Agent {
   isMine: boolean;
   modelProvider: ModelProvider;
   modelName: string;
+  /** Optional; absent means the runtime/model default (shown as Auto). */
+  reasoningEffort?: ReasoningEffort | null;
   systemPrompt: string;
   autonomyLevel: AutonomyLevel;
   temperature?: number;
@@ -217,6 +236,35 @@ export interface RunUsage {
   numTurns?: number;
 }
 
+/** Aggregated run telemetry returned to the Analytics surface. */
+export interface AnalyticsData {
+  totalTokens24h: number;
+  totalCost24h: number;
+  avgLatencyMs: number;
+  totalAgentRuns: number;
+  successRate: number;
+  tokenTimeline: Array<{
+    hour: string;
+    promptTokens: number;
+    completionTokens: number;
+    cost: number;
+  }>;
+  agentBreakdown: Array<{
+    agentId: string;
+    agentName: string;
+    tokens: number;
+    cost: number;
+    runs: number;
+    efficiency: number;
+  }>;
+  modelBreakdown: Array<{
+    modelName: string;
+    percentage: number;
+    cost: number;
+    totalCalls: number;
+  }>;
+}
+
 /**
  * One squad working one issue.
  *
@@ -333,6 +381,8 @@ export interface RuntimeEngine {
   type: 'local' | 'cloud' | 'remote';
   /** Measured probe round-trip. Was previously absent, so the UI showed a fixed 25ms. */
   latencyMs: number;
+  /** Optional local gateway endpoint, e.g. OpenCodex's OpenAI-compatible API. */
+  endpoint?: string;
   version?: string;
   isDefault?: boolean;
   models: string[];
@@ -348,11 +398,17 @@ export interface RuntimeEngine {
 export interface Skill {
   id: string;
   name: string;
-  category: 'File Operations' | 'Terminal' | 'MCP Servers' | 'Git' | 'Browser' | 'Code Execution';
+  category: 'File Operations' | 'Terminal' | 'MCP Servers' | 'Git' | 'Browser' | 'Code Execution' | 'Agent Skills';
   permissions: 'read_only' | 'write' | 'full_execution';
   description: string;
   isEnabled: boolean;
   commandExample?: string;
+  /** Where Alpha found the skill definition. Built-in rows omit this on older databases. */
+  source?: 'builtin' | 'system_detected' | 'mcp_server' | 'user' | 'project' | 'plugin';
+  /** Absolute path to the installed SKILL.md when this is filesystem-detected. */
+  path?: string;
+  /** True when the backing SKILL.md was present during the last scan. */
+  installed?: boolean;
   /**
    * CLI tools this skill grants a chat turn, from SKILL_TOOLS.
    *

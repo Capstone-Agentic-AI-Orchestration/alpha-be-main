@@ -41,4 +41,11 @@ describe('agentValidationError', () => {
       'description exceeds 255 characters'
     );
   });
+
+  it('accepts supported reasoning values and rejects arbitrary flags', () => {
+    expect(agentValidationError({ name: 'A', reasoningEffort: 'high' }, create)).toBeNull();
+    expect(agentValidationError({ name: 'A', reasoningEffort: 'not-a-level' }, create)).toBe(
+      'reasoningEffort must be one of: none, minimal, low, medium, high, xhigh, max, ultra'
+    );
+  });
 });

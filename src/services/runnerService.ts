@@ -329,6 +329,7 @@ export class RunnerService extends EventEmitter {
         personaFile: writeTurnPersona(runId, persona.systemPrompt) ?? undefined,
         provider: persona.modelProvider,
         modelName: persona.modelName,
+        reasoningEffort: persona.reasoningEffort,
         systemPrompt: persona.systemPrompt,
         personaName: persona.name,
         prompt,

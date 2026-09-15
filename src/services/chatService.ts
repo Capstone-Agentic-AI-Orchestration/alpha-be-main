@@ -452,6 +452,7 @@ export class ChatService extends EventEmitter {
       cwd: chatWorkspace(threadId),
       provider: persona.modelProvider,
       modelName: persona.modelName,
+      reasoningEffort: persona.reasoningEffort,
       systemPrompt: persona.systemPrompt,
       personaName: persona.name,
       // What squadmates said this turn rides with the message, not the system

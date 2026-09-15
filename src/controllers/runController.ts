@@ -12,6 +12,10 @@ runRouter.get('/runs', (req: Request, res: Response) => {
   res.json(sqliteService.getPrototypeRuns());
 });
 
+runRouter.get('/analytics', (req: Request, res: Response) => {
+  res.json(sqliteService.getAnalytics());
+});
+
 runRouter.post('/runs/start', async (req: Request, res: Response) => {
   try {
     const { issueId, agentId, plan, scenario } = req.body;

@@ -41,6 +41,33 @@ function assertSafeBranchName(branchName: string, label = 'Branch name'): void {
   if (!valid) throw new Error(`${label} "${branchName}" is not a valid git branch name.`);
 }
 
+/** Workflow files are repository-relative identifiers, never arbitrary URLs. */
+function assertSafeWorkflowName(workflow: string): void {
+  const valid =
+    /^[A-Za-z0-9._/-]{1,200}$/.test(workflow) &&
+    !workflow.startsWith('/') &&
+    !workflow.includes('..') &&
+    !workflow.includes('//');
+  if (!valid) throw new Error(`Workflow "${workflow}" is not a valid workflow file name.`);
+}
+
+function workflowInputArgs(inputs?: Record<string, string>): string[] {
+  if (!inputs) return [];
+  return Object.entries(inputs).flatMap(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(key)) {
+      throw new Error(`Workflow input "${key}" is not a valid input name.`);
+    }
+    if (typeof value !== 'string' || value.length > 1000) {
+      throw new Error(`Workflow input "${key}" must be a string of 1000 characters or fewer.`);
+    }
+    return ['-f', `${key}=${value}`];
+  });
+}
+
+function encodeWorkflowPath(workflow: string): string {
+  return workflow.split('/').map(encodeURIComponent).join('/');
+}
+
 /** A PR reference must be a number or a github.com pull URL — nothing else. */
 function assertSafePrRef(ref: string): void {
   if (!/^(\d+|https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+)$/.test(ref)) {
@@ -85,6 +112,19 @@ export interface WorkflowRun {
   updatedAt: string;
 }
 
+export interface WorkflowDispatchOptions {
+  cwd: string;
+  workflow?: string;
+  ref?: string;
+  inputs?: Record<string, string>;
+}
+
+export interface WorkflowDispatchResult {
+  workflow: string;
+  ref: string;
+  ownerRepo?: string;
+}
+
 /**
  * A remote repository is addressed as `owner/name`, nothing else.
  *
@@ -98,6 +138,18 @@ function assertOwnerRepo(ownerRepo: string): void {
       `Invalid repository "${ownerRepo}". Use owner/name, e.g. octocat/hello-world.`
     );
   }
+}
+
+/** Accept the repository forms project resources commonly store. */
+function parseOwnerRepo(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(
+    /^(?:https?:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?\/?$/i
+  );
+  return match?.[1];
 }
 
 /**
@@ -197,6 +249,7 @@ export interface IGitHubService {
   forkRepository(repo: string, cloneInto?: string): Promise<string>;
   inspectLocalRepo(cwd: string): Promise<RepoInspection>;
   getWorkflowRuns(cwdOrRepo?: string, limit?: number): Promise<WorkflowRun[]>;
+  dispatchWorkflow(options: WorkflowDispatchOptions): Promise<WorkflowDispatchResult>;
   getFailedWorkflowLogs(cwdOrRepo: string, runId: string | number): Promise<string>;
   commitAndPush(cwd: string, branchName: string, commitMessage: string, push?: boolean): Promise<boolean>;
   createPullRequest(cwd: string, title: string, body: string, base?: string, headBranch?: string): Promise<string>;
@@ -523,10 +576,19 @@ export class GhCliGitHubService implements IGitHubService {
 
   async getWorkflowRuns(cwd = path.resolve('..'), limit = 15): Promise<WorkflowRun[]> {
     try {
-      const { stdout } = await execAsync(
-        `gh run list --limit ${limit} --json databaseId,name,status,conclusion,headBranch,headSha,url,createdAt,updatedAt`,
-        { cwd }
-      );
+      const capped = Math.max(1, Math.min(100, Math.trunc(limit)));
+      const ownerRepo = parseOwnerRepo(cwd);
+      if (ownerRepo) assertOwnerRepo(ownerRepo);
+      const args = [
+        'run',
+        'list',
+        '--limit',
+        String(capped),
+        '--json',
+        'databaseId,name,status,conclusion,headBranch,headSha,url,createdAt,updatedAt'
+      ];
+      if (ownerRepo) args.push('--repo', ownerRepo);
+      const { stdout } = await execFileAsync('gh', args, ownerRepo ? {} : { cwd });
       return JSON.parse(stdout);
     } catch (err: any) {
       logError('Failed to list GitHub workflow runs via CLI:', err?.message || err);
@@ -534,11 +596,79 @@ export class GhCliGitHubService implements IGitHubService {
     }
   }
 
+  async dispatchWorkflow(options: WorkflowDispatchOptions): Promise<WorkflowDispatchResult> {
+    const cwd = options.cwd;
+    const ownerRepo = parseOwnerRepo(cwd);
+    if (ownerRepo) assertOwnerRepo(ownerRepo);
+    const inspection = ownerRepo
+      ? { isRepo: true, workflows: [], hasReadme: false, branch: undefined, ownerRepo }
+      : await this.inspectLocalRepo(cwd);
+    if (!inspection.isRepo) {
+      throw new Error(`Cannot dispatch a workflow: "${cwd}" is not a Git repository.`);
+    }
+
+    let workflow: string | undefined = options.workflow?.trim() || inspection.workflows[0];
+    if (!workflow && ownerRepo) {
+      try {
+        const { stdout } = await execFileAsync('gh', [
+          'workflow',
+          'list',
+          '--repo',
+          ownerRepo,
+          '--limit',
+          '100',
+          '--json',
+          'path,state'
+        ]);
+        const available = JSON.parse(stdout);
+        workflow = Array.isArray(available)
+          ? available
+              .filter((item: any) => item?.state === 'active' || !item?.state)
+              .map((item: any) => item?.path)
+              .find((value: unknown): value is string => typeof value === 'string')
+          : undefined;
+      } catch (err: any) {
+        const detail = String(err?.stderr || err?.message || err).trim();
+        throw new Error(`Could not list GitHub Actions workflows for ${ownerRepo}: ${detail}`);
+      }
+    }
+    if (!workflow) {
+      throw new Error(`No GitHub Actions workflow found in "${cwd}".`);
+    }
+    assertSafeWorkflowName(workflow);
+
+    const requestedRef = options.ref?.trim();
+    const ref = requestedRef || (inspection.branch && inspection.branch !== 'HEAD' ? inspection.branch : 'main');
+    assertSafeBranchName(ref, 'Workflow ref');
+
+    try {
+      const args = [
+        'workflow',
+        'run',
+        workflow,
+        '--ref',
+        ref,
+        ...(ownerRepo ? ['--repo', ownerRepo] : []),
+        ...workflowInputArgs(options.inputs)
+      ];
+      await execFileAsync('gh', args, ownerRepo ? {} : { cwd });
+    } catch (err: any) {
+      const detail = String(err?.stderr || err?.message || err).trim();
+      throw new Error(`GitHub Actions workflow dispatch failed: ${detail}`);
+    }
+
+    return { workflow, ref, ownerRepo: inspection.ownerRepo };
+  }
+
   async getFailedWorkflowLogs(cwd: string, runId: string | number): Promise<string> {
     try {
       // runId arrives as the :id route parameter, so it is caller-controlled.
       if (!/^\d+$/.test(String(runId))) throw new Error(`Invalid workflow run id "${runId}".`);
-      const { stdout } = await execFileAsync('gh', ['run', 'view', String(runId), '--log-failed'], { cwd });
+      const ownerRepo = parseOwnerRepo(cwd);
+      if (ownerRepo) assertOwnerRepo(ownerRepo);
+      const args = ['run', 'view', String(runId), '--log-failed'];
+      if (ownerRepo) args.push('--repo', ownerRepo);
+      const { stdout } = await execFileAsync('gh', args, ownerRepo ? {} : { cwd });
       return stdout;
     } catch (err: any) {
       return err?.stdout || 'Failed to pull workflow error logs';
@@ -1123,7 +1253,7 @@ export class RestGitHubService implements IGitHubService {
 
   async getWorkflowRuns(cwdOrRepo?: string, limit = 15): Promise<WorkflowRun[]> {
     try {
-      let ownerRepo = cwdOrRepo && cwdOrRepo.includes('/') ? cwdOrRepo : null;
+      let ownerRepo = parseOwnerRepo(cwdOrRepo) || null;
       if (!ownerRepo && cwdOrRepo) {
         const inspection = await this.inspectLocalRepo(cwdOrRepo);
         ownerRepo = inspection.ownerRepo || null;
@@ -1133,6 +1263,7 @@ export class RestGitHubService implements IGitHubService {
         if (repos.length > 0) ownerRepo = repos[0].nameWithOwner;
       }
       if (!ownerRepo) return [];
+      assertOwnerRepo(ownerRepo);
 
       const data = await this.request(`/repos/${ownerRepo}/actions/runs?per_page=${limit}`);
       return (data.workflow_runs || []).map((r: any) => ({
@@ -1152,14 +1283,55 @@ export class RestGitHubService implements IGitHubService {
     }
   }
 
+  async dispatchWorkflow(options: WorkflowDispatchOptions): Promise<WorkflowDispatchResult> {
+    const ownerRepoTarget = parseOwnerRepo(options.cwd);
+    const inspection = ownerRepoTarget
+      ? { isRepo: true, workflows: [], hasReadme: false, branch: undefined, ownerRepo: ownerRepoTarget }
+      : await this.inspectLocalRepo(options.cwd);
+    const ownerRepo = inspection.ownerRepo;
+    if (!ownerRepo) {
+      throw new Error(`Cannot dispatch a workflow: no GitHub repository is configured for "${options.cwd}".`);
+    }
+    assertOwnerRepo(ownerRepo);
+
+    let workflow = options.workflow?.trim();
+    if (!workflow) {
+      const data = await this.request(`/repos/${ownerRepo}/actions/workflows?per_page=100`);
+      const available = (data?.workflows || [])
+        .filter((item: any) => item?.state === 'active' || !item?.state)
+        .map((item: any) => item?.path || item?.file_name || item?.name)
+        .filter((value: unknown): value is string => typeof value === 'string');
+      workflow = available[0];
+    }
+    if (!workflow) {
+      throw new Error(`No active GitHub Actions workflow found in ${ownerRepo}.`);
+    }
+    assertSafeWorkflowName(workflow);
+
+    const requestedRef = options.ref?.trim();
+    const ref = requestedRef || (inspection.branch && inspection.branch !== 'HEAD' ? inspection.branch : 'main');
+    assertSafeBranchName(ref, 'Workflow ref');
+    // Reuse the same validation as the CLI implementation, without translating
+    // the inputs into command-line flags.
+    workflowInputArgs(options.inputs);
+
+    await this.request(`/repos/${ownerRepo}/actions/workflows/${encodeWorkflowPath(workflow)}/dispatches`, {
+      method: 'POST',
+      body: JSON.stringify({ ref, inputs: options.inputs || {} })
+    });
+
+    return { workflow, ref, ownerRepo };
+  }
+
   async getFailedWorkflowLogs(cwdOrRepo: string, runId: string | number): Promise<string> {
     try {
-      let ownerRepo = cwdOrRepo.includes('/') ? cwdOrRepo : null;
+      let ownerRepo = parseOwnerRepo(cwdOrRepo) || null;
       if (!ownerRepo) {
         const inspection = await this.inspectLocalRepo(cwdOrRepo);
         ownerRepo = inspection.ownerRepo || null;
       }
       if (!ownerRepo) return 'Owner/Repo not resolved for workflow log inspection.';
+      assertOwnerRepo(ownerRepo);
 
       const jobsData = await this.request(`/repos/${ownerRepo}/actions/runs/${runId}/jobs`);
       const failedJob = (jobsData.jobs || []).find((j: any) => j.conclusion === 'failure');
@@ -1350,6 +1522,14 @@ export class GitHubService implements IGitHubService {
       return this.restService.getWorkflowRuns(cwdOrRepo, limit);
     }
     return this.cliService.getWorkflowRuns(cwdOrRepo, limit);
+  }
+
+  async dispatchWorkflow(options: WorkflowDispatchOptions): Promise<WorkflowDispatchResult> {
+    const auth = await this.checkAuth();
+    if (auth.mode === 'rest' || auth.mode === 'github_app') {
+      return this.restService.dispatchWorkflow(options);
+    }
+    return this.cliService.dispatchWorkflow(options);
   }
 
   async getFailedWorkflowLogs(cwdOrRepo: string, runId: string | number): Promise<string> {

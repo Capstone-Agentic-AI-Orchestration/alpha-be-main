@@ -195,6 +195,7 @@ function personaPayload(id: string, agent: Agent) {
       role: effective.role,
       modelProvider: effective.modelProvider,
       modelName: effective.modelName,
+      reasoningEffort: effective.reasoningEffort,
       autonomyLevel: effective.autonomyLevel,
       skills: effective.skills,
       mcpServers: effective.mcpServers,
@@ -458,7 +459,17 @@ dataRouter.delete('/squads/:id', (req: Request, res: Response) => {
  */
 dataRouter.get('/skills', (req: Request, res: Response) => {
   res.json(
-    sqliteService.getSkills().map(skill => ({
+    sqliteService.scanSkills().map(skill => ({
+      ...skill,
+      grantedTools: SKILL_TOOLS[skill.id] ?? []
+    }))
+  );
+});
+
+/** Force a fresh filesystem scan after a skill is installed or removed. */
+dataRouter.post('/skills/scan', (_req: Request, res: Response) => {
+  res.json(
+    sqliteService.scanSkills().map(skill => ({
       ...skill,
       grantedTools: SKILL_TOOLS[skill.id] ?? []
     }))
