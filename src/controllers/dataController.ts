@@ -17,7 +17,7 @@ import {
 } from '../services/agentFileService.js';
 import { resolveAgent } from '../services/personaService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
-import { Agent } from '../models/index.js';
+import { Agent, Issue, IssueStatus } from '../models/index.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { SKILL_TOOLS } from '../services/toolPolicy.js';
 
@@ -304,6 +304,73 @@ dataRouter.post('/agents/builder/message', async (req: Request, res: Response) =
 });
 
 // --- Issues ---
+
+const ISSUE_STATUSES: readonly IssueStatus[] = [
+  'backlog',
+  'todo',
+  'in_progress',
+  'agent_running',
+  'review',
+  'done'
+];
+
+const ACTIVE_RUN_STATUSES = new Set([
+  'queued',
+  'running',
+  'awaiting_approval',
+  'validating'
+]);
+
+function isIssueStatus(value: unknown): value is IssueStatus {
+  return typeof value === 'string' && ISSUE_STATUSES.includes(value as IssueStatus);
+}
+
+function activeRunForIssue(issueId: string) {
+  return sqliteService.getPrototypeRuns().find(run =>
+    run.issueId === issueId && ACTIVE_RUN_STATUSES.has(run.status)
+  );
+}
+
+/**
+ * Status is writable through the generic issue endpoint only for ordinary
+ * planning moves. Starting an agent and completing reviewed work are commands
+ * with their own endpoints; otherwise a caller could skip the preparation or
+ * review gate by sending { status: 'agent_running' } or { status: 'done' } to
+ * PUT /issues/:id.
+ */
+function statusTransitionError(issue: Issue, requestedStatus: unknown): string | null {
+  if (requestedStatus === undefined || requestedStatus === issue.status) return null;
+
+  if (!isIssueStatus(requestedStatus)) {
+    return 'status must be one of: ' + ISSUE_STATUSES.join(', ') + '.';
+  }
+
+  const activeRun = activeRunForIssue(issue.id);
+
+  if (requestedStatus === 'agent_running') {
+    return 'Start an agent run through POST /api/runs/start; direct status changes to Agent Running are not allowed.';
+  }
+
+  if (requestedStatus === 'done') {
+    if (activeRun?.status === 'awaiting_approval') {
+      return 'Run ' + activeRun.id + ' is awaiting approval; approve it through POST /api/runs/' + activeRun.id + '/approve.';
+    }
+    if (activeRun) {
+      return 'Run ' + activeRun.id + ' is still ' + activeRun.status + '; wait for it to reach review before completing the issue.';
+    }
+    if (issue.status === 'agent_running') {
+      return 'An Agent Running issue must reach review before it can be completed.';
+    }
+    return 'Complete the issue through POST /api/issues/:id/complete with { reviewed: true }; direct Done transitions are not allowed.';
+  }
+
+  if (activeRun) {
+    return 'This issue has an active agent run (' + activeRun.id + ') still ' + activeRun.status + '; use the run controls before changing this issue.';
+  }
+
+  return null;
+}
+
 dataRouter.get('/issues', (req: Request, res: Response) => {
   res.json(sqliteService.getIssues());
 });
@@ -370,6 +437,12 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
   const before = sqliteService.getIssues().find(i => i.id === req.params.id);
   if (!before) return res.status(404).json({ error: 'Issue not found' });
 
+  const transitionError = statusTransitionError(before, req.body?.status);
+  if (transitionError) {
+    const status = isIssueStatus(req.body?.status) ? 409 : 400;
+    return res.status(status).json({ error: transitionError });
+  }
+
   const updated = sqliteService.updateIssue(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Issue not found' });
 
@@ -392,6 +465,53 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
    * has to know, or the board shows a state GitHub never accepted and the next
    * sync silently reverts it.
    */
+  res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
+});
+
+/**
+ * Complete an issue after a human review checkpoint.
+ *
+ * This is deliberately a command rather than another status-shaped PUT. The
+ * explicit reviewed flag gives clients a narrow, auditable write path, while
+ * active runs remain owned by the runner or the run approval endpoint.
+ */
+dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
+  const before = sqliteService.getIssues().find(i => i.id === req.params.id);
+  if (!before) return res.status(404).json({ error: 'Issue not found' });
+
+  if (req.body?.reviewed !== true) {
+    return res.status(400).json({ error: 'reviewed must be true to complete an issue.' });
+  }
+
+  if (before.status === 'done') return res.json(before);
+
+  const activeRun = activeRunForIssue(before.id);
+  if (activeRun) {
+    if (activeRun.status === 'awaiting_approval') {
+      return res.status(409).json({
+        error: 'This issue has a run awaiting approval; approve the run before completing the issue.'
+      });
+    }
+    return res.status(409).json({
+      error: 'This issue has an active agent run; wait for it to reach review before completing the issue.'
+    });
+  }
+
+  if (before.status === 'agent_running') {
+    return res.status(409).json({
+      error: 'An Agent Running issue must reach review before it can be completed.'
+    });
+  }
+
+  const updated = sqliteService.updateIssue(before.id, { status: 'done' });
+  if (!updated) return res.status(404).json({ error: 'Issue not found' });
+
+  if (!needsPush(before, updated)) return res.json(updated);
+
+  const push = await pushIssue(updated);
+  if (push.patch) sqliteService.updateIssue(updated.id, push.patch);
+
+  const saved = sqliteService.getIssues().find(i => i.id === updated.id) ?? updated;
   res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
 });
 
