@@ -232,6 +232,7 @@ export class SQLiteService {
         insertions INTEGER DEFAULT 0,
         deletions INTEGER DEFAULT 0,
         test_summary TEXT,
+        activities TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -392,6 +393,9 @@ export class SQLiteService {
        */
       ['prototype_runs', 'squad_run_id TEXT'],
       ['prototype_runs', 'squad_order INTEGER'],
+      // User-safe chronological run activity. Older databases get an empty
+      // feed and begin recording events as soon as the new daemon starts.
+      ['prototype_runs', "activities TEXT NOT NULL DEFAULT '[]'"],
       /**
        * Squad identity, which the create form has always collected and the
        * table has never held.
@@ -1385,6 +1389,7 @@ export class SQLiteService {
       plan: JSON.parse(r.plan || '[]'),
       currentStageIndex: r.current_stage_index,
       stages: JSON.parse(r.stages || '[]'),
+      activities: JSON.parse(r.activities || '[]'),
       branchName: r.branch_name,
       prUrl: r.pr_url,
       changedFiles: r.changed_files,
@@ -1540,8 +1545,8 @@ export class SQLiteService {
 
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
-      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
+      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, activities, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
+      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @activities, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
     `);
     stmt.run({
       id: run.id,
@@ -1559,6 +1564,7 @@ export class SQLiteService {
       insertions: run.insertions || 0,
       deletions: run.deletions || 0,
       testSummary: run.testSummary || null,
+      activities: JSON.stringify(run.activities || []),
       /**
        * `?? null`, never `|| 0`. A reported zero has to survive the round trip
        * as a zero, and an unreported figure has to stay NULL — the whole point

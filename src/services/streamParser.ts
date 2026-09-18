@@ -49,12 +49,14 @@ export interface RunTelemetry {
 export interface ParsedEvent {
   type:
     | 'log'
+    | 'text_delta'
     | 'tool_call'
     | 'tool_result'
     | 'stage_transition'
     | 'error'
     | 'thinking'
     | 'rate_limit'
+    | 'status'
     | 'session'
     | 'result';
   stage?: StageId;
@@ -65,6 +67,10 @@ export interface ParsedEvent {
   thinking?: string;
   /** Populated on 'session' and 'result'. */
   telemetry?: RunTelemetry;
+  /** Stable provider message/step key for live assistant text updates. */
+  streamKey?: string;
+  /** True while `text_delta` fragments are still arriving. */
+  isStreaming?: boolean;
 }
 
 export function compactToolOutput(
@@ -97,8 +103,11 @@ export class StreamParser {
   private sessionId?: string;
   /** Guards against emitting the final message twice — see handleResult. */
   private sawAssistantText = false;
+  /** Message id shared by Claude partial deltas and the completed assistant event. */
+  private claudeStreamKey = 'assistant';
   /** Accumulates Antigravity's `text_delta` fragments until its step completes. */
   private antigravityText = '';
+  private antigravityStreamKey = 'assistant';
   /** Event types seen that no branch handled — surfaced by tests, not swallowed. */
   private readonly unhandled = new Set<string>();
 
@@ -131,7 +140,8 @@ export class StreamParser {
       case 'system':
         return this.handleSystem(json);
       case 'assistant':
-        return this.handleContentBlocks(json?.message?.content, 'assistant');
+        if (json?.message?.id) this.claudeStreamKey = String(json.message.id);
+        return this.handleContentBlocks(json?.message?.content, 'assistant', json?.message?.id);
       case 'user':
         return this.handleContentBlocks(json?.message?.content, 'user');
       case 'rate_limit_event':
@@ -145,8 +155,28 @@ export class StreamParser {
       case 'result':
         return this.handleResult(json);
       case 'stream_event':
-        // Partial deltas, only present with includePartialMessages. Ignored:
-        // the completed assistant message carries the same content.
+        // With includePartialMessages Claude emits content_block_delta events
+        // before the completed assistant message. Preserve those fragments so
+        // the UI can render the assistant response while it is being written.
+        {
+          const event = json?.event ?? {};
+          const delta = event?.delta ?? {};
+          if (event?.type === 'message_start' && event?.message?.id) {
+            this.claudeStreamKey = String(event.message.id);
+            return [];
+          }
+          if (event?.type === 'content_block_delta' && delta?.type === 'text_delta') {
+            const text = String(delta.text ?? '');
+            if (!text) return [];
+            return [{
+              type: 'text_delta',
+              stage: this.currentStage,
+              message: text,
+              streamKey: String(json?.message?.id ?? event?.message?.id ?? this.claudeStreamKey),
+              isStreaming: true
+            }];
+          }
+        }
         return [];
       default:
         if (json?.type) this.unhandled.add(String(json.type));
@@ -155,7 +185,17 @@ export class StreamParser {
   }
 
   private handleSystem(json: any): ParsedEvent[] {
-    if (json.subtype !== 'init') return [];
+    if (json.subtype !== 'init') {
+      const subtype = String(json.subtype ?? '').toLowerCase();
+      if (subtype.includes('compact') || subtype.includes('context')) {
+        return [{
+          type: 'status',
+          stage: this.currentStage,
+          message: 'Context automatically compacted'
+        }];
+      }
+      return [];
+    }
     this.sessionId = json.session_id;
     return [
       {
@@ -168,7 +208,7 @@ export class StreamParser {
   }
 
   /** Walks the content blocks nested inside an assistant or user message. */
-  private handleContentBlocks(content: unknown, role: 'assistant' | 'user'): ParsedEvent[] {
+  private handleContentBlocks(content: unknown, role: 'assistant' | 'user', messageId?: unknown): ParsedEvent[] {
     if (!Array.isArray(content)) return [];
     const events: ParsedEvent[] = [];
 
@@ -178,7 +218,13 @@ export class StreamParser {
           const text = String(block.text ?? '').trim();
           if (text) {
             this.sawAssistantText = true;
-            events.push({ type: 'log', stage: this.currentStage, message: text });
+            events.push({
+              type: 'log',
+              stage: this.currentStage,
+              message: text,
+              streamKey: role === 'assistant' ? String(messageId ?? 'assistant') : undefined,
+              isStreaming: false
+            });
           }
           break;
         }
@@ -265,7 +311,13 @@ export class StreamParser {
       // produced no text of its own (a tool-only turn).
       !this.sawAssistantText
     ) {
-      events.push({ type: 'log', stage: this.currentStage, message: json.result.trim() });
+      events.push({
+        type: 'log',
+        stage: this.currentStage,
+        message: json.result.trim(),
+        streamKey: 'assistant',
+        isStreaming: false
+      });
     }
 
     events.push({
@@ -341,7 +393,13 @@ export class StreamParser {
               : `Antigravity run ended with status ${r.status}`
           });
         } else if (!this.sawAssistantText && typeof r.response === 'string' && r.response.trim()) {
-          events.push({ type: 'log', stage: this.currentStage, message: r.response.trim() });
+          events.push({
+            type: 'log',
+            stage: this.currentStage,
+            message: r.response.trim(),
+            streamKey: 'assistant',
+            isStreaming: false
+          });
         }
 
         events.push({
@@ -380,9 +438,22 @@ export class StreamParser {
 
     // Assistant prose, streamed a fragment at a time.
     if (kind === 'agent_response') {
+      this.antigravityStreamKey = `assistant:${step.step_index ?? 0}`;
       if (typeof step.text_delta === 'string' && step.text_delta) {
         this.sawAssistantText = true;
         this.antigravityText += step.text_delta;
+        // The DONE fragment is included in the final log below. Keeping it out
+        // of the delta stream avoids a one-character duplicate for consumers
+        // that still treat the completed log as the canonical message.
+        if (step.state !== 'DONE') {
+          events.push({
+            type: 'text_delta',
+            stage: this.currentStage,
+            message: step.text_delta,
+            streamKey: this.antigravityStreamKey,
+            isStreaming: true
+          });
+        }
       }
 
       /**
@@ -402,7 +473,15 @@ export class StreamParser {
       if (step.state === 'DONE') {
         const text = this.antigravityText.trim();
         this.antigravityText = '';
-        if (text) events.push({ type: 'log', stage: this.currentStage, message: text });
+        if (text) {
+          events.push({
+            type: 'log',
+            stage: this.currentStage,
+            message: text,
+            streamKey: this.antigravityStreamKey,
+            isStreaming: false
+          });
+        }
       }
       return events;
     }
@@ -565,7 +644,13 @@ export class StreamParser {
       const text = String(item.text ?? item.message ?? '').trim();
       if (!text) return [];
       this.sawAssistantText = true;
-      return [{ type: 'log', stage: this.currentStage, message: text }];
+      return [{
+        type: 'log',
+        stage: this.currentStage,
+        message: text,
+        streamKey: String(item.id ?? 'assistant'),
+        isStreaming: false
+      }];
     }
 
     if (kind === 'reasoning') {

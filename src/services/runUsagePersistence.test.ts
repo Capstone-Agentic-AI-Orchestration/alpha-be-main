@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PrototypeRun, RunUsage } from '../models/index.js';
+import { PrototypeRun, RunUsage, RunActivity } from '../models/index.js';
 
 /**
  * Token figures have to survive the database, and survive the rest of the run
@@ -61,6 +61,33 @@ const run = (id: string, usage?: RunUsage): PrototypeRun => ({
 const reload = (id: string) => sqlite.getPrototypeRuns().find(r => r.id === id);
 
 describe('run usage persistence', () => {
+  it('round-trips the chronological activity feed separately from token usage', () => {
+    const activities: RunActivity[] = [
+      {
+        id: 'run-activity:0',
+        sequence: 0,
+        kind: 'status',
+        message: 'Run started',
+        stageId: 'workspace',
+        createdAt: '2026-09-02T10:00:00.000Z'
+      },
+      {
+        id: 'run-activity:1',
+        sequence: 1,
+        kind: 'assistant',
+        message: 'I am reading the repository.',
+        stageId: 'analysis',
+        streamKey: 'assistant:1',
+        isStreaming: true,
+        createdAt: '2026-09-02T10:00:01.000Z'
+      }
+    ];
+
+    sqlite.savePrototypeRun({ ...run('run-activity'), activities });
+
+    expect(reload('run-activity')?.activities).toEqual(activities);
+  });
+
   it('round-trips every reported figure', () => {
     sqlite.savePrototypeRun(run('run-full', {
       inputTokens: 4,

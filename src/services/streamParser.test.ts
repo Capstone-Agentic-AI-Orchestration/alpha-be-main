@@ -224,6 +224,35 @@ describe('StreamParser — robustness', () => {
     );
     expect(events.some((e) => e.type === 'error')).toBe(true);
   });
+
+  it('preserves Claude text deltas for live assistant rendering', () => {
+    const p = new StreamParser('claude');
+    const events = p.parseLine(JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'working' }
+      },
+      message: { id: 'msg-live' }
+    }));
+
+    expect(events).toEqual([expect.objectContaining({
+      type: 'text_delta',
+      message: 'working',
+      streamKey: 'msg-live',
+      isStreaming: true
+    })]);
+  });
+
+  it('normalizes context compaction into a user-safe status event', () => {
+    const p = new StreamParser('claude');
+    const events = p.parseLine(JSON.stringify({ type: 'system', subtype: 'compact_boundary' }));
+    expect(events).toEqual([expect.objectContaining({
+      type: 'status',
+      message: 'Context automatically compacted'
+    })]);
+  });
 });
 
 describe('Antigravity agent_response completion', () => {

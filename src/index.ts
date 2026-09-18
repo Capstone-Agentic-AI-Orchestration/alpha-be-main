@@ -154,6 +154,7 @@ function broadcast(payload: Record<string, any>) {
 // Subscribe runner events to WebSocket broadcast
 runnerService.on('stage_update', (data) => broadcast({ type: 'stage_update', payload: data }));
 runnerService.on('log_chunk', (data) => broadcast({ type: 'log_chunk', payload: data }));
+runnerService.on('run_activity', (data) => broadcast({ type: 'run_activity', payload: data }));
 runnerService.on('run_completed', (data) => broadcast({ type: 'run_completed', payload: data }));
 runnerService.on('run_failed', (data) => broadcast({ type: 'run_failed', payload: data }));
 runnerService.on('run_cancelled', (data) => broadcast({ type: 'run_cancelled', payload: data }));

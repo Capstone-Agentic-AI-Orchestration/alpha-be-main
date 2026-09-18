@@ -21,7 +21,7 @@ import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, PrototypeRunStage, StageId, Issue } from '../models/index.js';
+import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind } from '../models/index.js';
 import { RUNS_DIR } from '../config/env.js';
 
 export interface StartRunParams {
@@ -141,6 +141,14 @@ export class RunnerService extends EventEmitter {
       plan,
       currentStageIndex: 0,
       stages,
+      activities: [{
+        id: `${runId}:activity:0`,
+        sequence: 0,
+        kind: 'status',
+        message: queuedBehind ? `Run queued. ${waitNote}` : 'Run accepted and workspace preparation started.',
+        stageId: 'workspace',
+        createdAt: now
+      }],
       branchName,
       squadRunId: params.squad?.squadRunId,
       squadOrder: params.squad?.order,
@@ -373,14 +381,54 @@ export class RunnerService extends EventEmitter {
         for (const ev of parsedEvents) {
           if (ev.type === 'stage_transition' && ev.stage) {
             this.advanceStage(runId, ev.stage, 'running');
+          } else if (ev.type === 'text_delta' && ev.message) {
+            this.appendActivity(runId, {
+              kind: 'assistant',
+              stageId: ev.stage ?? parser.getCurrentStage(),
+              message: ev.message,
+              streamKey: ev.streamKey,
+              isStreaming: true,
+              append: true
+            });
           } else if (ev.type === 'log' && ev.message) {
             const currentStage = parser.getCurrentStage();
-            this.appendLog(runId, currentStage, ev.message);
+            this.appendLog(runId, currentStage, ev.message, 'assistant', {
+              streamKey: ev.streamKey,
+              isStreaming: ev.isStreaming ?? false
+            });
           } else if (ev.type === 'tool_call' && ev.toolName) {
             const currentStage = parser.getCurrentStage();
-            this.appendLog(runId, currentStage, `[Tool Call] ${ev.toolName}: ${JSON.stringify(ev.toolInput || {})}`);
+            this.appendLog(
+              runId,
+              currentStage,
+              `[Tool Call] ${ev.toolName}: ${JSON.stringify(ev.toolInput || {})}`,
+              'tool',
+              {
+                detail: JSON.stringify(ev.toolInput || {}),
+                activityMessage: this.describeToolActivity(ev.toolName, ev.toolInput)
+              }
+            );
+          } else if (ev.type === 'tool_result' || ev.type === 'error') {
+            const currentStage = parser.getCurrentStage();
+            this.appendLog(
+              runId,
+              currentStage,
+              `[${ev.type === 'error' ? 'Error' : 'Tool Result'}] ${ev.message || 'No output'}`,
+              ev.type === 'error' ? 'error' : 'tool_result'
+            );
+          } else if (ev.type === 'session' || ev.type === 'rate_limit' || ev.type === 'status') {
+            this.appendActivity(runId, {
+              kind: 'status',
+              stageId: ev.stage ?? parser.getCurrentStage(),
+              message: ev.message || (ev.type === 'rate_limit' ? 'Provider rate limit signalled.' : 'Agent session started.')
+            });
           } else if (ev.type === 'result' && ev.telemetry) {
             this.recordUsage(runId, ev.telemetry);
+            this.appendActivity(runId, {
+              kind: ev.telemetry.isError ? 'error' : 'summary',
+              stageId: ev.stage ?? parser.getCurrentStage(),
+              message: ev.message || (ev.telemetry.isError ? 'Agent reported an error.' : 'Agent turn completed.')
+            });
           }
         }
       });
@@ -389,7 +437,7 @@ export class RunnerService extends EventEmitter {
     if (child.stderr) {
       createLineBuffer(child.stderr, (line) => {
         const currentStage = parser.getCurrentStage();
-        this.appendLog(runId, currentStage, `[stderr] ${line}`);
+        this.appendLog(runId, currentStage, `[stderr] ${line}`, 'error');
       });
     }
   }
@@ -724,6 +772,17 @@ ${issue.description}
           ? `${diffStats.changedFiles} file(s) changed. Tests were not verified by Alpha — review the run log.`
           : 'No files were changed by this run.',
         prUrl,
+        activities: [
+          ...(current.activities ?? []),
+          this.createActivity(runId, current.activities ?? [], {
+            kind: 'summary',
+            stageId: 'review',
+            message: diffStats.changedFiles
+              ? `Run finished: ${diffStats.changedFiles} file(s) changed. Awaiting review.`
+              : 'Run finished without changing files. Awaiting review.'
+          },
+          now)
+        ],
         updatedAt: now
       };
 
@@ -808,12 +867,29 @@ ${issue.description}
     const eventPayload = { runId, stageId, status, stageIndex };
     this.emit('stage_update', eventPayload);
 
+    this.appendActivity(runId, {
+      kind: 'status',
+      stageId,
+      message: `${updatedStages[stageIndex]?.label ?? stageId} ${status === 'running' ? 'started' : status}.`
+    });
+
     if (supabaseService.isConfigured()) {
       supabaseService.broadcastRunEvent(runId, { type: 'stage_update', payload: eventPayload }).catch(() => {});
     }
   }
 
-  private appendLog(runId: string, stageId: StageId, message: string) {
+  private appendLog(
+    runId: string,
+    stageId: StageId,
+    message: string,
+    activityKind: RunActivityKind = 'status',
+    activityOptions: {
+      streamKey?: string;
+      isStreaming?: boolean;
+      detail?: string;
+      activityMessage?: string;
+    } = {}
+  ) {
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
     if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
 
@@ -829,9 +905,117 @@ ${issue.description}
     const eventPayload = { runId, stageId, message };
     this.emit('log_chunk', eventPayload);
 
+    this.appendActivity(runId, {
+      kind: activityKind,
+      stageId,
+      message: activityOptions.activityMessage ?? message,
+      streamKey: activityOptions.streamKey,
+      isStreaming: activityOptions.isStreaming,
+      detail: activityOptions.detail
+    });
+
     if (supabaseService.isConfigured()) {
       supabaseService.broadcastRunEvent(runId, { type: 'log_chunk', payload: eventPayload }).catch(() => {});
     }
+  }
+
+  /**
+   * Append or update one safe, user-visible event in the run timeline.
+   *
+   * Provider deltas use the same stream key and replace the in-progress entry
+   * as the text grows. Every other event gets its own sequence number, keeping
+   * the feed chronological after a reload as well as during realtime updates.
+   */
+  private appendActivity(
+    runId: string,
+    input: {
+      kind: RunActivityKind;
+      message: string;
+      stageId?: StageId;
+      streamKey?: string;
+      isStreaming?: boolean;
+      detail?: string;
+      append?: boolean;
+    }
+  ) {
+    const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
+    if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
+
+    const activities = [...(run.activities ?? [])];
+    const matchIndex = input.streamKey
+      ? activities.map((activity, index) => ({ activity, index }))
+          .reverse()
+          .find(({ activity }) => activity.streamKey === input.streamKey && activity.isStreaming)?.index
+      : undefined;
+
+    let activity: RunActivity;
+    if (matchIndex !== undefined) {
+      const previous = activities[matchIndex];
+      activity = {
+        ...previous,
+        message: input.append ? `${previous.message}${input.message}` : input.message,
+        stageId: input.stageId ?? previous.stageId,
+        isStreaming: input.isStreaming ?? false,
+        detail: input.detail ?? previous.detail
+      };
+      activities[matchIndex] = activity;
+    } else {
+      const sequence = activities.reduce((max, item) => Math.max(max, item.sequence), -1) + 1;
+      activity = {
+        id: `${runId}:activity:${sequence}`,
+        sequence,
+        kind: input.kind,
+        message: input.message,
+        createdAt: new Date().toISOString(),
+        stageId: input.stageId,
+        streamKey: input.streamKey,
+        isStreaming: input.isStreaming,
+        detail: input.detail
+      };
+      activities.push(activity);
+    }
+
+    sqliteService.savePrototypeRun({ ...run, activities, updatedAt: new Date().toISOString() });
+    const eventPayload = { runId, activity };
+    this.emit('run_activity', eventPayload);
+
+    if (supabaseService.isConfigured()) {
+      supabaseService.broadcastRunEvent(runId, { type: 'run_activity', payload: eventPayload }).catch(() => {});
+    }
+  }
+
+  private createActivity(
+    runId: string,
+    activities: RunActivity[],
+    input: Omit<RunActivity, 'id' | 'sequence' | 'createdAt'>,
+    createdAt = new Date().toISOString()
+  ): RunActivity {
+    const sequence = activities.reduce((max, item) => Math.max(max, item.sequence), -1) + 1;
+    return {
+      ...input,
+      id: `${runId}:activity:${sequence}`,
+      sequence,
+      createdAt
+    };
+  }
+
+  private describeToolActivity(toolName: string, input: any): string {
+    const name = toolName.toLowerCase();
+    const file = input?.file_path ?? input?.path ?? input?.filename;
+    const command = input?.command ?? input?.CommandLine;
+    if (name.includes('edit') || name.includes('write') || name.includes('patch') || name.includes('replace')) {
+      return file ? `Edited ${file}` : `Edited files with ${toolName}`;
+    }
+    if (name.includes('read') || name.includes('view')) {
+      return file ? `Read ${file}` : `Viewed files with ${toolName}`;
+    }
+    if (name.includes('grep') || name.includes('search') || name.includes('glob')) {
+      return `Searched the workspace with ${toolName}`;
+    }
+    if (name.includes('bash') || name.includes('exec') || name.includes('command') || command) {
+      return command ? `Ran command: ${String(command).slice(0, 240)}` : `Ran a command with ${toolName}`;
+    }
+    return `Used ${toolName}`;
   }
 
   /**
@@ -855,6 +1039,14 @@ ${issue.description}
           ? { ...s, status: 'running' as const, startedAt: s.startedAt || now, logs: [...s.logs, `Checking out branch: ${run.branchName}`] }
           : s
       ),
+      activities: [
+        ...(run.activities ?? []),
+        this.createActivity(runId, run.activities ?? [], {
+          kind: 'status',
+          stageId: 'workspace',
+          message: 'Run started after the workspace became available.'
+        }, now)
+      ],
       updatedAt: now
     };
 
@@ -883,6 +1075,14 @@ ${issue.description}
       status: 'failed',
       stages: updatedStages,
       testSummary: `Run failed: ${errorMsg}`,
+      activities: [
+        ...(run.activities ?? []),
+        this.createActivity(runId, run.activities ?? [], {
+          kind: 'error',
+          stageId: run.stages[run.currentStageIndex]?.id,
+          message: `Run failed: ${errorMsg}`
+        }, now)
+      ],
       updatedAt: now
     };
 
@@ -916,6 +1116,14 @@ ${issue.description}
       ...run,
       status: 'cancelled',
       stages: updatedStages,
+      activities: [
+        ...(run.activities ?? []),
+        this.createActivity(runId, run.activities ?? [], {
+          kind: 'status',
+          stageId: run.stages[run.currentStageIndex]?.id,
+          message: 'Run cancelled by the user.'
+        }, now)
+      ],
       updatedAt: now
     };
 

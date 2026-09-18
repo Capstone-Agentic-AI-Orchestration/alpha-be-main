@@ -215,6 +215,36 @@ export interface PrototypeRunStage {
 }
 
 /**
+ * One user-safe event in a run's chronological activity feed.
+ *
+ * This is deliberately not a transcript of private model reasoning. It is the
+ * useful operational trail: narration, tools, command/file work, status
+ * changes, errors, and the final summary.
+ */
+export type RunActivityKind =
+  | 'assistant'
+  | 'tool'
+  | 'tool_result'
+  | 'status'
+  | 'error'
+  | 'summary';
+
+export interface RunActivity {
+  id: string;
+  sequence: number;
+  kind: RunActivityKind;
+  message: string;
+  createdAt: string;
+  stageId?: StageId;
+  /** Provider stream identifier used to update one assistant entry in place. */
+  streamKey?: string;
+  /** True while a provider is still sending fragments for this entry. */
+  isStreaming?: boolean;
+  /** Optional compact command/tool detail; never private chain-of-thought. */
+  detail?: string;
+}
+
+/**
  * Token and cost figures a CLI reported for a run.
  *
  * Every field is optional and every one means something different when absent:
@@ -310,6 +340,7 @@ export interface PrototypeRun {
   plan: string[];
   currentStageIndex: number;
   stages: PrototypeRunStage[];
+  activities?: RunActivity[];
   branchName?: string;
   prUrl?: string;
   changedFiles?: number;
