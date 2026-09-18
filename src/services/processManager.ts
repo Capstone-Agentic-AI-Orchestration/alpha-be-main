@@ -5,6 +5,8 @@ import { sqliteService } from './sqliteService.js';
 import { logAudit, logInfo, logError } from '../utils/logger.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 
+export type ProcessTerminationReason = 'cancelled' | 'timeout';
+
 export interface SpawnOptions {
   runId: string;
   bin: string;
@@ -25,11 +27,23 @@ export interface SpawnOptions {
   stdin?: string;
   onStdout?: (data: Buffer) => void;
   onStderr?: (data: Buffer) => void;
-  onExit?: (code: number | null, signal: string | null) => void;
+  onExit?: (code: number | null, signal: string | null, terminationReason?: ProcessTerminationReason) => void;
 }
 
 export class ProcessManager {
-  private activeProcesses = new Map<string, { child: ChildProcess; timer?: NodeJS.Timeout; idleTimer?: NodeJS.Timeout }>();
+  private activeProcesses = new Map<string, {
+    child: ChildProcess;
+    timer?: NodeJS.Timeout;
+    idleTimer?: NodeJS.Timeout;
+    terminationReason?: ProcessTerminationReason;
+  }>();
+  /**
+   * `killProcess` removes the process from the active map as soon as tree-kill
+   * acknowledges the request, but the child's `exit` event can arrive after
+   * that. Keep the reason separately so the runner cannot mistake SIGTERM for
+   * a normal successful exit.
+   */
+  private terminationReasons = new Map<string, ProcessTerminationReason>();
 
   /**
    * Spawns a process in a registered allowlisted directory with tree-kill tracking and timeouts.
@@ -108,7 +122,7 @@ export class ProcessManager {
         entry.idleTimer = setTimeout(() => {
           logError(`Run ${runId} timed out due to idle output (no output for ${EXECUTION_LIMITS.IDLE_TIMEOUT_MS / 1000}s)`);
           logAudit('PROCESS_IDLE_TIMEOUT', { runId, bin });
-          this.killProcess(runId, 'SIGTERM');
+          this.killProcess(runId, 'SIGTERM', 'timeout');
         }, EXECUTION_LIMITS.IDLE_TIMEOUT_MS);
       }
     };
@@ -117,9 +131,10 @@ export class ProcessManager {
     const timer = setTimeout(() => {
       logError(`Run ${runId} exceeded wall-clock timeout (${EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS / 1000}s)`);
       logAudit('PROCESS_WALL_CLOCK_TIMEOUT', { runId, bin });
-      this.killProcess(runId, 'SIGTERM');
+      this.killProcess(runId, 'SIGTERM', 'timeout');
     }, EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS);
 
+    this.terminationReasons.delete(runId);
     this.activeProcesses.set(runId, { child, timer });
     resetIdleTimer();
 
@@ -142,11 +157,13 @@ export class ProcessManager {
       if (entry?.timer) clearTimeout(entry.timer);
       if (entry?.idleTimer) clearTimeout(entry.idleTimer);
       this.activeProcesses.delete(runId);
+      const terminationReason = this.terminationReasons.get(runId);
+      this.terminationReasons.delete(runId);
 
       logInfo(`Process for run ${runId} exited with code ${code}, signal ${signal}`);
       logAudit('PROCESS_EXIT', { runId, code, signal });
 
-      if (onExit) onExit(code, signal);
+      if (onExit) onExit(code, signal, terminationReason);
     });
 
     child.on('error', (err) => {
@@ -160,7 +177,11 @@ export class ProcessManager {
   /**
    * Terminate entire child process tree cleanly
    */
-  async killProcess(runId: string, signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM'): Promise<void> {
+  async killProcess(
+    runId: string,
+    signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM',
+    terminationReason: ProcessTerminationReason = 'cancelled'
+  ): Promise<void> {
     const entry = this.activeProcesses.get(runId);
     if (!entry || !entry.child || !entry.child.pid) {
       this.activeProcesses.delete(runId);
@@ -168,6 +189,8 @@ export class ProcessManager {
     }
 
     const pid = entry.child.pid;
+    entry.terminationReason = terminationReason;
+    this.terminationReasons.set(runId, terminationReason);
     if (entry.timer) clearTimeout(entry.timer);
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
 

@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
-import { processManager } from './processManager.js';
+import { ProcessTerminationReason, processManager } from './processManager.js';
+import { classifyProcessExit } from './runLifecycle.js';
 import { StreamParser, RunTelemetry } from './streamParser.js';
 import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
@@ -204,6 +205,14 @@ export class RunnerService extends EventEmitter {
           plan,
           squad: params.squad
         });
+      }, {
+        // A queued run can be cancelled while an earlier run owns the
+        // checkout. Check again at the front of the queue so cancellation
+        // prevents the process from ever being spawned.
+        shouldStart: () => {
+          const latest = sqliteService.getPrototypeRuns().find(r => r.id === runId);
+          return !!latest && (latest.status === 'queued' || latest.status === 'running');
+        }
       })
       .catch(err => {
         logError(`Execution error in run ${runId}:`, err);
@@ -353,8 +362,8 @@ export class RunnerService extends EventEmitter {
       // The task description is multi-line, so it cannot travel in argv.
       stdin: invocation.stdin,
       onStdout: () => {},
-      onExit: async (code) => {
-        await this.handleProcessExit(runId, cwd, branchName, issue, code);
+      onExit: async (code, signal, terminationReason) => {
+        await this.handleProcessExit(runId, cwd, branchName, issue, code, signal, terminationReason);
       }
     });
 
@@ -474,13 +483,33 @@ Instructions:
 4. Summarize your completed work.${remoteSection}`;
   }
 
-  private async handleProcessExit(runId: string, cwd: string, branchName: string, issue: Issue, code: number | null) {
+  private async handleProcessExit(
+    runId: string,
+    cwd: string,
+    branchName: string,
+    issue: Issue,
+    code: number | null,
+    signal: string | null,
+    terminationReason?: ProcessTerminationReason
+  ) {
     // The persona file and any MCP config exist only for the duration of the
     // spawn; leaving them would accumulate a directory per run.
     cleanupRunMcpConfig(runId);
 
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
     if (!run) return;
+
+    // Cancellation wins over the child process's eventual exit event. The
+    // kill callback can be delivered after the cancellation row was saved,
+    // and it must never reopen the review pipeline.
+    if (run.status === 'cancelled') return;
+
+    const exitDecision = classifyProcessExit(code, signal, terminationReason);
+    if (exitDecision.kind === 'cancelled') return;
+    if (exitDecision.kind === 'failed') {
+      this.markRunFailed(runId, exitDecision.message);
+      return;
+    }
 
     /*
      * Re-derived here rather than carried in from startRun. This method is also
@@ -496,7 +525,7 @@ Instructions:
 
     const now = new Date().toISOString();
 
-    if (code === 0 || code === null) {
+    if (exitDecision.kind === 'success') {
       // Transition through remaining stages to review
       this.advanceStage(runId, 'analysis', 'success');
       this.advanceStage(runId, 'implementation', 'success');
@@ -747,7 +776,7 @@ ${issue.description}
 
   private advanceStage(runId: string, stageId: StageId, status: 'running' | 'success' | 'failed') {
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
-    if (!run) return;
+    if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
 
     const now = new Date().toISOString();
     const stageIndex = run.stages.findIndex(s => s.id === stageId);
@@ -786,7 +815,7 @@ ${issue.description}
 
   private appendLog(runId: string, stageId: StageId, message: string) {
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
-    if (!run) return;
+    if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
 
     const updatedStages = run.stages.map(s => {
       if (s.id === stageId) {
@@ -815,7 +844,7 @@ ${issue.description}
    */
   private markRunStarted(runId: string) {
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
-    if (!run) return;
+    if (!run || run.status !== 'queued') return;
 
     const now = new Date().toISOString();
     const startedRun: PrototypeRun = {
@@ -839,7 +868,7 @@ ${issue.description}
 
   private markRunFailed(runId: string, errorMsg: string) {
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
-    if (!run) return;
+    if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
 
     const now = new Date().toISOString();
     const updatedStages = run.stages.map((s, idx) => {
@@ -869,10 +898,11 @@ ${issue.description}
   }
 
   async cancelRun(runId: string): Promise<void> {
-    await processManager.killProcess(runId, 'SIGTERM');
-
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
-    if (!run) return;
+    if (!run) throw new Error(`Run not found: ${runId}`);
+    if (run.status !== 'queued' && run.status !== 'running') {
+      throw new Error(`Run is ${run.status}, not cancellable.`);
+    }
 
     const now = new Date().toISOString();
     const updatedStages = run.stages.map((s, idx) => {
@@ -898,6 +928,11 @@ ${issue.description}
       supabaseService.updateIssueInCloud(run.issueId, { status: 'in_progress' }).catch(() => {});
       supabaseService.broadcastRunEvent(runId, { type: 'run_cancelled', payload: cancelledRun }).catch(() => {});
     }
+
+    // Persist cancellation before killing the child. If the exit event wins
+    // the scheduling race, handleProcessExit now sees the terminal row and
+    // cannot finalize it as a success.
+    await processManager.killProcess(runId, 'SIGTERM', 'cancelled');
   }
 }
 
