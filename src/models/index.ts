@@ -201,7 +201,7 @@ export interface Project {
 }
 
 export type StageId = 'workspace' | 'analysis' | 'implementation' | 'tests' | 'review';
-export type StageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
+export type StageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped';
 
 export interface PrototypeRunStage {
   id: StageId;
@@ -240,6 +240,8 @@ export interface RunActivity {
   streamKey?: string;
   /** True while a provider is still sending fragments for this entry. */
   isStreaming?: boolean;
+  /** True when this entry received at least one incremental provider fragment. */
+  streamed?: boolean;
   /** Optional compact command/tool detail; never private chain-of-thought. */
   detail?: string;
 }

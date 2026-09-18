@@ -56,4 +56,19 @@ describe('ProcessManager termination reasons', () => {
 
     expect(onExit).toHaveBeenCalledWith(null, 'SIGTERM', 'cancelled');
   });
+
+  it('passes a provider error reason through a delayed exit event', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    treeKillMock.mockImplementationOnce((_pid: number, _signal: string, done: (error?: Error | null) => void) => done(null));
+
+    const onExit = vi.fn();
+    const manager = new ProcessManager();
+    manager.spawnProcess({ runId: 'run-provider-error', bin: 'node', args: [], cwd: process.cwd(), onExit });
+
+    await manager.killProcess('run-provider-error', 'SIGTERM', 'provider_error');
+    child.emit('exit', null, 'SIGTERM');
+
+    expect(onExit).toHaveBeenCalledWith(null, 'SIGTERM', 'provider_error');
+  });
 });

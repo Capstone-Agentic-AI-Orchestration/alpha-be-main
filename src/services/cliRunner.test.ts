@@ -74,6 +74,7 @@ describe('buildTurnInvocation — Claude', () => {
     expect(bin).toMatch(/^claude(\.cmd)?$/);
     expect(args).toContain('-p');
     expect(valueOf(args, '--output-format')).toBe('stream-json');
+    expect(args).toContain('--include-partial-messages');
     expect(args).toContain('--verbose');
   });
 
@@ -529,9 +530,10 @@ describe('run mode — Alpha doing the work, not discussing it', () => {
     expect(valueOf(run().args, '--append-system-prompt')).toBe('You are Ada.');
   });
 
-  it('gives codex a writable sandbox', () => {
+  it('uses Codex automatic review for a writable run', () => {
     const { args } = run({ provider: 'OpenAI' });
-    expect(valueOf(args, '--sandbox')).toBe('workspace-write');
+    expect(args).toContain('--approve-for-me');
+    expect(args).not.toContain('--sandbox');
   });
 
   it('still ignores the operator\'s codex config on a run', () => {

@@ -21,6 +21,9 @@ export function classifyProcessExit(
   if (terminationReason === 'timeout') {
     return { kind: 'failed', message: `Process timed out${signal ? ` after ${signal}` : ''}.` };
   }
+  if (terminationReason === 'provider_error') {
+    return { kind: 'failed', message: 'The provider reported an error.' };
+  }
   if (signal) return { kind: 'failed', message: `Process terminated by signal ${signal}.` };
   if (code === 0) return { kind: 'success' };
   return { kind: 'failed', message: `Process exited with error code: ${code}` };

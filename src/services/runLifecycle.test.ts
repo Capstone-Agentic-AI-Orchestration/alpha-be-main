@@ -20,5 +20,9 @@ describe('classifyProcessExit', () => {
       kind: 'failed',
       message: 'Process timed out after SIGTERM.'
     });
+    expect(classifyProcessExit(null, 'SIGTERM', 'provider_error')).toEqual({
+      kind: 'failed',
+      message: 'The provider reported an error.'
+    });
   });
 });

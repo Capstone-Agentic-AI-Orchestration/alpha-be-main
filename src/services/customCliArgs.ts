@@ -41,6 +41,9 @@ const RESERVED_FLAGS = new Set([
   '--permission-mode', '--permission-prompt-tool',
   '--add-dir',
   '--sandbox',
+  // Codex owns the non-interactive run approval policy too. It cannot be
+  // combined with --sandbox and must not be replaced by an agent-supplied flag.
+  '--approve-for-me',
   '--agents',
 
   // Would undo the isolation from the operator's own configuration.

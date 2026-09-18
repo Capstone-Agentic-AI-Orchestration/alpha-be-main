@@ -65,6 +65,7 @@ describe('parseCustomCliArgs — what it refuses', () => {
     '--permission-mode',
     '--add-dir',
     '--sandbox',
+    '--approve-for-me',
     '--setting-sources',
     '--mcp-config',
     '--strict-mcp-config',

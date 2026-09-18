@@ -20,6 +20,7 @@ import { updateIssueAndPush } from './boardWriteThrough.js';
 import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
+import { runVerification } from './verificationService.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind } from '../models/index.js';
 import { RUNS_DIR } from '../config/env.js';
@@ -260,7 +261,11 @@ export class RunnerService extends EventEmitter {
         this.appendLog(runId, 'workspace', `Continuing on the squad's branch: ${branchName}`);
       }
     } catch (err: any) {
-      this.appendLog(runId, 'workspace', `Git branch checkout notice: ${err.message}`);
+      this.markRunFailed(
+        runId,
+        `Workspace preparation failed while checking out ${branchName}: ${err?.message || String(err)}`
+      );
+      return;
     }
 
     this.advanceStage(runId, 'workspace', 'success');
@@ -416,6 +421,9 @@ export class RunnerService extends EventEmitter {
               `[${ev.type === 'error' ? 'Error' : 'Tool Result'}] ${ev.message || 'No output'}`,
               ev.type === 'error' ? 'error' : 'tool_result'
             );
+            if (ev.type === 'error' && ev.fatal) {
+              this.failProviderRun(runId, ev.message || 'The provider reported an error.');
+            }
           } else if (ev.type === 'session' || ev.type === 'rate_limit' || ev.type === 'status') {
             this.appendActivity(runId, {
               kind: 'status',
@@ -429,6 +437,9 @@ export class RunnerService extends EventEmitter {
               stageId: ev.stage ?? parser.getCurrentStage(),
               message: ev.message || (ev.telemetry.isError ? 'Agent reported an error.' : 'Agent turn completed.')
             });
+            if (ev.telemetry.isError) {
+              this.failProviderRun(runId, ev.message || 'The provider reported an error.');
+            }
           }
         }
       });
@@ -550,7 +561,7 @@ Instructions:
     // Cancellation wins over the child process's eventual exit event. The
     // kill callback can be delivered after the cancellation row was saved,
     // and it must never reopen the review pipeline.
-    if (run.status === 'cancelled') return;
+    if (['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
 
     const exitDecision = classifyProcessExit(code, signal, terminationReason);
     if (exitDecision.kind === 'cancelled') return;
@@ -574,10 +585,62 @@ Instructions:
     const now = new Date().toISOString();
 
     if (exitDecision.kind === 'success') {
-      // Transition through remaining stages to review
+      // Transition through implementation into the real repository checks.
       this.advanceStage(runId, 'analysis', 'success');
       this.advanceStage(runId, 'implementation', 'success');
-      this.advanceStage(runId, 'tests', 'success');
+
+      this.advanceStage(runId, 'tests', 'running');
+      const verification = await runVerification({
+        runId,
+        cwd,
+        shouldContinue: () => {
+          const latest = sqliteService.getPrototypeRuns().find(item => item.id === runId);
+          return !!latest && latest.status === 'running';
+        }
+      });
+
+      const statusAfterVerification = sqliteService.getPrototypeRuns().find(item => item.id === runId)?.status;
+      if (!statusAfterVerification || statusAfterVerification === 'cancelled') return;
+
+      // Keep the command result in the existing run log. Output is bounded by
+      // verificationService, and each line is stored separately so it remains
+      // readable after a reload rather than becoming one collapsed paragraph.
+      for (const result of verification.commands) {
+        const exit = result.exitCode === null
+          ? `signal ${result.signal || 'unknown'}`
+          : `exit ${result.exitCode}`;
+        this.appendLog(runId, 'tests', `$ ${result.command.display} (${exit})`);
+        const outputLines = result.output
+          .split(/\r?\n/)
+          .map(line => line.trimEnd())
+          .filter(Boolean)
+          .slice(-120);
+        for (const line of outputLines) {
+          this.appendLog(runId, 'tests', `[${result.command.display}] ${line}`);
+        }
+      }
+
+      const verificationRun = sqliteService.getPrototypeRuns().find(item => item.id === runId);
+      if (verificationRun) {
+        sqliteService.savePrototypeRun({
+          ...verificationRun,
+          testSummary: verification.summary,
+          updatedAt: new Date().toISOString()
+        });
+      }
+
+      if (verification.status === 'cancelled') return;
+      if (verification.status === 'failed') {
+        this.advanceStage(runId, 'tests', 'failed');
+        this.markRunFailed(runId, verification.summary);
+        return;
+      }
+
+      this.advanceStage(
+        runId,
+        'tests',
+        verification.status === 'passed' ? 'success' : 'skipped'
+      );
       this.advanceStage(runId, 'review', 'running');
 
       // Compute real Git diff
@@ -647,7 +710,7 @@ ${issue.description}
 - **Changed Files:** ${diffStats.changedFiles}
 - **Insertions:** +${diffStats.insertions}
 - **Deletions:** -${diffStats.deletions}
-- **Tests:** not verified by Alpha — see the run log
+- **Tests:** ${verification.summary}
 
 ---
 *Autonomous Pull Request created by Alpha Orchestration Engine.*`;
@@ -734,7 +797,7 @@ ${issue.description}
 
       const updatedStages = current.stages.map(s => ({
         ...s,
-        status: 'success' as const,
+        status: s.id === 'tests' && s.status === 'skipped' ? 'skipped' as const : 'success' as const,
         completedAt: s.completedAt || now
       }));
 
@@ -761,16 +824,11 @@ ${issue.description}
         insertions: diffStats.insertions,
         deletions: diffStats.deletions,
         /**
-         * Alpha does not run the tests, so it cannot report on them.
-         *
-         * This said "All unit and regression tests passed." unconditionally.
-         * The agent is *asked* to run tests in the task prompt, but nothing
-         * checks whether it did, or what happened — and the claim was also
-         * being written into pull request descriptions.
+         * Preserve the verifier's measured result. The diff summary belongs
+         * beside it in the review activity; it must not overwrite a passing,
+         * failing, or explicitly skipped command result.
          */
-        testSummary: diffStats.changedFiles
-          ? `${diffStats.changedFiles} file(s) changed. Tests were not verified by Alpha — review the run log.`
-          : 'No files were changed by this run.',
+        testSummary: verification.summary,
         prUrl,
         activities: [
           ...(current.activities ?? []),
@@ -833,7 +891,7 @@ ${issue.description}
     }
   }
 
-  private advanceStage(runId: string, stageId: StageId, status: 'running' | 'success' | 'failed') {
+  private advanceStage(runId: string, stageId: StageId, status: 'running' | 'success' | 'failed' | 'skipped') {
     const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
     if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
 
@@ -850,7 +908,7 @@ ${issue.description}
           ...s,
           status,
           startedAt: s.startedAt || now,
-          completedAt: status === 'success' || status === 'failed' ? now : undefined
+          completedAt: status === 'success' || status === 'failed' || status === 'skipped' ? now : undefined
         };
       }
       return s;
@@ -956,6 +1014,7 @@ ${issue.description}
         message: input.append ? `${previous.message}${input.message}` : input.message,
         stageId: input.stageId ?? previous.stageId,
         isStreaming: input.isStreaming ?? false,
+        streamed: previous.streamed || previous.isStreaming || input.isStreaming || undefined,
         detail: input.detail ?? previous.detail
       };
       activities[matchIndex] = activity;
@@ -970,6 +1029,7 @@ ${issue.description}
         stageId: input.stageId,
         streamKey: input.streamKey,
         isStreaming: input.isStreaming,
+        streamed: input.isStreaming ? true : undefined,
         detail: input.detail
       };
       activities.push(activity);
@@ -982,6 +1042,19 @@ ${issue.description}
     if (supabaseService.isConfigured()) {
       supabaseService.broadcastRunEvent(runId, { type: 'run_activity', payload: eventPayload }).catch(() => {});
     }
+  }
+
+  /**
+   * A provider-level failure is terminal even when the CLI later exits with 0.
+   * Some providers emit a structured failure and then close their wrapper
+   * cleanly, which used to send that run through the review pipeline.
+   */
+  private failProviderRun(runId: string, message: string) {
+    const run = sqliteService.getPrototypeRuns().find(r => r.id === runId);
+    if (!run || ['cancelled', 'failed', 'awaiting_approval', 'completed', 'changes_requested'].includes(run.status)) return;
+
+    this.markRunFailed(runId, message);
+    void processManager.killProcess(runId, 'SIGTERM', 'provider_error');
   }
 
   private createActivity(

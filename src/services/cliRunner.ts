@@ -363,9 +363,14 @@ export function buildTurnInvocation(
         'exec',
         '--json',
         // A run edits the repository it was given; so does a chat whose agent
-        // was granted `sk-fs`. Without the skill the sandbox stays read-only,
-        // which is codex's own enforcement rather than a prompt asking nicely.
-        '--sandbox', canWrite ? 'workspace-write' : 'read-only',
+        // was granted `sk-fs`. Codex's non-interactive approval switch is a
+        // special case: `--approve-for-me` selects its workspace-write policy,
+        // and the CLI rejects it when `--sandbox` is present. Keep the explicit
+        // sandbox for chats, where Alpha must preserve the agent's capability
+        // boundary, and use the compatible approval mode for launched runs.
+        ...(isRun
+          ? ['--approve-for-me']
+          : ['--sandbox', canWrite ? 'workspace-write' : 'read-only']),
         '--skip-git-repo-check',
         /**
          * Isolate codex from ~/.codex/config.toml — the operator's own file.
@@ -523,6 +528,10 @@ export function buildTurnInvocation(
           ? ['--append-system-prompt', persona]
           : []),
       '--output-format', 'stream-json',
+      // Claude only emits content_block_delta events when this opt-in is set.
+      // The parser already understands those fragments and folds them into one
+      // activity, so the run can show the assistant while it is still writing.
+      '--include-partial-messages',
       // REQUIRED. Without it the CLI exits 1 with
       // "When using --print, --output-format=stream-json requires --verbose",
       // stdout stays empty, and this method silently returns a canned string.

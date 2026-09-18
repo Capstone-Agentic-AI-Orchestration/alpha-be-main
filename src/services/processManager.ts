@@ -5,7 +5,7 @@ import { sqliteService } from './sqliteService.js';
 import { logAudit, logInfo, logError } from '../utils/logger.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 
-export type ProcessTerminationReason = 'cancelled' | 'timeout';
+export type ProcessTerminationReason = 'cancelled' | 'timeout' | 'provider_error';
 
 export interface SpawnOptions {
   runId: string;

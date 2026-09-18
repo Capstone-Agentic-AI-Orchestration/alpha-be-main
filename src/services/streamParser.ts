@@ -71,6 +71,8 @@ export interface ParsedEvent {
   streamKey?: string;
   /** True while `text_delta` fragments are still arriving. */
   isStreaming?: boolean;
+  /** True when this event means the provider cannot complete the run. */
+  fatal?: boolean;
 }
 
 export function compactToolOutput(
@@ -108,6 +110,8 @@ export class StreamParser {
   /** Accumulates Antigravity's `text_delta` fragments until its step completes. */
   private antigravityText = '';
   private antigravityStreamKey = 'assistant';
+  /** Accumulates Codex deltas until the matching item/turn completes. */
+  private readonly codexStreamText = new Map<string, string>();
   /** Event types seen that no branch handled — surfaced by tests, not swallowed. */
   private readonly unhandled = new Set<string>();
 
@@ -301,7 +305,8 @@ export class StreamParser {
       events.push({
         type: 'error',
         stage: this.currentStage,
-        message: String(json.result ?? json.subtype ?? 'Run failed')
+        message: String(json.result ?? json.subtype ?? 'Run failed'),
+        fatal: true
       });
     } else if (
       typeof json.result === 'string' &&
@@ -390,7 +395,8 @@ export class StreamParser {
             stage: this.currentStage,
             message: detail
               ? `Antigravity run ended with status ${r.status}: ${detail}`
-              : `Antigravity run ended with status ${r.status}`
+              : `Antigravity run ended with status ${r.status}`,
+            fatal: true
           });
         } else if (!this.sawAssistantText && typeof r.response === 'string' && r.response.trim()) {
           events.push({
@@ -505,7 +511,8 @@ export class StreamParser {
         events.push({
           type: kind === 'error_message' ? 'error' : 'log',
           stage: this.currentStage,
-          message: text || `Antigravity reported: ${JSON.stringify(step).slice(0, 400)}`
+          message: text || `Antigravity reported: ${JSON.stringify(step).slice(0, 400)}`,
+          ...(kind === 'error_message' ? { fatal: true } : {})
         });
       }
       return events;
@@ -572,6 +579,8 @@ export class StreamParser {
    *
    *   { "type": "thread.started", "thread_id": "…" }
    *   { "type": "turn.started" }
+   *   { "type": "item.started", "item": { "id": "item_0", "type": "…", … } }
+   *   { "type": "item.delta", "item_id": "item_0", "delta": "…" }
    *   { "type": "item.completed", "item": { "id": "item_0", "type": "…", … } }
    *   { "type": "error",       "message": "…" }
    *   { "type": "turn.failed", "error": { "message": "…" } }
@@ -593,43 +602,69 @@ export class StreamParser {
         }];
 
       case 'turn.started':
+        // A new turn must not inherit a partial response from an interrupted
+        // one. A completed turn flushes this map below, but a failed process
+        // can end without a final provider event.
+        this.codexStreamText.clear();
         return [];
+
+      case 'item.started':
+        // Tool and assistant items are announced before their content. The
+        // completed event is the authoritative tool/message record; keeping
+        // this branch explicit prevents harmless lifecycle events becoming
+        // "unhandled" noise in diagnostics.
+        return [];
+
+      case 'item.delta':
+      case 'item.updated':
+      case 'response.output_text.delta':
+      case 'output_text.delta':
+      case 'response.content_part.delta':
+      case 'content_block_delta':
+        return this.handleCodexDelta(json);
 
       case 'item.completed':
         return this.handleCodexItem(json.item ?? {});
 
       case 'error':
+        this.codexStreamText.clear();
         return [{
           type: 'error',
           stage: this.currentStage,
-          message: extractCodexError(json.message)
+          message: extractCodexError(json.message),
+          fatal: true
         }];
 
       case 'turn.failed':
+        this.codexStreamText.clear();
         return [{
           type: 'error',
           stage: this.currentStage,
-          message: extractCodexError(json.error?.message)
+          message: extractCodexError(json.error?.message),
+          fatal: true
         }];
 
       case 'turn.completed':
-        return [{
-          type: 'result',
-          stage: this.currentStage,
-          message: 'Run completed',
-          telemetry: {
-            sessionId: this.sessionId,
-            inputTokens: json.usage?.input_tokens,
-            outputTokens: json.usage?.output_tokens,
-            // From codex's documented turn.completed schema. Unverified
-            // against a live stream — the captured fixture only contains a
-            // turn.failed, because this machine's codex is signed out. A wrong
-            // key here reads as undefined, i.e. "not reported", which is the
-            // honest answer anyway; it must never become a zero.
-            cacheReadTokens: json.usage?.cached_input_tokens,
-            isError: false
+        return [
+          ...this.flushCodexStreams(),
+          {
+            type: 'result',
+            stage: this.currentStage,
+            message: 'Run completed',
+            telemetry: {
+              sessionId: this.sessionId,
+              inputTokens: json.usage?.input_tokens,
+              outputTokens: json.usage?.output_tokens,
+              // From codex's documented turn.completed schema. Unverified
+              // against a live stream — the captured fixture only contains a
+              // turn.failed, because this machine's codex is signed out. A wrong
+              // key here reads as undefined, i.e. "not reported", which is the
+              // honest answer anyway; it must never become a zero.
+              cacheReadTokens: json.usage?.cached_input_tokens,
+              isError: false
+            }
           }
-        }];
+        ];
 
       default:
         if (json?.type) this.unhandled.add('codex.' + String(json.type));
@@ -637,18 +672,106 @@ export class StreamParser {
     }
   }
 
+  /**
+   * Normalize the incremental text shapes used by Codex/Responses-style JSONL.
+   *
+   * Some Codex builds expose `item.delta`, while others use
+   * `response.output_text.delta`. Only fields explicitly named `delta` or
+   * `text_delta` are accepted here: treating a full `item.text` update as a
+   * fragment would duplicate the response on every update.
+   */
+  private handleCodexDelta(json: any): ParsedEvent[] {
+    const text = this.readCodexDelta(json);
+    if (!text) return [];
+
+    const streamKey = this.codexStreamKey(json);
+    const previous = this.codexStreamText.get(streamKey) ?? '';
+
+    // A few clients label a cumulative update as `delta`. If so, append only
+    // the new suffix; repeated cumulative values become no-ops rather than
+    // duplicated text in the activity feed.
+    const fragment = previous && text.startsWith(previous)
+      ? text.slice(previous.length)
+      : text;
+    if (!fragment) return [];
+
+    this.codexStreamText.set(streamKey, previous + fragment);
+    this.sawAssistantText = true;
+
+    return [{
+      type: 'text_delta',
+      stage: this.currentStage,
+      message: fragment,
+      streamKey,
+      isStreaming: true
+    }];
+  }
+
+  private readCodexDelta(json: any): string {
+    const candidates = [
+      json?.delta,
+      json?.text_delta,
+      json?.item?.delta,
+      json?.item?.text_delta,
+      json?.content_part?.delta
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string') return candidate;
+      if (candidate && typeof candidate.text === 'string') return candidate.text;
+      if (candidate && typeof candidate.delta === 'string') return candidate.delta;
+    }
+    return '';
+  }
+
+  private codexStreamKey(json: any): string {
+    return String(
+      json?.item_id ??
+      json?.item?.id ??
+      json?.output_item_id ??
+      json?.message_id ??
+      json?.id ??
+      'assistant'
+    );
+  }
+
+  private flushCodexStreams(): ParsedEvent[] {
+    const events: ParsedEvent[] = [];
+    for (const [streamKey, message] of this.codexStreamText) {
+      if (message) {
+        events.push({
+          type: 'log',
+          stage: this.currentStage,
+          message,
+          streamKey,
+          isStreaming: false
+        });
+      }
+    }
+    this.codexStreamText.clear();
+    return events;
+  }
+
   private handleCodexItem(item: any): ParsedEvent[] {
     const kind = String(item.type ?? '');
 
     if (kind === 'agent_message' || kind === 'assistant_message') {
-      const text = String(item.text ?? item.message ?? '').trim();
+      const streamKey = String(item.id ?? 'assistant');
+      const completedText = String(item.text ?? item.message ?? '').trim();
+      const streamedText = this.codexStreamText.get(streamKey) ?? '';
+      const text = completedText || streamedText;
       if (!text) return [];
       this.sawAssistantText = true;
+      // Keep the final event even when it repeats the accumulated fragments:
+      // RunnerService uses the same stream key to replace the in-progress
+      // activity and mark it no longer streaming, rather than creating a
+      // second visible message.
+      this.codexStreamText.delete(streamKey);
       return [{
         type: 'log',
         stage: this.currentStage,
         message: text,
-        streamKey: String(item.id ?? 'assistant'),
+        streamKey,
         isStreaming: false
       }];
     }
