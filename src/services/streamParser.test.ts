@@ -152,6 +152,7 @@ describe('StreamParser — real Codex transcript', () => {
     // Raw value is an escaped JSON blob; the readable sentence must survive.
     expect(errors[0].message).toContain('not supported when using Codex');
     expect(errors[0].message).not.toContain('\\"');
+    expect(errors[0].fatal).toBe(true);
   });
 
   it('treats item.completed errors as warnings, not failures', () => {
@@ -168,6 +169,68 @@ describe('StreamParser — real Codex transcript', () => {
       item: { id: 'item_2', type: 'agent_message', text: 'PONG' }
     }));
     expect(events.some(e => e.type === 'log' && e.message === 'PONG')).toBe(true);
+  });
+
+  it('forwards Codex item deltas and finalizes the same stream key', () => {
+    const p = new StreamParser('codex');
+    const delta = p.parseLine(JSON.stringify({
+      type: 'item.delta',
+      item_id: 'item-live',
+      delta: 'PONG'
+    }));
+    const completed = p.parseLine(JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item-live', type: 'agent_message', text: 'PONG' }
+    }));
+
+    expect(delta).toEqual([expect.objectContaining({
+      type: 'text_delta',
+      message: 'PONG',
+      streamKey: 'item-live',
+      isStreaming: true
+    })]);
+    // The completed event closes/replaces the in-progress activity. It is not
+    // a second visible assistant message because RunnerService matches this
+    // same stream key while the prior activity is still streaming.
+    expect(completed).toEqual([expect.objectContaining({
+      type: 'log',
+      message: 'PONG',
+      streamKey: 'item-live',
+      isStreaming: false
+    })]);
+    expect(p.getUnhandledTypes()).toEqual([]);
+  });
+
+  it('normalizes Responses-style deltas and cumulative updates', () => {
+    const p = new StreamParser('codex');
+    const first = p.parseLine(JSON.stringify({
+      type: 'response.output_text.delta',
+      item_id: 'item-live',
+      delta: 'Hello '
+    }));
+    const second = p.parseLine(JSON.stringify({
+      type: 'item.updated',
+      item_id: 'item-live',
+      delta: 'Hello world'
+    }));
+
+    expect(first[0]).toEqual(expect.objectContaining({ type: 'text_delta', message: 'Hello ' }));
+    expect(second[0]).toEqual(expect.objectContaining({ type: 'text_delta', message: 'world' }));
+    expect(p.getUnhandledTypes()).toEqual([]);
+  });
+
+  it('flushes an in-progress Codex response if no item.completed arrives', () => {
+    const p = new StreamParser('codex');
+    p.parseLine(JSON.stringify({ type: 'item.delta', item_id: 'item-live', delta: 'partial' }));
+    const events = p.parseLine(JSON.stringify({ type: 'turn.completed', usage: {} }));
+
+    expect(events[0]).toEqual(expect.objectContaining({
+      type: 'log',
+      message: 'partial',
+      streamKey: 'item-live',
+      isStreaming: false
+    }));
+    expect(events[1]).toEqual(expect.objectContaining({ type: 'result' }));
   });
 });
 
@@ -223,6 +286,36 @@ describe('StreamParser — robustness', () => {
       })
     );
     expect(events.some((e) => e.type === 'error')).toBe(true);
+    expect(events.find((e) => e.type === 'error')?.fatal).toBeUndefined();
+  });
+
+  it('preserves Claude text deltas for live assistant rendering', () => {
+    const p = new StreamParser('claude');
+    const events = p.parseLine(JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'working' }
+      },
+      message: { id: 'msg-live' }
+    }));
+
+    expect(events).toEqual([expect.objectContaining({
+      type: 'text_delta',
+      message: 'working',
+      streamKey: 'msg-live',
+      isStreaming: true
+    })]);
+  });
+
+  it('normalizes context compaction into a user-safe status event', () => {
+    const p = new StreamParser('claude');
+    const events = p.parseLine(JSON.stringify({ type: 'system', subtype: 'compact_boundary' }));
+    expect(events).toEqual([expect.objectContaining({
+      type: 'status',
+      message: 'Context automatically compacted'
+    })]);
   });
 });
 

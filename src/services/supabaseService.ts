@@ -42,7 +42,7 @@ export class SupabaseService {
    */
   async broadcastRunEvent(
     runId: string,
-    event: { type: 'stage_update' | 'log_chunk' | 'run_completed' | 'run_failed' | 'run_cancelled'; payload: any }
+    event: { type: 'stage_update' | 'log_chunk' | 'run_activity' | 'run_completed' | 'run_failed' | 'run_cancelled'; payload: any }
   ): Promise<void> {
     if (!this.client) return;
 

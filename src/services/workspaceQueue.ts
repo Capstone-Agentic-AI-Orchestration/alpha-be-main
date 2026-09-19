@@ -55,14 +55,23 @@ export class WorkspaceQueue {
    * The returned promise settles with the task's own result, so callers see
    * their own failure and not the queue's.
    */
-  run<T>(key: string, task: () => Promise<T>): Promise<T> {
+  run<T>(
+    key: string,
+    task: () => Promise<T>,
+    options: { shouldStart?: () => boolean } = {}
+  ): Promise<T | undefined> {
     const previous = this.tails.get(key) ?? Promise.resolve();
     this.counts.set(key, this.depth(key) + 1);
 
-    // Both arms call the task: a task must not be skipped because the one
-    // before it threw. The predecessor's rejection is already reported to
-    // whoever enqueued it.
-    const result = previous.then(task, task);
+    // Both arms reach the same gate: a task must not be skipped merely because
+    // the one before it threw, but a caller may withdraw queued work before it
+    // reaches the front of the chain. The predicate is evaluated at the last
+    // possible moment, immediately before the task would start.
+    const runIfAllowed = () => {
+      if (options.shouldStart && !options.shouldStart()) return undefined;
+      return task();
+    };
+    const result = previous.then(runIfAllowed, runIfAllowed);
 
     let tail: Promise<void>;
     tail = result.then(

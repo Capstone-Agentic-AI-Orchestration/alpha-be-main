@@ -201,7 +201,7 @@ export interface Project {
 }
 
 export type StageId = 'workspace' | 'analysis' | 'implementation' | 'tests' | 'review';
-export type StageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
+export type StageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped';
 
 export interface PrototypeRunStage {
   id: StageId;
@@ -212,6 +212,38 @@ export interface PrototypeRunStage {
   logs: string[];
   startedAt?: string;
   completedAt?: string;
+}
+
+/**
+ * One user-safe event in a run's chronological activity feed.
+ *
+ * This is deliberately not a transcript of private model reasoning. It is the
+ * useful operational trail: narration, tools, command/file work, status
+ * changes, errors, and the final summary.
+ */
+export type RunActivityKind =
+  | 'assistant'
+  | 'tool'
+  | 'tool_result'
+  | 'status'
+  | 'error'
+  | 'summary';
+
+export interface RunActivity {
+  id: string;
+  sequence: number;
+  kind: RunActivityKind;
+  message: string;
+  createdAt: string;
+  stageId?: StageId;
+  /** Provider stream identifier used to update one assistant entry in place. */
+  streamKey?: string;
+  /** True while a provider is still sending fragments for this entry. */
+  isStreaming?: boolean;
+  /** True when this entry received at least one incremental provider fragment. */
+  streamed?: boolean;
+  /** Optional compact command/tool detail; never private chain-of-thought. */
+  detail?: string;
 }
 
 /**
@@ -310,6 +342,7 @@ export interface PrototypeRun {
   plan: string[];
   currentStageIndex: number;
   stages: PrototypeRunStage[];
+  activities?: RunActivity[];
   branchName?: string;
   prUrl?: string;
   changedFiles?: number;

@@ -1,0 +1,114 @@
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const spawnProcess = vi.hoisted(() => vi.fn());
+
+vi.mock('./processManager.js', () => ({
+  processManager: { spawnProcess }
+}));
+
+import { discoverVerificationCommands, runVerification } from './verificationService.js';
+
+const tempDirectories: string[] = [];
+
+function fixture(scripts: Record<string, string>, packageManager?: string): string {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-verification-'));
+  tempDirectories.push(cwd);
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ packageManager, scripts }), 'utf8');
+  return cwd;
+}
+
+afterEach(() => {
+  spawnProcess.mockReset();
+  for (const directory of tempDirectories.splice(0)) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+describe('verificationService', () => {
+  it('prefers one repository-owned combined verification script', () => {
+    const cwd = fixture({
+      verify: 'npm run test && npm run typecheck',
+      test: 'vitest run',
+      typecheck: 'tsc --noEmit'
+    }, 'pnpm@9.0.0');
+
+    expect(discoverVerificationCommands(cwd)).toEqual([{
+      script: 'verify',
+      bin: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
+      args: ['run', 'verify'],
+      display: 'pnpm run verify'
+    }]);
+  });
+
+  it('discovers conventional test, typecheck, and lint scripts in order', () => {
+    const cwd = fixture({
+      lint: 'eslint .',
+      typecheck: 'tsc --noEmit',
+      test: 'vitest run'
+    });
+
+    expect(discoverVerificationCommands(cwd).map(command => command.display)).toEqual([
+      'npm run test',
+      'npm run typecheck',
+      'npm run lint'
+    ]);
+  });
+
+  it('captures command output and reports a nonzero exit as failed', async () => {
+    const cwd = fixture({ test: 'node test.js', typecheck: 'tsc --noEmit' });
+    spawnProcess.mockImplementation((options: any) => {
+      const child = new EventEmitter();
+      queueMicrotask(() => {
+        options.onStdout?.(Buffer.from('checking files\n'));
+        options.onStderr?.(Buffer.from('one assertion failed\n'));
+        options.onExit?.(1, null);
+      });
+      return child;
+    });
+
+    const result = await runVerification({ runId: 'run-verification', cwd });
+
+    expect(result.status).toBe('failed');
+    expect(result.commands).toHaveLength(1);
+    expect(result.commands[0].exitCode).toBe(1);
+    expect(result.commands[0].output).toContain('one assertion failed');
+    expect(result.summary).toContain('npm run test (exit 1)');
+    expect(spawnProcess).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-verification',
+      cwd,
+      bin: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      args: ['run', 'test']
+    }));
+  });
+
+  it('runs every conventional check and reports verified only after all pass', async () => {
+    const cwd = fixture({ test: 'node test.js', typecheck: 'tsc --noEmit' });
+    spawnProcess.mockImplementation((options: any) => {
+      const child = new EventEmitter();
+      queueMicrotask(() => options.onExit?.(0, null));
+      return child;
+    });
+
+    const result = await runVerification({ runId: 'run-verification-pass', cwd });
+
+    expect(result.status).toBe('passed');
+    expect(result.commands.map(item => item.exitCode)).toEqual([0, 0]);
+    expect(result.summary).toBe('Verification passed: npm run test (exit 0); npm run typecheck (exit 0).');
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves the run unverified when the repository has no supported scripts', async () => {
+    const cwd = fixture({ dev: 'vite' });
+
+    const result = await runVerification({ runId: 'run-unverified', cwd });
+
+    expect(result.status).toBe('skipped');
+    expect(result.commands).toEqual([]);
+    expect(result.summary).toContain('No configured verification commands');
+    expect(spawnProcess).not.toHaveBeenCalled();
+  });
+});

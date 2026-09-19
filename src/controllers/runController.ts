@@ -39,7 +39,9 @@ runRouter.post('/runs/:id/cancel', async (req: Request, res: Response) => {
     await runnerService.cancelRun(req.params.id);
     res.json({ success: true });
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to cancel run' });
+    const message = err.message || 'Failed to cancel run';
+    const status = message.startsWith('Run not found') ? 404 : message.includes('not cancellable') ? 409 : 500;
+    res.status(status).json({ error: message });
   }
 });
 

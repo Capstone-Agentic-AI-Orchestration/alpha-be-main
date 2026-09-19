@@ -95,6 +95,25 @@ describe('WorkspaceQueue', () => {
     expect(q.depth('/repo')).toBe(0);
   });
 
+  it('skips queued work when its cancellation predicate is false', async () => {
+    const q = new WorkspaceQueue();
+    let allowSecond = true;
+    let secondStarted = false;
+
+    const first = q.run('/repo', async () => { await tick(5); });
+    const second = q.run('/repo', async () => {
+      secondStarted = true;
+      return 'started';
+    }, { shouldStart: () => allowSecond });
+
+    allowSecond = false;
+    await Promise.all([first, second]);
+
+    expect(secondStarted).toBe(false);
+    await expect(second).resolves.toBeUndefined();
+    expect(q.depth('/repo')).toBe(0);
+  });
+
   it('forgets a key once its work is done', async () => {
     // Otherwise the maps grow for the life of the daemon, one entry per
     // directory ever touched.
