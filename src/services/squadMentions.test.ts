@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveMentions } from './chatService.js';
+import { resolveChatTarget, resolveMentions } from './chatService.js';
 import { orderedMembers, SUPPORTED_TOPOLOGIES, isSupportedTopology } from './squadRunner.js';
 import { Squad } from '../models/index.js';
 
@@ -40,6 +40,22 @@ describe('resolveMentions — agents', () => {
 
   it('resolves nobody when no one is named', () => {
     expect(resolveMentions('hello', agents, [squad()])).toEqual([]);
+  });
+});
+
+describe('resolveChatTarget — Chats picker', () => {
+  it('routes an unmentioned message to the selected agent', () => {
+    expect(ids(resolveChatTarget('agent-reviewer', undefined, agents, [])))
+      .toEqual(['agent-reviewer']);
+  });
+
+  it('expands a selected squad in leader-first order', () => {
+    expect(ids(resolveChatTarget(undefined, 'squad-core', agents, [squad()])))
+      .toEqual(['agent-developer', 'agent-architect', 'agent-reviewer']);
+  });
+
+  it('returns no target for Automatic Alpha mode', () => {
+    expect(resolveChatTarget(undefined, undefined, agents, [squad()])).toEqual([]);
   });
 });
 

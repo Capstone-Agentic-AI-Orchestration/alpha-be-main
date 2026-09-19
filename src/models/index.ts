@@ -365,6 +365,10 @@ export interface ChatThread {
   lastMessageSnippet: string;
   lastMessageAt: string;
   agentIds: string[];
+  /** The responder selected for this conversation, when it is not automatic Alpha. */
+  targetAgentId?: string;
+  /** The squad selected for this conversation, when several agents should answer. */
+  targetSquadId?: string;
   /**
    * Which project this conversation is about, when it is about one.
    *
@@ -399,6 +403,10 @@ export interface ChatMessage {
 
 export type RuntimeStatus = 'online' | 'degraded' | 'offline' | 'scanning';
 
+/** How Alpha obtained a runtime's model catalog. */
+export type RuntimeCatalogSource = 'cli' | 'local_api' | 'remote_api' | 'cache' | 'none';
+export type RuntimeUpdateSource = 'provider_cli' | 'npm' | 'remote_api' | 'none';
+
 export interface RuntimeEngine {
   id: string;
   name: string;
@@ -426,6 +434,18 @@ export interface RuntimeEngine {
     plan?: string;
   };
   detectedAt?: string;
+  /** Model-catalog freshness and provenance. */
+  catalogSource?: RuntimeCatalogSource;
+  catalogCheckedAt?: string;
+  catalogFetchedAt?: string;
+  catalogStale?: boolean;
+  catalogError?: string;
+  /** Runtime-version update information, kept separate from model discovery. */
+  updateAvailable?: boolean;
+  latestVersion?: string;
+  updateCheckedAt?: string;
+  updateError?: string;
+  updateSource?: RuntimeUpdateSource;
 }
 
 export interface Skill {

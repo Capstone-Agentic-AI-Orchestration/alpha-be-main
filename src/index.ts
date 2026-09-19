@@ -13,7 +13,7 @@ import { chatRouter } from './controllers/chatController.js';
 import { mcpRouter } from './controllers/mcpController.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
-import { runtimeService } from './services/runtimeService.js';
+import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
 import { warmIdentity } from './services/identityService.js';
@@ -216,6 +216,6 @@ server.listen(PORT, HOST, () => {
     logError('Could not initialise the agent file layer:', err);
   }
 
-  // Initial runtime scan in background
-  runtimeService.scanRuntimes().catch(err => logError('Initial runtime probe failed:', err));
+  // Initial runtime scan plus periodic catalog refresh in background.
+  runtimeRefreshService.start();
 });

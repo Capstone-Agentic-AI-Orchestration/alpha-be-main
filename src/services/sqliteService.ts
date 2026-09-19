@@ -273,7 +273,17 @@ export class SQLiteService {
         is_default INTEGER DEFAULT 0,
         models TEXT DEFAULT '[]',
         account TEXT DEFAULT '{}',
-        detected_at TEXT
+        detected_at TEXT,
+        catalog_source TEXT DEFAULT 'none',
+        catalog_checked_at TEXT,
+        catalog_fetched_at TEXT,
+        catalog_stale INTEGER DEFAULT 0,
+        catalog_error TEXT,
+        update_available INTEGER DEFAULT 0,
+        latest_version TEXT,
+        update_checked_at TEXT,
+        update_error TEXT,
+        update_source TEXT DEFAULT 'none'
       );
 
       CREATE TABLE IF NOT EXISTS chat_threads (
@@ -282,6 +292,8 @@ export class SQLiteService {
         last_message_snippet TEXT,
         last_message_at TEXT NOT NULL,
         agent_ids TEXT DEFAULT '[]',
+        target_agent_id TEXT,
+        target_squad_id TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -347,6 +359,16 @@ export class SQLiteService {
       ['runtimes', "type TEXT DEFAULT 'cloud'"],
       ['runtimes', 'latency_ms INTEGER DEFAULT 0'],
       ['runtimes', 'endpoint TEXT'],
+      ['runtimes', "catalog_source TEXT DEFAULT 'none'"],
+      ['runtimes', 'catalog_checked_at TEXT'],
+      ['runtimes', 'catalog_fetched_at TEXT'],
+      ['runtimes', 'catalog_stale INTEGER DEFAULT 0'],
+      ['runtimes', 'catalog_error TEXT'],
+      ['runtimes', 'update_available INTEGER DEFAULT 0'],
+      ['runtimes', 'latest_version TEXT'],
+      ['runtimes', 'update_checked_at TEXT'],
+      ['runtimes', 'update_error TEXT'],
+      ['runtimes', "update_source TEXT DEFAULT 'none'"],
       ['skills', "source TEXT DEFAULT 'builtin'"],
       ['skills', 'path TEXT'],
       ['skills', 'installed INTEGER DEFAULT 0'],
@@ -445,6 +467,12 @@ export class SQLiteService {
        * for a conversation that is not about code.
        */
       ['chat_threads', 'project_id TEXT'],
+      // A thread may be addressed to one agent, one squad, or Alpha's
+      // automatic responder. This is separate from agent_ids, which is the
+      // historical participant roster and grows as a conversation speaks to
+      // more agents.
+      ['chat_threads', 'target_agent_id TEXT'],
+      ['chat_threads', 'target_squad_id TEXT'],
       /**
        * The squad assigned to an issue.
        *
@@ -729,7 +757,7 @@ export class SQLiteService {
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
-        modelName: 'claude-sonnet-5',
+        modelName: '',
         systemPrompt: 'You are the Architect. Focus on clean interfaces, modular decomposition, and strict type definitions. Propose structure before code.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-git', 'sk-browser'],
@@ -746,7 +774,7 @@ export class SQLiteService {
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
-        modelName: 'claude-sonnet-5',
+        modelName: '',
         systemPrompt: 'You are the Developer. Write robust, concise TypeScript. Match the surrounding code and add no extraneous comments.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash', 'sk-git'],
@@ -763,7 +791,7 @@ export class SQLiteService {
         owner: 'You',
         isMine: true,
         modelProvider: 'OpenAI',
-        modelName: 'codex',
+        modelName: '',
         systemPrompt: 'You are the Reviewer. Inspect diffs for correctness, performance, and security anti-patterns. Report findings; do not rewrite the change yourself.',
         autonomyLevel: 'Supervised',
         skills: ['sk-fs', 'sk-git'],
@@ -780,7 +808,7 @@ export class SQLiteService {
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
-        modelName: 'claude-sonnet-5',
+        modelName: '',
         systemPrompt: 'You are the Tester. Write thorough unit and regression tests with high assertion density. Name the cases you did not cover.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash'],
@@ -797,7 +825,7 @@ export class SQLiteService {
         owner: 'You',
         isMine: true,
         modelProvider: 'Anthropic',
-        modelName: 'claude-sonnet-5',
+        modelName: '',
         systemPrompt: 'You are the Operator. Inspect CI workflows, diagnose failed run logs, and patch builds. Explain the failure before fixing it.',
         autonomyLevel: 'Semi-Autonomous (Requires Approval)',
         skills: ['sk-fs', 'sk-bash', 'sk-git'],
@@ -1857,14 +1885,34 @@ export class SQLiteService {
       isDefault: Boolean(r.is_default),
       models: JSON.parse(r.models || '[]'),
       account: JSON.parse(r.account || '{}'),
-      detectedAt: r.detected_at
+      detectedAt: r.detected_at,
+      catalogSource: r.catalog_source || 'none',
+      catalogCheckedAt: r.catalog_checked_at || undefined,
+      catalogFetchedAt: r.catalog_fetched_at || undefined,
+      catalogStale: r.catalog_checked_at ? Boolean(r.catalog_stale) : undefined,
+      catalogError: r.catalog_error || undefined,
+      updateAvailable: r.update_checked_at ? Boolean(r.update_available) : undefined,
+      latestVersion: r.latest_version || undefined,
+      updateCheckedAt: r.update_checked_at || undefined,
+      updateError: r.update_error || undefined,
+      updateSource: r.update_source || undefined
     }));
   }
 
   saveRuntimes(runtimes: RuntimeEngine[]) {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO runtimes (id, name, provider, status, type, latency_ms, endpoint, version, is_default, models, account, detected_at)
-      VALUES (@id, @name, @provider, @status, @type, @latencyMs, @endpoint, @version, @isDefault, @models, @account, @detectedAt)
+      INSERT OR REPLACE INTO runtimes (
+        id, name, provider, status, type, latency_ms, endpoint, version, is_default,
+        models, account, detected_at, catalog_source, catalog_checked_at,
+        catalog_fetched_at, catalog_stale, catalog_error, update_available,
+        latest_version, update_checked_at, update_error, update_source
+      )
+      VALUES (
+        @id, @name, @provider, @status, @type, @latencyMs, @endpoint, @version,
+        @isDefault, @models, @account, @detectedAt, @catalogSource,
+        @catalogCheckedAt, @catalogFetchedAt, @catalogStale, @catalogError,
+        @updateAvailable, @latestVersion, @updateCheckedAt, @updateError, @updateSource
+      )
     `);
     const tx = this.db.transaction((list: RuntimeEngine[]) => {
       for (const r of list) {
@@ -1880,7 +1928,17 @@ export class SQLiteService {
           isDefault: r.isDefault ? 1 : 0,
           models: JSON.stringify(r.models || []),
           account: JSON.stringify(r.account || {}),
-          detectedAt: r.detectedAt || new Date().toISOString()
+          detectedAt: r.detectedAt || new Date().toISOString(),
+          catalogSource: r.catalogSource || 'none',
+          catalogCheckedAt: r.catalogCheckedAt || null,
+          catalogFetchedAt: r.catalogFetchedAt || null,
+          catalogStale: r.catalogStale ? 1 : 0,
+          catalogError: r.catalogError || null,
+          updateAvailable: r.updateAvailable ? 1 : 0,
+          latestVersion: r.latestVersion || null,
+          updateCheckedAt: r.updateCheckedAt || null,
+          updateError: r.updateError || null,
+          updateSource: r.updateSource || 'none'
         });
       }
     });
@@ -1896,6 +1954,8 @@ export class SQLiteService {
       lastMessageSnippet: r.last_message_snippet,
       lastMessageAt: r.last_message_at,
       agentIds: JSON.parse(r.agent_ids || '[]'),
+      targetAgentId: r.target_agent_id ?? undefined,
+      targetSquadId: r.target_squad_id ?? undefined,
       projectId: r.project_id ?? undefined,
       createdAt: r.created_at
     }));
@@ -1950,18 +2010,28 @@ export class SQLiteService {
       // Deliberately empty: a new conversation is addressed to nobody until the
       // user @-mentions an agent. See chatService.resolveAgent().
       agentIds: thread.agentIds ?? [],
+      targetAgentId: thread.targetAgentId,
+      targetSquadId: thread.targetSquadId,
       projectId: thread.projectId,
       createdAt: thread.createdAt || now
     };
 
     this.db.prepare(`
-      INSERT INTO chat_threads (id, title, last_message_snippet, last_message_at, agent_ids, project_id, created_at)
-      VALUES (@id, @title, @lastMessageSnippet, @lastMessageAt, @agentIds, @projectId, @createdAt)
+      INSERT INTO chat_threads (
+        id, title, last_message_snippet, last_message_at, agent_ids,
+        target_agent_id, target_squad_id, project_id, created_at
+      )
+      VALUES (
+        @id, @title, @lastMessageSnippet, @lastMessageAt, @agentIds,
+        @targetAgentId, @targetSquadId, @projectId, @createdAt
+      )
     `).run({
       ...complete,
       agentIds: JSON.stringify(complete.agentIds),
       // Bound explicitly: the column is nullable and the field optional, but
       // better-sqlite3 requires every named parameter to be present.
+      targetAgentId: complete.targetAgentId ?? null,
+      targetSquadId: complete.targetSquadId ?? null,
       projectId: complete.projectId ?? null
     });
 
@@ -1972,6 +2042,25 @@ export class SQLiteService {
   setChatThreadAgents(threadId: string, agentIds: string[]) {
     this.db.prepare('UPDATE chat_threads SET agent_ids = ? WHERE id = ?')
       .run(JSON.stringify(agentIds), threadId);
+  }
+
+  /** Persist the one responder a conversation should use when no @mention is present. */
+  setChatThreadTarget(
+    threadId: string,
+    targetAgentId: string | null,
+    targetSquadId: string | null
+  ): ChatThread | null {
+    const exists = this.getChatThreads().some(t => t.id === threadId);
+    if (!exists) return null;
+
+    this.db.prepare(`
+      UPDATE chat_threads SET
+        target_agent_id = ?,
+        target_squad_id = ?
+      WHERE id = ?
+    `).run(targetAgentId, targetSquadId, threadId);
+
+    return this.getChatThreads().find(t => t.id === threadId) ?? null;
   }
 
   /**

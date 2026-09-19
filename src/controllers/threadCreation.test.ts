@@ -173,6 +173,35 @@ describe('a thread that has been created', () => {
 
     expect(res.status).toBe(200);
   });
+
+  it('persists the selected agent target and can return to Automatic Alpha', async () => {
+    const { app, svc } = await startApi();
+    const payload = threadPayload();
+    await call(app, 'POST', '/api/chat/threads', payload);
+    const agent = svc.getAgents()[0];
+
+    const selected = await call(
+      app,
+      'PUT',
+      `/api/chat/threads/${payload.id}/target`,
+      { targetAgentId: agent.id, targetSquadId: null }
+    );
+
+    expect(selected.status).toBe(200);
+    expect(selected.body.targetAgentId).toBe(agent.id);
+    expect(selected.body.targetSquadId).toBeUndefined();
+
+    const cleared = await call(
+      app,
+      'PUT',
+      `/api/chat/threads/${payload.id}/target`,
+      { targetAgentId: null, targetSquadId: null }
+    );
+
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.targetAgentId).toBeUndefined();
+    expect(cleared.body.targetSquadId).toBeUndefined();
+  });
 });
 
 describe('an id the daemon has never seen', () => {

@@ -298,3 +298,41 @@ export function findOpenCode(): string {
 
   return defaultName;
 }
+
+/**
+ * Discover the LM Studio CLI (`lms`). It is shipped with LM Studio but is not
+ * always added to PATH for per-user Windows installs.
+ *
+ * Priority: LMSTUDIO_PATH -> PATH -> the documented per-user CLI locations.
+ */
+export function findLMStudio(): string {
+  if (process.env.LMSTUDIO_PATH && fs.existsSync(process.env.LMSTUDIO_PATH)) {
+    return process.env.LMSTUDIO_PATH;
+  }
+
+  const defaultName = isWin ? 'lms.exe' : 'lms';
+  const onPath = findOnPath('lms');
+  if (onPath) return onPath;
+
+  const home = os.homedir();
+  const candidates = isWin
+    ? [
+        path.join(home, '.cache', 'lm-studio', 'bin', 'lms.exe'),
+        path.join(home, '.lmstudio', 'bin', 'lms.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'LM-Studio', 'bin', 'lms.exe')
+      ]
+    : [
+        path.join(home, '.cache', 'lm-studio', 'bin', 'lms'),
+        path.join(home, '.cache', 'lm-studio', 'bin', 'LMS'),
+        path.join(home, '.lmstudio', 'bin', 'lms'),
+        path.join(home, '.lmstudio', 'bin', 'LMS'),
+        '/usr/local/bin/lms',
+        '/opt/homebrew/bin/lms'
+      ];
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+
+  return defaultName;
+}

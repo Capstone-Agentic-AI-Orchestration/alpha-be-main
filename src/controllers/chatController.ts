@@ -84,6 +84,42 @@ chatRouter.put('/chat/threads/:id', (req: Request, res: Response) => {
   });
 });
 
+/**
+ * Choose who answers an unmentioned message in a conversation.
+ *
+ * A thread can point at one configured agent, one squad, or neither (Alpha's
+ * automatic responder). The target is deliberately separate from `agentIds`:
+ * that field is the participant history and must not make an old participant
+ * answer every future message.
+ */
+chatRouter.put('/chat/threads/:id/target', (req: Request, res: Response) => {
+  const { targetAgentId = null, targetSquadId = null } = req.body ?? {};
+
+  if (
+    (targetAgentId !== null && typeof targetAgentId !== 'string') ||
+    (targetSquadId !== null && typeof targetSquadId !== 'string')
+  ) {
+    return res.status(400).json({ error: 'Target ids must be strings or null' });
+  }
+
+  if (targetAgentId && targetSquadId) {
+    return res.status(400).json({ error: 'Choose an agent or a squad, not both' });
+  }
+
+  if (targetAgentId) {
+    const agent = sqliteService.getAgents().find(a => a.id === targetAgentId && !a.isArchived);
+    if (!agent) return res.status(404).json({ error: 'Agent not found or archived' });
+  }
+
+  if (targetSquadId && !sqliteService.getSquads().some(squad => squad.id === targetSquadId)) {
+    return res.status(404).json({ error: 'Squad not found' });
+  }
+
+  const updated = sqliteService.setChatThreadTarget(req.params.id, targetAgentId, targetSquadId);
+  if (!updated) return res.status(404).json({ error: 'Thread not found' });
+  return res.json(updated);
+});
+
 chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
   res.json(sqliteService.getChatMessages(req.params.id));
 });
@@ -110,11 +146,26 @@ chatRouter.delete('/chat/threads/:id/messages', (req: Request, res: Response) =>
 
 chatRouter.post('/chat/messages', async (req: Request, res: Response) => {
   try {
-    const { threadId, content, senderName } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId } = req.body;
     if (!threadId || !content) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
-    const result = await chatService.sendMessage({ threadId, content, senderName });
+    if (
+      (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') ||
+      (targetSquadId !== undefined && targetSquadId !== null && typeof targetSquadId !== 'string')
+    ) {
+      return res.status(400).json({ error: 'Target ids must be strings or null' });
+    }
+    if (targetAgentId && targetSquadId) {
+      return res.status(400).json({ error: 'Choose an agent or a squad, not both' });
+    }
+    const result = await chatService.sendMessage({
+      threadId,
+      content,
+      senderName,
+      targetAgentId,
+      targetSquadId
+    });
     res.status(201).json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to process chat message' });
