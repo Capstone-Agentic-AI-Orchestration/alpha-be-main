@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { DB_PATH } from '../config/env.js';
+import { DEFAULT_WORKSPACE_ID } from './workspaceContext.js';
 
 export type WorkspaceRole = 'client' | 'dev' | 'pm' | 'admin';
 export type WorkspaceMemberStatus = 'invited' | 'active' | 'suspended' | 'removed';
@@ -165,7 +166,11 @@ function roleOrAdmin(value: unknown): WorkspaceRole {
  */
 class WorkspaceRegistry {
   private readonly db: Database.Database;
-  private readonly defaultWorkspaceId = 'workspace-default';
+  // Must match the id sqliteService seeds, and the id currentWorkspaceId()
+  // falls back to. A second literal here meant the registry looked up a
+  // workspace whose INSERT was silently dropped by the UNIQUE slug it shared
+  // with the seeded row, so every membership lookup hit a dangling FK.
+  private readonly defaultWorkspaceId = DEFAULT_WORKSPACE_ID;
 
   constructor() {
     this.db = new Database(DB_PATH);
@@ -256,6 +261,36 @@ class WorkspaceRegistry {
       this.db.exec("ALTER TABLE workspaces ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'");
     } catch {
       // Existing installations already have the column.
+    }
+
+    try {
+      this.db.exec("ALTER TABLE workspaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+    } catch {
+      // Existing installations already have the column.
+    }
+
+    try {
+      this.db.exec("ALTER TABLE workspaces ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'");
+    } catch {
+      // Existing installations already have the column.
+    }
+
+    // SQLite refuses ADD COLUMN with a UNIQUE constraint, so join_code lands
+    // nullable and a partial index supplies the uniqueness. The predicate skips
+    // the NULLs that rows predating this column already carry.
+    try {
+      this.db.exec('ALTER TABLE workspaces ADD COLUMN join_code TEXT');
+    } catch {
+      // Existing installations already have the column.
+    }
+
+    try {
+      this.db.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_join_code ' +
+          'ON workspaces(join_code) WHERE join_code IS NOT NULL'
+      );
+    } catch {
+      // Existing installations already have the index.
     }
 
     try {

@@ -20,7 +20,10 @@ import {
   RemoteAction,
   Workspace,
   ProjectBuildStep,
-  BuildStepPhase
+  BuildStepPhase,
+  AgentCall,
+  AgentCallTarget,
+  AgentCallArtifact
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';

@@ -29,6 +29,14 @@ export interface SendMessageParams {
   /** Explicit target from the chat picker. Null clears a persisted target. */
   targetAgentId?: string | null;
   targetSquadId?: string | null;
+  /**
+   * Workspace the message belongs to. Optional: requests that go through
+   * runWithWorkspace already carry it ambiently via currentWorkspaceId().
+   * When supplied, the thread is bound to that workspace.
+   */
+  workspaceId?: string;
+  /** Caller's role in that workspace, for role-gated chat behaviour. */
+  workspaceRole?: WorkspaceRole;
 }
 
 /**
