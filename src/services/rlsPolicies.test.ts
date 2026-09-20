@@ -198,6 +198,64 @@ describe('a workspace is a hard boundary', () => {
   });
 });
 
+/**
+ * The two halves of the claims contract, checked against each other.
+ *
+ * Everything above feeds the policies hand-written claims, which proves the
+ * policies work but not that anything produces claims in that shape. A name
+ * that drifts between `supabaseTokenService` and the migration does not fail
+ * loudly — the policy reads `null` and denies everything, or matches a row it
+ * should not.
+ *
+ * So this decodes a genuinely minted token and feeds the policies exactly what
+ * the server would send.
+ */
+describe('a real minted token satisfies the policies', () => {
+  async function claimsFromRealToken(
+    login: string,
+    role: 'client' | 'dev' | 'pm' | 'admin',
+    workspace = 'ws1'
+  ) {
+    process.env.SUPABASE_JWT_SECRET = 'integration-test-secret';
+    const { mintSupabaseToken } = await import('./supabaseTokenService.js');
+    const { token } = mintSupabaseToken({ sub: login, workspace_id: workspace, alpha_role: role });
+    // Exactly what Supabase would hand the policies after verifying it.
+    return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+  }
+
+  async function asToken<T>(
+    login: string,
+    role: 'client' | 'dev' | 'pm' | 'admin',
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const claims = await claimsFromRealToken(login, role);
+    await db.exec(`update auth._claims set v = '${JSON.stringify(claims)}'::jsonb`);
+    await db.exec('set role app');
+    try { return await fn(); } finally { await db.exec('reset role'); }
+  }
+
+  it('lets a developer read their own thread with a minted token', async () => {
+    expect(await asToken('Lloyd1020', 'dev', () => rows('select * from chat_threads'))).toBe(1);
+  });
+
+  it('still hides it from another developer with a minted token', async () => {
+    // Zane owns t-zane, so he correctly sees exactly one thread: his own.
+    // Asserting zero here would be asserting that the policy is broken.
+    expect(
+      await asToken('ZaneZamoraC1Cs', 'dev', () => rows('select * from chat_threads'))
+    ).toBe(1);
+    expect(
+      await asToken('ZaneZamoraC1Cs', 'dev', () =>
+        rows(`select * from chat_threads where id='t-lloyd'`))
+    ).toBe(0);
+  });
+
+  it('still hides prompts from a project manager with a minted token', async () => {
+    expect(await asToken('LloydLim1', 'pm', () => rows('select * from agent_calls'))).toBe(0);
+    expect(await asToken('LloydLim1', 'pm', () => rows('select * from prototype_runs'))).toBe(1);
+  });
+});
+
 describe('the audit log is append-only', () => {
   /**
    * There is no update or delete policy on `remote_actions`, and with RLS

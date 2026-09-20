@@ -2,6 +2,7 @@ import { Request, Response, Router } from 'express';
 import { currentIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
+import { mintSupabaseToken } from '../services/supabaseTokenService.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -81,6 +82,39 @@ dataRouter.get('/me', async (req: Request, res: Response) => {
   }
 
   return res.json({ authenticated: true, ...(await currentIdentity()) });
+});
+
+/**
+ * A short-lived token for talking to the database directly.
+ *
+ * The browser and the desktop both need one: the web app to subscribe to
+ * Supabase Realtime, the desktop daemon to read and write the board without
+ * paying Render's cold start on every action. Neither can present Alpha's
+ * session cookie to Supabase.
+ *
+ * Deliberately not the session. A session is revocable and long-lived; this is
+ * neither, because nothing consults a blocklist on every row read — so it
+ * lives ten minutes and the caller re-asks.
+ *
+ * Minted from `req.workspace`, which the middleware already resolved, so the
+ * claims cannot be chosen by the caller. Asking for a token for a workspace
+ * you are not a member of fails earlier, in `workspaceContext`.
+ */
+dataRouter.get('/database/token', (req: Request, res: Response) => {
+  if (!req.workspace) return res.status(401).json({ error: 'Sign in to use Alpha.' });
+
+  try {
+    const { token, expiresAt } = mintSupabaseToken({
+      sub: req.workspace.userId,
+      workspace_id: req.workspace.workspaceId,
+      alpha_role: req.workspace.role
+    });
+    return res.json({ token, expiresAt });
+  } catch (err: any) {
+    // Unconfigured is a deployment gap, not a client error: say so plainly
+    // rather than letting the browser retry a 500 forever.
+    return res.status(503).json({ error: err?.message ?? 'Database tokens are not configured.' });
+  }
 });
 
 /**

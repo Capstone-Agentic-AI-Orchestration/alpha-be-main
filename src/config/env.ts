@@ -273,6 +273,26 @@ export const ALPHA_SESSION_SECRET = process.env.ALPHA_SESSION_SECRET || '';
  */
 export const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
+/**
+ * The Supabase project's JWT secret, for signing database tokens.
+ *
+ * Symmetric: Render signs, Supabase verifies, and the secret never leaves the
+ * server. Found in the Supabase dashboard under Settings → API. Distinct from
+ * ALPHA_SESSION_SECRET, which encrypts stored GitHub tokens and is Alpha's
+ * own — mixing them would mean one leak compromised both.
+ */
+export const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || '';
+
+/**
+ * How long a database token is good for.
+ *
+ * Minutes, not days. Unlike a session this cannot be revoked — nothing checks
+ * a blocklist on every row read — so its lifetime is the only bound on a
+ * leaked one. Ten minutes is long enough to cover a page's work and short
+ * enough that a copied token is stale before it is useful.
+ */
+export const SUPABASE_TOKEN_TTL_MS = Number(process.env.SUPABASE_TOKEN_TTL_MS || 10 * 60 * 1000);
+
 // Supabase Configuration (team / cloud mode)
 export const SUPABASE_URL = process.env.SUPABASE_URL || '';
 export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';

@@ -750,3 +750,71 @@ none unprotected.
 - `supabaseService` still writes with the anon key and no claims, so it will
   now be *correctly* denied by RLS rather than silently failing against missing
   tables. It needs the token before it can work.
+
+---
+
+## 1c — Database tokens
+
+**Status:** done
+**Files:** `supabaseTokenService.ts` (new), `supabaseTokenService.test.ts` (new),
+`dataController.ts`, `config/env.ts`, `rlsPolicies.test.ts`
+
+The policies in `0002` read three claims. Nothing produced them, so
+`supabaseService` was writing with a bare anon key and would now be *correctly*
+denied by RLS rather than silently failing against missing tables. Better, but
+still not working.
+
+### Deliberately not the session
+
+The browser's session is an opaque cookie and the GitHub token behind it never
+leaves the server. But the desktop talks to Postgres directly, and the web app
+subscribes to Realtime directly, and neither can present a cookie to Supabase.
+
+So this is a second, different credential minted from a session:
+
+| | session cookie | database token |
+| :--- | :--- | :--- |
+| lifetime | 7 days | 10 minutes |
+| revocable | yes, server-side row | **no** — nothing checks a blocklist per row read |
+| holds | nothing but an id | the three claims the policies read |
+
+Un-revocable is why it is short. Its lifetime is the only bound on a leaked
+one.
+
+Claims come from `req.workspace`, which the middleware already resolved, so a
+caller cannot choose them. Asking for a token for a workspace you do not belong
+to fails earlier, in `workspaceContext`.
+
+### `role` and `alpha_role` are different claims
+
+PostgREST reads `role` to decide which Postgres role to run the request as, and
+rejects anything but `authenticated` or `anon`. Alpha's own role could never
+have shared that name — one claim cannot mean both "which database role" and
+"pm or dev". This is why the policies read `alpha_role`, and there is now a
+test asserting both are present and distinct.
+
+### The contract is tested from both ends
+
+`rlsPolicies.test.ts` previously fed the policies hand-written claims, which
+proves the policies work but not that anything emits claims in that shape. A
+name drifting between the service and the migration would not fail loudly — the
+policy reads `null` and denies everything, or matches a row it should not.
+
+Three tests now decode a genuinely minted token and hand the policies exactly
+what the server would send.
+
+One of those failed first, and it was the test that was wrong: it asserted a
+second developer sees zero threads, but that developer owns one, so the correct
+answer is one — his own — plus zero of the other developer's. Asserting zero
+would have been asserting the policy was broken.
+
+### Verification
+
+`npx tsc --noEmit` — exit 0.
+`npx vitest run` — **773 passed / 35 failed (808)**. Baseline 720/35.
+
+### Still open
+
+`supabaseService` does not yet use the token: it holds a client built with the
+anon key at construction. Pointing it at `/database/token` is the next change,
+and is what finally makes cloud persistence do something.
