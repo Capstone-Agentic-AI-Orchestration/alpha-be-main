@@ -41,7 +41,43 @@ export const PORT = Number(process.env.PORT || 3001);
  * outside the container, and a service bound to loopback answers none of them —
  * the deploy is marked unhealthy and rolled back with no obvious cause.
  */
-export const HOST = process.env.HOST || (IS_CLOUD ? '0.0.0.0' : '127.0.0.1');
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0:0:0:0:0:0:0:1']);
+
+let hostOverrideReason = '';
+
+/**
+ * A loopback bind in a container serves nobody, so it is never the intent.
+ *
+ * The mode default alone was not enough. `dotenv` loads the repository's local
+ * `.env`, which sets `HOST=127.0.0.1` for desktop development, and that value
+ * wins over the default here. The file is gitignored so a real Render deploy
+ * would not have it — but "the safety depends on a file being absent" is the
+ * kind of thing that holds until someone copies their env to the server, and
+ * the failure it produces is a health check that times out with nothing in the
+ * log pointing at the cause.
+ *
+ * Overridden rather than refused: the deploy should come up. The reason is
+ * reported at startup so the stale setting still gets fixed.
+ */
+function resolveHost(): string {
+  const configured = process.env.HOST?.trim();
+  if (!configured) return IS_CLOUD ? '0.0.0.0' : '127.0.0.1';
+
+  if (IS_CLOUD && LOOPBACK_HOSTS.has(configured.toLowerCase())) {
+    hostOverrideReason =
+      `HOST was set to "${configured}", which in cloud mode would accept no traffic ` +
+      'from outside the container and fail the platform health check. Bound 0.0.0.0 instead.';
+    return '0.0.0.0';
+  }
+  return configured;
+}
+
+export const HOST = resolveHost();
+
+/** Why HOST differs from what was configured, when it does. */
+export function hostOverrideNote(): string {
+  return hostOverrideReason;
+}
 
 /**
  * The GitHub organisation this installation serves.
@@ -210,6 +246,32 @@ const ORIGIN_MATCHERS = ALLOWED_ORIGINS.map(originMatcher);
 export function isAllowedOrigin(origin: string): boolean {
   return ORIGIN_MATCHERS.some(match => match(origin));
 }
+
+/**
+ * Key for encrypting stored GitHub tokens, and for nothing else.
+ *
+ * A session row holds a `repo`-scoped GitHub token. In plaintext that makes
+ * the database a credential store: read access to one file or one backup is
+ * read/write access to every private repository in the organisation. Encrypted
+ * at rest, a leaked database is inert without this value, which lives only in
+ * the process environment.
+ *
+ * Required in cloud mode — the daemon refuses to start without it rather than
+ * quietly writing tokens in the clear. Unused on the desktop, which has no
+ * sessions: there, `gh` holds the credential in the OS keyring where it
+ * belongs.
+ */
+export const ALPHA_SESSION_SECRET = process.env.ALPHA_SESSION_SECRET || '';
+
+/**
+ * How long a browser session lasts before re-authentication.
+ *
+ * Seven days by default: long enough that a PM checking the board twice a week
+ * is not re-authenticating every visit, short enough that a stolen cookie is
+ * not indefinite. Sessions are revocable regardless, so this is the ceiling on
+ * an unnoticed compromise rather than the only defence.
+ */
+export const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
 // Supabase Configuration (team / cloud mode)
 export const SUPABASE_URL = process.env.SUPABASE_URL || '';

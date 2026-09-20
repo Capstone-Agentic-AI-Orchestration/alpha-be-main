@@ -182,6 +182,68 @@ function breakGlassAdmin(login: string): AlphaRole | undefined {
   return allowed.includes(login.toLowerCase()) ? 'admin' : undefined;
 }
 
+/**
+ * Team memberships over the REST API, for a token rather than for `gh`.
+ *
+ * `fetchTeams()` shells out to the CLI, which is right on a workstation and
+ * impossible in a container: there is no `gh`, and no single signed-in user
+ * for it to be. A browser session has an OAuth token instead, and this is the
+ * same question asked with it.
+ *
+ * Paginated because `per_page` caps at 100 and an account in many
+ * organisations will exceed that — this one is already in sixteen teams across
+ * six orgs. Stopping at the first page would silently drop memberships and
+ * hand somebody a lower role than they hold, or none.
+ */
+export async function fetchTeamsWithToken(token: string): Promise<TeamMembership[]> {
+  const teams: TeamMembership[] = [];
+
+  for (let page = 1; page <= 10; page++) {
+    const res = await fetch(`https://api.github.com/user/teams?per_page=100&page=${page}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'alpha-orchestrator'
+      }
+    });
+    if (!res.ok) {
+      /**
+       * Not fatal, and not silently empty either.
+       *
+       * A 403 here usually means the organisation has third-party application
+       * restrictions and has not approved this app — in which case every
+       * member resolves to no role and is refused, and the only way to tell
+       * that apart from "genuinely in no team" is this line.
+       */
+      logError(`GitHub team lookup failed (${res.status}) — roles cannot be resolved from teams.`);
+      break;
+    }
+
+    const batch = (await res.json()) as Array<{ slug: string; organization: { login: string } }>;
+    for (const team of batch) {
+      if (team?.slug && team.organization?.login) {
+        teams.push({ org: team.organization.login, slug: team.slug });
+      }
+    }
+    if (batch.length < 100) break;
+  }
+
+  return teams;
+}
+
+/**
+ * The Alpha role for a login and its team memberships.
+ *
+ * Shared by both identity paths so they cannot drift: the desktop resolves it
+ * from `gh`, a browser session from an OAuth token, and both must agree about
+ * what a given set of teams means. Break-glass is checked first for the same
+ * reason it is in `resolve()` — the failure it recovers from includes reading
+ * teams.
+ */
+export function roleForLogin(login: string, teams: TeamMembership[]): AlphaRole | undefined {
+  return breakGlassAdmin(login) ?? roleFromTeams(teams, ALPHA_ORG);
+}
+
 export interface Identity {
   /** GitHub login, or the OS username when GitHub is unavailable. */
   login: string;

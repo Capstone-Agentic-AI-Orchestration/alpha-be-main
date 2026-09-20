@@ -4,10 +4,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, ALPHA_MODE, IS_CLOUD, IS_DESKTOP, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, ALPHA_SESSION_SECRET, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { dataRouter } from './controllers/dataController.js';
 import { workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
+import { sessionContext } from './controllers/sessionContext.js';
 import { runRouter } from './controllers/runController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
@@ -28,6 +29,26 @@ import { ensureAgentFiles } from './services/agentFileService.js';
 import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
 import { DEFAULT_WORKSPACE_ID, runWithWorkspace } from './services/workspaceContext.js';
+
+/**
+ * Refuse to start rather than store credentials in the clear.
+ *
+ * Cloud mode keeps a `repo`-scoped GitHub token per session. Without
+ * ALPHA_SESSION_SECRET those rows would be plaintext, which turns the database
+ * into a credential store: one leaked backup is read/write access to every
+ * private repository in the organisation.
+ *
+ * A hard exit, not a warning. A warning at boot is read once and then lives in
+ * a log nobody opens, and the failure it precedes is silent and permanent.
+ */
+if (IS_CLOUD && !ALPHA_SESSION_SECRET) {
+  logError(
+    'ALPHA_SESSION_SECRET is not set. Cloud mode stores GitHub tokens for each ' +
+      'signed-in user and will not run without a key to encrypt them. ' +
+      'Set it to a long random value (openssl rand -base64 48).'
+  );
+  process.exit(1);
+}
 
 const app = express();
 
@@ -106,6 +127,16 @@ app.use('/api', (req, res, next) => {
 });
 
 // API Routes
+/**
+ * Identity first, then authorization.
+ *
+ * `sessionContext` resolves who is calling and puts their GitHub token on the
+ * request's async chain; `workspaceContext` decides what that person may do.
+ * The order matters and is not interchangeable — the second reads what the
+ * first sets. On the desktop `sessionContext` is a pass-through, because
+ * identity there is the machine's `gh` login rather than a cookie.
+ */
+app.use('/api', sessionContext);
 app.use('/api', workspaceContext);
 app.use('/api', workspaceRouter);
 app.use('/api', dataRouter);
@@ -264,6 +295,8 @@ server.listen(PORT, HOST, () => {
    * the cause, which is a bad way to learn that the entry was refused on
    * purpose.
    */
+  if (hostOverrideNote()) logError(hostOverrideNote());
+
   for (const { pattern, reason } of unsafeOriginPatterns()) {
     logError(`CORS_ORIGIN entry "${pattern}" was ignored as unsafe: ${reason}.`);
   }

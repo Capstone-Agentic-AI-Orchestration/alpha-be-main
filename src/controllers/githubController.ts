@@ -5,6 +5,11 @@ import { sqliteService } from '../services/sqliteService.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
 import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
+import { CORS_ORIGIN, ALPHA_ORG } from '../config/env.js';
+import { fetchTeamsWithToken, roleForLogin } from '../services/identityService.js';
+import { sessionService } from '../services/sessionService.js';
+import { SESSION_COOKIE, clearedSessionCookie, readCookie, sessionCookie } from './sessionContext.js';
+import { logInfo, logError } from '../utils/logger.js';
 
 export const githubRouter = Router();
 
@@ -46,7 +51,20 @@ githubRouter.get('/github/oauth/url', (req: Request, res: Response) => {
   }
 });
 
-/** Handle OAuth callback from GitHub */
+/**
+ * Handle OAuth callback from GitHub, and open a session.
+ *
+ * This used to throw the credential away. `handleOAuthCallback` returned
+ * `{ username, token }`, the token was dropped, and the browser was redirected
+ * to `/#github_connected=true&username=...` — a name in a URL fragment, which
+ * is not authentication and which nothing in the frontend read anyway. Both
+ * ends of the flow were inert, which is consistent with `.env` having always
+ * been empty: it has never once run.
+ *
+ * Now: the token stays on the server, encrypted, and the browser receives an
+ * opaque httpOnly cookie. A cookie that leaks is a revocable session; a token
+ * that leaks is every private repository the user can reach.
+ */
 githubRouter.get('/github/oauth/callback', async (req: Request, res: Response) => {
   const code = req.query.code as string;
   const state = req.query.state as string | undefined;
@@ -54,14 +72,65 @@ githubRouter.get('/github/oauth/callback', async (req: Request, res: Response) =
     return res.status(400).send('Missing "code" parameter');
   }
 
+  const redirectOrigin = CORS_ORIGIN.split(',')[0].trim();
+
   try {
     // state is validated inside; a missing or unknown value is rejected.
     const result = await githubService.handleOAuthCallback(code, state);
-    const redirectOrigin = (process.env.CORS_ORIGIN || 'http://localhost:3000').split(',')[0].trim();
-    return res.redirect(`${redirectOrigin}/#github_connected=true&username=${encodeURIComponent(result.username)}`);
+
+    /**
+     * The role is decided once, here, and cached on the session.
+     *
+     * Deriving it per request would put a GitHub team lookup on every API
+     * call — hundreds of milliseconds, on a service whose free tier already
+     * cold-starts. The cost is that a team change takes effect at next
+     * sign-in rather than immediately, which is the right trade for a
+     * membership that changes a few times a year.
+     */
+    const teams = await fetchTeamsWithToken(result.token);
+    const role = roleForLogin(result.username, teams);
+
+    if (!role) {
+      /**
+       * Refused before a session exists, so there is nothing to revoke.
+       *
+       * Sent back to the app with a reason rather than a bare 403 page: the
+       * person needs to know it is their team membership that is missing, not
+       * their password.
+       */
+      logInfo(`Sign-in refused for ${result.username}: no team in ${ALPHA_ORG} maps to a role.`);
+      return res.redirect(`${redirectOrigin}/#alpha_error=no_team`);
+    }
+
+    const { cookieValue } = sessionService.create({
+      login: result.username,
+      role,
+      githubToken: result.token
+    });
+
+    res.setHeader('Set-Cookie', sessionCookie(cookieValue));
+    return res.redirect(`${redirectOrigin}/#alpha_signed_in=1`);
   } catch (err: any) {
-    return res.status(500).json({ error: err?.message ?? 'OAuth token exchange failed' });
+    logError('OAuth callback failed:', err?.message || err);
+    // Back to the app, not a JSON blob in the address bar: this is a browser
+    // navigation, and the person needs somewhere to retry from.
+    return res.redirect(`${redirectOrigin}/#alpha_error=oauth_failed`);
   }
+});
+
+/** The signed-in user, or 401. The frontend's "who am I" on boot. */
+githubRouter.get('/github/session', (req: Request, res: Response) => {
+  if (!req.session) return res.status(401).json({ error: 'Not signed in.' });
+  const { login, name, role, expiresAt } = req.session;
+  // Deliberately not the GitHub token. It never leaves this process.
+  return res.json({ login, name, role, expiresAt });
+});
+
+/** Sign out: revoke server-side, then clear the cookie. */
+githubRouter.post('/github/session/logout', (req: Request, res: Response) => {
+  sessionService.revoke(readCookie(req, SESSION_COOKIE));
+  res.setHeader('Set-Cookie', clearedSessionCookie());
+  return res.json({ success: true });
 });
 
 // ─── GitHub App Integration ──────────────────────────────────────────────────

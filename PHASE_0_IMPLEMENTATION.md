@@ -398,3 +398,151 @@ that the entry was dropped deliberately.
 `npx tsc --noEmit` — exit 0.
 `npx vitest run` — **731 passed / 35 failed (766)**. Eight new tests in
 `corsOrigin.test.ts`; failure count unchanged from the baseline.
+
+---
+
+## The session layer
+
+**Status:** done
+**Files:** `sessionService.ts` (new), `sessionContext.ts` (new),
+`workspaceContext.ts`, `githubController.ts`, `identityService.ts`,
+`config/env.ts`, `index.ts`, `types/express.d.ts`
+
+The change the whole phase was for. Every request now resolves to the person
+who made it.
+
+### What was wrong
+
+`workspaceContext` asked `currentIdentity()`, a process-global cached read of
+the local `gh` CLI. One process, one human — correct on a workstation, and
+meaningless on Render, where one process serves everyone. There is no `gh` in
+the container, so every caller resolved to the OS user, and the entire RBAC
+layer below was gating on a constant.
+
+The other half was already written and unused. `githubRequestContext.ts` says
+in its own comment that it is "populated by middleware once sessions exist".
+That middleware did not exist, and `withGitHubIdentity` was called in exactly
+one place: inside the OAuth callback, on the token it was about to discard.
+
+### Shape
+
+```
+browser --cookie(opaque, httpOnly)--> sessionContext --> workspaceContext --> route
+                                            |                   |
+                            resolves the session     decides what they may do
+                            + withGitHubIdentity()
+```
+
+Identity first, authorization second; the order is not interchangeable. On the
+desktop `sessionContext` is a pass-through, because identity there is the
+machine's `gh` login and a cookie would be ceremony around a settled question.
+
+### What a session holds
+
+The GitHub token never reaches the browser. The browser gets 32 random bytes in
+an httpOnly cookie; the token stays server-side, encrypted, replayed per
+request on the async call chain. A cookie that leaks is a revocable session. A
+token that leaks is every private repository its owner can reach, and it keeps
+working after they sign out.
+
+Two properties the tests pin down, both about an attacker holding the database
+rather than a live attacker:
+
+- **The stored id is a SHA-256 of the cookie**, so read access to the table
+  cannot mint a session — the same reason passwords are not stored either.
+  Unsalted deliberately: the input is CSPRNG output, so there is no dictionary
+  for a salt to defend against, and a slow KDF would only add latency to every
+  authenticated request.
+- **The token is AES-256-GCM encrypted** under `ALPHA_SESSION_SECRET`. GCM
+  rather than CBC so a tampered row fails to decrypt instead of decoding to
+  something plausible.
+
+Cloud mode exits rather than start without that key. A warning is read once and
+then lives in a log nobody opens, while the failure it precedes is silent and
+permanent.
+
+### The role is resolved once, at sign-in
+
+Per request it would be a GitHub team lookup on every API call — hundreds of
+milliseconds on a service whose free tier already cold-starts. Cached on the
+session row instead. A team change then takes effect at next sign-in, which is
+the right trade for a membership that changes a few times a year.
+
+`fetchTeamsWithToken()` is new: `fetchTeams()` shells out to `gh`, which a
+container does not have. Same question over REST, paginated — `per_page` caps
+at 100 and this account is already in sixteen teams across six organisations,
+so stopping at one page would silently under-resolve roles. `roleForLogin()` is
+shared by both paths so they cannot drift.
+
+### The OAuth callback stopped discarding the credential
+
+It returned `{ username, token }`, dropped the token, and redirected to
+`/#github_connected=true&username=...` — a name in a URL fragment, which is not
+authentication, and which nothing in the frontend read. Both ends were inert,
+consistent with `.env` having always been empty: the flow has never once run.
+
+Sign-in with no mapped team is refused before a session exists, and returns to
+the app with a reason rather than a bare 403 page.
+
+Added `GET /api/github/session` (who am I, minus the token) and
+`POST /api/github/session/logout` (revoke, then clear). Both bypass
+`workspaceContext` — running the workspace resolver first would refuse the very
+call the browser makes to find out whether it is signed in.
+
+### Cookie attributes, and what each one stops
+
+| Attribute | Stops |
+| :--- | :--- |
+| `HttpOnly` | an XSS bug reading the session out of `document.cookie` |
+| `Secure` | travel over plain HTTP. Omitted on desktop, whose origin is `http://127.0.0.1` |
+| `SameSite=Lax` | a cross-site POST carrying the cookie — CSRF defence for every state-changing route at once. Lax not Strict: the OAuth callback returns as a top-level navigation and Strict drops the cookie on exactly that hop |
+| `Path=/` | sign-out clearing a different cookie than the API set |
+
+Parsed by hand rather than with `cookie-parser`: one cookie, one place, six
+lines — and a dependency here ships in the desktop binary too.
+
+### HOST again — a gitignored .env defeated G1
+
+The cloud smoke test logged `CLOUD mode on http://127.0.0.1:3999`. `dotenv`
+loads the repository's `.env`, which sets `HOST=127.0.0.1`, and an explicit
+value beats a mode default.
+
+`.env` is gitignored so a real deploy would not have it — but "safe because a
+file is absent" holds only until someone copies their env to the server, and
+the failure is a health check that times out with nothing explaining it. Cloud
+mode now overrides a loopback HOST to `0.0.0.0` and reports why at startup.
+Overridden rather than refused: the deploy should come up, and the stale
+setting should still get fixed.
+
+### Verification
+
+`npx tsc --noEmit` — exit 0.
+`npx vitest run` — **748 passed / 35 failed (783)**. Baseline 720/35; the +28
+is this phase's new tests, failures unchanged.
+
+Smoke-tested against a running cloud-mode daemon:
+
+```
+GET /api/health                          200   (public)
+GET /api/projects          no cookie     401   "Sign in with GitHub to use Alpha."
+GET /api/github/session    no cookie     401   "Not signed in."
+GET /api/projects          forged cookie 401
+log: Cloud mode: runner, runtime discovery and local scaffolding are disabled.
+```
+
+The second line is the point of the phase. `/api/projects` previously answered
+an anonymous caller with data, because that caller resolved to the OS user and
+`ensureMember` had already made them an admin.
+
+### Still open
+
+- Sessions live in SQLite, so on Render they do not survive a deploy or a
+  spin-down and everyone signs in again. Inconvenient rather than broken, and
+  it goes away with the Postgres store; `sessionService` is deliberately small
+  so that is a driver swap.
+- `sqliteService` still opens the database at import time, so cloud mode
+  touches SQLite before the mode guard can run — visible as memory scaffolding
+  written during the fail-fast test. That is the module-shape problem the
+  store-driver work exists to fix.
+- Still OAuth-App tokens, which do not expire. GitHub App user tokens expire in
+  8 hours and need refresh; the session row has somewhere to put that.
