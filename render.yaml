@@ -1,0 +1,98 @@
+# Alpha control plane — Render Blueprint
+#
+# Render reads this when the repository is connected as a Blueprint, so the
+# service comes up configured rather than depending on a dozen dashboard fields
+# being filled in correctly by hand.
+#
+# What this deployment is, and is not: the control plane. Identity, RBAC, the
+# GitHub App, webhooks, the board. It does NOT run agents — there is no `gh`,
+# no `claude`, no `agy` and no working copy in a container, and the disk is
+# ephemeral. `ALPHA_MODE=cloud` is what makes the process behave accordingly;
+# without it the runner and the filesystem scan would start and find nothing,
+# forever.
+
+services:
+  - type: web
+    name: alpha-api
+    runtime: node
+    plan: free
+    region: singapore
+
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/index.js
+
+    # Render probes this from outside the container. The service must bind
+    # 0.0.0.0 to answer it, which cloud mode does on its own — see resolveHost()
+    # in src/config/env.ts, which also overrides a stale loopback HOST rather
+    # than letting the deploy fail a health check for a reason nothing logs.
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: ALPHA_MODE
+        value: cloud
+
+      # Encrypts the GitHub token on every session row. The daemon refuses to
+      # start without it rather than writing credentials in the clear, so let
+      # Render mint one — a generated value is better than a memorable one.
+      - key: ALPHA_SESSION_SECRET
+        generateValue: true
+
+      - key: ALPHA_ORG
+        value: Capstone-Agentic-AI-Orchestration
+
+      # PORT and HOST are deliberately absent. Render supplies PORT, and cloud
+      # mode resolves HOST itself. Setting either here is how a deploy ends up
+      # bound to an interface nothing can reach.
+
+      # ── Set these in the dashboard ────────────────────────────────────────
+      # `sync: false` means Render prompts for the value and never stores it in
+      # the repository. Everything below is either a secret or a URL that is not
+      # known until the first deploy has produced one.
+
+      # From the GitHub App — the same App does login and server-side work.
+      # Its Client ID/Secret drive user sign-in; the App ID and private key let
+      # the server act without any individual's token.
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_APP_SLUG
+        sync: false
+      - key: GITHUB_APP_WEBHOOK_SECRET
+        sync: false
+
+      # Must match the App's callback exactly, including the path. The default
+      # in env.ts used to point at a route that does not exist, so the first
+      # sign-in would have 404'd.
+      #   https://<this-service>.onrender.com/api/github/oauth/callback
+      - key: GITHUB_CALLBACK_URL
+        sync: false
+
+      # Supabase: Settings → API. The anon key is public by design — RLS is what
+      # protects the data, which is why the policies in supabase/migrations are
+      # the security boundary rather than defence in depth.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      # Signs the short-lived tokens the RLS policies read. Distinct from
+      # ALPHA_SESSION_SECRET on purpose: one leak should not be two.
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+
+      # The Vercel origin, plus a preview pattern if you want previews to reach
+      # the API. Pin a label you control — a bare https://*.vercel.app is
+      # refused at parse time, because it would admit every tenant on Vercel:
+      #   https://<vercel-app>.vercel.app,https://<project>-*-<team>.vercel.app
+      - key: CORS_ORIGIN
+        sync: false
+
+      # Temporary. Grants admin by GitHub login while the `admins` team does
+      # not exist, and is the way back in if reading teams is itself what
+      # broke. Delete once that team is created.
+      - key: ALPHA_ADMINS
+        sync: false

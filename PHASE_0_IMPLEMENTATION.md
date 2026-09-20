@@ -882,3 +882,80 @@ distinction stays visible rather than becoming an accident.
 
 `npx tsc --noEmit` — exit 0.
 `npx vitest run` — **781 passed / 35 failed (816)**. Baseline 720/35.
+
+---
+
+## Deploy configuration, and the cloud uplink
+
+**Status:** done
+**Files:** `render.yaml` (new), `alpha-fe-main/vercel.json` (new),
+`alpha-fe-main/DEPLOYMENT.md` (new), `supabaseService.ts`,
+`supabaseSync.test.ts` (new)
+
+### render.yaml / vercel.json
+
+A Blueprint so the service comes up configured rather than depending on a dozen
+dashboard fields being right. `ALPHA_SESSION_SECRET` uses `generateValue`, so
+Render mints it; every secret uses `sync: false`, so it is prompted for and
+never lands in the repository.
+
+`PORT` and `HOST` are deliberately absent — Render supplies the first and cloud
+mode resolves the second. Setting either is how a deploy ends up bound to an
+interface nothing can reach.
+
+All 15 keys were checked against `env.ts`; none is dead config.
+
+`vercel.json` exists only for security headers. A Vite SPA deploys without one,
+and there is no rewrite rule because this app has no router — navigation is
+component state on a single URL.
+
+### supabaseService had two independent faults
+
+Neither was visible, because every failure was caught and logged where nobody
+reads.
+
+**No usable credentials.** The client was built once with the anon key, which
+under the new policies resolves to no login, no workspace and no role — every
+claim null, every row denied. It now supplies a fresh token per request through
+supabase-js's `accessToken` callback, so the claims describe the workspace the
+caller is actually in. Minting once at construction would pin the first
+workspace this process touched onto every later write.
+
+**Incomplete payloads.** `saveRunToCloud` sent neither `workspace_id` nor
+`owner_id`, both `NOT NULL`. Every insert would have been rejected even with a
+valid token. This is the failure mode no type catches: a well-formed object, in
+valid TypeScript, missing two required columns. It compiled and read as
+complete.
+
+Failures are now reported at most once every five minutes rather than on every
+call or swallowed entirely with `.catch(() => {})`. Both extremes fail the same
+way — a broken uplink either drowns the log during a run or leaves no trace,
+and "silently does nothing" is exactly the state this service was in.
+
+### The mapper is tested against the real migration
+
+`runToCloudRow` is extracted so its output can be inserted into the actual
+schema in PGlite. Six tests, including two that drop `owner_id` and
+`workspace_id` to reproduce the old payload and require the database to reject
+it — otherwise the passing test could drift against a schema that quietly
+stopped requiring them.
+
+### A regression I introduced, and what it showed
+
+The rewrite added a top-level `workspaceRegistry` import, which opens SQLite in
+a module-level singleton. That put a second handle on `alpha.db` in every
+process importing this service, and `runnerCancellation.test.ts` began failing
+on Windows because the extra handle stopped its temporary database being
+unlinked. 35 failures became 37.
+
+Deferred to `await import()` inside the method, which is what `identityService`
+already does for the same reason. Back to 35.
+
+Worth recording because the test caught an architectural smell rather than a
+logic error: a module-level database handle is not free, and the store-driver
+work exists to remove the ones that remain.
+
+### Verification
+
+`npx tsc --noEmit` both repos — exit 0.
+`npx vitest run` — **787 passed / 35 failed (822)**. Baseline 720/35.
