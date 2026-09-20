@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
 import { ChatMessage, ChatThread, Squad } from '../models/index.js';
 import { runCliTurn } from './cliRunner.js';
@@ -18,11 +19,15 @@ import {
 import { describeChatToolPolicy, describeAlphaWorkspace } from './toolPolicy.js';
 import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
+import { workspaceRegistry, WorkspaceRole } from './workspaceRegistry.js';
+import { RUNS_DIR } from '../config/env.js';
 
 export interface SendMessageParams {
   threadId: string;
   content: string;
   senderName?: string;
+  workspaceId?: string;
+  workspaceRole?: WorkspaceRole;
 }
 
 /**
@@ -128,8 +133,16 @@ function chatWorkspace(threadId: string): string {
 
   const workspace = resolveProjectWorkspace(project);
   if (!workspace || !fs.existsSync(workspace.dir)) {
-    logInfo(`Thread project "${project.name}" has no working copy on disk — using the managed root`);
-    return root;
+    // A project-scoped chat must never fall back to the shared workspaces
+    // root: that would let a question about one project read another project's
+    // checkout. Use an empty, allowlisted scratch directory instead. The
+    // explicit Agent Call path reports the missing working copy for code
+    // review/revision; this legacy Alpha reply can still answer general text.
+    fs.mkdirSync(RUNS_DIR, { recursive: true });
+    const isolated = fs.mkdtempSync(path.join(RUNS_DIR, 'chat-empty-'));
+    sqliteService.addAllowedPath(isolated, `Empty chat context for ${project.name}`);
+    logInfo(`Thread project "${project.name}" has no working copy on disk — using an empty isolated context`);
+    return isolated;
   }
 
   // The same consent record a run makes: a hand-attached folder is registered,
@@ -150,15 +163,14 @@ function chatWorkspace(threadId: string): string {
  * only participant that talks about the workspace as a whole; an agent is a
  * member of it.
  */
-function describeWorkspaceForAlpha(): string {
-  const agents = sqliteService
-    .getAgents()
+function describeWorkspaceForAlpha(workspaceId?: string): string {
+  const agents = (workspaceId ? workspaceRegistry.scope('agents', sqliteService.getAgents(), workspaceId) : sqliteService.getAgents())
     .filter(a => !a.isArchived)
     .map(a => ({ id: a.id, name: a.name, role: a.role }));
 
   const byId = new Map(agents.map(a => [a.id, a.name]));
 
-  const squads = sqliteService.getSquads().map(sq => ({
+  const squads = (workspaceId ? workspaceRegistry.scope('squads', sqliteService.getSquads(), workspaceId) : sqliteService.getSquads()).map(sq => ({
     name: sq.name,
     topology: sq.topology,
     memberNames: (sq.memberAgentIds ?? []).map(id => byId.get(id) ?? id)
@@ -169,7 +181,7 @@ function describeWorkspaceForAlpha(): string {
 
 export class ChatService extends EventEmitter {
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
-    const { threadId, content, senderName = 'You' } = params;
+    const { threadId, content, senderName = 'You', workspaceId, workspaceRole } = params;
     const now = new Date().toISOString();
 
     let thread = sqliteService.getChatThreads().find(t => t.id === threadId);
@@ -185,6 +197,7 @@ export class ChatService extends EventEmitter {
         agentIds: [],
         createdAt: now
       });
+      if (workspaceId) workspaceRegistry.bind('chat_threads', threadId, workspaceId);
     }
 
     // 1. Save user message
@@ -208,12 +221,19 @@ export class ChatService extends EventEmitter {
      *
      * Agents speak when spoken to. Anything else Alpha answers itself.
      */
-    const agents = sqliteService.getAgents().filter(a => !a.isArchived);
-    const squads = sqliteService.getSquads();
-    const mentioned = resolveMentions(content, agents, squads);
+    const agents = workspaceId
+      ? workspaceRegistry.scope('agents', sqliteService.getAgents(), workspaceId).filter(a => !a.isArchived)
+      : sqliteService.getAgents().filter(a => !a.isArchived);
+    const squads = workspaceId
+      ? workspaceRegistry.scope('squads', sqliteService.getSquads(), workspaceId)
+      : sqliteService.getSquads();
+    // Clients can use general workspace chat, but cannot address or execute
+    // internal personas directly. Their thread remains a project-manager
+    // conversation even if the text contains an agent-like @mention.
+    const mentioned = workspaceRole === 'client' ? [] : resolveMentions(content, agents, squads);
 
     if (!mentioned.length) {
-      const reply = await this.generateDefaultReply(content, threadId);
+      const reply = await this.generateDefaultReply(content, threadId, workspaceId);
       sqliteService.saveChatMessage(reply);
       this.emit('chat_message', reply);
       return { userMessage, agentMessage: reply, agentMessages: [reply] };
@@ -279,7 +299,7 @@ export class ChatService extends EventEmitter {
    * It keeps its own CLI session per thread, keyed by DEFAULT_ASSISTANT.id, so
    * a plain conversation has continuity without borrowing an agent's transcript.
    */
-  private async generateDefaultReply(prompt: string, threadId: string): Promise<ChatMessage> {
+  private async generateDefaultReply(prompt: string, threadId: string, workspaceId?: string): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
       id: `msg-${Date.now()}-alpha`,
@@ -314,7 +334,7 @@ export class ChatService extends EventEmitter {
       provider: runtime.provider,
       modelName: runtime.modelName,
       // The tool policy still applies: a chat inspects, it does not mutate.
-      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, describeWorkspaceForAlpha(), describeChatToolPolicy()]
+      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, describeWorkspaceForAlpha(workspaceId), describeChatToolPolicy()]
         .filter(Boolean)
         .join(`
 

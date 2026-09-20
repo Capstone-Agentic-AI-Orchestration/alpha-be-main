@@ -11,6 +11,8 @@ import {
 import { sqliteService } from '../services/sqliteService.js';
 import { mcpNameError, mcpServerError, toServerSpec } from './mcpValidation.js';
 import { logInfo } from '../utils/logger.js';
+import { requireWorkspaceCapability } from './workspaceContext.js';
+import { workspaceRegistry } from '../services/workspaceRegistry.js';
 
 export const mcpRouter = Router();
 
@@ -51,13 +53,15 @@ interface McpServerView {
   grantedTo: string[];
 }
 
-function serverViews(): McpServerView[] {
+function serverViews(workspaceId?: string): McpServerView[] {
   const all = availableServers();
   const catalog = readCatalog();
   const builtins = new Set(builtinServerNames());
 
   // Read once for the whole list rather than once per server.
-  const agents = sqliteService.getAgents();
+  const agents = workspaceId
+    ? workspaceRegistry.scope('agents', sqliteService.getAgents(), workspaceId)
+    : sqliteService.getAgents();
 
   return Object.entries(all).map(([name, spec]) => {
     const shared = {
@@ -85,14 +89,16 @@ function serverViews(): McpServerView[] {
 }
 
 mcpRouter.get('/mcp/servers', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   try {
-    res.json(serverViews());
+    res.json(serverViews(req.workspace!.workspaceId));
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Could not read the MCP catalog' });
   }
 });
 
 mcpRouter.put('/mcp/servers/:name', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const { name } = req.params;
 
   const nameError = mcpNameError(name);
@@ -106,13 +112,14 @@ mcpRouter.put('/mcp/servers/:name', (req: Request, res: Response) => {
     logInfo(`MCP catalog: wrote "${name}"`);
     // The whole list back, not just the one written: saving can change another
     // row's `overridden` flag, and the panel would otherwise show it stale.
-    res.json(serverViews());
+    res.json(serverViews(req.workspace!.workspaceId));
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Could not write the MCP catalog' });
   }
 });
 
 mcpRouter.delete('/mcp/servers/:name', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const { name } = req.params;
 
   try {
@@ -132,7 +139,7 @@ mcpRouter.delete('/mcp/servers/:name', (req: Request, res: Response) => {
     }
 
     logInfo(`MCP catalog: removed "${name}"`);
-    res.json(serverViews());
+    res.json(serverViews(req.workspace!.workspaceId));
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Could not write the MCP catalog' });
   }

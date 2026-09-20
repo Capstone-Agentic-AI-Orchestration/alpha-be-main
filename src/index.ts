@@ -6,13 +6,18 @@ import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { PORT, HOST, CORS_ORIGIN } from './config/env.js';
 import { dataRouter } from './controllers/dataController.js';
+import { workspaceRouter } from './controllers/workspaceController.js';
+import { workspaceContext } from './controllers/workspaceContext.js';
 import { runRouter } from './controllers/runController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
 import { mcpRouter } from './controllers/mcpController.js';
+import { liveBuildRoomRouter } from './controllers/liveBuildRoomController.js';
+import { agentCallRouter } from './controllers/agentCallController.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
+import { agentCallService } from './services/agentCallService.js';
 import { runtimeService } from './services/runtimeService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
@@ -81,7 +86,11 @@ if (process.env.ALPHA_LOCAL_TOKEN) {
 }
 
 // API Routes
+app.use('/api', workspaceContext);
+app.use('/api', workspaceRouter);
 app.use('/api', dataRouter);
+app.use('/api', liveBuildRoomRouter);
+app.use('/api', agentCallRouter);
 app.use('/api', runRouter);
 app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
@@ -151,6 +160,27 @@ function broadcast(payload: Record<string, any>) {
   }
 }
 
+function safeAgentCallEvent(data: unknown) {
+  if (!data || typeof data !== 'object') return null;
+  const call = data as {
+    id?: string;
+    status?: string;
+    startedAt?: string;
+    completedAt?: string;
+    resultMessageId?: string;
+  };
+  // The local WebSocket is intentionally not an authorization boundary. Do
+  // not broadcast instructions, patch contents, errors, project paths, or
+  // workspace metadata; authorized clients re-read the call over HTTP.
+  return {
+    id: call.id,
+    status: call.status,
+    startedAt: call.startedAt,
+    completedAt: call.completedAt,
+    resultMessageId: call.resultMessageId
+  };
+}
+
 // Subscribe runner events to WebSocket broadcast
 runnerService.on('stage_update', (data) => broadcast({ type: 'stage_update', payload: data }));
 runnerService.on('log_chunk', (data) => broadcast({ type: 'log_chunk', payload: data }));
@@ -160,6 +190,16 @@ runnerService.on('run_failed', (data) => broadcast({ type: 'run_failed', payload
 runnerService.on('run_cancelled', (data) => broadcast({ type: 'run_cancelled', payload: data }));
 // A queued run reaching the front of its workspace queue.
 runnerService.on('run_started', (data) => broadcast({ type: 'run_started', payload: data }));
+
+// Project-scoped chat calls use the same realtime channel as runs. The payload
+// contains identifiers and status only; model reasoning and local paths never
+// leave the backend through this broadcast.
+agentCallService.on('agent_call.created', (data) => broadcast({ type: 'agent_call.created', payload: safeAgentCallEvent(data) }));
+agentCallService.on('agent_call.queued', (data) => broadcast({ type: 'agent_call.queued', payload: safeAgentCallEvent(data) }));
+agentCallService.on('agent_call.started', (data) => broadcast({ type: 'agent_call.started', payload: safeAgentCallEvent(data) }));
+agentCallService.on('agent_call.completed', (data) => broadcast({ type: 'agent_call.completed', payload: safeAgentCallEvent(data) }));
+agentCallService.on('agent_call.failed', (data) => broadcast({ type: 'agent_call.failed', payload: safeAgentCallEvent(data) }));
+agentCallService.on('agent_call.cancelled', (data) => broadcast({ type: 'agent_call.cancelled', payload: safeAgentCallEvent(data) }));
 
 /**
  * Squad events, which were emitted and never forwarded.

@@ -32,7 +32,12 @@ export const AGENTS_DIR = path.join(ALPHA_DIR, 'agents');
 // keeps every agent-writable path in a single place that is easy to reason about.
 export const WORKSPACES_DIR = path.join(ALPHA_DIR, 'workspaces');
 
-export const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000,http://localhost:5173';
+export const CORS_ORIGIN = process.env.CORS_ORIGIN || [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+].join(',');
 
 // Supabase Configuration (team / cloud mode)
 export const SUPABASE_URL = process.env.SUPABASE_URL || '';

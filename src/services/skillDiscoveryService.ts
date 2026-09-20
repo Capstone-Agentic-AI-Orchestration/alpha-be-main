@@ -137,8 +137,8 @@ function defaultRoots(options: SkillDiscoveryOptions): { roots: SkillDiscoveryRo
 }
 
 function findSkillFiles(root: SkillDiscoveryRoot): SkillFileCandidate[] {
-  const start = existingDirectory(root.path);
-  if (!start) return [];
+  const start = normalisePath(root.path);
+  if (!existingDirectory(start)) return [];
 
   const maxDepth = root.maxDepth ?? 5;
   const result: SkillFileCandidate[] = [];
@@ -149,7 +149,10 @@ function findSkillFiles(root: SkillDiscoveryRoot): SkillFileCandidate[] {
     if (!realDirectory || visited.has(realDirectory.toLowerCase())) return;
     visited.add(realDirectory.toLowerCase());
 
-    const skillFile = path.join(realDirectory, 'SKILL.md');
+    // Keep the caller's lexical path in the catalog. On macOS `/var` is a
+    // symlink to `/private/var`; resolving it here makes otherwise identical
+    // paths change depending on how the caller reached the directory.
+    const skillFile = path.join(directory, 'SKILL.md');
     try {
       const stat = fs.statSync(skillFile);
       if (stat.isFile()) {
@@ -178,7 +181,7 @@ function findSkillFiles(root: SkillDiscoveryRoot): SkillFileCandidate[] {
       // Do not follow symlinked directories. A plugin cache can contain links
       // back into the home directory and would otherwise recurse indefinitely.
       if (entry.isSymbolicLink()) continue;
-      visit(path.join(realDirectory, entry.name), depth + 1);
+      visit(path.join(directory, entry.name), depth + 1);
     }
   };
 
@@ -189,8 +192,9 @@ function findSkillFiles(root: SkillDiscoveryRoot): SkillFileCandidate[] {
 function pluginCandidates(cacheRoot: string): SkillFileCandidate[] {
   const rootPath = existingDirectory(cacheRoot);
   if (!rootPath) return [];
+  const displayRoot = normalisePath(cacheRoot);
   const pluginRoot: SkillDiscoveryRoot = {
-    path: rootPath,
+    path: displayRoot,
     source: 'plugin',
     label: 'Installed plugin',
     maxDepth: 10
@@ -198,7 +202,7 @@ function pluginCandidates(cacheRoot: string): SkillFileCandidate[] {
   const candidates = findSkillFiles(pluginRoot);
 
   return candidates.map(candidate => {
-    const relativeParts = path.relative(rootPath, candidate.filePath).split(path.sep).filter(Boolean);
+    const relativeParts = path.relative(displayRoot, candidate.filePath).split(path.sep).filter(Boolean);
     const skillMarker = relativeParts.findIndex(part => part === 'skills' || part === 'migrated-command-skills');
     const pluginName = relativeParts[1] || relativeParts[0] || 'plugin';
     const skillNameHint = skillMarker >= 0
