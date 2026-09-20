@@ -18,6 +18,18 @@ export type AgentRole =
   | 'Validation / Checking Agent'
   | 'GitHub Finalization Agent';
 
+export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer';
+
+export interface Workspace {
+  id: string;
+  name: string;
+  slug: string;
+  organization?: string;
+  role: WorkspaceRole;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type AgentPhase = 'Planning' | 'Development' | 'Validation' | 'Finalization';
 
 export type AutonomyLevel = 'Supervised' | 'Semi-Autonomous (Requires Approval)' | 'Full Autonomy';
@@ -200,6 +212,32 @@ export interface Project {
   envVars?: { key: string; value: string; isSecret?: boolean }[];
 }
 
+export type BuildStepPhase =
+  | 'requirements'
+  | 'architecture'
+  | 'implementation'
+  | 'database'
+  | 'validation'
+  | 'review'
+  | 'delivery';
+
+/** An ordered, project-owned step displayed by the Live Build Room. */
+export interface ProjectBuildStep {
+  id: string;
+  projectId: string;
+  label: string;
+  phase: BuildStepPhase;
+  agentId?: string;
+  squadId?: string;
+  position: number;
+  enabled: boolean;
+  required: boolean;
+  approvalGate?: boolean;
+  dependsOn?: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export type StageId = 'workspace' | 'analysis' | 'implementation' | 'tests' | 'review';
 export type StageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped';
 
@@ -365,6 +403,10 @@ export interface ChatThread {
   lastMessageSnippet: string;
   lastMessageAt: string;
   agentIds: string[];
+  /** The responder selected for this conversation, when it is not automatic Alpha. */
+  targetAgentId?: string;
+  /** The squad selected for this conversation, when several agents should answer. */
+  targetSquadId?: string;
   /**
    * Which project this conversation is about, when it is about one.
    *
@@ -478,6 +520,10 @@ export interface ChatMessage {
 
 export type RuntimeStatus = 'online' | 'degraded' | 'offline' | 'scanning';
 
+/** How Alpha obtained a runtime's model catalog. */
+export type RuntimeCatalogSource = 'cli' | 'local_api' | 'remote_api' | 'cache' | 'none';
+export type RuntimeUpdateSource = 'provider_cli' | 'npm' | 'remote_api' | 'none';
+
 export interface RuntimeEngine {
   id: string;
   name: string;
@@ -505,6 +551,18 @@ export interface RuntimeEngine {
     plan?: string;
   };
   detectedAt?: string;
+  /** Model-catalog freshness and provenance. */
+  catalogSource?: RuntimeCatalogSource;
+  catalogCheckedAt?: string;
+  catalogFetchedAt?: string;
+  catalogStale?: boolean;
+  catalogError?: string;
+  /** Runtime-version update information, kept separate from model discovery. */
+  updateAvailable?: boolean;
+  latestVersion?: string;
+  updateCheckedAt?: string;
+  updateError?: string;
+  updateSource?: RuntimeUpdateSource;
 }
 
 export interface Skill {

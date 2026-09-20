@@ -110,6 +110,15 @@ export class SquadRunner {
       );
     }
 
+    // The squad is the issue's execution owner. Member runs below carry the
+    // individual agent identity, but must not replace this assignment when the
+    // issue is refreshed by the project execution monitor.
+    sqliteService.updateIssue(issue.id, {
+      assignedSquadId: squad.id,
+      assignedAgentId: undefined,
+      status: 'agent_running'
+    });
+
     const now = new Date().toISOString();
     const squadRun: SquadRun = {
       id: `squadrun-${Date.now()}`,

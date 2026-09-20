@@ -2,15 +2,17 @@ import crossSpawn from 'cross-spawn';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RuntimeEngine } from '../models/index.js';
+import { RuntimeCatalogSource, RuntimeEngine } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
+import { enrichRuntimeUpdates } from './runtimeUpdateService.js';
 import { logInfo } from '../utils/logger.js';
 import {
   findClaude,
   findCodex,
   findAntigravity,
   findGemini,
-  findOpenCode
+  findOpenCode,
+  findLMStudio
 } from './runtimeDiscovery.js';
 
 /**
@@ -26,7 +28,8 @@ import {
 function runClosedStdin(
   bin: string,
   args: string[],
-  timeoutMs = 30_000
+  timeoutMs = 30_000,
+  options: { env?: NodeJS.ProcessEnv } = {}
 ): Promise<{ ok: boolean; stdout: string; timedOut: boolean }> {
   return new Promise(resolve => {
     let child: ReturnType<typeof crossSpawn>;
@@ -34,7 +37,10 @@ function runClosedStdin(
       // Windows installs commonly expose `.cmd` shims. cross-spawn resolves
       // those wrappers consistently, whereas Node's native spawn can report
       // ENOENT/EINVAL even when the same command works in the user's shell.
-      child = crossSpawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = crossSpawn(bin, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: options.env ? { ...process.env, ...options.env } : process.env
+      });
     } catch {
       resolve({ ok: false, stdout: '', timedOut: false });
       return;
@@ -60,14 +66,54 @@ function runClosedStdin(
 /** What a detector reports. scanRuntimes() stamps `type` and `latencyMs`. */
 type DetectedEngine = Omit<RuntimeEngine, 'type' | 'latencyMs'>;
 
+type CatalogDiscovery = {
+  models: string[];
+  source: RuntimeCatalogSource;
+  fetchedAt?: string;
+  stale?: boolean;
+  error?: string;
+  endpoint?: string;
+};
+
+const CODEX_CATALOG_STALE_AFTER_MS = 30 * 60 * 1000;
+
+function catalogTimestampIsStale(fetchedAt: string | undefined): boolean {
+  if (!fetchedAt) return true;
+  const age = Date.now() - Date.parse(fetchedAt);
+  return !Number.isFinite(age) || age > CODEX_CATALOG_STALE_AFTER_MS;
+}
+
+function catalogMetadata(catalog: CatalogDiscovery, checkedAt: string): Pick<RuntimeEngine,
+  'catalogSource' | 'catalogCheckedAt' | 'catalogFetchedAt' | 'catalogStale' | 'catalogError'
+> {
+  return {
+    catalogSource: catalog.source,
+    catalogCheckedAt: checkedAt,
+    catalogFetchedAt: catalog.fetchedAt,
+    catalogStale: catalog.stale ?? false,
+    catalogError: catalog.error
+  };
+}
+
+function uniqueModelIds(values: unknown[]): string[] {
+  return Array.from(new Set(
+    values
+      .filter((value): value is string => typeof value === 'string')
+      .map(value => value.trim())
+      .filter(Boolean)
+  ));
+}
+
 /**
- * Used only when neither Codex nor a local OpenAI-compatible catalog can
- * answer. The list is deliberately conservative: advertising a model that the
- * current account cannot actually run is worse than showing a short list and
- * explaining that the catalog is unavailable.
+ * Codex's local cache and an optional local OpenAI-compatible gateway are the
+ * only sources of model IDs. Alpha must not invent model IDs when neither
+ * source is available.
  */
-const CODEX_FALLBACK_MODELS = ['gpt-5.6-sol', 'o3', 'gpt-4o'];
 const DEFAULT_OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
+
+function codexHome(): string {
+  return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
+}
 
 function localBaseUrl(value: string | undefined): string | undefined {
   if (!value?.trim()) return undefined;
@@ -99,8 +145,7 @@ function codexCatalogBases(): string[] {
     process.env.CODEX_OPENAI_BASE_URL
   ].filter((value): value is string => Boolean(value?.trim()));
 
-  const codexHome = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
-  const configPath = path.join(codexHome, 'config.toml');
+  const configPath = path.join(codexHome(), 'config.toml');
   try {
     const config = fs.readFileSync(configPath, 'utf8');
     const match = config.match(/^\s*openai_base_url\s*=\s*["']([^"']+)["']/im);
@@ -142,28 +187,244 @@ function catalogModelIds(payload: unknown): string[] {
   );
 }
 
-async function discoverCodexCatalog(): Promise<{ models: string[]; endpoint?: string }> {
+/**
+ * Codex CLI keeps the provider model catalogue in CODEX_HOME/models_cache.json.
+ * It contains internal entries too, so only models visible in Codex's picker
+ * and supported by the API belong in Alpha's model selector.
+ */
+export function codexCacheModelIds(payload: unknown): string[] {
+  const rows = (payload as { models?: unknown })?.models;
+  if (!Array.isArray(rows)) return [];
+
+  return rows
+    .map((item, index) => {
+      if (typeof item === 'string') return { id: item.trim(), priority: index, visible: true, supported: true };
+      if (!item || typeof item !== 'object') return null;
+
+      const model = item as {
+        slug?: unknown;
+        visibility?: unknown;
+        supported_in_api?: unknown;
+        priority?: unknown;
+      };
+      const id = typeof model.slug === 'string' ? model.slug.trim() : '';
+      const priority = typeof model.priority === 'number' ? model.priority : index;
+      const visible = model.visibility === undefined || model.visibility === 'list';
+      const supported = model.supported_in_api !== false;
+      return { id, priority, visible, supported };
+    })
+    .filter((model): model is { id: string; priority: number; visible: boolean; supported: boolean } =>
+      Boolean(model?.id && model.visible && model.supported)
+    )
+    .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id))
+    .map(model => model.id)
+    .filter((id, index, all) => all.indexOf(id) === index);
+}
+
+function readCodexModelCache(): { models: string[]; fetchedAt?: string; found: boolean } {
+  try {
+    const cachePath = path.join(codexHome(), 'models_cache.json');
+    const payload = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as { fetched_at?: unknown };
+    const fetchedAt = typeof payload.fetched_at === 'string' && !Number.isNaN(Date.parse(payload.fetched_at))
+      ? new Date(payload.fetched_at).toISOString()
+      : undefined;
+    return { models: codexCacheModelIds(payload), fetchedAt, found: true };
+  } catch {
+    // Codex has not fetched a catalogue yet, or the cache is unavailable.
+    return { models: [], found: false };
+  }
+}
+
+async function discoverCodexCatalog(): Promise<CatalogDiscovery> {
   for (const base of codexCatalogBases()) {
     try {
       const response = await fetch(`${base}/models`, { signal: AbortSignal.timeout(1500) });
       if (!response.ok) continue;
       const models = catalogModelIds(await response.json());
-      if (models.length) return { models, endpoint: base };
+      if (models.length) return { models, source: 'local_api', fetchedAt: new Date().toISOString(), endpoint: base };
     } catch {
-      // The gateway is optional; fall back to the small known-safe list.
+      // The gateway is optional; continue with Codex's local cache.
     }
   }
-  return { models: [] };
+
+  const cachedModels = readCodexModelCache();
+  if (cachedModels.found) {
+    return {
+      models: cachedModels.models,
+      source: 'cache',
+      fetchedAt: cachedModels.fetchedAt,
+      stale: catalogTimestampIsStale(cachedModels.fetchedAt),
+      error: cachedModels.fetchedAt ? undefined : 'Codex cache has no fetch timestamp'
+    };
+  }
+
+  return { models: [], source: 'none', error: 'No Codex model catalog is available' };
+}
+
+/** OpenCode prints one provider/model identifier per line. */
+export function parseOpenCodeModelIds(output: string): string[] {
+  const ansi = /\u001b\[[0-?]*[ -\/]*[@-~]/g;
+  const ids: string[] = [];
+  for (const rawLine of output.replace(ansi, '').split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^[>*•-]\s*/, '');
+    const token = line.split(/\s+/)[0] || '';
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:@+~-]*$/.test(token)) {
+      ids.push(token);
+    }
+  }
+  return uniqueModelIds(ids);
+}
+
+/** Parse Antigravity's human-readable model listing without inventing IDs. */
+export function parseAntigravityModelIds(output: string): string[] {
+  const ansi = /\u001b\[[0-?]*[ -\/]*[@-~]/g;
+  const ids: string[] = [];
+
+  const collectJson = (value: unknown) => {
+    const rows = Array.isArray(value)
+      ? value
+      : value && typeof value === 'object' && Array.isArray((value as { models?: unknown }).models)
+        ? (value as { models: unknown[] }).models
+        : [];
+    for (const row of rows) {
+      if (typeof row === 'string') ids.push(row);
+      else if (row && typeof row === 'object') {
+        const item = row as { id?: unknown; name?: unknown; model?: unknown };
+        const id = [item.id, item.name, item.model].find(candidate => typeof candidate === 'string');
+        if (typeof id === 'string') ids.push(id);
+      }
+    }
+  };
+
+  try {
+    const trimmed = output.replace(ansi, '').trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) collectJson(JSON.parse(trimmed));
+  } catch {
+    // Fall through to the line-oriented format.
+  }
+
+  const ignored = /^(available\s+models?|models?|name|id|fetching|loading|authenticated|warning|info)\b/i;
+  for (const rawLine of output.replace(ansi, '').split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^[>*•-]\s*/, '');
+    if (!line || ignored.test(line)) continue;
+    const token = line.split(/\t|\s{2,}/)[0].trim();
+    if (/^[A-Za-z0-9][A-Za-z0-9._:/@+~-]*$/.test(token)) ids.push(token);
+  }
+
+  return uniqueModelIds(ids);
+}
+
+/**
+ * Parse both LM Studio's native v1 response and its OpenAI-compatible legacy
+ * response. Embedding models are excluded because Alpha's runtime picker is
+ * for inference/chat models.
+ */
+export function parseLMStudioModelIds(payload: unknown): string[] {
+    const root = payload && typeof payload === 'object' ? payload as { models?: unknown; data?: unknown } : {};
+  const rows = Array.isArray(root.models) ? root.models : Array.isArray(root.data) ? root.data : Array.isArray(payload) ? payload : [];
+  const ids = rows.map(item => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return '';
+    const row = item as { type?: unknown; key?: unknown; id?: unknown };
+    if (typeof row.type === 'string' && /^embeddings?$/i.test(row.type)) return '';
+    return typeof row.key === 'string' ? row.key : typeof row.id === 'string' ? row.id : '';
+  });
+  return uniqueModelIds(ids);
+}
+
+async function discoverOpenCodeCatalog(bin: string, refresh = false): Promise<CatalogDiscovery> {
+  let listing = await runClosedStdin(bin, refresh ? ['models', '--refresh'] : ['models'], 60_000);
+  // Older OpenCode builds may not understand --refresh. Their cached listing
+  // is still better than losing the catalog entirely.
+  if (!listing.ok && refresh) listing = await runClosedStdin(bin, ['models'], 60_000);
+  const models = parseOpenCodeModelIds(listing.stdout);
+  if (listing.ok) {
+    return {
+      models,
+      source: 'cli',
+      fetchedAt: new Date().toISOString(),
+      error: models.length ? undefined : 'OpenCode returned no parseable models'
+    };
+  }
+  return { models: [], source: 'none', error: listing.timedOut ? 'OpenCode model listing timed out' : 'OpenCode model listing failed' };
+}
+
+async function discoverAnthropicCatalog(): Promise<CatalogDiscovery> {
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey) {
+    return { models: [], source: 'none', error: 'ANTHROPIC_API_KEY is not configured' };
+  }
+
+  const models: string[] = [];
+  let afterId: string | undefined;
+  try {
+    do {
+      const url = new URL('https://api.anthropic.com/v1/models');
+      url.searchParams.set('limit', '1000');
+      if (afterId) url.searchParams.set('after_id', afterId);
+      const response = await fetch(url, {
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!response.ok) return { models: [], source: 'remote_api', error: `Anthropic model catalog returned HTTP ${response.status}` };
+      const payload = await response.json() as { data?: Array<{ id?: unknown }>; has_more?: boolean; last_id?: unknown };
+      models.push(...(payload.data || []).map(model => model.id).filter((id): id is string => typeof id === 'string'));
+      afterId = payload.has_more && typeof payload.last_id === 'string' ? payload.last_id : undefined;
+    } while (afterId);
+    return { models: uniqueModelIds(models), source: 'remote_api', fetchedAt: new Date().toISOString() };
+  } catch {
+    return { models: [], source: 'remote_api', error: 'Anthropic model catalog request failed' };
+  }
+}
+
+async function discoverGeminiCatalog(): Promise<CatalogDiscovery> {
+  const apiKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)?.trim();
+  if (!apiKey) {
+    return { models: [], source: 'none', error: 'GEMINI_API_KEY or GOOGLE_API_KEY is not configured' };
+  }
+
+  const models: string[] = [];
+  let pageToken: string | undefined;
+  try {
+    do {
+      const url = new URL('https://generativelanguage.googleapis.com/v1beta/models');
+      url.searchParams.set('pageSize', '1000');
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
+      const response = await fetch(url, {
+        headers: { 'x-goog-api-key': apiKey },
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!response.ok) return { models: [], source: 'remote_api', error: `Gemini model catalog returned HTTP ${response.status}` };
+      const payload = await response.json() as {
+        models?: Array<{ name?: unknown; supportedGenerationMethods?: unknown }>;
+        nextPageToken?: unknown;
+      };
+      for (const model of payload.models || []) {
+        const name = typeof model.name === 'string' ? model.name.replace(/^models\//, '') : '';
+        const methods = Array.isArray(model.supportedGenerationMethods)
+          ? model.supportedGenerationMethods
+          : [];
+        if (name && (!methods.length || methods.includes('generateContent'))) models.push(name);
+      }
+      pageToken = typeof payload.nextPageToken === 'string' && payload.nextPageToken ? payload.nextPageToken : undefined;
+    } while (pageToken);
+    return { models: uniqueModelIds(models), source: 'remote_api', fetchedAt: new Date().toISOString() };
+  } catch {
+    return { models: [], source: 'remote_api', error: 'Gemini model catalog request failed' };
+  }
 }
 
 export class RuntimeService {
   /**
    * Scan host workstation for installed and authenticated AI CLI tools
    */
-  async scanRuntimes(): Promise<RuntimeEngine[]> {
+  async scanRuntimes(options: { refreshCatalog?: boolean } = {}): Promise<RuntimeEngine[]> {
     /**
      * Each detector reports identity and status; `type` and a measured
-     * `latencyMs` are stamped here so the five of them cannot disagree.
+     * `latencyMs` are stamped here so every detector reports the same shape.
      *
      * 'cloud' vs 'local' describes where INFERENCE happens, not the process:
      * the CLIs run on this machine but call a hosted model.
@@ -177,20 +438,97 @@ export class RuntimeService {
       return { ...engine, type: kind, latencyMs: Date.now() - started };
     };
 
-    const runtimes: RuntimeEngine[] = [
+    const detectedRuntimes: RuntimeEngine[] = [
       await timed('cloud', () => this.detectClaude()),
       await timed('cloud', () => this.detectCodex()),
       await timed('cloud', () => this.detectAntigravity()),
       await timed('cloud', () => this.detectGemini()),
-      await timed('local', () => this.detectOpenCode()),
+      await timed('local', () => this.detectOpenCode(options.refreshCatalog === true)),
       await timed('local', () => this.detectOllama()),
       await timed('local', () => this.detectLMStudio())
     ];
 
-    // Save to SQLite
-    sqliteService.saveRuntimes(runtimes);
-    logInfo('Runtime scan completed', { runtimes: runtimes.map(r => ({ id: r.id, status: r.status })) });
-    return runtimes;
+    const previousById = new Map(sqliteService.getRuntimes().map(runtime => [runtime.id, runtime]));
+    const runtimes = detectedRuntimes.map(runtime => {
+      const previous = previousById.get(runtime.id);
+      const catalogFailed = !runtime.models.length && !runtime.catalogFetchedAt;
+      const preserveCatalog = catalogFailed && Boolean(previous?.models.length);
+      return {
+        ...runtime,
+        // User preference, if already persisted, wins over detector defaults.
+        isDefault: previous?.isDefault ?? runtime.isDefault,
+        ...(preserveCatalog ? {
+          models: previous!.models,
+          catalogSource: 'cache' as const,
+          catalogFetchedAt: previous!.catalogFetchedAt,
+          catalogStale: true
+        } : {})
+      };
+    });
+
+    const enriched = await enrichRuntimeUpdates(runtimes);
+    sqliteService.saveRuntimes(enriched);
+    logInfo('Runtime scan completed', { runtimes: enriched.map(r => ({ id: r.id, status: r.status })) });
+    return enriched;
+  }
+
+  /** Refresh one runtime without forcing unrelated providers to be probed. */
+  async refreshRuntime(id: string, options: { refreshCatalog?: boolean } = {}): Promise<RuntimeEngine> {
+    const started = Date.now();
+    let engine: DetectedEngine;
+    let type: RuntimeEngine['type'];
+
+    switch (id) {
+      case 'claude':
+        engine = await this.detectClaude();
+        type = 'cloud';
+        break;
+      case 'codex':
+        engine = await this.detectCodex();
+        type = 'cloud';
+        break;
+      case 'antigravity':
+        engine = await this.detectAntigravity();
+        type = 'cloud';
+        break;
+      case 'gemini':
+        engine = await this.detectGemini();
+        type = 'cloud';
+        break;
+      case 'opencode':
+        engine = await this.detectOpenCode(options.refreshCatalog === true);
+        type = 'local';
+        break;
+      case 'ollama':
+        engine = await this.detectOllama();
+        type = 'local';
+        break;
+      case 'lmstudio':
+        engine = await this.detectLMStudio();
+        type = 'local';
+        break;
+      default:
+        throw new Error(`Unknown runtime: ${id}`);
+    }
+
+    const previous = sqliteService.getRuntimes().find(runtime => runtime.id === id);
+    const preserveCatalog = !engine.models.length && !engine.catalogFetchedAt && Boolean(previous?.models.length);
+    const runtime: RuntimeEngine = {
+      ...(previous || { id }),
+      ...engine,
+      isDefault: previous?.isDefault ?? engine.isDefault,
+      ...(preserveCatalog ? {
+        models: previous!.models,
+        catalogSource: 'cache' as const,
+        catalogFetchedAt: previous!.catalogFetchedAt,
+        catalogStale: true
+      } : {}),
+      type,
+      latencyMs: Date.now() - started
+    };
+    const [enriched] = await enrichRuntimeUpdates([runtime]);
+    sqliteService.saveRuntimes([enriched]);
+    return enriched;
   }
 
   static claudePath(): string {
@@ -216,6 +554,7 @@ export class RuntimeService {
   private async detectClaude(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.claudePath();
+    const catalog = await discoverAnthropicCatalog();
     const versionProbe = await runClosedStdin(bin, ['--version'], 15_000);
     if (!versionProbe.ok) {
       return {
@@ -223,7 +562,8 @@ export class RuntimeService {
         name: 'Claude Code CLI',
         provider: 'Anthropic',
         status: 'offline',
-        models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+        models: catalog.models,
+        ...catalogMetadata(catalog, now),
         detectedAt: now
       };
     }
@@ -239,7 +579,8 @@ export class RuntimeService {
         status: auth.loggedIn ? 'online' : 'degraded',
         version,
         isDefault: true,
-        models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+        models: catalog.models,
+        ...catalogMetadata(catalog, now),
         account: {
           email: auth.email,
           org: auth.orgName,
@@ -256,7 +597,8 @@ export class RuntimeService {
         status: 'degraded',
         version,
         isDefault: true,
-        models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+        models: catalog.models,
+        ...catalogMetadata(catalog, now),
         detectedAt: now
       };
     }
@@ -266,7 +608,7 @@ export class RuntimeService {
     const now = new Date().toISOString();
     const bin = RuntimeService.codexPath();
     const catalog = await discoverCodexCatalog();
-    const models = catalog.models.length ? catalog.models : CODEX_FALLBACK_MODELS;
+    const models = catalog.models;
     const versionProbe = await runClosedStdin(bin, ['--version'], 15_000);
     if (!versionProbe.ok) {
       return {
@@ -283,17 +625,22 @@ export class RuntimeService {
     const version = versionProbe.stdout.trim();
     const doctorProbe = await runClosedStdin(bin, ['doctor'], 30_000);
     const doctorOut = doctorProbe.stdout.toLowerCase();
-    const isHealthy = doctorProbe.ok && !doctorOut.includes('error') && !doctorOut.includes('not logged in');
+    // `codex doctor` can report non-blocking diagnostics such as
+    // "rollout DB scan errors 0" or a non-interactive TERM warning. Neither
+    // means the CLI cannot run. Only an explicit authentication failure should
+    // downgrade an installed runtime.
+    const isSignedOut = /not logged in|authentication failed|auth(?:entication)? required/.test(doctorOut);
     return {
       id: 'codex',
       name: 'OpenAI Codex CLI',
       provider: 'OpenAI',
       // A versioned CLI that cannot answer its optional doctor command is still
       // installed; report it as online rather than pretending it is absent.
-      status: doctorProbe.ok ? (isHealthy ? 'online' : 'degraded') : 'online',
+      status: isSignedOut ? 'degraded' : 'online',
       version,
       models,
       endpoint: catalog.endpoint,
+      ...catalogMetadata(catalog, now),
       detectedAt: now
     };
   }
@@ -306,23 +653,33 @@ export class RuntimeService {
       provider: 'Antigravity',
       status: 'offline',
       models: [],
+      catalogSource: 'none',
+      catalogCheckedAt: now,
       detectedAt: now
     };
 
     const bin = RuntimeService.agyPath();
-    const probe = await runClosedStdin(bin, ['--version'], 15_000);
+    // Alpha's catalog scan is metadata-only. Antigravity has its own
+    // background self-updater, so disable that updater for these probes.
+    const probeOptions = { env: { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' } };
+    const probe = await runClosedStdin(bin, ['--version'], 15_000, probeOptions);
     if (!probe.ok) return base;
     const version = probe.stdout.trim();
 
     // `agy models` performs a live fetch, so it doubles as the auth probe.
-    const listing = await runClosedStdin(bin, ['models'], 60_000);
+    const listing = await runClosedStdin(bin, ['models'], 60_000, probeOptions);
 
     if (listing.ok) {
-      const models = listing.stdout
-        .split('\n')
-        .map(l => l.trim().split('\t')[0])
-        .filter(id => id && !id.toLowerCase().startsWith('fetching'));
-      return { ...base, status: models.length ? 'online' : 'degraded', version, models };
+      const models = parseAntigravityModelIds(listing.stdout);
+      return {
+        ...base,
+        status: models.length ? 'online' : 'degraded',
+        version,
+        models,
+        catalogSource: 'cli',
+        catalogFetchedAt: now,
+        catalogError: models.length ? undefined : 'Antigravity returned no models'
+      };
     }
 
     // A timeout is not evidence of being signed out — `--version` answered a
@@ -334,13 +691,17 @@ export class RuntimeService {
       ...base,
       status: listing.timedOut ? 'online' : 'degraded',
       version,
-      models: cachedModels
+      models: cachedModels,
+      catalogSource: cachedModels.length ? 'cache' : 'none',
+      catalogStale: true,
+      catalogError: listing.timedOut ? 'Antigravity model listing timed out' : 'Antigravity model listing failed'
     };
   }
 
   private async detectGemini(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.geminiPath();
+    const catalog = await discoverGeminiCatalog();
     const probe = await runClosedStdin(bin, ['--version'], 15_000);
     if (probe.ok) {
       return {
@@ -349,7 +710,8 @@ export class RuntimeService {
         provider: 'Google Gemini',
         status: 'online',
         version: probe.stdout.trim(),
-        models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+        models: catalog.models,
+        ...catalogMetadata(catalog, now),
         detectedAt: now
       };
     }
@@ -358,23 +720,26 @@ export class RuntimeService {
       name: 'Google Gemini CLI',
       provider: 'Google Gemini',
       status: 'offline',
-      models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+      models: catalog.models,
+      ...catalogMetadata(catalog, now),
       detectedAt: now
     };
   }
 
-  private async detectOpenCode(): Promise<DetectedEngine> {
+  private async detectOpenCode(refreshCatalog = false): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.opencodePath();
     const probe = await runClosedStdin(bin, ['--version'], 15_000);
     if (probe.ok) {
+      const catalog = await discoverOpenCodeCatalog(bin, refreshCatalog);
       return {
         id: 'opencode',
         name: 'OpenCode CLI',
         provider: 'OpenCode',
         status: 'online',
         version: probe.stdout.trim(),
-        models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
+        models: catalog.models,
+        ...catalogMetadata(catalog, now),
         detectedAt: now
       };
     }
@@ -383,7 +748,10 @@ export class RuntimeService {
       name: 'OpenCode CLI',
       provider: 'OpenCode',
       status: 'offline',
-      models: ['opencode-coder', 'deepseek-coder', 'qwen2.5-coder'],
+      models: [],
+      catalogSource: 'none',
+      catalogCheckedAt: now,
+      catalogError: 'OpenCode CLI is not installed',
       detectedAt: now
     };
   }
@@ -394,41 +762,123 @@ export class RuntimeService {
       const res = await fetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(1000) });
       if (res.ok) {
         const data = await res.json() as any;
-        const models = (data.models || []).map((m: any) => m.name || m.model);
+        const models = uniqueModelIds((data.models || []).map((m: any) => m.name || m.model));
+        let version: string | undefined;
+        try {
+          const versionResponse = await fetch('http://127.0.0.1:11434/api/version', { signal: AbortSignal.timeout(1000) });
+          if (versionResponse.ok) {
+            const versionPayload = await versionResponse.json() as { version?: unknown };
+            version = typeof versionPayload.version === 'string' ? versionPayload.version : undefined;
+          }
+        } catch {
+          // Version is optional; the model catalog remains authoritative.
+        }
         return {
           id: 'ollama',
           name: 'Ollama Local Engine',
           provider: 'Ollama',
           status: 'online',
-          models: models.length > 0 ? models : ['llama3.2', 'qwen2.5-coder'],
+          version,
+          models,
+          catalogSource: 'local_api',
+          catalogCheckedAt: now,
+          catalogFetchedAt: now,
+          catalogError: models.length ? undefined : 'Ollama returned no installed models',
           detectedAt: now
         };
       }
-      return { id: 'ollama', name: 'Ollama Local Engine', provider: 'Ollama', status: 'degraded', models: ['llama3.2'], detectedAt: now };
+      return {
+        id: 'ollama',
+        name: 'Ollama Local Engine',
+        provider: 'Ollama',
+        status: 'degraded',
+        models: [],
+        catalogSource: 'none',
+        catalogCheckedAt: now,
+        catalogError: `Ollama model catalog returned HTTP ${res.status}`,
+        detectedAt: now
+      };
     } catch {
-      return { id: 'ollama', name: 'Ollama Local Engine', provider: 'Ollama', status: 'offline', models: ['llama3.2'], detectedAt: now };
+      return {
+        id: 'ollama',
+        name: 'Ollama Local Engine',
+        provider: 'Ollama',
+        status: 'offline',
+        models: [],
+        catalogSource: 'none',
+        catalogCheckedAt: now,
+        catalogError: 'Ollama model catalog is unavailable',
+        detectedAt: now
+      };
     }
   }
 
   private async detectLMStudio(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
+    const cli = findLMStudio();
+    const versionProbe = fs.existsSync(cli)
+      ? await runClosedStdin(cli, ['--version'], 15_000)
+      : { ok: false, stdout: '', timedOut: false };
+    const version = versionProbe.ok ? versionProbe.stdout.trim() : undefined;
+    const baseUrl = 'http://127.0.0.1:1234';
+    const headers = process.env.LM_API_TOKEN?.trim()
+      ? { Authorization: `Bearer ${process.env.LM_API_TOKEN.trim()}` }
+      : undefined;
     try {
-      const res = await fetch('http://127.0.0.1:1234/v1/models', { signal: AbortSignal.timeout(1000) });
+      // Native v1 lists all downloaded models. Fall back to the older native v0
+      // endpoint, then the OpenAI-compatible endpoint for very old installs.
+      let endpoint = `${baseUrl}/api/v1/models`;
+      let res = await fetch(endpoint, { headers, signal: AbortSignal.timeout(1000) });
+      if (res.status === 404 || res.status === 405) {
+        endpoint = `${baseUrl}/api/v0/models`;
+        res = await fetch(endpoint, { headers, signal: AbortSignal.timeout(1000) });
+      }
+      if ((res.status === 404 || res.status === 405) && endpoint.endsWith('/api/v0/models')) {
+        endpoint = `${baseUrl}/v1/models`;
+        res = await fetch(endpoint, { headers, signal: AbortSignal.timeout(1000) });
+      }
       if (res.ok) {
-        const data = await res.json() as any;
-        const models = (data.data || []).map((m: any) => m.id);
+        const models = parseLMStudioModelIds(await res.json());
         return {
           id: 'lmstudio',
           name: 'LM Studio Engine',
           provider: 'LM Studio',
           status: 'online',
-          models: models.length > 0 ? models : ['local-model'],
+          version,
+          models,
+          endpoint: `${baseUrl}/v1`,
+          catalogSource: 'local_api',
+          catalogCheckedAt: now,
+          catalogFetchedAt: now,
+          catalogError: models.length ? undefined : 'LM Studio returned no installed chat models',
           detectedAt: now
         };
       }
-      return { id: 'lmstudio', name: 'LM Studio Engine', provider: 'LM Studio', status: 'degraded', models: ['local-model'], detectedAt: now };
+      return {
+        id: 'lmstudio',
+        name: 'LM Studio Engine',
+        provider: 'LM Studio',
+        status: 'degraded',
+        version,
+        models: [],
+        catalogSource: 'none',
+        catalogCheckedAt: now,
+        catalogError: `LM Studio model catalog returned HTTP ${res.status}`,
+        detectedAt: now
+      };
     } catch {
-      return { id: 'lmstudio', name: 'LM Studio Engine', provider: 'LM Studio', status: 'offline', models: ['local-model'], detectedAt: now };
+      return {
+        id: 'lmstudio',
+        name: 'LM Studio Engine',
+        provider: 'LM Studio',
+        status: 'offline',
+        version,
+        models: [],
+        catalogSource: 'none',
+        catalogCheckedAt: now,
+        catalogError: 'LM Studio model catalog is unavailable',
+        detectedAt: now
+      };
     }
   }
 }

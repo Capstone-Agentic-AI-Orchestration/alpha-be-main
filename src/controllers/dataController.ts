@@ -115,6 +115,28 @@ dataRouter.delete('/projects/:id', (req: Request, res: Response) => {
   res.json({ success: deleted });
 });
 
+// --- Project Build Room ---
+dataRouter.get('/projects/:id/build-steps', (req: Request, res: Response) => {
+  try {
+    res.json(sqliteService.getProjectBuildSteps(req.params.id));
+  } catch (error: any) {
+    const message = error?.message ?? 'Could not load project build steps';
+    res.status(message === 'Project not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+dataRouter.put('/projects/:id/build-steps', (req: Request, res: Response) => {
+  try {
+    if (!Array.isArray(req.body?.steps)) {
+      return res.status(400).json({ error: 'steps must be an array' });
+    }
+    res.json(sqliteService.saveProjectBuildSteps(req.params.id, req.body.steps));
+  } catch (error: any) {
+    const message = error?.message ?? 'Could not save project build steps';
+    res.status(message === 'Project not found' ? 404 : 400).json({ error: message });
+  }
+});
+
 // --- Agents ---
 
 /**
@@ -433,6 +455,10 @@ dataRouter.get('/issues', (req: Request, res: Response) => {
 dataRouter.post('/issues', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   const { identifier: _ignored, comments: _alsoIgnored, ...rest } = req.body ?? {};
+
+  if (rest.assignedAgentId && rest.assignedSquadId) {
+    return res.status(400).json({ error: 'Choose either an agent or a squad as the issue owner, not both.' });
+  }
 
   const identity = await currentIdentity();
   if (!rest.projectId || typeof rest.projectId !== 'string') {

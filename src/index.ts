@@ -13,12 +13,10 @@ import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
 import { mcpRouter } from './controllers/mcpController.js';
-import { liveBuildRoomRouter } from './controllers/liveBuildRoomController.js';
-import { agentCallRouter } from './controllers/agentCallController.js';
+import { workspaceRouter } from './controllers/workspaceController.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
-import { agentCallService } from './services/agentCallService.js';
-import { runtimeService } from './services/runtimeService.js';
+import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
 import { warmIdentity } from './services/identityService.js';
@@ -27,6 +25,7 @@ import { sqliteService } from './services/sqliteService.js';
 import { ensureAgentFiles } from './services/agentFileService.js';
 import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
+import { DEFAULT_WORKSPACE_ID, runWithWorkspace } from './services/workspaceContext.js';
 
 const app = express();
 
@@ -85,6 +84,25 @@ if (process.env.ALPHA_LOCAL_TOKEN) {
   logInfo('Local token authentication is ENABLED');
 }
 
+/**
+ * Every workspace-owned API request runs with one explicit data scope.
+ * Existing callers that do not send a header remain on the migrated default
+ * workspace, while the browser can switch scopes without another daemon.
+ */
+app.use('/api', (req, res, next) => {
+  if (
+    req.path === '/health' ||
+    req.path === '/workspaces' ||
+    req.path.startsWith('/workspaces/')
+  ) return next();
+
+  const workspaceId = req.header('X-Workspace-Id') || DEFAULT_WORKSPACE_ID;
+  if (!sqliteService.getWorkspace(workspaceId)) {
+    return res.status(404).json({ error: `Workspace not found: ${workspaceId}` });
+  }
+  return runWithWorkspace(workspaceId, next);
+});
+
 // API Routes
 app.use('/api', workspaceContext);
 app.use('/api', workspaceRouter);
@@ -96,6 +114,7 @@ app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
 app.use('/api', chatRouter);
 app.use('/api', mcpRouter);
+app.use('/api', workspaceRouter);
 
 /**
  * Last in the chain, so every route above answers failures as JSON.
@@ -256,6 +275,6 @@ server.listen(PORT, HOST, () => {
     logError('Could not initialise the agent file layer:', err);
   }
 
-  // Initial runtime scan in background
-  runtimeService.scanRuntimes().catch(err => logError('Initial runtime probe failed:', err));
+  // Initial runtime scan plus periodic catalog refresh in background.
+  runtimeRefreshService.start();
 });

@@ -162,14 +162,18 @@ export class RunnerService extends EventEmitter {
       supabaseService.saveRunToCloud(runRecord).catch(err => logError('Supabase run sync warning:', err));
     }
 
-    // Update Issue status
-    updateIssueAndPush(issueId, {
+    // Update Issue status. A squad-owned issue keeps the squad as its owner;
+    // the individual member is already recorded on the run itself. Writing
+    // the member into assignedAgentId here made a squad issue appear to have
+    // two owners after the next refresh.
+    const issueUpdate: Partial<Issue> = {
       status: 'agent_running',
-      assignedAgentId: agentId,
-      branchName
-    });
+      branchName,
+      ...(params.squad ? {} : { assignedAgentId: agentId })
+    };
+    updateIssueAndPush(issueId, issueUpdate);
     if (supabaseService.isConfigured()) {
-      supabaseService.updateIssueInCloud(issueId, { status: 'agent_running', branchName }).catch(() => {});
+      supabaseService.updateIssueInCloud(issueId, issueUpdate).catch(() => {});
     }
 
     sqliteService.addIssueComment({

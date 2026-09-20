@@ -120,11 +120,10 @@ export function agentFromOfficialTemplate(template: OfficialAgentTemplate, creat
     description: template.description,
     owner: 'Alpha',
     isMine: true,
-    // Roles are provider-neutral. Pin the local Codex binding to a concrete
-    // model id; the CLI treats the old `codex` label as a legacy alias and
-    // cannot load model metadata for it.
+    // Roles are provider-neutral. Leave the model unpinned so the current
+    // runtime catalog/default remains authoritative as providers evolve.
     modelProvider: 'OpenAI',
-    modelName: 'gpt-5.6-sol',
+    modelName: '',
     systemPrompt: template.systemPrompt,
     autonomyLevel: template.autonomyLevel,
     temperature: 0.2,

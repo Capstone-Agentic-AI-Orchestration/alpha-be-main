@@ -26,8 +26,9 @@ export interface SendMessageParams {
   threadId: string;
   content: string;
   senderName?: string;
-  workspaceId?: string;
-  workspaceRole?: WorkspaceRole;
+  /** Explicit target from the chat picker. Null clears a persisted target. */
+  targetAgentId?: string | null;
+  targetSquadId?: string | null;
 }
 
 /**
@@ -80,6 +81,34 @@ export function resolveMentions(content: string, agents: any[], squads: Squad[] 
   }
 
   return picked;
+}
+
+/**
+ * Resolve the target chosen in the Chats tab when the message has no explicit
+ * @mention. Keeping this separate from mention resolution makes the precedence
+ * clear: a typed mention wins, otherwise the per-thread picker wins, otherwise
+ * Alpha answers as the automatic responder.
+ */
+export function resolveChatTarget(
+  targetAgentId: string | undefined,
+  targetSquadId: string | undefined,
+  agents: any[],
+  squads: Squad[] = []
+): any[] {
+  if (targetAgentId) {
+    const agent = agents.find(a => a.id === targetAgentId);
+    return agent ? [agent] : [];
+  }
+
+  if (targetSquadId) {
+    const squad = squads.find(sq => sq.id === targetSquadId);
+    if (!squad) return [];
+    return orderedSquadMembers(squad)
+      .map(id => agents.find(a => a.id === id))
+      .filter(Boolean);
+  }
+
+  return [];
 }
 
 export interface SendMessageResult {
@@ -195,6 +224,8 @@ export class ChatService extends EventEmitter {
         // user @-mentions. Defaulting to agent-ada meant every conversation
         // silently had a participant nobody chose.
         agentIds: [],
+        targetAgentId: params.targetAgentId ?? undefined,
+        targetSquadId: params.targetSquadId ?? undefined,
         createdAt: now
       });
       if (workspaceId) workspaceRegistry.bind('chat_threads', threadId, workspaceId);
@@ -221,19 +252,23 @@ export class ChatService extends EventEmitter {
      *
      * Agents speak when spoken to. Anything else Alpha answers itself.
      */
-    const agents = workspaceId
-      ? workspaceRegistry.scope('agents', sqliteService.getAgents(), workspaceId).filter(a => !a.isArchived)
-      : sqliteService.getAgents().filter(a => !a.isArchived);
-    const squads = workspaceId
-      ? workspaceRegistry.scope('squads', sqliteService.getSquads(), workspaceId)
-      : sqliteService.getSquads();
-    // Clients can use general workspace chat, but cannot address or execute
-    // internal personas directly. Their thread remains a project-manager
-    // conversation even if the text contains an agent-like @mention.
-    const mentioned = workspaceRole === 'client' ? [] : resolveMentions(content, agents, squads);
+    const agents = sqliteService.getAgents().filter(a => !a.isArchived);
+    const squads = sqliteService.getSquads();
+    const mentioned = resolveMentions(content, agents, squads);
+    const hasExplicitTarget =
+      params.targetAgentId !== undefined || params.targetSquadId !== undefined;
+    const targetAgentId = hasExplicitTarget
+      ? params.targetAgentId ?? undefined
+      : thread.targetAgentId;
+    const targetSquadId = hasExplicitTarget
+      ? params.targetSquadId ?? undefined
+      : thread.targetSquadId;
+    const addressed = mentioned.length
+      ? mentioned
+      : resolveChatTarget(targetAgentId, targetSquadId, agents, squads);
 
-    if (!mentioned.length) {
-      const reply = await this.generateDefaultReply(content, threadId, workspaceId);
+    if (!addressed.length) {
+      const reply = await this.generateDefaultReply(content, threadId);
       sqliteService.saveChatMessage(reply);
       this.emit('chat_message', reply);
       return { userMessage, agentMessage: reply, agentMessages: [reply] };
@@ -244,7 +279,7 @@ export class ChatService extends EventEmitter {
      * and for per-agent CLI sessions. It is no longer used to decide who
      * answers — that is what made a mention permanent.
      */
-    const roster = [...new Set([...(thread.agentIds ?? []), ...mentioned.map(a => a.id)])];
+    const roster = [...new Set([...(thread.agentIds ?? []), ...addressed.map(a => a.id)])];
     sqliteService.setChatThreadAgents(threadId, roster);
 
     /**
@@ -259,13 +294,13 @@ export class ChatService extends EventEmitter {
      * Anthropic at 2 concurrent, and a four-member squad answering at once
      * would spend the whole allowance on a single chat message.
      */
-    if (mentioned.length > 1) {
-      logInfo(`Chat: ${mentioned.length} agents addressed — answering in sequence`);
+    if (addressed.length > 1) {
+      logInfo(`Chat: ${addressed.length} agents addressed — answering in sequence`);
     }
 
     const agentMessages: ChatMessage[] = [];
 
-    for (const [index, agent] of mentioned.entries()) {
+    for (const [index, agent] of addressed.entries()) {
       const priorTurn = agentMessages.length ? describePriorReplies(agentMessages) : undefined;
       const reply = await this.generateAgentReply(agent, content, threadId, priorTurn);
 
