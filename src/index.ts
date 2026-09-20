@@ -22,7 +22,7 @@ import { chatService } from './services/chatService.js';
 import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
-import { warmIdentity } from './services/identityService.js';
+import { currentIdentity, warmIdentity } from './services/identityService.js';
 import { jsonErrorHandler } from './controllers/errorHandler.js';
 import { sqliteService } from './services/sqliteService.js';
 import { ensureAgentFiles } from './services/agentFileService.js';
@@ -328,6 +328,27 @@ server.listen(PORT, HOST, () => {
   // Resolve who is using this copy, so the first issue anyone creates does not
   // pay for a `gh` subprocess.
   warmIdentity();
+
+  /**
+   * Give legacy conversations an owner.
+   *
+   * `chat_threads.owner_id` landed nullable — ADD COLUMN cannot be NOT NULL
+   * without a default — so every thread written before it has none, and the
+   * read path does not treat unowned as public. Without this they would simply
+   * disappear from the list.
+   *
+   * Desktop only, and correct there for the reason the whole mode split
+   * exists: one process, one person at one keyboard, so every thread on this
+   * machine is theirs. A cloud database has no legacy rows.
+   *
+   * After identity, because the login is not known until `gh` answers.
+   */
+  currentIdentity()
+    .then(identity => {
+      const claimed = sqliteService.claimUnownedThreads(identity.login);
+      if (claimed > 0) logInfo(`Claimed ${claimed} conversation(s) for ${identity.login}.`);
+    })
+    .catch(err => logError('Could not claim unowned conversations:', err));
 
   // Write a starter MCP catalog if the user has none, so the file is
   // discoverable rather than something you have to know to create.

@@ -818,3 +818,67 @@ would have been asserting the policy was broken.
 `supabaseService` does not yet use the token: it holds a client built with the
 anon key at construction. Pointing it at `/database/token` is the next change,
 and is what finally makes cloud persistence do something.
+
+---
+
+## Chat ownership — closing the leak in the code that actually runs
+
+**Status:** done
+**Files:** `sqliteService.ts`, `models/index.ts`, `chatController.ts`,
+`index.ts`, `chatOwnership.test.ts` (new)
+
+The sequencing was backwards. RLS protects a Postgres database nothing talks
+to yet, while the desktop app — the one people run today — still returned every
+thread in the workspace to every member:
+
+```ts
+res.json(workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(), ...))
+```
+
+`SELECT * FROM chat_threads WHERE workspace_id = ?`. No owner column existed,
+so there was nothing to filter on and the filter was never written.
+
+### `owner_id`, and what an unowned row means
+
+Added through the existing `additions` migration table. Nullable, because
+`ADD COLUMN` cannot be `NOT NULL` without a default and there is no sensible
+default for "who wrote this".
+
+That leaves legacy rows with no owner, and the tempting read is
+`owner_id = ? OR owner_id IS NULL` — which would have reinstated the exact leak
+being closed, with every pre-existing thread visible to everyone.
+
+So unowned is **not** public. Legacy rows are claimed once at startup by
+`claimUnownedThreads()`, which is correct on the desktop for the reason the
+whole mode split exists: one process, one person at one keyboard, so every
+thread on this machine is theirs. A cloud database has no legacy rows. The
+claim only touches `owner_id IS NULL`, so it can never transfer ownership.
+
+It runs after `currentIdentity()` resolves, because the login is not known
+until `gh` answers.
+
+### The owner comes from the middleware, never the body
+
+```ts
+sqliteService.createChatThread({ ...req.body, ownerId: req.workspace!.userId })
+```
+
+A client that could name its own `ownerId` could attribute a thread to someone
+else, or read one by claiming to own it.
+
+### Same rule, enforced twice, on purpose
+
+The desktop reaches Postgres directly, so this Express check is not in that
+path — which is why `0002_row_level_security.sql` states the rule again. The
+two do not share code and cannot be kept in step by a type, so each has its own
+test: `chatOwnership.test.ts` here and `rlsPolicies.test.ts` there.
+
+`getChatThreads()` keeps its unscoped form for internal callers resolving a
+single thread the controller already authorised. Nothing on a request path uses
+it, and a test pins that the unscoped call still sees everything so the
+distinction stays visible rather than becoming an accident.
+
+### Verification
+
+`npx tsc --noEmit` — exit 0.
+`npx vitest run` — **781 passed / 35 failed (816)**. Baseline 720/35.

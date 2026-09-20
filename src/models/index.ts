@@ -415,6 +415,18 @@ export interface ChatThread {
    * nothing in particular.
    */
   projectId?: string;
+  /**
+   * The GitHub login of whoever started this conversation.
+   *
+   * A developer's prompts are their working notes, not managed output, so a
+   * thread is visible to its owner and to nobody else — not even a project
+   * manager, who sees the work (runs, stages, patches) without the thinking
+   * behind it.
+   *
+   * Optional only because rows created before the column exists have none.
+   * Those are claimed at startup; nothing new is written without an owner.
+   */
+  ownerId?: string;
   createdAt: string;
 }
 
