@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, CORS_ORIGIN } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, IS_CLOUD, IS_DESKTOP, isAllowedOrigin } from './config/env.js';
 import { dataRouter } from './controllers/dataController.js';
 import { workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
@@ -40,14 +40,13 @@ const app = express();
  *
  * `CORS_ORIGIN` was already parsed in config/env.ts but ignored here.
  */
-const allowedOrigins = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
   origin(origin, callback) {
     // Same-origin / curl / Electron send no Origin header.
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
+    // Exact entries plus wildcard labels, so Vercel preview deploys — a fresh
+    // subdomain on every push — are not each blocked as an unknown origin.
+    if (isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error(`Origin ${origin} is not allowed`));
   },
   credentials: true
@@ -150,27 +149,43 @@ app.get('/api/health', (req, res) => {
 
 const server = http.createServer(app);
 
-// WebSocket Server for Live Real-Time 5-Stage Streaming
-const wss = new WebSocketServer({ server });
-
 const clients = new Set<WebSocket>();
 
-wss.on('connection', (ws: WebSocket) => {
-  clients.add(ws);
-  logInfo('Client connected to WebSocket stream');
+/**
+ * Live run streaming, on the desktop only.
+ *
+ * This socket carries every run's stage updates to every client that connects,
+ * with no token check on upgrade and no workspace filter — the comment on
+ * `safeAgentCallEvent` says as much: it "is intentionally not an authorization
+ * boundary". On a workstation that is fine, because HOST is loopback and the
+ * only listener is this app's own renderer.
+ *
+ * In the cloud the same socket is published to the internet, where "not an
+ * authorization boundary" means any browser can subscribe to the activity of
+ * every developer in every workspace. Cloud clients get the same telemetry
+ * through Supabase Realtime instead, where RLS applies, so there is nothing to
+ * replace here — only something to stop exposing.
+ */
+if (IS_DESKTOP) {
+  const wss = new WebSocketServer({ server });
 
-  ws.send(JSON.stringify({ type: 'connected', time: new Date().toISOString() }));
+  wss.on('connection', (ws: WebSocket) => {
+    clients.add(ws);
+    logInfo('Client connected to WebSocket stream');
 
-  ws.on('close', () => {
-    clients.delete(ws);
-    logInfo('Client disconnected from WebSocket stream');
+    ws.send(JSON.stringify({ type: 'connected', time: new Date().toISOString() }));
+
+    ws.on('close', () => {
+      clients.delete(ws);
+      logInfo('Client disconnected from WebSocket stream');
+    });
+
+    ws.on('error', (err) => {
+      logError('WebSocket client error:', err);
+      clients.delete(ws);
+    });
   });
-
-  ws.on('error', (err) => {
-    logError('WebSocket client error:', err);
-    clients.delete(ws);
-  });
-});
+}
 
 function broadcast(payload: Record<string, any>) {
   const data = JSON.stringify(payload);
@@ -238,8 +253,23 @@ runnerService.on('squad_run_failed', (data) => broadcast({ type: 'squad_run_fail
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
 
 server.listen(PORT, HOST, () => {
-  logInfo(`Alpha v2 Execution Engine & Backend Daemon running on http://${HOST}:${PORT}`);
-  logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+  logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${PORT}`);
+  if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  /**
+   * Everything below this point is execution-node work.
+   *
+   * The cloud process has no working copy to reconcile, no `~/.alpha` that
+   * survives a deploy, no agent CLIs to discover and no local models to poll.
+   * Running any of it there is not merely wasted — `runtimeRefreshService`
+   * rescans the filesystem on a timer and would report "no runtimes found"
+   * forever, which is indistinguishable from a real misconfiguration on a
+   * developer's machine.
+   */
+  if (IS_CLOUD) {
+    logInfo('Cloud mode: runner, runtime discovery and local scaffolding are disabled.');
+    return;
+  }
 
   /**
    * Close out anything the previous process was in the middle of.
