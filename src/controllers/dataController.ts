@@ -1,5 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { currentIdentity } from '../services/identityService.js';
+import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
+import { githubService } from '../services/githubService.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -38,8 +40,47 @@ export const dataRouter = Router();
  * teams and every pull request already use, or the OS username when GitHub is
  * not signed in — `source` says which, so the UI can be honest about it.
  */
-dataRouter.get('/me', async (_req: Request, res: Response) => {
-  res.json(await currentIdentity());
+dataRouter.get('/me', async (req: Request, res: Response) => {
+  /**
+   * Answered from the session in the cloud, from `gh` on the desktop.
+   *
+   * `currentIdentity()` unconditionally was the same defect one level up from
+   * `workspaceContext`: a process-global read of the local CLI, which in a
+   * container is the OS user. The browser's "who am I" would have come back as
+   * the same person for everyone, and the UI would have drawn their role.
+   *
+   * Always 200, never 401. This is the probe the app makes on boot to find out
+   * whether it needs to show a sign-in, and an error status would put that
+   * answer on the failure path where the existing caller already swallows it.
+   * `authenticated: false` is a fact about the caller, not a failure to read
+   * it.
+   */
+  if (IS_CLOUD) {
+    if (!req.session) {
+      let signInUrl: string | undefined;
+      try {
+        signInUrl = githubService.getOAuthLoginUrl().url;
+      } catch {
+        // OAuth not configured yet. The app can still say "sign in", it just
+        // cannot say where to — better than rendering a dead button.
+      }
+      return res.json({ authenticated: false, signInUrl });
+    }
+
+    const { login, name, role } = req.session;
+    return res.json({
+      authenticated: true,
+      login,
+      name,
+      role,
+      source: 'github',
+      workspaceOrg: ALPHA_ORG,
+      access: 'granted',
+      github: 'ok'
+    });
+  }
+
+  return res.json({ authenticated: true, ...(await currentIdentity()) });
 });
 
 /**

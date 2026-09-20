@@ -546,3 +546,91 @@ an anonymous caller with data, because that caller resolved to the OS user and
   store-driver work exists to fix.
 - Still OAuth-App tokens, which do not expire. GitHub App user tokens expire in
   8 hours and need refresh; the session row has somewhere to put that.
+
+---
+
+## Closing the loop — the browser can now sign in
+
+**Status:** done
+**Files:** `dataController.ts`; frontend `apiService.ts`, `types/index.ts`,
+`App.tsx`, `SignIn.tsx` (new), `DeveloperGateway.tsx` (new)
+
+The session layer made the API refuse anonymous callers. The frontend had no
+way to stop being one, so cloud mode was a closed loop: the backend answered
+401 to everything and the browser could not authenticate.
+
+Two causes, each individually fatal:
+
+1. **`fetch` never sent the cookie.** No `credentials` option, and the browser
+   omits credentials cross-origin unless asked — which Vercel-to-Render always
+   is. Every request arrived anonymous no matter who was signed in.
+2. **`/me` answered from `currentIdentity()`.** The same defect as
+   `workspaceContext`, one level up: in a container that is the OS user, so the
+   browser's "who am I" would have returned the same person for everyone and
+   the UI would have drawn their role.
+
+### `/me` is now the sign-in probe
+
+Mode-aware: the session in cloud, `gh` on the desktop. Always 200, never 401 —
+this is the call the app makes on boot to find out *whether* it needs a
+sign-in, and an error status would put that answer on the failure path, where
+the existing caller already swallows it. `authenticated: false` is a fact about
+the caller, not a failure to read one.
+
+When OAuth is unconfigured the response carries no `signInUrl`, and the screen
+says so rather than rendering a button that cannot work — a dead button reads
+as a bug in the app instead of a gap in the deployment.
+
+### Two new gates
+
+**`SignIn`** — web only; the desktop resolves identity before its window opens,
+so `authenticated` is never false there. Not a form: Alpha has no passwords and
+no user table. A person is their GitHub account and their role is their team.
+
+It renders the reason a previous attempt bounced, read from the redirect
+fragment (`#alpha_error=no_team|oauth_failed`). A fragment rather than a query
+string because it never reaches the server and so never lands in an access log
+or a `Referer` header. Read once and cleared, so a refresh does not re-show an
+error already resolved.
+
+**`DeveloperGateway`** — a developer who signs in to the web app. Their tools
+need a checkout and the AI CLIs on their own machine; a browser tab has
+neither. The honest answer is a signpost, not a degraded workspace. Their
+session stays valid and the desktop app finds the same account.
+
+Gated on `role === 'dev' && !isDesktop`, where `isDesktop` comes from the
+Electron preload bridge that already exposed `window.alphaDesktop.isDesktop`.
+
+### Verification
+
+Cloud mode, live:
+
+```
+GET /api/me          no cookie   200  {"authenticated":false}
+GET /api/projects    no cookie   401
+log: HOST was set to "127.0.0.1", which in cloud mode would accept no traffic
+     from outside the container ... Bound 0.0.0.0 instead.
+```
+
+That last line is the HOST override from the previous commit firing correctly —
+the earlier smoke test bound loopback because the gitignored `.env` won.
+
+Desktop mode, unregressed:
+
+```
+GET /api/me          200  {"authenticated":true,"login":"LloydLim1",...}
+GET /api/projects    200
+log: DESKTOP mode ... WebSocket Live Stream Server listening
+```
+
+`npx tsc --noEmit` both repos — exit 0.
+`npx vitest run` — 748 passed / 35 failed, unchanged.
+`npm run build` (frontend) — 917 kB, builds clean.
+
+### Not done yet
+
+The gateway's download link points at `/api/download/desktop`, which still
+serves a stale 333 kB source zip rather than the 86 MB installer, and requires
+no authentication. Fixing that needs a published GitHub Release and an
+authenticated proxy — see the blockers recorded against the gateway in the
+hosting plan.
