@@ -1,10 +1,12 @@
 import { Request, Response, Router } from 'express';
 import { runtimeRefreshService } from '../services/runtimeRefreshService.js';
 import { sqliteService } from '../services/sqliteService.js';
+import { requireWorkspaceCapability } from './workspaceContext.js';
 
 export const runtimeRouter = Router();
 
 runtimeRouter.get('/runtimes', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   const cached = sqliteService.getRuntimes();
   if (cached.length > 0) {
     return res.json(cached);

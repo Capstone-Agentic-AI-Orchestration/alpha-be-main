@@ -2,11 +2,14 @@ import { Request, Response, Router } from 'express';
 import { chatService } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
+import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
+import { workspaceRegistry } from '../services/workspaceRegistry.js';
 
 export const chatRouter = Router();
 
 chatRouter.get('/chat/threads', (req: Request, res: Response) => {
-  res.json(sqliteService.getChatThreads());
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  res.json(workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(), req.workspace!.workspaceId));
 });
 
 /**
@@ -29,14 +32,23 @@ chatRouter.get('/chat/threads', (req: Request, res: Response) => {
  * the wire.
  */
 chatRouter.post('/chat/threads', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   const id = typeof req.body?.id === 'string' ? req.body.id : undefined;
 
   const existing = id
-    ? sqliteService.getChatThreads().find(t => t.id === id)
+    ? workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(), req.workspace!.workspaceId).find(t => t.id === id)
     : undefined;
   if (existing) return res.status(200).json(existing);
 
+  if (req.body?.projectId !== undefined && req.body.projectId !== null) {
+    if (typeof req.body.projectId !== 'string') {
+      return res.status(400).json({ error: 'projectId must be a string or null' });
+    }
+    if (!requireProjectWorkspace(req, res, req.body.projectId)) return;
+  }
+
   const thread = sqliteService.createChatThread(req.body);
+  workspaceRegistry.bind('chat_threads', thread.id, req.workspace!.workspaceId);
   res.status(201).json(thread);
 });
 
@@ -48,15 +60,15 @@ chatRouter.post('/chat/threads', (req: Request, res: Response) => {
  * the managed workspace root.
  */
 chatRouter.put('/chat/threads/:id', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const { projectId } = req.body ?? {};
 
   if (projectId !== null && typeof projectId !== 'string') {
     return res.status(400).json({ error: 'projectId must be a string or null' });
   }
 
-  if (projectId && !sqliteService.getProjects().some(p => p.id === projectId)) {
-    return res.status(404).json({ error: `No project with id "${projectId}"` });
-  }
+  if (projectId && !requireProjectWorkspace(req, res, projectId)) return;
 
   const updated = sqliteService.setChatThreadProject(req.params.id, projectId);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
@@ -121,6 +133,8 @@ chatRouter.put('/chat/threads/:id/target', (req: Request, res: Response) => {
 });
 
 chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   res.json(sqliteService.getChatMessages(req.params.id));
 });
 
@@ -133,12 +147,17 @@ chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
  * copy, because a deleted thread came back empty and looked deleted.
  */
 chatRouter.delete('/chat/threads/:id', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const deleted = sqliteService.deleteChatThread(req.params.id);
+  if (deleted) workspaceRegistry.unbind('chat_threads', req.params.id);
   if (!deleted) return res.status(404).json({ error: 'Thread not found' });
   res.json({ success: true });
 });
 
 chatRouter.delete('/chat/threads/:id/messages', (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const removed = sqliteService.clearChatMessages(req.params.id);
   if (removed < 0) return res.status(404).json({ error: 'Thread not found' });
   res.json({ success: true, removed });

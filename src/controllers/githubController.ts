@@ -4,6 +4,7 @@ import { createScaffoldedRepository } from '../services/repoScaffoldService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
+import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
 export const githubRouter = Router();
 
@@ -89,22 +90,30 @@ githubRouter.post('/github/app/webhook', async (req: Request, res: Response) => 
 
 /** Organizations the signed-in user can be offered as a repository owner. */
 githubRouter.get('/github/orgs', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   res.json(await githubService.listOrganizations());
 });
 
 githubRouter.get('/github/repos', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   const repos = await githubService.listRepositories();
   res.json(repos);
 });
 
 githubRouter.get('/github/runs', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'deployment.read')) return;
   const cwd = (req.query.cwd as string) || path.resolve('..');
   const runs = await githubService.getWorkflowRuns(cwd);
   res.json(runs);
 });
 
 githubRouter.post('/github/dispatch', async (req: Request, res: Response) => {
-  const { cwd, workflow, ref, inputs } = req.body ?? {};
+  if (!requireWorkspaceCapability(req, res, 'deployment.manage')) return;
+  const { projectId, cwd, workflow, ref, inputs } = req.body ?? {};
+  if (!projectId || typeof projectId !== 'string') {
+    return res.status(400).json({ error: 'A workspace projectId is required.' });
+  }
+  if (!requireEntityWorkspace(req, res, 'projects', projectId)) return;
   if (!cwd || typeof cwd !== 'string') {
     return res.status(400).json({ error: 'A project workspace "cwd" is required.' });
   }
@@ -133,12 +142,14 @@ githubRouter.post('/github/dispatch', async (req: Request, res: Response) => {
 });
 
 githubRouter.get('/github/runs/:id/logs', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'deployment.read')) return;
   const cwd = (req.query.cwd as string) || path.resolve('..');
   const logs = await githubService.getFailedWorkflowLogs(cwd, req.params.id);
   res.json({ logs });
 });
 
 githubRouter.post('/github/pr', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'deployment.manage')) return;
   try {
     const { cwd = path.resolve('..'), title, body, base = 'main', headBranch } = req.body;
     const prUrl = await githubService.createPullRequest(cwd, title, body, base, headBranch);
@@ -149,6 +160,7 @@ githubRouter.post('/github/pr', async (req: Request, res: Response) => {
 });
 
 githubRouter.post('/github/merge', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'deployment.manage')) return;
   try {
     const { cwd = path.resolve('..'), prUrl, method = 'squash' } = req.body;
     const result = await githubService.mergePullRequest(cwd, prUrl, method);
@@ -166,6 +178,7 @@ githubRouter.post('/github/merge', async (req: Request, res: Response) => {
  * Body: { name, visibility?, description?, org?, sourceDir?, initReadme? }
  */
 githubRouter.post('/github/repos', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const { name, visibility, description, org, sourceDir, initReadme } = req.body ?? {};
 
   if (!name || typeof name !== 'string') {
@@ -200,6 +213,7 @@ githubRouter.post('/github/repos', async (req: Request, res: Response) => {
  * is not enforced at all.
  */
 githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const { projectId, repoName, stack, org, visibility, shape, includeDocker } = req.body ?? {};
 
   if (!projectId || typeof projectId !== 'string') {
@@ -217,6 +231,7 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
     return res.status(400).json({ error: 'visibility must be private or public.' });
   }
 
+  if (!requireEntityWorkspace(req, res, 'projects', projectId)) return;
   const project = sqliteService.getProjects().find(p => p.id === projectId);
   if (!project) {
     return res.status(404).json({ error: `Project not found: ${projectId}` });
@@ -268,6 +283,7 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
  * Body: { repo: "owner/name", intoDir }
  */
 githubRouter.post('/github/repos/clone', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const { repo, intoDir } = req.body ?? {};
   if (!repo || !intoDir) {
     return res.status(400).json({ error: '"repo" and "intoDir" are required.' });
@@ -286,6 +302,7 @@ githubRouter.post('/github/repos/clone', async (req: Request, res: Response) => 
  * Body: { repo: "owner/name", cloneInto? }
  */
 githubRouter.post('/github/repos/fork', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const { repo, cloneInto } = req.body ?? {};
   if (!repo) return res.status(400).json({ error: '"repo" is required.' });
 
@@ -301,6 +318,7 @@ githubRouter.post('/github/repos/fork', async (req: Request, res: Response) => {
  * GET /api/github/inspect?cwd=...
  */
 githubRouter.get('/github/inspect', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   const raw = req.query.cwd;
   const cwd = typeof raw === 'string' ? raw : '';
   if (!cwd) return res.status(400).json({ error: 'A "cwd" query parameter is required.' });

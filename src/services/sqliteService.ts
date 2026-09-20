@@ -82,6 +82,24 @@ function squadRunFromRow(r: any): SquadRun {
   };
 }
 
+function parseJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function agentCallTargetFromRow(row: any): AgentCallTarget | undefined {
+  if (!row.revision_target_type || !row.revision_target_id) return undefined;
+  return {
+    type: row.revision_target_type,
+    id: row.revision_target_id,
+    label: row.revision_target_label ?? undefined
+  };
+}
+
 export class SQLiteService {
   private db: Database.Database;
 
@@ -347,7 +365,46 @@ export class SQLiteService {
         content TEXT NOT NULL,
         thinking_process TEXT,
         tools_executed TEXT DEFAULT '[]',
+        message_type TEXT DEFAULT 'assistant',
+        agent_call_id TEXT,
+        squad_id TEXT,
+        operation_mode TEXT,
+        agent_call_status TEXT,
+        revision_target TEXT,
         timestamp TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_calls (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+        message_id TEXT,
+        squad_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        operation_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        revision_target_type TEXT,
+        revision_target_id TEXT,
+        revision_target_label TEXT,
+        instruction TEXT NOT NULL,
+        working_copy_id TEXT,
+        result_message_id TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_call_artifacts (
+        id TEXT PRIMARY KEY,
+        agent_call_id TEXT NOT NULL REFERENCES agent_calls(id) ON DELETE CASCADE,
+        artifact_type TEXT NOT NULL,
+        path TEXT,
+        content_reference TEXT,
+        content TEXT,
+        created_at TEXT NOT NULL
       );
     `);
   }
@@ -596,6 +653,12 @@ export class SQLiteService {
        * with its id already set, so it is never a candidate to be pushed back.
        */
       ['issue_comments', 'github_id INTEGER']
+      ,['chat_messages', 'message_type TEXT DEFAULT \'assistant\'']
+      ,['chat_messages', 'agent_call_id TEXT']
+      ,['chat_messages', 'squad_id TEXT']
+      ,['chat_messages', 'operation_mode TEXT']
+      ,['chat_messages', 'agent_call_status TEXT']
+      ,['chat_messages', 'revision_target TEXT']
     ];
 
 
@@ -2341,22 +2404,45 @@ export class SQLiteService {
       senderName: r.sender_name,
       agentId: r.agent_id,
       content: r.content,
-      thinkingProcess: r.thinking_process,
-      toolsExecuted: JSON.parse(r.tools_executed || '[]'),
+      // Private model reasoning is not returned by the agent-call path. Keep
+      // this legacy field readable for old conversations, but new responses
+      // deliberately omit it at the service boundary.
+      thinkingProcess: r.thinking_process ?? undefined,
+      toolsExecuted: parseJson(r.tools_executed, []),
+      messageType: r.message_type ?? undefined,
+      agentCallId: r.agent_call_id ?? undefined,
+      squadId: r.squad_id ?? undefined,
+      operationMode: r.operation_mode ?? undefined,
+      agentCallStatus: r.agent_call_status ?? undefined,
+      revisionTarget: parseJson<AgentCallTarget | undefined>(r.revision_target, undefined),
       timestamp: r.timestamp
     }));
   }
 
   saveChatMessage(msg: ChatMessage) {
     const stmt = this.db.prepare(`
-      INSERT INTO chat_messages (id, thread_id, sender_type, sender_name, agent_id, content, thinking_process, tools_executed, timestamp)
-      VALUES (@id, @threadId, @senderType, @senderName, @agentId, @content, @thinkingProcess, @toolsExecuted, @timestamp)
+      INSERT INTO chat_messages (
+        id, thread_id, sender_type, sender_name, agent_id, content,
+        thinking_process, tools_executed, message_type, agent_call_id,
+        squad_id, operation_mode, agent_call_status, revision_target, timestamp
+      )
+      VALUES (
+        @id, @threadId, @senderType, @senderName, @agentId, @content,
+        @thinkingProcess, @toolsExecuted, @messageType, @agentCallId,
+        @squadId, @operationMode, @agentCallStatus, @revisionTarget, @timestamp
+      )
     `);
     stmt.run({
       ...msg,
       agentId: msg.agentId || null,
       toolsExecuted: JSON.stringify(msg.toolsExecuted || []),
-      thinkingProcess: msg.thinkingProcess || null
+      thinkingProcess: msg.thinkingProcess || null,
+      messageType: msg.messageType || (msg.senderType === 'user' ? 'user' : msg.senderType),
+      agentCallId: msg.agentCallId || null,
+      squadId: msg.squadId || null,
+      operationMode: msg.operationMode || null,
+      agentCallStatus: msg.agentCallStatus || null,
+      revisionTarget: msg.revisionTarget ? JSON.stringify(msg.revisionTarget) : null
     });
 
     const updateThread = this.db.prepare(`
@@ -2366,6 +2452,10 @@ export class SQLiteService {
       WHERE id = ? AND workspace_id = ?
     `);
     updateThread.run(msg.content.slice(0, 100), msg.timestamp, msg.threadId, this.workspaceId());
+  }
+
+  deleteChatMessage(messageId: string): boolean {
+    return this.db.prepare('DELETE FROM chat_messages WHERE id = ?').run(messageId).changes > 0;
   }
 
   createChatThread(thread: Partial<ChatThread>): ChatThread {
@@ -2489,6 +2579,158 @@ export class SQLiteService {
       .run(projectId, threadId, this.workspaceId());
 
     return this.getChatThreads().find(t => t.id === threadId) ?? null;
+  }
+
+  // --- Project-scoped agent calls -----------------------------------------
+  private agentCallFromRow(row: any): AgentCall {
+    return {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      projectId: row.project_id,
+      threadId: row.thread_id,
+      messageId: row.message_id ?? undefined,
+      squadId: row.squad_id,
+      agentId: row.agent_id,
+      requestedBy: row.requested_by,
+      operationMode: row.operation_mode,
+      status: row.status,
+      revisionTarget: agentCallTargetFromRow(row),
+      instruction: row.instruction,
+      workingCopyId: row.working_copy_id ?? undefined,
+      resultMessageId: row.result_message_id ?? undefined,
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      startedAt: row.started_at ?? undefined,
+      completedAt: row.completed_at ?? undefined,
+      artifacts: this.getAgentCallArtifacts(row.id)
+    };
+  }
+
+  getAgentCalls(filters: { workspaceId?: string; projectId?: string; threadId?: string } = {}): AgentCall[] {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filters.workspaceId) { clauses.push('workspace_id = ?'); values.push(filters.workspaceId); }
+    if (filters.projectId) { clauses.push('project_id = ?'); values.push(filters.projectId); }
+    if (filters.threadId) { clauses.push('thread_id = ?'); values.push(filters.threadId); }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`SELECT * FROM agent_calls ${where} ORDER BY created_at DESC`).all(...values) as any[];
+    return rows.map(row => this.agentCallFromRow(row));
+  }
+
+  getAgentCall(id: string): AgentCall | null {
+    const row = this.db.prepare('SELECT * FROM agent_calls WHERE id = ?').get(id) as any;
+    return row ? this.agentCallFromRow(row) : null;
+  }
+
+  saveAgentCall(call: AgentCall): AgentCall {
+    const target = call.revisionTarget;
+    this.db.prepare(`
+      INSERT INTO agent_calls (
+        id, workspace_id, project_id, thread_id, message_id, squad_id, agent_id,
+        requested_by, operation_mode, status, revision_target_type,
+        revision_target_id, revision_target_label, instruction, working_copy_id,
+        result_message_id, error, created_at, started_at, completed_at
+      ) VALUES (
+        @id, @workspaceId, @projectId, @threadId, @messageId, @squadId, @agentId,
+        @requestedBy, @operationMode, @status, @revisionTargetType,
+        @revisionTargetId, @revisionTargetLabel, @instruction, @workingCopyId,
+        @resultMessageId, @error, @createdAt, @startedAt, @completedAt
+      )
+    `).run({
+      id: call.id,
+      workspaceId: call.workspaceId,
+      projectId: call.projectId,
+      threadId: call.threadId,
+      messageId: call.messageId ?? null,
+      squadId: call.squadId,
+      agentId: call.agentId,
+      requestedBy: call.requestedBy,
+      operationMode: call.operationMode,
+      status: call.status,
+      revisionTargetType: target?.type ?? null,
+      revisionTargetId: target?.id ?? null,
+      revisionTargetLabel: target?.label ?? null,
+      instruction: call.instruction,
+      workingCopyId: call.workingCopyId ?? null,
+      resultMessageId: call.resultMessageId ?? null,
+      error: call.error ?? null,
+      createdAt: call.createdAt,
+      startedAt: call.startedAt ?? null,
+      completedAt: call.completedAt ?? null
+    });
+    return this.getAgentCall(call.id)!;
+  }
+
+  updateAgentCall(id: string, updates: Partial<AgentCall>): AgentCall | null {
+    const current = this.getAgentCall(id);
+    if (!current) return null;
+    const merged = { ...current, ...updates };
+    const target = merged.revisionTarget;
+    this.db.prepare(`
+      UPDATE agent_calls SET
+        message_id = @messageId, squad_id = @squadId, agent_id = @agentId,
+        requested_by = @requestedBy, operation_mode = @operationMode,
+        status = @status, revision_target_type = @revisionTargetType,
+        revision_target_id = @revisionTargetId, revision_target_label = @revisionTargetLabel,
+        instruction = @instruction, working_copy_id = @workingCopyId,
+        result_message_id = @resultMessageId, error = @error,
+        started_at = @startedAt, completed_at = @completedAt
+      WHERE id = @id
+    `).run({
+      id,
+      messageId: merged.messageId ?? null,
+      squadId: merged.squadId,
+      agentId: merged.agentId,
+      requestedBy: merged.requestedBy,
+      operationMode: merged.operationMode,
+      status: merged.status,
+      revisionTargetType: target?.type ?? null,
+      revisionTargetId: target?.id ?? null,
+      revisionTargetLabel: target?.label ?? null,
+      instruction: merged.instruction,
+      workingCopyId: merged.workingCopyId ?? null,
+      resultMessageId: merged.resultMessageId ?? null,
+      error: merged.error ?? null,
+      startedAt: merged.startedAt ?? null,
+      completedAt: merged.completedAt ?? null
+    });
+    return this.getAgentCall(id);
+  }
+
+  getAgentCallArtifacts(agentCallId: string): AgentCallArtifact[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM agent_call_artifacts WHERE agent_call_id = ? ORDER BY created_at ASC'
+    ).all(agentCallId) as any[];
+    return rows.map(row => ({
+      id: row.id,
+      agentCallId: row.agent_call_id,
+      artifactType: row.artifact_type,
+      path: row.path ?? undefined,
+      contentReference: row.content_reference ?? undefined,
+      content: row.content ?? undefined,
+      createdAt: row.created_at
+    }));
+  }
+
+  saveAgentCallArtifact(artifact: AgentCallArtifact): AgentCallArtifact {
+    this.db.prepare(`
+      INSERT INTO agent_call_artifacts
+        (id, agent_call_id, artifact_type, path, content_reference, content, created_at)
+      VALUES (@id, @agentCallId, @artifactType, @path, @contentReference, @content, @createdAt)
+    `).run({
+      id: artifact.id,
+      agentCallId: artifact.agentCallId,
+      artifactType: artifact.artifactType,
+      path: artifact.path ?? null,
+      contentReference: artifact.contentReference ?? null,
+      content: artifact.content ?? null,
+      createdAt: artifact.createdAt
+    });
+    return artifact;
+  }
+
+  deleteAgentCallArtifacts(agentCallId: string): number {
+    return this.db.prepare('DELETE FROM agent_call_artifacts WHERE agent_call_id = ?').run(agentCallId).changes;
   }
 
   // --- CLI session continuity -----------------------------------------------

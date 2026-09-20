@@ -37,10 +37,12 @@ async function startApi() {
 
   const sql = await import('../services/sqliteService.js');
   const { chatRouter } = await import('./chatController.js');
+  const { workspaceContext } = await import('./workspaceContext.js');
   opened.push(sql.sqliteService);
 
   const app = express();
   app.use(express.json());
+  app.use('/api', workspaceContext);
   app.use('/api', chatRouter);
   return { svc: sql.sqliteService as any, app };
 }

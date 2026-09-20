@@ -418,6 +418,79 @@ export interface ChatThread {
   createdAt: string;
 }
 
+export type AgentCallMode = 'ask' | 'review' | 'revise' | 'implement';
+export type AgentCallStatus =
+  | 'draft'
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'awaiting_confirmation';
+
+export type AgentCallTargetType =
+  | 'message'
+  | 'agent_response'
+  | 'issue'
+  | 'specification'
+  | 'file'
+  | 'code'
+  | 'branch'
+  | 'commit'
+  | 'pull_request'
+  | 'diff';
+
+export interface AgentCallTarget {
+  type: AgentCallTargetType;
+  id: string;
+  label?: string;
+}
+
+export interface AgentCallArtifact {
+  id: string;
+  agentCallId: string;
+  artifactType: 'summary' | 'finding' | 'diff' | 'patch' | 'test_result' | 'file_reference' | 'log';
+  path?: string;
+  contentReference?: string;
+  content?: string;
+  createdAt: string;
+}
+
+export interface AgentCall {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  threadId: string;
+  messageId?: string;
+  squadId: string;
+  agentId: string;
+  requestedBy: string;
+  operationMode: AgentCallMode;
+  status: AgentCallStatus;
+  revisionTarget?: AgentCallTarget;
+  instruction: string;
+  workingCopyId?: string;
+  resultMessageId?: string;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  artifacts: AgentCallArtifact[];
+}
+
+export interface ProjectChatAgent {
+  id: string;
+  name: string;
+  role: string;
+  description?: string;
+  avatar?: string;
+  color?: string;
+  squadId: string;
+  squadName: string;
+  availability: 'ready';
+  supportedModes: AgentCallMode[];
+}
+
 export interface ToolExecutionRecord {
   id: string;
   toolName: string;
@@ -436,6 +509,12 @@ export interface ChatMessage {
   content: string;
   thinkingProcess?: string;
   toolsExecuted?: ToolExecutionRecord[];
+  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call';
+  agentCallId?: string;
+  squadId?: string;
+  operationMode?: AgentCallMode;
+  agentCallStatus?: AgentCallStatus;
+  revisionTarget?: AgentCallTarget;
   timestamp: string;
 }
 
