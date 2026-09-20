@@ -337,7 +337,30 @@ class WorkspaceRegistry {
     };
   }
 
+  /**
+   * Enrol a first-time caller in the default workspace, at the role GitHub
+   * gave them.
+   *
+   * `suggestedRole ?? 'admin'` used to sit on that last field, and it was the
+   * single most dangerous line in the permission system: any account this
+   * function had not seen before became a workspace administrator. It was not
+   * reachable in practice only because the *other* half of the check was also
+   * broken — `resolveWorkspaceOrg()` returned undefined on an install with no
+   * projects, which disabled the `no_team` gate, which meant callers with no
+   * role arrived here constantly. Two defects cancelling out.
+   *
+   * Now: no role, no membership. `identityService` refuses a GitHub account
+   * that belongs to no mapped team before the request reaches this far, so a
+   * missing role here means a path that bypassed that gate. Enrolling nobody
+   * is the safe answer — `resolve()` then finds no membership and answers 403,
+   * which is the same thing the caller would have seen anyway.
+   *
+   * Admin is granted by the `admins` team, or by ALPHA_ADMINS while that team
+   * does not exist. Never by arriving.
+   */
   ensureMember(userId: string, suggestedRole?: WorkspaceRole): void {
+    if (!suggestedRole) return;
+
     const existing = this.db.prepare(
       'SELECT id FROM workspace_members WHERE workspace_id = ? AND user_id = ?'
     ).get(this.defaultWorkspaceId, userId);
@@ -352,7 +375,7 @@ class WorkspaceRegistry {
       `member-${randomUUID()}`,
       this.defaultWorkspaceId,
       userId,
-      suggestedRole ?? 'admin',
+      suggestedRole,
       now,
       now
     );
