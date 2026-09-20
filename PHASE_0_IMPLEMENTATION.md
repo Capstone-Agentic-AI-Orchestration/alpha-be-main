@@ -634,3 +634,119 @@ serves a stale 333 kB source zip rather than the 86 MB installer, and requires
 no authentication. Fixing that needs a published GitHub Release and an
 authenticated proxy — see the blockers recorded against the gateway in the
 hosting plan.
+
+---
+
+# Phase 1a/1b — Supabase schema and RLS
+
+**Status:** done (migrations written and tested; not yet applied to a project)
+**Files:** `supabase/migrations/0001_control_plane_schema.sql` (new),
+`supabase/migrations/0002_row_level_security.sql` (new),
+`src/services/rlsPolicies.test.ts` (new)
+
+No Supabase schema existed. `supabaseService` has been upserting into
+`prototype_runs` and `issues` for months against tables that were never
+created, swallowing every error into `logError` — so cloud persistence has
+silently done nothing while looking healthy.
+
+## 20 tables, not 24
+
+The three-way split from the hosting plan, made concrete. `allowed_paths`,
+`runtimes`, `thread_sessions`, `meta` and `local_project_bindings` are absent
+on purpose: they name paths, PIDs, binaries and session files, which are facts
+about one machine. `C:\Code\checkout` means nothing on another developer's Mac.
+
+Identifiers stay `text`. The application mints `member-<uuid>` and
+`ws-default`, and changing that is a different change from moving the storage.
+This is also why `auth.uid()` is unused — it casts to uuid, and Alpha's subject
+is a GitHub login.
+
+## RLS is the security boundary, not defence in depth
+
+The desktop talks to Postgres directly, because proxying every board action
+through Render means a thirty-second cold start on the first one. So a
+developer's machine holds a token that reaches the database, and the Express
+authorization checks are not in that path. The policies are what stands between
+one developer's session and another's conversations.
+
+Claims contract: `sub` (login), `workspace_id`, `alpha_role`. The role travels
+in the token rather than being read from `workspace_members` per row — a
+membership lookup inside a policy runs once per row, and the token is already
+minted from a session that resolved the role at sign-in.
+
+### The privacy line, as policy
+
+| | |
+| :--- | :--- |
+| `chat_threads`, `chat_messages`, `agent_calls` | owner only, **no overseer bypass** |
+| `agent_call_artifacts` (patches) | owner **or** pm/admin |
+| `prototype_runs`, `squad_runs` | owner **or** pm/admin |
+| board (`projects`, `issues`, `agents`, …) | any workspace member; clients excluded from issues |
+| `remote_actions` | insert + select only — no update or delete policy exists |
+
+A PM sees the work and not the thinking that produced it. The audit log's
+missing update/delete policies are the feature: with RLS on, an operation with
+no policy is denied, and an actor who can rewrite their own audit trail is not
+audited.
+
+`chat_threads.owner_id` is new. In SQLite the table has only `workspace_id`,
+which is why `GET /chat/threads` returned every thread in the workspace to
+every member — there was no column to filter on, so the filter was never
+written.
+
+## RLS composes through subqueries
+
+The one real bug, found by running the policies rather than reading them.
+
+`agent_call_artifacts` deliberately grants **more** than its parent
+`agent_calls`: a PM must be able to review a patch without reading the prompt
+that asked for it. The first version expressed that as
+
+```sql
+exists (select 1 from agent_calls c where c.id = ... and (... or alpha.is_overseer()))
+```
+
+which cannot work. **RLS applies inside a policy's own subqueries**, so that
+lookup runs under the caller's access to `agent_calls` — none, for a PM, by the
+policy immediately above it. The subquery returned no row and the grant
+silently never fired.
+
+The policy read correctly. It granted nothing.
+
+Fixed by denormalising `workspace_id` and `owner_id` onto the artifact, so the
+decision needs no parent read. The general rule, now written in both files:
+**a policy may only widen access beyond its parent if it can decide without
+reading that parent.**
+
+`chat_messages` joins to `chat_threads` and is fine, because there the child's
+visibility is meant to equal the parent's. It is only the widening case that
+breaks.
+
+## Tested behaviourally, as an unprivileged role
+
+`src/services/rlsPolicies.test.ts` runs both migrations against PGlite —
+Postgres compiled to WebAssembly, with the real planner and the real policy
+machinery — seeds two developers, a PM and a client, and asserts what each can
+reach. Superusers bypass RLS, so the tests `set role` to an unprivileged role
+first; without that they would all pass and prove nothing.
+
+14 tests. The one that matters most: a second developer reading the first's
+`chat_threads` returns zero rows.
+
+## Verification
+
+Both migrations apply cleanly: 20 tables, 20 with RLS enabled, 37 policies,
+none unprotected.
+
+`npx tsc --noEmit` — exit 0.
+`npx vitest run` — **762 passed / 35 failed (797)**. Baseline 720/35.
+
+## Not done
+
+- The migrations have not been applied to a real Supabase project.
+- Nothing mints the JWT yet. The session cookie is opaque by design; the token
+  these policies read is a separate short-lived one, derived from a session —
+  that endpoint is the next piece.
+- `supabaseService` still writes with the anon key and no claims, so it will
+  now be *correctly* denied by RLS rather than silently failing against missing
+  tables. It needs the token before it can work.
