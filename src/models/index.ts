@@ -18,6 +18,18 @@ export type AgentRole =
   | 'Validation / Checking Agent'
   | 'GitHub Finalization Agent';
 
+export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer';
+
+export interface Workspace {
+  id: string;
+  name: string;
+  slug: string;
+  organization?: string;
+  role: WorkspaceRole;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type AgentPhase = 'Planning' | 'Development' | 'Validation' | 'Finalization';
 
 export type AutonomyLevel = 'Supervised' | 'Semi-Autonomous (Requires Approval)' | 'Full Autonomy';
@@ -198,6 +210,32 @@ export interface Project {
    * envVars override these in turn.
    */
   envVars?: { key: string; value: string; isSecret?: boolean }[];
+}
+
+export type BuildStepPhase =
+  | 'requirements'
+  | 'architecture'
+  | 'implementation'
+  | 'database'
+  | 'validation'
+  | 'review'
+  | 'delivery';
+
+/** An ordered, project-owned step displayed by the Live Build Room. */
+export interface ProjectBuildStep {
+  id: string;
+  projectId: string;
+  label: string;
+  phase: BuildStepPhase;
+  agentId?: string;
+  squadId?: string;
+  position: number;
+  enabled: boolean;
+  required: boolean;
+  approvalGate?: boolean;
+  dependsOn?: string[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export type StageId = 'workspace' | 'analysis' | 'implementation' | 'tests' | 'review';

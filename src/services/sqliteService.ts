@@ -17,7 +17,10 @@ import {
   RunUsage,
   AnalyticsData,
   SquadRun,
-  RemoteAction
+  RemoteAction,
+  Workspace,
+  ProjectBuildStep,
+  BuildStepPhase
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -27,6 +30,7 @@ import {
   OFFICIAL_AGENT_TEMPLATES
 } from './officialAgentTemplates.js';
 import { discoverInstalledSkills } from './skillDiscoveryService.js';
+import { currentWorkspaceId, DEFAULT_WORKSPACE_ID, runWithWorkspace } from './workspaceContext.js';
 
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
@@ -86,6 +90,7 @@ export class SQLiteService {
     this.initPragmas();
     this.initTables();
     this.migrate();
+    this.ensureDefaultWorkspace();
     this.seedDefaultsIfEmpty();
     this.ensureOfficialAgents();
   }
@@ -110,6 +115,15 @@ export class SQLiteService {
 
   private initTables() {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        organization TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS allowed_paths (
         path TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -118,6 +132,7 @@ export class SQLiteService {
 
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         name TEXT NOT NULL,
         key TEXT NOT NULL UNIQUE,
         description TEXT,
@@ -135,8 +150,29 @@ export class SQLiteService {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS project_build_steps (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
+        project_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        agent_id TEXT,
+        squad_id TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        required INTEGER NOT NULL DEFAULT 1,
+        approval_gate INTEGER NOT NULL DEFAULT 0,
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_project_build_steps_project
+        ON project_build_steps(workspace_id, project_id, position);
+
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         name TEXT NOT NULL,
         role TEXT NOT NULL,
         avatar TEXT,
@@ -161,6 +197,7 @@ export class SQLiteService {
 
       CREATE TABLE IF NOT EXISTS issues (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         identifier TEXT NOT NULL UNIQUE,
         title TEXT NOT NULL,
         description TEXT,
@@ -203,6 +240,7 @@ export class SQLiteService {
        */
       CREATE TABLE IF NOT EXISTS remote_actions (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         run_id TEXT,
         agent_id TEXT,
         issue_id TEXT,
@@ -218,6 +256,7 @@ export class SQLiteService {
 
       CREATE TABLE IF NOT EXISTS prototype_runs (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -239,6 +278,7 @@ export class SQLiteService {
 
       CREATE TABLE IF NOT EXISTS squads (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         name TEXT NOT NULL,
         topology TEXT NOT NULL,
         leader_agent_id TEXT,
@@ -288,6 +328,7 @@ export class SQLiteService {
 
       CREATE TABLE IF NOT EXISTS chat_threads (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'ws-default',
         title TEXT NOT NULL,
         last_message_snippet TEXT,
         last_message_at TEXT NOT NULL,
@@ -356,6 +397,14 @@ export class SQLiteService {
     `);
 
     const additions: Array<[string, string]> = [
+      ['projects', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['agents', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['issues', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['prototype_runs', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['squads', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['chat_threads', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['project_build_steps', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
+      ['remote_actions', "workspace_id TEXT NOT NULL DEFAULT 'ws-default'"],
       ['runtimes', "type TEXT DEFAULT 'cloud'"],
       ['runtimes', 'latency_ms INTEGER DEFAULT 0'],
       ['runtimes', 'endpoint TEXT'],
@@ -562,6 +611,7 @@ export class SQLiteService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS squad_runs (
         id                   TEXT PRIMARY KEY,
+        workspace_id         TEXT NOT NULL DEFAULT 'ws-default',
         squad_id             TEXT NOT NULL,
         issue_id             TEXT NOT NULL,
         project_id           TEXT NOT NULL,
@@ -578,9 +628,131 @@ export class SQLiteService {
 
       -- After the ALTERs above: this indexes a column they add.
       CREATE INDEX IF NOT EXISTS idx_runs_squad_run ON prototype_runs(squad_run_id);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_template_key
-        ON agents(template_key) WHERE template_key IS NOT NULL;
+      DROP INDEX IF EXISTS idx_agents_template_key;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_workspace_template_key
+        ON agents(workspace_id, template_key) WHERE template_key IS NOT NULL;
     `);
+
+    try {
+      this.db.exec("ALTER TABLE squad_runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'ws-default'");
+    } catch {
+      // Already present.
+    }
+
+    // Rows from before workspaces existed belong to the default workspace.
+    for (const table of ['projects', 'project_build_steps', 'agents', 'issues', 'prototype_runs', 'squads', 'chat_threads', 'squad_runs', 'remote_actions']) {
+      this.db.prepare(`UPDATE ${table} SET workspace_id = ? WHERE workspace_id IS NULL OR workspace_id = ''`)
+        .run(DEFAULT_WORKSPACE_ID);
+    }
+  }
+
+  private ensureDefaultWorkspace(): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO workspaces (id, name, slug, organization, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      DEFAULT_WORKSPACE_ID,
+      'Alpha Workspace',
+      'alpha-workspace',
+      null,
+      now,
+      now
+    );
+  }
+
+  private workspaceId(): string {
+    return currentWorkspaceId();
+  }
+
+  getWorkspace(id: string): Workspace | undefined {
+    const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as any;
+    return row ? {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      organization: row.organization ?? undefined,
+      role: 'owner',
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    } : undefined;
+  }
+
+  getWorkspaces(): Workspace[] {
+    const rows = this.db.prepare('SELECT * FROM workspaces ORDER BY created_at ASC').all() as any[];
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      organization: row.organization ?? undefined,
+      role: 'owner' as const,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  createWorkspace(input: Partial<Workspace>): Workspace {
+    const now = new Date().toISOString();
+    const name = String(input.name || 'Untitled Workspace').trim() || 'Untitled Workspace';
+    const baseSlug = String(input.slug || name)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || `workspace-${Date.now()}`;
+    let slug = baseSlug;
+    let suffix = 2;
+    while (this.db.prepare('SELECT 1 FROM workspaces WHERE slug = ?').get(slug)) {
+      slug = `${baseSlug}-${suffix}`;
+      suffix += 1;
+    }
+
+    const workspace: Workspace = {
+      id: input.id || `ws-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      name,
+      slug,
+      organization: input.organization || undefined,
+      role: 'owner',
+      createdAt: now,
+      updatedAt: now
+    };
+
+    this.db.prepare(`
+      INSERT INTO workspaces (id, name, slug, organization, created_at, updated_at)
+      VALUES (@id, @name, @slug, @organization, @createdAt, @updatedAt)
+    `).run({ ...workspace, organization: workspace.organization ?? null });
+
+    // New workspaces start with the same official role catalogue and a reusable
+    // squad scaffold as the default. Projects and issues stay intentionally
+    // empty because those are the owner's work, not product seed data.
+    runWithWorkspace(workspace.id, () => {
+      this.ensureOfficialAgents(workspace.id);
+      const agents = this.getAgents();
+      this.createSquad({
+        id: `squad-${workspace.id}`,
+        name: `${workspace.name} Core Squad`,
+        description: 'Official Alpha roles working in sequence.',
+        avatar: '◈',
+        color: '#6366f1',
+        topology: 'Sequential',
+        leaderAgentId: agents.find(agent => agent.role === 'Manager Agent')?.id || agents[0]?.id,
+        memberAgentIds: agents.map(agent => agent.id),
+        mission: 'Research, plan, build, review, and validate approved project work.',
+        activeRunsCount: 0,
+        completedRunsCount: 0
+      });
+    });
+    return workspace;
+  }
+
+  updateWorkspace(id: string, updates: Partial<Workspace>): Workspace | null {
+    const existing = this.getWorkspace(id);
+    if (!existing) return null;
+    const name = updates.name === undefined ? existing.name : String(updates.name).trim();
+    const slug = updates.slug === undefined ? existing.slug : String(updates.slug).trim();
+    if (!name || !slug) return null;
+    this.db.prepare(`
+      UPDATE workspaces SET name = ?, slug = ?, organization = ?, updated_at = ? WHERE id = ?
+    `).run(name, slug, updates.organization ?? existing.organization ?? null, new Date().toISOString(), id);
+    return this.getWorkspace(id) ?? null;
   }
 
   /**
@@ -632,7 +804,7 @@ export class SQLiteService {
    * old full-stack Developer intentionally remains a legacy custom agent while
    * Backend and Frontend are seeded as separate official roles.
    */
-  private ensureOfficialAgents(): void {
+  private ensureOfficialAgents(workspaceId = this.workspaceId()): void {
     const linkLegacy = this.db.transaction(() => {
       const stmt = this.db.prepare(`
         UPDATE agents
@@ -640,7 +812,7 @@ export class SQLiteService {
             template_version = @templateVersion,
             phase = @phase,
             is_seeded = 1
-        WHERE id = @id AND template_key IS NULL
+        WHERE id = @id AND workspace_id = @workspaceId AND template_key IS NULL
       `);
 
       for (const [id, key] of Object.entries(LEGACY_TEMPLATE_MAPPINGS)) {
@@ -650,7 +822,8 @@ export class SQLiteService {
           id,
           templateKey: template.key,
           templateVersion: template.version,
-          phase: template.phase
+          phase: template.phase,
+          workspaceId
         });
       }
     });
@@ -658,10 +831,12 @@ export class SQLiteService {
     linkLegacy();
 
     const existing = new Set(
-      (this.db.prepare('SELECT template_key FROM agents WHERE template_key IS NOT NULL').all() as Array<{ template_key: string }>)
+      (this.db.prepare('SELECT template_key FROM agents WHERE workspace_id = ? AND template_key IS NOT NULL').all(workspaceId) as Array<{ template_key: string }>)
         .map(row => row.template_key)
     );
     const existingIds = new Set(
+      // Agent ids remain globally unique because they are referenced by runs,
+      // issues, and persona files. The template membership itself is scoped.
       (this.db.prepare('SELECT id FROM agents').all() as Array<{ id: string }>).map(row => row.id)
     );
     const now = new Date().toISOString();
@@ -902,7 +1077,7 @@ export class SQLiteService {
 
   // --- Projects ---
   getProjects(): Project[] {
-    const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all() as any[];
+    const rows = this.db.prepare('SELECT * FROM projects WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
     return rows.map(r => ({
       ...r,
       startDate: r.start_date,
@@ -947,11 +1122,12 @@ export class SQLiteService {
     } as Project;
 
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, env_vars, created_at)
-      VALUES (@id, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @envVars, @createdAt)
+      INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, env_vars, created_at)
+      VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @envVars, @createdAt)
     `);
     stmt.run({
       ...complete,
+      workspaceId: this.workspaceId(),
       startDate: complete.startDate || now,
       targetDate: complete.targetDate || null,
       leadType: complete.leadType || 'agent',
@@ -978,10 +1154,11 @@ export class SQLiteService {
         status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
         lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
         github_org = @githubOrg, env_vars = @envVars
-      WHERE id = @id
+      WHERE id = @id AND workspace_id = @workspaceId
     `);
     stmt.run({
       ...merged,
+      workspaceId: this.workspaceId(),
       resources: JSON.stringify(merged.resources || []),
       githubOrg: merged.githubOrg || null,
       envVars: JSON.stringify(merged.envVars || [])
@@ -990,9 +1167,151 @@ export class SQLiteService {
   }
 
   deleteProject(id: string): boolean {
-    const stmt = this.db.prepare('DELETE FROM projects WHERE id = ?');
-    const res = stmt.run(id);
-    return res.changes > 0;
+    const workspaceId = this.workspaceId();
+    const remove = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM project_build_steps WHERE project_id = ? AND workspace_id = ?').run(id, workspaceId);
+      return this.db.prepare('DELETE FROM projects WHERE id = ? AND workspace_id = ?').run(id, workspaceId).changes > 0;
+    });
+    return remove();
+  }
+
+  // --- Project Build Room ---
+  getProjectBuildSteps(projectId: string): ProjectBuildStep[] {
+    const workspaceId = this.workspaceId();
+    const project = this.db
+      .prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?')
+      .get(projectId, workspaceId);
+    if (!project) throw new Error('Project not found');
+
+    const rows = this.db.prepare(`
+      SELECT * FROM project_build_steps
+      WHERE project_id = ? AND workspace_id = ?
+      ORDER BY position ASC, created_at ASC
+    `).all(projectId, workspaceId) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      projectId: row.project_id,
+      label: row.label,
+      phase: row.phase as BuildStepPhase,
+      agentId: row.agent_id || undefined,
+      squadId: row.squad_id || undefined,
+      position: Number(row.position) || 0,
+      enabled: Boolean(row.enabled),
+      required: Boolean(row.required),
+      approvalGate: Boolean(row.approval_gate),
+      dependsOn: this.parseJsonArray(row.depends_on),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  saveProjectBuildSteps(
+    projectId: string,
+    input: Array<Partial<ProjectBuildStep>>
+  ): ProjectBuildStep[] {
+    const workspaceId = this.workspaceId();
+    const project = this.db
+      .prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?')
+      .get(projectId, workspaceId);
+    if (!project) throw new Error('Project not found');
+    if (!Array.isArray(input)) throw new Error('steps must be an array');
+
+    const phases = new Set<BuildStepPhase>([
+      'requirements', 'architecture', 'implementation', 'database',
+      'validation', 'review', 'delivery'
+    ]);
+    const agentIds = new Set(
+      (this.db.prepare('SELECT id FROM agents WHERE workspace_id = ?').all(workspaceId) as Array<{ id: string }>)
+        .map(row => row.id)
+    );
+    const squadIds = new Set(
+      (this.db.prepare('SELECT id FROM squads WHERE workspace_id = ?').all(workspaceId) as Array<{ id: string }>)
+        .map(row => row.id)
+    );
+
+    const now = new Date().toISOString();
+    const seenIds = new Set<string>();
+    const normalized = input.map((raw, index) => {
+      const label = String(raw.label ?? '').trim();
+      if (!label) throw new Error(`Build step ${index + 1} needs a label`);
+
+      const phase = String(raw.phase ?? 'implementation') as BuildStepPhase;
+      if (!phases.has(phase)) throw new Error(`Unsupported build step phase: ${phase}`);
+
+      const agentId = typeof raw.agentId === 'string' && raw.agentId ? raw.agentId : undefined;
+      const squadId = typeof raw.squadId === 'string' && raw.squadId ? raw.squadId : undefined;
+      if (agentId && squadId) throw new Error(`Build step ${index + 1} cannot target both an agent and a squad`);
+      if (agentId && !agentIds.has(agentId)) throw new Error(`Agent not found for build step ${index + 1}`);
+      if (squadId && !squadIds.has(squadId)) throw new Error(`Squad not found for build step ${index + 1}`);
+
+      let id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `build-step-${randomUUID()}`;
+      if (seenIds.has(id)) id = `build-step-${randomUUID()}`;
+      seenIds.add(id);
+
+      const dependsOn = Array.isArray(raw.dependsOn)
+        ? raw.dependsOn.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        : [];
+
+      return {
+        id,
+        projectId,
+        label,
+        phase,
+        agentId,
+        squadId,
+        position: index,
+        enabled: raw.enabled !== false,
+        required: raw.required !== false,
+        approvalGate: raw.approvalGate === true,
+        dependsOn,
+        createdAt: now,
+        updatedAt: now
+      } satisfies ProjectBuildStep;
+    });
+
+    const replace = this.db.transaction(() => {
+      this.db.prepare(
+        'DELETE FROM project_build_steps WHERE project_id = ? AND workspace_id = ?'
+      ).run(projectId, workspaceId);
+
+      const insert = this.db.prepare(`
+        INSERT INTO project_build_steps
+          (id, workspace_id, project_id, label, phase, agent_id, squad_id, position,
+           enabled, required, approval_gate, depends_on, created_at, updated_at)
+        VALUES
+          (@id, @workspaceId, @projectId, @label, @phase, @agentId, @squadId, @position,
+           @enabled, @required, @approvalGate, @dependsOn, @createdAt, @updatedAt)
+      `);
+
+      for (const step of normalized) {
+        insert.run({
+          ...step,
+          workspaceId,
+          agentId: step.agentId ?? null,
+          squadId: step.squadId ?? null,
+          enabled: step.enabled ? 1 : 0,
+          required: step.required ? 1 : 0,
+          approvalGate: step.approvalGate ? 1 : 0,
+          dependsOn: JSON.stringify(step.dependsOn ?? [])
+        });
+      }
+    });
+    replace();
+
+    return this.getProjectBuildSteps(projectId);
+  }
+
+  private parseJsonArray(value: unknown): string[] {
+    if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === 'string');
+    try {
+      const parsed = JSON.parse(String(value ?? '[]'));
+      return Array.isArray(parsed)
+        ? parsed.filter((entry): entry is string => typeof entry === 'string')
+        : [];
+    } catch {
+      return [];
+    }
   }
 
   // --- Agents ---
@@ -1026,8 +1345,9 @@ export class SQLiteService {
           THEN (julianday(updated_at) - julianday(created_at)) * 86400000 END
         ) AS avg_latency_ms
       FROM prototype_runs
+      WHERE workspace_id = ?
       GROUP BY agent_id
-    `).all() as any[];
+    `).all(this.workspaceId()) as any[];
 
     return new Map(rows.map(r => [
       r.agent_id,
@@ -1049,7 +1369,7 @@ export class SQLiteService {
   }
 
   getAgents(): Agent[] {
-    const rows = this.db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all() as any[];
+    const rows = this.db.prepare('SELECT * FROM agents WHERE workspace_id = ? ORDER BY created_at ASC').all(this.workspaceId()) as any[];
     const stats = this.agentStats();
     return rows.map(r => ({
       ...r,
@@ -1101,11 +1421,12 @@ export class SQLiteService {
 
   createAgent(a: Agent): Agent {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, template_key, template_version, phase, is_seeded, created_at)
-      VALUES (@id, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @reasoningEffort, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @templateKey, @templateVersion, @phase, @isSeeded, @createdAt)
+      INSERT INTO agents (id, workspace_id, name, role, avatar, color, description, owner, is_mine, model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit, is_archived, allowed_users, template_key, template_version, phase, is_seeded, created_at)
+      VALUES (@id, @workspaceId, @name, @role, @avatar, @color, @description, @owner, @isMine, @modelProvider, @modelName, @reasoningEffort, @systemPrompt, @autonomyLevel, @temperature, @skills, @mcpServers, @customCliArgs, @envVars, @concurrencyLimit, @isArchived, @allowedUsers, @templateKey, @templateVersion, @phase, @isSeeded, @createdAt)
     `);
     stmt.run({
       ...a,
+      workspaceId: this.workspaceId(),
       isMine: a.isMine ? 1 : 0,
       isArchived: a.isArchived ? 1 : 0,
       temperature: a.temperature ?? 0.7,
@@ -1169,10 +1490,11 @@ export class SQLiteService {
         mcp_servers = @mcpServers, custom_cli_args = @customCliArgs, env_vars = @envVars,
         concurrency_limit = @concurrencyLimit, is_archived = @isArchived,
         allowed_users = @allowedUsers
-      WHERE id = @id
+      WHERE id = @id AND workspace_id = @workspaceId
     `);
     stmt.run({
       ...merged,
+      workspaceId: this.workspaceId(),
       isArchived: merged.isArchived ? 1 : 0,
       allowedUsers: merged.allowedUsers ?? null,
       reasoningEffort: merged.reasoningEffort ?? null,
@@ -1207,8 +1529,8 @@ export class SQLiteService {
   }
 
   deleteAgent(id: string): boolean {
-    const stmt = this.db.prepare('DELETE FROM agents WHERE id = ?');
-    const res = stmt.run(id);
+    const stmt = this.db.prepare('DELETE FROM agents WHERE id = ? AND workspace_id = ?');
+    const res = stmt.run(id, this.workspaceId());
 
     // Only when a row really went away, so a delete of an unknown id does not
     // remove a file that some other agent might still be using.
@@ -1219,8 +1541,14 @@ export class SQLiteService {
 
   // --- Issues ---
   getIssues(): Issue[] {
-    const rows = this.db.prepare('SELECT * FROM issues ORDER BY created_at DESC').all() as any[];
-    const comments = this.db.prepare('SELECT * FROM issue_comments ORDER BY created_at ASC').all() as any[];
+    const workspaceId = this.workspaceId();
+    const rows = this.db.prepare('SELECT * FROM issues WHERE workspace_id = ? ORDER BY created_at DESC').all(workspaceId) as any[];
+    const comments = this.db.prepare(`
+      SELECT c.* FROM issue_comments c
+      JOIN issues i ON i.id = c.issue_id
+      WHERE i.workspace_id = ?
+      ORDER BY c.created_at ASC
+    `).all(workspaceId) as any[];
 
     const commentsByIssue = new Map<string, IssueComment[]>();
     comments.forEach(c => {
@@ -1277,8 +1605,8 @@ export class SQLiteService {
     const key = (project?.key || 'ISS').toUpperCase();
 
     const used = this.db
-      .prepare('SELECT identifier FROM issues WHERE project_id = ?')
-      .all(projectId) as { identifier: string }[];
+      .prepare('SELECT identifier FROM issues WHERE project_id = ? AND workspace_id = ?')
+      .all(projectId, this.workspaceId()) as { identifier: string }[];
 
     const highest = used.reduce((max, r) => {
       const n = Number(String(r.identifier).split('-').pop());
@@ -1300,7 +1628,16 @@ export class SQLiteService {
    */
   createIssue(issue: Partial<Issue>): Issue {
     const now = new Date().toISOString();
-    const projectId = issue.projectId || this.getProjects()[0]?.id || '';
+    const projects = this.getProjects();
+    const projectId = projects.some(project => project.id === issue.projectId)
+      ? issue.projectId as string
+      : projects[0]?.id || '';
+    const squadId = issue.assignedSquadId && this.getSquads().some(squad => squad.id === issue.assignedSquadId)
+      ? issue.assignedSquadId
+      : undefined;
+    const agentId = !squadId && issue.assignedAgentId && this.getAgents().some(agent => agent.id === issue.assignedAgentId)
+      ? issue.assignedAgentId
+      : undefined;
 
     const complete: Issue = {
       ...issue,
@@ -1311,6 +1648,8 @@ export class SQLiteService {
       status: issue.status || 'todo',
       priority: issue.priority || 'medium',
       projectId,
+      assignedAgentId: agentId,
+      assignedSquadId: squadId,
       labels: issue.labels || [],
       subtasks: issue.subtasks || [],
       comments: issue.comments || [],
@@ -1319,11 +1658,12 @@ export class SQLiteService {
     } as Issue;
 
     const stmt = this.db.prepare(`
-      INSERT INTO issues (id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
-      VALUES (@id, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
+      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
+      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
       ...complete,
+      workspaceId: this.workspaceId(),
       labels: JSON.stringify(complete.labels),
       subtasks: JSON.stringify(complete.subtasks),
       assignedAgentId: complete.assignedAgentId || null,
@@ -1360,6 +1700,21 @@ export class SQLiteService {
     const existing = this.getIssues().find(i => i.id === id);
     if (!existing) return null;
     const merged = { ...existing, ...updates, updatedAt: new Date().toISOString() };
+    if (updates.projectId && !this.getProjects().some(project => project.id === updates.projectId)) {
+      merged.projectId = existing.projectId;
+    }
+    if (updates.assignedAgentId && !this.getAgents().some(agent => agent.id === updates.assignedAgentId)) {
+      merged.assignedAgentId = undefined;
+    }
+    if (updates.assignedSquadId && !this.getSquads().some(squad => squad.id === updates.assignedSquadId)) {
+      merged.assignedSquadId = undefined;
+    }
+    // An issue has one execution owner. A squad wins when a legacy caller
+    // sends both fields; ordinary agent/squad edits clear the other owner.
+    if (merged.assignedAgentId && merged.assignedSquadId) {
+      if (updates.assignedSquadId) merged.assignedAgentId = undefined;
+      else merged.assignedSquadId = undefined;
+    }
     const stmt = this.db.prepare(`
       UPDATE issues SET
         title = @title, description = @description, status = @status, priority = @priority,
@@ -1368,10 +1723,11 @@ export class SQLiteService {
         labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl,
         github_repo = @githubRepo, github_number = @githubNumber, github_url = @githubUrl,
         updated_at = @updatedAt
-      WHERE id = @id
+      WHERE id = @id AND workspace_id = @workspaceId
     `);
     stmt.run({
       ...merged,
+      workspaceId: this.workspaceId(),
       assignedSquadId: merged.assignedSquadId || null,
       githubRepo: merged.githubRepo || null,
       githubNumber: merged.githubNumber ?? null,
@@ -1383,12 +1739,13 @@ export class SQLiteService {
   }
 
   deleteIssue(id: string): boolean {
-    const stmt = this.db.prepare('DELETE FROM issues WHERE id = ?');
-    const res = stmt.run(id);
+    const stmt = this.db.prepare('DELETE FROM issues WHERE id = ? AND workspace_id = ?');
+    const res = stmt.run(id, this.workspaceId());
     return res.changes > 0;
   }
 
   addIssueComment(c: IssueComment): IssueComment {
+    if (!this.getIssues().some(issue => issue.id === c.issueId)) return c;
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO issue_comments (id, issue_id, author_type, author_name, author_avatar, agent_id, content, is_thinking, github_id, created_at)
       VALUES (@id, @issueId, @authorType, @authorName, @authorAvatar, @agentId, @content, @isThinking, @githubId, @createdAt)
@@ -1406,7 +1763,7 @@ export class SQLiteService {
 
   // --- Prototype Runs ---
   getPrototypeRuns(): PrototypeRun[] {
-    const rows = this.db.prepare('SELECT * FROM prototype_runs ORDER BY created_at DESC').all() as any[];
+    const rows = this.db.prepare('SELECT * FROM prototype_runs WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
     return rows.map(r => ({
       id: r.id,
       issueId: r.issue_id,
@@ -1573,11 +1930,12 @@ export class SQLiteService {
 
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO prototype_runs (id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, activities, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
-      VALUES (@id, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @activities, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
+      INSERT OR REPLACE INTO prototype_runs (id, workspace_id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, activities, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
+      VALUES (@id, @workspaceId, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @activities, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
     `);
     stmt.run({
       id: run.id,
+      workspaceId: this.workspaceId(),
       issueId: run.issueId,
       projectId: run.projectId,
       agentId: run.agentId,
@@ -1624,25 +1982,26 @@ export class SQLiteService {
    * run that already happened.
    */
   getSquadRuns(): SquadRun[] {
-    const rows = this.db.prepare('SELECT * FROM squad_runs ORDER BY created_at DESC').all() as any[];
+    const rows = this.db.prepare('SELECT * FROM squad_runs WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
     return rows.map(squadRunFromRow);
   }
 
   getSquadRun(id: string): SquadRun | undefined {
-    const row = this.db.prepare('SELECT * FROM squad_runs WHERE id = ?').get(id) as any;
+    const row = this.db.prepare('SELECT * FROM squad_runs WHERE id = ? AND workspace_id = ?').get(id, this.workspaceId()) as any;
     return row ? squadRunFromRow(row) : undefined;
   }
 
   saveSquadRun(run: SquadRun): SquadRun {
     this.db.prepare(`
       INSERT OR REPLACE INTO squad_runs
-        (id, squad_id, issue_id, project_id, branch_name, member_agent_ids,
+        (id, workspace_id, squad_id, issue_id, project_id, branch_name, member_agent_ids,
          current_member_index, status, mission, plan, stopped_reason, created_at, updated_at)
       VALUES
-        (@id, @squadId, @issueId, @projectId, @branchName, @memberAgentIds,
+        (@id, @workspaceId, @squadId, @issueId, @projectId, @branchName, @memberAgentIds,
          @currentMemberIndex, @status, @mission, @plan, @stoppedReason, @createdAt, @updatedAt)
     `).run({
       ...run,
+      workspaceId: this.workspaceId(),
       memberAgentIds: JSON.stringify(run.memberAgentIds || []),
       plan: JSON.stringify(run.plan || []),
       stoppedReason: run.stoppedReason ?? null
@@ -1668,11 +2027,12 @@ export class SQLiteService {
       this.db
         .prepare(
           `INSERT OR REPLACE INTO remote_actions
-             (id, run_id, agent_id, issue_id, actor, action, target, detail, succeeded, created_at)
-           VALUES (@id, @runId, @agentId, @issueId, @actor, @action, @target, @detail, @succeeded, @createdAt)`
+             (id, workspace_id, run_id, agent_id, issue_id, actor, action, target, detail, succeeded, created_at)
+           VALUES (@id, @workspaceId, @runId, @agentId, @issueId, @actor, @action, @target, @detail, @succeeded, @createdAt)`
         )
         .run({
           id: action.id ?? `ra-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          workspaceId: this.workspaceId(),
           runId: action.runId ?? null,
           agentId: action.agentId ?? null,
           issueId: action.issueId ?? null,
@@ -1692,11 +2052,15 @@ export class SQLiteService {
   getRemoteActions(runId?: string): RemoteAction[] {
     const rows = runId
       ? (this.db
-          .prepare('SELECT * FROM remote_actions WHERE run_id = ? ORDER BY created_at ASC')
-          .all(runId) as any[])
+          .prepare('SELECT * FROM remote_actions WHERE run_id = ? AND workspace_id = ? ORDER BY created_at ASC')
+          .all(runId, this.workspaceId()) as any[])
       : (this.db
-          .prepare('SELECT * FROM remote_actions ORDER BY created_at DESC LIMIT 200')
-          .all() as any[]);
+          .prepare(`
+            SELECT * FROM remote_actions
+            WHERE workspace_id = ?
+            ORDER BY created_at DESC LIMIT 200
+          `)
+          .all(this.workspaceId()) as any[]);
 
     return rows.map(r => ({
       id: r.id,
@@ -1720,7 +2084,7 @@ export class SQLiteService {
 
   // --- Squads ---
   getSquads(): Squad[] {
-    const rows = this.db.prepare('SELECT * FROM squads').all() as any[];
+    const rows = this.db.prepare('SELECT * FROM squads WHERE workspace_id = ?').all(this.workspaceId()) as any[];
     return rows.map(r => ({
       id: r.id,
       name: r.name,
@@ -1741,12 +2105,13 @@ export class SQLiteService {
   createSquad(squad: Squad): Squad {
     const stmt = this.db.prepare(`
       INSERT INTO squads
-        (id, name, description, avatar, color, topology, leader_agent_id, member_agent_ids, mission, active_runs_count, completed_runs_count)
+        (id, workspace_id, name, description, avatar, color, topology, leader_agent_id, member_agent_ids, mission, active_runs_count, completed_runs_count)
       VALUES
-        (@id, @name, @description, @avatar, @color, @topology, @leaderAgentId, @memberAgentIds, @mission, @activeRunsCount, @completedRunsCount)
+        (@id, @workspaceId, @name, @description, @avatar, @color, @topology, @leaderAgentId, @memberAgentIds, @mission, @activeRunsCount, @completedRunsCount)
     `);
     stmt.run({
       ...squad,
+      workspaceId: this.workspaceId(),
       description: squad.description ?? '',
       avatar: squad.avatar ?? '',
       color: squad.color ?? '',
@@ -1776,9 +2141,10 @@ export class SQLiteService {
         name = @name, description = @description, avatar = @avatar, color = @color,
         topology = @topology, leader_agent_id = @leaderAgentId,
         member_agent_ids = @memberAgentIds, mission = @mission
-      WHERE id = @id
+      WHERE id = @id AND workspace_id = @workspaceId
     `).run({
       ...merged,
+      workspaceId: this.workspaceId(),
       memberAgentIds: JSON.stringify(merged.memberAgentIds || [])
     });
 
@@ -1793,7 +2159,7 @@ export class SQLiteService {
    * reads as a deleted squad rather than as a missing one.
    */
   deleteSquad(id: string): boolean {
-    return this.db.prepare('DELETE FROM squads WHERE id = ?').run(id).changes > 0;
+    return this.db.prepare('DELETE FROM squads WHERE id = ? AND workspace_id = ?').run(id, this.workspaceId()).changes > 0;
   }
 
   // --- Skills ---
@@ -1947,7 +2313,7 @@ export class SQLiteService {
 
   // --- Chat ---
   getChatThreads(): ChatThread[] {
-    const rows = this.db.prepare('SELECT * FROM chat_threads ORDER BY last_message_at DESC').all() as any[];
+    const rows = this.db.prepare('SELECT * FROM chat_threads WHERE workspace_id = ? ORDER BY last_message_at DESC').all(this.workspaceId()) as any[];
     return rows.map(r => ({
       id: r.id,
       title: r.title,
@@ -1962,7 +2328,12 @@ export class SQLiteService {
   }
 
   getChatMessages(threadId: string): ChatMessage[] {
-    const rows = this.db.prepare('SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY timestamp ASC').all(threadId) as any[];
+    const rows = this.db.prepare(`
+      SELECT m.* FROM chat_messages m
+      JOIN chat_threads t ON t.id = m.thread_id
+      WHERE m.thread_id = ? AND t.workspace_id = ?
+      ORDER BY m.timestamp ASC
+    `).all(threadId, this.workspaceId()) as any[];
     return rows.map(r => ({
       id: r.id,
       threadId: r.thread_id,
@@ -1992,9 +2363,9 @@ export class SQLiteService {
       UPDATE chat_threads SET
         last_message_snippet = ?,
         last_message_at = ?
-      WHERE id = ?
+      WHERE id = ? AND workspace_id = ?
     `);
-    updateThread.run(msg.content.slice(0, 100), msg.timestamp, msg.threadId);
+    updateThread.run(msg.content.slice(0, 100), msg.timestamp, msg.threadId, this.workspaceId());
   }
 
   createChatThread(thread: Partial<ChatThread>): ChatThread {
@@ -2018,15 +2389,16 @@ export class SQLiteService {
 
     this.db.prepare(`
       INSERT INTO chat_threads (
-        id, title, last_message_snippet, last_message_at, agent_ids,
+        id, workspace_id, title, last_message_snippet, last_message_at, agent_ids,
         target_agent_id, target_squad_id, project_id, created_at
       )
       VALUES (
-        @id, @title, @lastMessageSnippet, @lastMessageAt, @agentIds,
+        @id, @workspaceId, @title, @lastMessageSnippet, @lastMessageAt, @agentIds,
         @targetAgentId, @targetSquadId, @projectId, @createdAt
       )
     `).run({
       ...complete,
+      workspaceId: this.workspaceId(),
       agentIds: JSON.stringify(complete.agentIds),
       // Bound explicitly: the column is nullable and the field optional, but
       // better-sqlite3 requires every named parameter to be present.
@@ -2040,8 +2412,8 @@ export class SQLiteService {
 
   /** Persist the agent roster on a thread once it is known. */
   setChatThreadAgents(threadId: string, agentIds: string[]) {
-    this.db.prepare('UPDATE chat_threads SET agent_ids = ? WHERE id = ?')
-      .run(JSON.stringify(agentIds), threadId);
+    this.db.prepare('UPDATE chat_threads SET agent_ids = ? WHERE id = ? AND workspace_id = ?')
+      .run(JSON.stringify(agentIds), threadId, this.workspaceId());
   }
 
   /** Persist the one responder a conversation should use when no @mention is present. */
@@ -2057,8 +2429,8 @@ export class SQLiteService {
       UPDATE chat_threads SET
         target_agent_id = ?,
         target_squad_id = ?
-      WHERE id = ?
-    `).run(targetAgentId, targetSquadId, threadId);
+      WHERE id = ? AND workspace_id = ?
+    `).run(targetAgentId, targetSquadId, threadId, this.workspaceId());
 
     return this.getChatThreads().find(t => t.id === threadId) ?? null;
   }
@@ -2077,7 +2449,7 @@ export class SQLiteService {
    * storage.
    */
   deleteChatThread(threadId: string): boolean {
-    const removed = this.db.prepare('DELETE FROM chat_threads WHERE id = ?').run(threadId).changes > 0;
+    const removed = this.db.prepare('DELETE FROM chat_threads WHERE id = ? AND workspace_id = ?').run(threadId, this.workspaceId()).changes > 0;
     if (removed) {
       this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
     }
@@ -2098,7 +2470,7 @@ export class SQLiteService {
 
     const removed = this.db.prepare('DELETE FROM chat_messages WHERE thread_id = ?').run(threadId).changes;
     this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
-    this.db.prepare("UPDATE chat_threads SET last_message_snippet = '' WHERE id = ?").run(threadId);
+    this.db.prepare("UPDATE chat_threads SET last_message_snippet = '' WHERE id = ? AND workspace_id = ?").run(threadId, this.workspaceId());
     return removed;
   }
 
@@ -2113,8 +2485,8 @@ export class SQLiteService {
     const exists = this.getChatThreads().some(t => t.id === threadId);
     if (!exists) return null;
 
-    this.db.prepare('UPDATE chat_threads SET project_id = ? WHERE id = ?')
-      .run(projectId, threadId);
+    this.db.prepare('UPDATE chat_threads SET project_id = ? WHERE id = ? AND workspace_id = ?')
+      .run(projectId, threadId, this.workspaceId());
 
     return this.getChatThreads().find(t => t.id === threadId) ?? null;
   }
