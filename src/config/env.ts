@@ -107,20 +107,78 @@ export const CORS_ORIGIN = process.env.CORS_ORIGIN || [
 const ALLOWED_ORIGINS = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 
 /**
+ * Hosting platforms where a subdomain is not evidence of anything.
+ *
+ * `alpha-fe-git-main-lloyd.vercel.app` and `attacker-exfil.vercel.app` are
+ * issued by the same registrar to anyone who signs up, so a wildcard over one
+ * of these apexes is not an allowlist — it admits every tenant of the platform.
+ * Combined with `credentials: true` that lets any of them replay a signed-in
+ * user's session cookie against this API.
+ */
+const SHARED_HOSTING_APEXES = [
+  'vercel.app',
+  'netlify.app',
+  'pages.dev',
+  'workers.dev',
+  'herokuapp.com',
+  'onrender.com',
+  'web.app',
+  'firebaseapp.com',
+  'github.io'
+];
+
+/**
+ * Whether a wildcard pattern leans on a domain the operator does not control.
+ *
+ * A wildcard is safe over an apex you own — `https://*.alpha.example.com` can
+ * only ever be issued by you. Over a shared apex it is safe only if the literal
+ * part of the pattern pins something you control: Vercel URLs end in
+ * `-<team-slug>.vercel.app`, so `https://alpha-fe-main-*-myteam.vercel.app`
+ * still requires an attacker to publish under your team.
+ *
+ * Measured as literal characters rather than by parsing the platform's URL
+ * format, because every platform's format is different and changes. Six is
+ * enough to rule out a bare `*` and a token gesture like `*-app`, without
+ * guessing at a scheme.
+ */
+function wildcardLeansOnSharedApex(pattern: string): boolean {
+  const host = pattern.replace(/^[a-z]+:\/\//i, '').split('/')[0].toLowerCase();
+  const apex = SHARED_HOSTING_APEXES.find(a => host === `*.${a}` || host.endsWith(`.${a}`));
+  if (!apex) return false;
+
+  const subdomain = host.slice(0, Math.max(0, host.length - apex.length - 1));
+  const literal = subdomain.replaceAll('*', '').replace(/[^a-z0-9]/g, '');
+  return literal.length < 6;
+}
+
+/**
  * One entry of the allowlist, as a matcher.
  *
- * `*` is permitted only as a whole label inside the host — `https://*.vercel.app`
- * — because Vercel gives every preview deploy a fresh subdomain and an
- * exact-match list blocks all of them. Every push would otherwise produce a
- * preview that cannot reach the API, which reads as a broken build.
+ * `*` stands for exactly one host label — it expands to `[^.]+`, and the
+ * pattern is anchored — so `https://*.example.com` cannot be satisfied by
+ * `evil.example.com.attacker.net` or by a deeper subdomain.
  *
- * The `*` matches one label and no dots, so `https://*.vercel.app` admits
- * `alpha-fe-git-xyz.vercel.app` but not `evil.attacker.com.vercel.app.evil.com`,
- * and the anchors stop a suffix match from accepting a lookalike domain.
+ * That containment is about the shape of the match. It says nothing about who
+ * can obtain a matching name, which is the question that actually decides
+ * whether an origin is trustworthy — see `wildcardLeansOnSharedApex`.
  */
 function originMatcher(pattern: string): (origin: string) => boolean {
-  if (pattern === '*') return () => true;
+  if (pattern === '*') {
+    // `credentials: true` plus a total wildcard is the classic CORS hole, and
+    // browsers reject the combination anyway. Refuse rather than appear to work.
+    logOriginRefusal(pattern, 'a bare "*" cannot be combined with credentials');
+    return () => false;
+  }
   if (!pattern.includes('*')) return origin => origin === pattern;
+
+  if (wildcardLeansOnSharedApex(pattern)) {
+    logOriginRefusal(
+      pattern,
+      'a wildcard over a shared hosting apex admits every tenant of that platform. ' +
+        'Pin a label you control (https://myapp-*-myteam.vercel.app) or list the exact origin'
+    );
+    return () => false;
+  }
 
   const source = pattern
     .split('*')
@@ -128,6 +186,22 @@ function originMatcher(pattern: string): (origin: string) => boolean {
     .join('[^.]+');
   const re = new RegExp(`^${source}$`);
   return origin => re.test(origin);
+}
+
+/**
+ * Refusals are announced, not silent.
+ *
+ * An operator who sets a pattern that is dropped would otherwise see only a
+ * browser CORS error with nothing in the server log pointing at the cause.
+ */
+const refusedOrigins: Array<{ pattern: string; reason: string }> = [];
+function logOriginRefusal(pattern: string, reason: string): void {
+  refusedOrigins.push({ pattern, reason });
+}
+
+/** Origin patterns that were dropped as unsafe, for the startup banner. */
+export function unsafeOriginPatterns(): ReadonlyArray<{ pattern: string; reason: string }> {
+  return refusedOrigins;
 }
 
 const ORIGIN_MATCHERS = ALLOWED_ORIGINS.map(originMatcher);

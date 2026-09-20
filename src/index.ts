@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, ALPHA_MODE, IS_CLOUD, IS_DESKTOP, isAllowedOrigin } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, IS_CLOUD, IS_DESKTOP, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { dataRouter } from './controllers/dataController.js';
 import { workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
@@ -44,8 +44,9 @@ app.use(cors({
   origin(origin, callback) {
     // Same-origin / curl / Electron send no Origin header.
     if (!origin) return callback(null, true);
-    // Exact entries plus wildcard labels, so Vercel preview deploys — a fresh
-    // subdomain on every push — are not each blocked as an unknown origin.
+    // Exact entries, plus wildcard labels over an apex the operator controls.
+    // A wildcard across a shared hosting apex is refused at parse time — see
+    // isAllowedOrigin — because it would admit every tenant of that platform.
     if (isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error(`Origin ${origin} is not allowed`));
   },
@@ -255,6 +256,17 @@ chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', paylo
 server.listen(PORT, HOST, () => {
   logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${PORT}`);
   if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  /**
+   * A dropped origin pattern is otherwise invisible.
+   *
+   * The operator sees a browser CORS error and nothing server-side pointing at
+   * the cause, which is a bad way to learn that the entry was refused on
+   * purpose.
+   */
+  for (const { pattern, reason } of unsafeOriginPatterns()) {
+    logError(`CORS_ORIGIN entry "${pattern}" was ignored as unsafe: ${reason}.`);
+  }
 
   /**
    * Everything below this point is execution-node work.

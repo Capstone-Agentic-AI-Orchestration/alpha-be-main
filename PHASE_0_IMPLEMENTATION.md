@@ -336,3 +336,65 @@ code it explains is worse than none.
 `npx vitest run` — **723 passed / 35 failed (758)**.
 Baseline was 720 / 35 (755); the +3 is this change's net new tests, and the
 failure count is unchanged.
+
+---
+
+## G2 revisited — the wildcard was too generous
+
+**Status:** done
+**Files:** `src/config/env.ts`, `src/index.ts`, `src/config/corsOrigin.test.ts`
+
+An automated security review flagged the wildcard matcher after it was
+committed. The finding was correct.
+
+### The defect
+
+`https://*.vercel.app` expands to `^https://[^.]+\.vercel\.app$` — one label,
+anchored, no dots. The original comment defended exactly that, arguing it could
+not be satisfied by `evil.attacker.com.vercel.app.evil.com`.
+
+That reasoning was about the **shape** of the match and never asked the
+question that decides trust: **who can obtain a name that matches?**
+`vercel.app` is a shared apex. `attacker-exfil.vercel.app` is free, instant,
+and available to anyone. So the pattern did not describe an allowlist — it
+described every tenant of the platform. With `credentials: true`, any of them
+could replay a signed-in user's cookie against this API.
+
+Not yet exploitable, because the default `CORS_ORIGIN` is localhost-only and
+nothing sets a wildcard. But it was documented as the way to support previews,
+which is worse than a live bug: a footgun handed over with instructions.
+
+### The change
+
+A wildcard remains fine over an apex the operator owns —
+`https://*.alpha.example.com` can only ever be issued by them. Over a shared
+apex it is accepted only if the literal part of the pattern pins something they
+control:
+
+```
+https://*.vercel.app                            REFUSED
+https://*-app.vercel.app                        REFUSED  (token gesture)
+https://alpha-fe-main-*-lloyds-projects.vercel.app   allowed
+https://*.alpha.example.com                     allowed  (own apex)
+```
+
+Vercel preview URLs end `-<team-slug>.vercel.app`, so pinning the slug puts the
+match back behind something an attacker would have to publish under.
+
+Measured as literal alphanumeric characters (fewer than six ⇒ refuse) rather
+than by parsing each platform's URL format, because every platform's format
+differs and changes. The threshold rules out a bare `*` and a gesture like
+`*-app` without pretending to understand the scheme.
+
+A bare `*` is now refused outright rather than silently doing nothing: browsers
+reject `*` with credentials anyway, so accepting it only looked like it worked.
+
+Refusals are collected and logged at startup. An ignored pattern would
+otherwise show up as a browser CORS error with nothing server-side explaining
+that the entry was dropped deliberately.
+
+### Verification
+
+`npx tsc --noEmit` — exit 0.
+`npx vitest run` — **731 passed / 35 failed (766)**. Eight new tests in
+`corsOrigin.test.ts`; failure count unchanged from the baseline.
