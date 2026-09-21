@@ -217,12 +217,18 @@ describe('a workspace is a hard boundary', () => {
  * the server would send.
  */
 describe('a real minted token satisfies the policies', () => {
+  afterAll(() => {
+    delete process.env.ALPHA_MODE;
+  });
+
   async function claimsFromRealToken(
     login: string,
     role: 'client' | 'dev' | 'pm' | 'admin',
     workspace = 'ws1'
   ) {
     process.env.SUPABASE_JWT_SECRET = 'integration-test-secret';
+    // Minting is cloud-only; this is the token the cloud would send.
+    process.env.ALPHA_MODE = 'cloud';
     const { mintSupabaseToken } = await import('./supabaseTokenService.js');
     const { token } = mintSupabaseToken({ sub: login, workspace_id: workspace, alpha_role: role });
     // Exactly what Supabase would hand the policies after verifying it.
