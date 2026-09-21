@@ -59,7 +59,8 @@ beforeAll(async () => {
     create role authenticated nologin;
   `);
 
-  for (const file of ['0001_control_plane_schema.sql', '0002_row_level_security.sql']) {
+  // Every migration, in order -- a hard-coded list silently skips the next one.
+  for (const file of fs.readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql')).sort()) {
     await db.exec(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8'));
   }
 
