@@ -38,7 +38,9 @@ async function as<T>(
     `update auth._claims set v = '${JSON.stringify({
       sub: login,
       workspace_id: workspace,
-      alpha_role: role
+      alpha_role: role,
+      // What supabaseTokenService stamps; 0004 ignores claims without it.
+      iss: 'alpha'
     })}'::jsonb`
   );
   await db.exec('set role authenticated');
@@ -266,6 +268,51 @@ describe('a real minted token satisfies the policies', () => {
   it('still hides prompts from a project manager with a minted token', async () => {
     expect(await asToken('LloydLim1', 'pm', () => rows('select * from agent_calls'))).toBe(0);
     expect(await asToken('LloydLim1', 'pm', () => rows('select * from prototype_runs'))).toBe(1);
+  });
+});
+
+describe('only tokens Alpha issued are trusted', () => {
+  /**
+   * Supabase checks a token's signature, not its issuer, and Supabase Auth
+   * signs with the same secret. A token it minted -- or anything else signed
+   * with the project secret -- must read as nobody, however admin its claims.
+   */
+  async function asForeignIssuer<T>(fn: () => Promise<T>): Promise<T> {
+    await db.exec(
+      `update auth._claims set v = '${JSON.stringify({
+        sub: 'LloydLim1',
+        workspace_id: 'ws1',
+        alpha_role: 'admin',
+        // Anything but Alpha's issuer; Supabase's own keys say 'supabase'.
+        iss: 'supabase'
+      })}'::jsonb`
+    );
+    await db.exec('set role authenticated');
+    try {
+      return await fn();
+    } finally {
+      await db.exec('reset role');
+    }
+  }
+
+  it('grants an Alpha-issued admin token the workspace', async () => {
+    expect(await as('LloydLim1', 'admin', () => rows('select * from projects'))).toBe(1);
+  });
+
+  it('grants the same claims nothing when another issuer signed them', async () => {
+    expect(await asForeignIssuer(() => rows('select * from projects'))).toBe(0);
+    expect(await asForeignIssuer(() => rows('select * from prototype_runs'))).toBe(0);
+    expect(await asForeignIssuer(() => rows('select * from remote_actions'))).toBe(0);
+  });
+
+  it('does not let a foreign token read skills just by having a subject', async () => {
+    await db.exec(
+      `insert into skills (id, name, category, permissions, description)
+       values ('s-probe', 'Probe', 'test', 'read', 'visible to Alpha tokens only')
+       on conflict (id) do nothing`
+    );
+    expect(await as('Lloyd1020', 'dev', () => rows('select * from skills'))).toBe(1);
+    expect(await asForeignIssuer(() => rows('select * from skills'))).toBe(0);
   });
 });
 
