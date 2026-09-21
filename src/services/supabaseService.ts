@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Issue } from '../models/index.js';
 import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
 import { DatabaseTokenClient } from './databaseTokenClient.js';
+import { RunPublishGate } from './runPublishGate.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,9 +88,14 @@ export function runToCloudRow(
   };
 }
 
+/** The events after which a run sends nothing more. */
+const TERMINAL_RUN_EVENTS = new Set(['run_completed', 'run_failed', 'run_cancelled']);
+
 export class SupabaseService {
   private client: SupabaseClient | null = null;
   private lastFailureLoggedAt = 0;
+  private readonly publishGate = new RunPublishGate();
+  private readonly runChannels = new Map<string, RealtimeChannel>();
   private readonly tokens = new DatabaseTokenClient({
     cloudApi: ALPHA_CLOUD_API,
     githubToken: githubCliToken,
@@ -157,7 +163,18 @@ export class SupabaseService {
     logError(`Cloud sync failing (${what}): ${detail}. Further failures suppressed for 5 minutes.`);
   }
 
-  /** Broadcast live stage transitions or log chunks to a Realtime channel. */
+  /**
+   * Broadcast live stage transitions or log chunks to a run's channel.
+   *
+   * Private (see 0006): Realtime lets the message through only if this token's
+   * login owns the run, and delivers it only to the owner and their overseers.
+   * It used to be public, readable and writable by anyone with the anon key
+   * and the run id.
+   *
+   * One channel per run, removed when the run ends. `client.channel()` makes a
+   * new channel on every call and the client keeps them all, so one per event
+   * grew without bound across a long run's log chunks.
+   */
   async broadcastRunEvent(
     runId: string,
     event: {
@@ -168,27 +185,50 @@ export class SupabaseService {
     if (!this.client) return;
 
     try {
-      const channel = this.client.channel(`run:${runId}`);
+      // The row must exist before the channel will accept anything.
+      await this.publishGate.ready(runId);
+
+      let channel = this.runChannels.get(runId);
+      if (!channel) {
+        channel = this.client.channel(`run:${runId}`, { config: { private: true } });
+        this.runChannels.set(runId, channel);
+      }
       await channel.send({ type: 'broadcast', event: event.type, payload: event.payload });
     } catch (err: any) {
       this.reportFailure(`broadcast run ${runId}`, err);
+    } finally {
+      if (TERMINAL_RUN_EVENTS.has(event.type)) this.forgetRun(runId);
     }
   }
 
+  private forgetRun(runId: string): void {
+    this.publishGate.done(runId);
+    const channel = this.runChannels.get(runId);
+    this.runChannels.delete(runId);
+    if (channel && this.client) void this.client.removeChannel(channel);
+  }
+
   /** Persist a run to the cloud board. */
-  async saveRunToCloud(run: PrototypeRun): Promise<void> {
-    if (!this.client) return;
+  saveRunToCloud(run: PrototypeRun): Promise<void> {
+    if (!this.client) return Promise.resolve();
+    const client = this.client;
 
-    const identity = knownIdentity();
-    const workspaceId = currentWorkspaceId();
+    const save = (async () => {
+      const identity = knownIdentity();
+      const workspaceId = currentWorkspaceId();
 
-    try {
-      const payload = runToCloudRow(run, workspaceId, identity?.login ?? 'unknown');
-      const { error } = await this.client.from('prototype_runs').upsert(payload);
-      if (error) throw error;
-    } catch (err: any) {
-      this.reportFailure(`save run ${run.id}`, err);
-    }
+      try {
+        const payload = runToCloudRow(run, workspaceId, identity?.login ?? 'unknown');
+        const { error } = await client.from('prototype_runs').upsert(payload);
+        if (error) throw error;
+      } catch (err: any) {
+        this.reportFailure(`save run ${run.id}`, err);
+      }
+    })();
+
+    // Broadcasts for this run wait on its first save; see RunPublishGate.
+    this.publishGate.saved(run.id, save);
+    return save;
   }
 
   /** Persist issue updates to the cloud board. */

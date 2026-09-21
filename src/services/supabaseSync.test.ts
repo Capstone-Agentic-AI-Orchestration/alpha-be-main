@@ -57,6 +57,13 @@ beforeAll(async () => {
     -- Supabase's API roles, which the migrations grant to by name.
     create role anon nologin;
     create role authenticated nologin;
+
+    -- Supabase Realtime's authorization table, which 0006 writes policies on.
+    create schema if not exists realtime;
+    create table realtime.messages (topic text not null, extension text not null, event text, payload jsonb);
+    alter table realtime.messages enable row level security;
+    create function realtime.topic() returns text
+      language sql stable as $$ select nullif(current_setting('realtime.topic', true), '') $$;
   `);
 
   // Every migration, in order -- a hard-coded list silently skips the next one.

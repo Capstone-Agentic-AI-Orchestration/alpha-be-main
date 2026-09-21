@@ -71,6 +71,21 @@ beforeAll(async () => {
     -- Supabase's API roles, which the migrations grant to by name.
     create role anon nologin;
     create role authenticated nologin;
+
+    -- Supabase Realtime's authorization surface, which 0006 writes policies
+    -- on: a private channel's join and sends are checked as SELECT and
+    -- INSERT on realtime.messages, with the channel name in realtime.topic().
+    create schema if not exists realtime;
+    create table realtime.messages (
+      topic text not null,
+      extension text not null,
+      event text,
+      payload jsonb,
+      private boolean default true
+    );
+    alter table realtime.messages enable row level security;
+    create function realtime.topic() returns text
+      language sql stable as $$ select nullif(current_setting('realtime.topic', true), '') $$;
   `);
 
   // Every migration, in order -- a hard-coded list silently skips the next one.
@@ -111,6 +126,8 @@ beforeAll(async () => {
     grant usage on schema public, auth to authenticated;
     grant select on auth._claims to authenticated;
     grant select, insert, update, delete on all tables in schema public to authenticated;
+    grant usage on schema realtime to authenticated;
+    grant select, insert on realtime.messages to authenticated;
   `);
 });
 
@@ -313,6 +330,59 @@ describe('only tokens Alpha issued are trusted', () => {
     );
     expect(await as('Lloyd1020', 'dev', () => rows('select * from skills'))).toBe(1);
     expect(await asForeignIssuer(() => rows('select * from skills'))).toBe(0);
+  });
+});
+
+describe('a run channel is exactly as private as the run', () => {
+  /**
+   * Realtime evaluates a private channel by querying realtime.messages with
+   * the channel's name in realtime.topic(): SELECT to join and receive,
+   * INSERT to send. `r1` belongs to Lloyd1020 in ws1 (seeded above).
+   */
+  async function onChannel<T>(topic: string, fn: () => Promise<T>): Promise<T> {
+    await db.exec(`select set_config('realtime.topic', '${topic}', false)`);
+    try {
+      return await fn();
+    } finally {
+      await db.exec(`select set_config('realtime.topic', '', false)`);
+    }
+  }
+
+  const received = () => rows(`select * from realtime.messages where event = 'probe'`);
+  const send = () =>
+    db.query(
+      `insert into realtime.messages (topic, extension, event, payload)
+       values (realtime.topic(), 'broadcast', 'sent', '{}'::jsonb)`
+    );
+
+  beforeAll(async () => {
+    await db.exec(
+      `insert into realtime.messages (topic, extension, event, payload)
+       values ('run:r1', 'broadcast', 'probe', '{}'::jsonb)`
+    );
+  });
+
+  it('lets the owner listen to their run', async () => {
+    expect(await onChannel('run:r1', () => as('Lloyd1020', 'dev', received))).toBe(1);
+  });
+
+  it("lets a project manager in the workspace listen, as oversight", async () => {
+    expect(await onChannel('run:r1', () => as('LloydLim1', 'pm', received))).toBe(1);
+  });
+
+  it("keeps another developer off someone else's run", async () => {
+    expect(await onChannel('run:r1', () => as('ZaneZamoraC1Cs', 'dev', received))).toBe(0);
+  });
+
+  it('keeps everyone off a run that does not exist', async () => {
+    expect(await onChannel('run:nope', () => as('Lloyd1020', 'dev', received))).toBe(0);
+  });
+
+  it('lets only the owner publish on the channel', async () => {
+    await expect(onChannel('run:r1', () => as('Lloyd1020', 'dev', send))).resolves.toBeTruthy();
+    await expect(onChannel('run:r1', () => as('ZaneZamoraC1Cs', 'dev', send))).rejects.toThrow(/row-level security/);
+    // Oversight is read-only: a PM can watch a run but not speak on it.
+    await expect(onChannel('run:r1', () => as('LloydLim1', 'pm', send))).rejects.toThrow(/row-level security/);
   });
 });
 
