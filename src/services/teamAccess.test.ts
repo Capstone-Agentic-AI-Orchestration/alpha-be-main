@@ -152,6 +152,28 @@ describe('team-based access', () => {
   });
 
   /**
+   * A sign-in made while the app is open is picked up without a restart.
+   *
+   * The identity is cached at boot and nothing ever cleared it, so the setup
+   * screen's "I've done this" could never succeed -- the answer stayed
+   * "signed out" until the app was relaunched. `/me?refresh=1` calls
+   * `refreshIdentity()` for exactly this moment.
+   */
+  it('picks up a GitHub sign-in made after boot, on refresh', async () => {
+    const gh = { ghFails: true, ghUser: 'Lloyd1020', teams: [`${ORG}/developers`] };
+    expect((await startWith(gh)).github).not.toBe('ok');
+
+    gh.ghFails = false; // they signed in, in the app or a terminal
+    const identity = await import('./identityService.js');
+    expect((await identity.currentIdentity()).github).not.toBe('ok'); // cache, unchanged
+
+    const after = await identity.refreshIdentity();
+    expect(after.github).toBe('ok');
+    expect(after.login).toBe('Lloyd1020');
+    expect(after.role).toBe('dev');
+  });
+
+  /**
    * The circular dependency, gone.
    *
    * This used to assert `workspaceOrg` was undefined here, because the org was
