@@ -16,7 +16,7 @@ import { roleFromTeams, TeamMembership } from './identityService.js';
  */
 const t = (org: string, slug: string): TeamMembership => ({ org, slug });
 
-const WS = 'Capstone-Agentic-AI-Orchestration';
+const WS = 'example-org';
 
 describe('roleFromTeams', () => {
   it('reads the role from a team in the workspace', () => {

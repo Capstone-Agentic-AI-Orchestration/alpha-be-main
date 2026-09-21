@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, ALPHA_MODE, ALPHA_SESSION_SECRET, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { dataRouter } from './controllers/dataController.js';
 import { workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
@@ -46,6 +46,23 @@ if (IS_CLOUD && !ALPHA_SESSION_SECRET) {
     'ALPHA_SESSION_SECRET is not set. Cloud mode stores GitHub tokens for each ' +
       'signed-in user and will not run without a key to encrypt them. ' +
       'Set it to a long random value (openssl rand -base64 48).'
+  );
+  process.exit(1);
+}
+
+/**
+ * Refuse to start without the organisation roles come from.
+ *
+ * It used to default to one particular org, which tied every deployment and
+ * every teammate's desktop to it without anyone choosing that. Unset, no team
+ * would map to a role and everyone would be refused one sign-in at a time --
+ * a quiet failure that reads as a permissions problem. Both modes need it.
+ */
+if (!ALPHA_ORG) {
+  logError(
+    'ALPHA_ORG is not set. Roles come from team membership in this GitHub ' +
+      'organisation, so without it nobody can be given one. Set it to the ' +
+      'organisation login, e.g. ALPHA_ORG=my-org.'
   );
   process.exit(1);
 }

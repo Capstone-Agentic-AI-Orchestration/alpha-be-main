@@ -257,7 +257,8 @@ export interface IGitHubService {
   reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string>;
   getOAuthLoginUrl(state?: string): { url: string; state: string };
   handleOAuthCallback(code: string, state?: string): Promise<{ success: boolean; username: string; token: string }>;
-  getGitHubAppInstallUrl(): string;
+  /** Null when GITHUB_APP_SLUG is unset -- there is no App to link to. */
+  getGitHubAppInstallUrl(): string | null;
   handleGitHubAppWebhook(event: string, payload: any, signature?: string, rawBody?: Buffer): Promise<any>;
 }
 
@@ -800,8 +801,8 @@ export class GhCliGitHubService implements IGitHubService {
     throw new Error('OAuth Web Flow is only used in hosted REST mode.');
   }
 
-  getGitHubAppInstallUrl(): string {
-    return `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new`;
+  getGitHubAppInstallUrl(): string | null {
+    return GITHUB_APP_SLUG ? `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new` : null;
   }
 
   async handleGitHubAppWebhook(): Promise<any> {
@@ -974,6 +975,11 @@ export class RestGitHubService implements IGitHubService {
     if (!GITHUB_CLIENT_ID) {
       throw new Error('GITHUB_CLIENT_ID is not configured in backend environment.');
     }
+    // Without it GitHub falls back to the App's registered callback, which may
+    // be a different deployment -- one this session's cookie will never reach.
+    if (!GITHUB_CALLBACK_URL) {
+      throw new Error('GITHUB_CALLBACK_URL is not configured in backend environment.');
+    }
 
     // Remember the state so the callback can prove this flow started here.
     // Without this the `state` parameter is decoration and the callback accepts
@@ -1060,8 +1066,8 @@ export class RestGitHubService implements IGitHubService {
     };
   }
 
-  getGitHubAppInstallUrl(): string {
-    return `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new`;
+  getGitHubAppInstallUrl(): string | null {
+    return GITHUB_APP_SLUG ? `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new` : null;
   }
 
   /**
@@ -1579,7 +1585,7 @@ export class GitHubService implements IGitHubService {
     return this.restService.handleOAuthCallback(code, state);
   }
 
-  getGitHubAppInstallUrl(): string {
+  getGitHubAppInstallUrl(): string | null {
     return this.restService.getGitHubAppInstallUrl();
   }
 
