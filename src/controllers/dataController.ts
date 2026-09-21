@@ -1,5 +1,8 @@
 import { Request, Response, Router } from 'express';
 import { currentIdentity } from '../services/identityService.js';
+import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
+import { githubService } from '../services/githubService.js';
+import { mintSupabaseToken } from '../services/supabaseTokenService.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -38,8 +41,80 @@ export const dataRouter = Router();
  * teams and every pull request already use, or the OS username when GitHub is
  * not signed in — `source` says which, so the UI can be honest about it.
  */
-dataRouter.get('/me', async (_req: Request, res: Response) => {
-  res.json(await currentIdentity());
+dataRouter.get('/me', async (req: Request, res: Response) => {
+  /**
+   * Answered from the session in the cloud, from `gh` on the desktop.
+   *
+   * `currentIdentity()` unconditionally was the same defect one level up from
+   * `workspaceContext`: a process-global read of the local CLI, which in a
+   * container is the OS user. The browser's "who am I" would have come back as
+   * the same person for everyone, and the UI would have drawn their role.
+   *
+   * Always 200, never 401. This is the probe the app makes on boot to find out
+   * whether it needs to show a sign-in, and an error status would put that
+   * answer on the failure path where the existing caller already swallows it.
+   * `authenticated: false` is a fact about the caller, not a failure to read
+   * it.
+   */
+  if (IS_CLOUD) {
+    if (!req.session) {
+      let signInUrl: string | undefined;
+      try {
+        signInUrl = githubService.getOAuthLoginUrl().url;
+      } catch {
+        // OAuth not configured yet. The app can still say "sign in", it just
+        // cannot say where to — better than rendering a dead button.
+      }
+      return res.json({ authenticated: false, signInUrl });
+    }
+
+    const { login, name, role } = req.session;
+    return res.json({
+      authenticated: true,
+      login,
+      name,
+      role,
+      source: 'github',
+      workspaceOrg: ALPHA_ORG,
+      access: 'granted',
+      github: 'ok'
+    });
+  }
+
+  return res.json({ authenticated: true, ...(await currentIdentity()) });
+});
+
+/**
+ * A short-lived token for talking to the database directly.
+ *
+ * The browser and the desktop both need one: the web app to subscribe to
+ * Supabase Realtime, the desktop daemon to read and write the board without
+ * paying Render's cold start on every action. Neither can present Alpha's
+ * session cookie to Supabase.
+ *
+ * Deliberately not the session. A session is revocable and long-lived; this is
+ * neither, because nothing consults a blocklist on every row read — so it
+ * lives ten minutes and the caller re-asks.
+ *
+ * Minted from `req.workspace`, which the middleware already resolved, so the
+ * claims cannot be chosen by the caller. Asking for a token for a workspace
+ * you are not a member of fails earlier, in `workspaceContext`.
+ */
+dataRouter.get('/database/token', (req: Request, res: Response) => {
+  if (!req.workspace) return res.status(401).json({ error: 'Sign in to use Alpha.' });
+
+  try {
+    const { token, expiresAt } = mintSupabaseToken({
+      sub: req.workspace.userId,
+      workspace_id: req.workspace.workspaceId,
+      alpha_role: req.workspace.role
+    });
+    return res.json({ token, expiresAt });
+  } catch (err: any) {
+    // Unconfigured is a deployment gap, not a client error: say so plainly
+    // rather than letting the browser retry a 500 forever.
+    return res.status(503).json({ error: err?.message ?? 'Database tokens are not configured.' });
+  }
 });
 
 /**

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { DB_PATH } from '../config/env.js';
+import { DEFAULT_WORKSPACE_ID } from './workspaceContext.js';
 
 export type WorkspaceRole = 'client' | 'dev' | 'pm' | 'admin';
 export type WorkspaceMemberStatus = 'invited' | 'active' | 'suspended' | 'removed';
@@ -165,7 +166,11 @@ function roleOrAdmin(value: unknown): WorkspaceRole {
  */
 class WorkspaceRegistry {
   private readonly db: Database.Database;
-  private readonly defaultWorkspaceId = 'workspace-default';
+  // Must match the id sqliteService seeds, and the id currentWorkspaceId()
+  // falls back to. A second literal here meant the registry looked up a
+  // workspace whose INSERT was silently dropped by the UNIQUE slug it shared
+  // with the seeded row, so every membership lookup hit a dangling FK.
+  private readonly defaultWorkspaceId = DEFAULT_WORKSPACE_ID;
 
   constructor() {
     this.db = new Database(DB_PATH);
@@ -259,6 +264,36 @@ class WorkspaceRegistry {
     }
 
     try {
+      this.db.exec("ALTER TABLE workspaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+    } catch {
+      // Existing installations already have the column.
+    }
+
+    try {
+      this.db.exec("ALTER TABLE workspaces ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'");
+    } catch {
+      // Existing installations already have the column.
+    }
+
+    // SQLite refuses ADD COLUMN with a UNIQUE constraint, so join_code lands
+    // nullable and a partial index supplies the uniqueness. The predicate skips
+    // the NULLs that rows predating this column already carry.
+    try {
+      this.db.exec('ALTER TABLE workspaces ADD COLUMN join_code TEXT');
+    } catch {
+      // Existing installations already have the column.
+    }
+
+    try {
+      this.db.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_join_code ' +
+          'ON workspaces(join_code) WHERE join_code IS NOT NULL'
+      );
+    } catch {
+      // Existing installations already have the index.
+    }
+
+    try {
       this.db.exec("ALTER TABLE workspace_squad_projects ADD COLUMN relationship TEXT NOT NULL DEFAULT 'assigned'");
     } catch {
       // Existing installations already have the column.
@@ -302,7 +337,30 @@ class WorkspaceRegistry {
     };
   }
 
+  /**
+   * Enrol a first-time caller in the default workspace, at the role GitHub
+   * gave them.
+   *
+   * `suggestedRole ?? 'admin'` used to sit on that last field, and it was the
+   * single most dangerous line in the permission system: any account this
+   * function had not seen before became a workspace administrator. It was not
+   * reachable in practice only because the *other* half of the check was also
+   * broken — `resolveWorkspaceOrg()` returned undefined on an install with no
+   * projects, which disabled the `no_team` gate, which meant callers with no
+   * role arrived here constantly. Two defects cancelling out.
+   *
+   * Now: no role, no membership. `identityService` refuses a GitHub account
+   * that belongs to no mapped team before the request reaches this far, so a
+   * missing role here means a path that bypassed that gate. Enrolling nobody
+   * is the safe answer — `resolve()` then finds no membership and answers 403,
+   * which is the same thing the caller would have seen anyway.
+   *
+   * Admin is granted by the `admins` team, or by ALPHA_ADMINS while that team
+   * does not exist. Never by arriving.
+   */
   ensureMember(userId: string, suggestedRole?: WorkspaceRole): void {
+    if (!suggestedRole) return;
+
     const existing = this.db.prepare(
       'SELECT id FROM workspace_members WHERE workspace_id = ? AND user_id = ?'
     ).get(this.defaultWorkspaceId, userId);
@@ -317,7 +375,7 @@ class WorkspaceRegistry {
       `member-${randomUUID()}`,
       this.defaultWorkspaceId,
       userId,
-      suggestedRole ?? 'admin',
+      suggestedRole,
       now,
       now
     );

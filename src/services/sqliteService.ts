@@ -20,7 +20,10 @@ import {
   RemoteAction,
   Workspace,
   ProjectBuildStep,
-  BuildStepPhase
+  BuildStepPhase,
+  AgentCall,
+  AgentCallTarget,
+  AgentCallArtifact
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -579,6 +582,21 @@ export class SQLiteService {
       // more agents.
       ['chat_threads', 'target_agent_id TEXT'],
       ['chat_threads', 'target_squad_id TEXT'],
+      /**
+       * Whose conversation this is.
+       *
+       * The table had only `workspace_id`, so `GET /chat/threads` returned
+       * every thread in the workspace to every member — one developer could
+       * read another's prompts. There was no column to filter on, which is why
+       * the filter was never written.
+       *
+       * Nullable, because ADD COLUMN cannot be NOT NULL without a default and
+       * there is no sensible default for "who wrote this". Existing rows are
+       * claimed at startup by `claimUnownedThreads()`: on a desktop install
+       * every legacy thread belongs to the one person at the keyboard, and a
+       * cloud database has no legacy rows to claim.
+       */
+      ['chat_threads', 'owner_id TEXT'],
       /**
        * The squad assigned to an issue.
        *
@@ -2375,8 +2393,26 @@ export class SQLiteService {
   }
 
   // --- Chat ---
-  getChatThreads(): ChatThread[] {
-    const rows = this.db.prepare('SELECT * FROM chat_threads WHERE workspace_id = ? ORDER BY last_message_at DESC').all(this.workspaceId()) as any[];
+  getChatThreads(ownerId?: string): ChatThread[] {
+    /**
+     * Owner-scoped when an owner is given, which the HTTP layer always does.
+     *
+     * Left optional for the internal callers that resolve a single thread they
+     * have already authorised — `chatService` acting on a thread the
+     * controller just checked. A caller that passes nothing gets the whole
+     * workspace, so nothing on a request path may.
+     *
+     * `owner_id IS NULL` is deliberately NOT matched. Legacy rows are claimed
+     * at startup instead; treating unowned as public here would reinstate
+     * exactly the leak this column exists to close.
+     */
+    const rows = (ownerId
+      ? this.db.prepare(
+          'SELECT * FROM chat_threads WHERE workspace_id = ? AND owner_id = ? ORDER BY last_message_at DESC'
+        ).all(this.workspaceId(), ownerId)
+      : this.db.prepare(
+          'SELECT * FROM chat_threads WHERE workspace_id = ? ORDER BY last_message_at DESC'
+        ).all(this.workspaceId())) as any[];
     return rows.map(r => ({
       id: r.id,
       title: r.title,
@@ -2386,6 +2422,7 @@ export class SQLiteService {
       targetAgentId: r.target_agent_id ?? undefined,
       targetSquadId: r.target_squad_id ?? undefined,
       projectId: r.project_id ?? undefined,
+      ownerId: r.owner_id ?? undefined,
       createdAt: r.created_at
     }));
   }
@@ -2474,16 +2511,17 @@ export class SQLiteService {
       targetAgentId: thread.targetAgentId,
       targetSquadId: thread.targetSquadId,
       projectId: thread.projectId,
+      ownerId: thread.ownerId,
       createdAt: thread.createdAt || now
     };
 
     this.db.prepare(`
       INSERT INTO chat_threads (
-        id, workspace_id, title, last_message_snippet, last_message_at, agent_ids,
+        id, workspace_id, owner_id, title, last_message_snippet, last_message_at, agent_ids,
         target_agent_id, target_squad_id, project_id, created_at
       )
       VALUES (
-        @id, @workspaceId, @title, @lastMessageSnippet, @lastMessageAt, @agentIds,
+        @id, @workspaceId, @ownerId, @title, @lastMessageSnippet, @lastMessageAt, @agentIds,
         @targetAgentId, @targetSquadId, @projectId, @createdAt
       )
     `).run({
@@ -2494,10 +2532,35 @@ export class SQLiteService {
       // better-sqlite3 requires every named parameter to be present.
       targetAgentId: complete.targetAgentId ?? null,
       targetSquadId: complete.targetSquadId ?? null,
-      projectId: complete.projectId ?? null
+      projectId: complete.projectId ?? null,
+      ownerId: complete.ownerId ?? null
     });
 
     return complete;
+  }
+
+  /**
+   * Give legacy threads an owner, once.
+   *
+   * `owner_id` had to land nullable — ADD COLUMN cannot be NOT NULL without a
+   * default, and there is no sensible default for "who wrote this". That
+   * leaves every thread created before this column with no owner, and the read
+   * path deliberately does not treat unowned as public, so they would simply
+   * vanish from the UI.
+   *
+   * On the desktop the right owner is unambiguous: one process, one person at
+   * one keyboard, so every existing thread on this machine is theirs. A cloud
+   * database has no legacy rows to claim, which is why this is called only in
+   * desktop mode.
+   *
+   * Runs after identity resolves, not at construction, because the login is
+   * not known until `gh` answers.
+   */
+  claimUnownedThreads(ownerId: string): number {
+    if (!ownerId) return 0;
+    return this.db
+      .prepare('UPDATE chat_threads SET owner_id = ? WHERE owner_id IS NULL')
+      .run(ownerId).changes;
   }
 
   /** Persist the agent roster on a thread once it is known. */

@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
+import { IS_CLOUD } from '../config/env.js';
 import { currentIdentity } from '../services/identityService.js';
 import { workspaceRegistry, WorkspaceRole } from '../services/workspaceRegistry.js';
 
@@ -12,6 +13,11 @@ const PUBLIC_EXACT = [
   '/github/auth/logout',
   '/github/oauth/url',
   '/github/oauth/callback',
+  // Reads req.session directly and answers 401 itself. Running the workspace
+  // resolver first would refuse the very call the browser makes to find out
+  // whether it is signed in.
+  '/github/session',
+  '/github/session/logout',
   '/github/app/install-url',
   '/github/app/webhook'
 ];
@@ -19,6 +25,40 @@ const PUBLIC_PREFIXES = ['/download/'];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_EXACT.includes(pathname) || PUBLIC_PREFIXES.some(prefix => pathname.startsWith(prefix));
+}
+
+/**
+ * Who this caller is, and whether they may be here at all.
+ *
+ * The two deployments answer this from different places, and conflating them
+ * was the defect:
+ *
+ *  - **desktop** — `currentIdentity()`, a process-global cached read of the
+ *    local `gh` CLI. Correct, because one process serves one human at one
+ *    keyboard.
+ *  - **cloud** — the browser session on this request. The same process-global
+ *    call on Render returned one identity for every caller: no `gh` in the
+ *    container, so every request resolved to the OS user and the entire RBAC
+ *    layer below was gating on a constant.
+ */
+async function callerFor(
+  req: Request
+): Promise<{ login: string; role?: WorkspaceRole; refused?: string }> {
+  if (IS_CLOUD) {
+    if (!req.session) {
+      return { login: '', refused: 'Sign in with GitHub to use Alpha.' };
+    }
+    return { login: req.session.login, role: req.session.role as WorkspaceRole };
+  }
+
+  const identity = await currentIdentity();
+  if (identity.access === 'no_team') {
+    return {
+      login: identity.login,
+      refused: 'Your account is not a member of an Alpha workspace.'
+    };
+  }
+  return { login: identity.login, role: identity.role as WorkspaceRole | undefined };
 }
 
 /** Resolve the active product workspace before a feature route runs. */
@@ -30,16 +70,22 @@ export async function workspaceContext(
   if (isPublicPath(req.path)) return next();
 
   try {
-    const identity = await currentIdentity();
-    if (identity.access === 'no_team') {
-      res.status(403).json({ error: 'Your account is not a member of an Alpha workspace.' });
+    const caller = await callerFor(req);
+    if (caller.refused) {
+      /**
+       * 401 when we do not know who you are, 403 when we do and the answer is
+       * no. A browser can act on the first — start a sign-in — and can only
+       * report the second.
+       */
+      const status = IS_CLOUD && !req.session ? 401 : 403;
+      res.status(status).json({ error: caller.refused });
       return;
     }
 
     const context = workspaceRegistry.resolve(
-      identity.login,
+      caller.login,
       req.header('X-Workspace-Id') || undefined,
-      identity.role as WorkspaceRole | undefined
+      caller.role
     );
     if (!context) {
       res.status(403).json({ error: 'You do not have access to the requested workspace.' });

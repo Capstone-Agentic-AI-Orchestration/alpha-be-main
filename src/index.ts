@@ -4,28 +4,51 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, CORS_ORIGIN } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, ALPHA_SESSION_SECRET, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { dataRouter } from './controllers/dataController.js';
 import { workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
+import { sessionContext } from './controllers/sessionContext.js';
 import { runRouter } from './controllers/runController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
 import { mcpRouter } from './controllers/mcpController.js';
-import { workspaceRouter } from './controllers/workspaceController.js';
+import { liveBuildRoomRouter } from './controllers/liveBuildRoomController.js';
+import { agentCallRouter } from './controllers/agentCallController.js';
+import { agentCallService } from './services/agentCallService.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
-import { warmIdentity } from './services/identityService.js';
+import { currentIdentity, warmIdentity } from './services/identityService.js';
 import { jsonErrorHandler } from './controllers/errorHandler.js';
 import { sqliteService } from './services/sqliteService.js';
 import { ensureAgentFiles } from './services/agentFileService.js';
 import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
 import { DEFAULT_WORKSPACE_ID, runWithWorkspace } from './services/workspaceContext.js';
+
+/**
+ * Refuse to start rather than store credentials in the clear.
+ *
+ * Cloud mode keeps a `repo`-scoped GitHub token per session. Without
+ * ALPHA_SESSION_SECRET those rows would be plaintext, which turns the database
+ * into a credential store: one leaked backup is read/write access to every
+ * private repository in the organisation.
+ *
+ * A hard exit, not a warning. A warning at boot is read once and then lives in
+ * a log nobody opens, and the failure it precedes is silent and permanent.
+ */
+if (IS_CLOUD && !ALPHA_SESSION_SECRET) {
+  logError(
+    'ALPHA_SESSION_SECRET is not set. Cloud mode stores GitHub tokens for each ' +
+      'signed-in user and will not run without a key to encrypt them. ' +
+      'Set it to a long random value (openssl rand -base64 48).'
+  );
+  process.exit(1);
+}
 
 const app = express();
 
@@ -38,14 +61,14 @@ const app = express();
  *
  * `CORS_ORIGIN` was already parsed in config/env.ts but ignored here.
  */
-const allowedOrigins = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
   origin(origin, callback) {
     // Same-origin / curl / Electron send no Origin header.
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
+    // Exact entries, plus wildcard labels over an apex the operator controls.
+    // A wildcard across a shared hosting apex is refused at parse time — see
+    // isAllowedOrigin — because it would admit every tenant of that platform.
+    if (isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error(`Origin ${origin} is not allowed`));
   },
   credentials: true
@@ -104,6 +127,16 @@ app.use('/api', (req, res, next) => {
 });
 
 // API Routes
+/**
+ * Identity first, then authorization.
+ *
+ * `sessionContext` resolves who is calling and puts their GitHub token on the
+ * request's async chain; `workspaceContext` decides what that person may do.
+ * The order matters and is not interchangeable — the second reads what the
+ * first sets. On the desktop `sessionContext` is a pass-through, because
+ * identity there is the machine's `gh` login rather than a cookie.
+ */
+app.use('/api', sessionContext);
 app.use('/api', workspaceContext);
 app.use('/api', workspaceRouter);
 app.use('/api', dataRouter);
@@ -148,27 +181,43 @@ app.get('/api/health', (req, res) => {
 
 const server = http.createServer(app);
 
-// WebSocket Server for Live Real-Time 5-Stage Streaming
-const wss = new WebSocketServer({ server });
-
 const clients = new Set<WebSocket>();
 
-wss.on('connection', (ws: WebSocket) => {
-  clients.add(ws);
-  logInfo('Client connected to WebSocket stream');
+/**
+ * Live run streaming, on the desktop only.
+ *
+ * This socket carries every run's stage updates to every client that connects,
+ * with no token check on upgrade and no workspace filter — the comment on
+ * `safeAgentCallEvent` says as much: it "is intentionally not an authorization
+ * boundary". On a workstation that is fine, because HOST is loopback and the
+ * only listener is this app's own renderer.
+ *
+ * In the cloud the same socket is published to the internet, where "not an
+ * authorization boundary" means any browser can subscribe to the activity of
+ * every developer in every workspace. Cloud clients get the same telemetry
+ * through Supabase Realtime instead, where RLS applies, so there is nothing to
+ * replace here — only something to stop exposing.
+ */
+if (IS_DESKTOP) {
+  const wss = new WebSocketServer({ server });
 
-  ws.send(JSON.stringify({ type: 'connected', time: new Date().toISOString() }));
+  wss.on('connection', (ws: WebSocket) => {
+    clients.add(ws);
+    logInfo('Client connected to WebSocket stream');
 
-  ws.on('close', () => {
-    clients.delete(ws);
-    logInfo('Client disconnected from WebSocket stream');
+    ws.send(JSON.stringify({ type: 'connected', time: new Date().toISOString() }));
+
+    ws.on('close', () => {
+      clients.delete(ws);
+      logInfo('Client disconnected from WebSocket stream');
+    });
+
+    ws.on('error', (err) => {
+      logError('WebSocket client error:', err);
+      clients.delete(ws);
+    });
   });
-
-  ws.on('error', (err) => {
-    logError('WebSocket client error:', err);
-    clients.delete(ws);
-  });
-});
+}
 
 function broadcast(payload: Record<string, any>) {
   const data = JSON.stringify(payload);
@@ -236,8 +285,36 @@ runnerService.on('squad_run_failed', (data) => broadcast({ type: 'squad_run_fail
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
 
 server.listen(PORT, HOST, () => {
-  logInfo(`Alpha v2 Execution Engine & Backend Daemon running on http://${HOST}:${PORT}`);
-  logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+  logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${PORT}`);
+  if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  /**
+   * A dropped origin pattern is otherwise invisible.
+   *
+   * The operator sees a browser CORS error and nothing server-side pointing at
+   * the cause, which is a bad way to learn that the entry was refused on
+   * purpose.
+   */
+  if (hostOverrideNote()) logError(hostOverrideNote());
+
+  for (const { pattern, reason } of unsafeOriginPatterns()) {
+    logError(`CORS_ORIGIN entry "${pattern}" was ignored as unsafe: ${reason}.`);
+  }
+
+  /**
+   * Everything below this point is execution-node work.
+   *
+   * The cloud process has no working copy to reconcile, no `~/.alpha` that
+   * survives a deploy, no agent CLIs to discover and no local models to poll.
+   * Running any of it there is not merely wasted — `runtimeRefreshService`
+   * rescans the filesystem on a timer and would report "no runtimes found"
+   * forever, which is indistinguishable from a real misconfiguration on a
+   * developer's machine.
+   */
+  if (IS_CLOUD) {
+    logInfo('Cloud mode: runner, runtime discovery and local scaffolding are disabled.');
+    return;
+  }
 
   /**
    * Close out anything the previous process was in the middle of.
@@ -251,6 +328,27 @@ server.listen(PORT, HOST, () => {
   // Resolve who is using this copy, so the first issue anyone creates does not
   // pay for a `gh` subprocess.
   warmIdentity();
+
+  /**
+   * Give legacy conversations an owner.
+   *
+   * `chat_threads.owner_id` landed nullable — ADD COLUMN cannot be NOT NULL
+   * without a default — so every thread written before it has none, and the
+   * read path does not treat unowned as public. Without this they would simply
+   * disappear from the list.
+   *
+   * Desktop only, and correct there for the reason the whole mode split
+   * exists: one process, one person at one keyboard, so every thread on this
+   * machine is theirs. A cloud database has no legacy rows.
+   *
+   * After identity, because the login is not known until `gh` answers.
+   */
+  currentIdentity()
+    .then(identity => {
+      const claimed = sqliteService.claimUnownedThreads(identity.login);
+      if (claimed > 0) logInfo(`Claimed ${claimed} conversation(s) for ${identity.login}.`);
+    })
+    .catch(err => logError('Could not claim unowned conversations:', err));
 
   // Write a starter MCP catalog if the user has none, so the file is
   // discoverable rather than something you have to know to create.

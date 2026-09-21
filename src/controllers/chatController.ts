@@ -7,9 +7,29 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 
 export const chatRouter = Router();
 
+/**
+ * The caller's own conversations, and only those.
+ *
+ * This used to be scoped by workspace alone, so every member of a workspace
+ * received every other member's threads — a developer could read a colleague's
+ * prompts by loading the chat list. The table had no owner column, so there
+ * was nothing to filter on and the filter was never written.
+ *
+ * No project-manager bypass, deliberately. Prompts are working notes rather
+ * than managed output; oversight sees runs, stages and patches instead. The
+ * same split is enforced again in Postgres by the policies in
+ * `0002_row_level_security.sql`, because the desktop reaches that database
+ * without passing through this route.
+ */
 chatRouter.get('/chat/threads', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
-  res.json(workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(), req.workspace!.workspaceId));
+  res.json(
+    workspaceRegistry.scope(
+      'chat_threads',
+      sqliteService.getChatThreads(req.workspace!.userId),
+      req.workspace!.workspaceId
+    )
+  );
 });
 
 /**
@@ -36,7 +56,7 @@ chatRouter.post('/chat/threads', (req: Request, res: Response) => {
   const id = typeof req.body?.id === 'string' ? req.body.id : undefined;
 
   const existing = id
-    ? workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(), req.workspace!.workspaceId).find(t => t.id === id)
+    ? workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(req.workspace!.userId), req.workspace!.workspaceId).find(t => t.id === id)
     : undefined;
   if (existing) return res.status(200).json(existing);
 
@@ -47,7 +67,17 @@ chatRouter.post('/chat/threads', (req: Request, res: Response) => {
     if (!requireProjectWorkspace(req, res, req.body.projectId)) return;
   }
 
-  const thread = sqliteService.createChatThread(req.body);
+  /**
+   * The owner is taken from the resolved caller, never from the body.
+   *
+   * A client that could name its own `ownerId` could create a thread
+   * attributed to someone else, or read one by claiming to own it. The
+   * middleware already decided who this is.
+   */
+  const thread = sqliteService.createChatThread({
+    ...req.body,
+    ownerId: req.workspace!.userId
+  });
   workspaceRegistry.bind('chat_threads', thread.id, req.workspace!.workspaceId);
   res.status(201).json(thread);
 });
