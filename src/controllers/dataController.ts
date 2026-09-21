@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express';
-import { currentIdentity } from '../services/identityService.js';
+import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
 import { mintSupabaseToken } from '../services/supabaseTokenService.js';
@@ -82,6 +82,17 @@ dataRouter.get('/me', async (req: Request, res: Response) => {
     });
   }
 
+  /**
+   * `?refresh=1` re-reads `gh` instead of answering from the boot-time cache.
+   *
+   * The identity is resolved once and reused, so a teammate who signed in to
+   * GitHub while the app was open -- from the in-app sign-in, or a terminal --
+   * stayed "signed out" until they restarted it; "I've done this" could never
+   * work. The explicit flag keeps every other request on the cache: resolving
+   * spawns `gh`, and doing that per request would put a subprocess behind
+   * every board action while signed out.
+   */
+  if (req.query.refresh === '1') await refreshIdentity();
   return res.json({ authenticated: true, ...(await currentIdentity()) });
 });
 
