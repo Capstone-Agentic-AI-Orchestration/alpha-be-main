@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { SUPABASE_JWT_SECRET, SUPABASE_TOKEN_TTL_MS } from '../config/env.js';
+import { IS_CLOUD, SUPABASE_JWT_SECRET, SUPABASE_TOKEN_TTL_MS } from '../config/env.js';
 import type { AlphaRole } from './identityService.js';
 
 /**
@@ -79,6 +79,23 @@ export function mintSupabaseToken(claims: SupabaseTokenClaims): {
   token: string;
   expiresAt: string;
 } {
+  /**
+   * Only the cloud mints, whatever the environment holds.
+   *
+   * The desktop used to sign its own tokens, which needed the secret on every
+   * developer's machine -- and the claims it signed, role included, were
+   * whatever that machine said. Anyone with the secret could make themselves
+   * admin of any workspace. A desktop that still has the secret in an old
+   * `.env` must not quietly keep doing it, so this refuses by mode rather than
+   * by whether the secret happens to be set.
+   */
+  if (!IS_CLOUD) {
+    throw new Error(
+      'Database tokens are minted only by the cloud service. The desktop asks ' +
+        'for one at ALPHA_CLOUD_API instead of signing its own.'
+    );
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const exp = now + Math.floor(SUPABASE_TOKEN_TTL_MS / 1000);
 

@@ -237,10 +237,21 @@ log says so explicitly and binds `0.0.0.0` anyway.
 
 ### Cloud writes are rejected
 
-`SUPABASE_JWT_SECRET` missing. The log says so once:
+On a **desktop**, the database token comes from the cloud. The log names the
+cause, at most once every five minutes:
 
-> `SUPABASE_JWT_SECRET is not set, so cloud writes carry no identity and row
-> level security will reject them.`
+> `Cloud sync failing (database token): ...`
+
+- `ALPHA_CLOUD_API is not set` — add it to the desktop `.env`
+  (`https://<vercel-app>.vercel.app/api`).
+- `gh is not signed in` — run `gh auth login`.
+- `cloud answered 403: ... no team` — the account needs a team in the org, or
+  its `gh` token lacks `read:org` (`gh auth refresh -s read:org`).
+- `cloud answered 503` — Render has no `SUPABASE_JWT_SECRET`.
+
+Never fix this by putting `SUPABASE_JWT_SECRET` on the desktop: minting refuses
+to run outside cloud mode, and the secret there would let that machine claim
+any role.
 
 ---
 

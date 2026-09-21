@@ -280,6 +280,10 @@ export const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 7 * 24 * 60 *
  * server. Found in the Supabase dashboard under Settings → API. Distinct from
  * ALPHA_SESSION_SECRET, which encrypts stored GitHub tokens and is Alpha's
  * own — mixing them would mean one leak compromised both.
+ *
+ * Cloud only. Minting refuses to run on the desktop even when this is set:
+ * anyone holding it can sign any role for any workspace. The desktop gets its
+ * token from the cloud instead -- see ALPHA_CLOUD_API.
  */
 export const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || '';
 
@@ -296,6 +300,20 @@ export const SUPABASE_TOKEN_TTL_MS = Number(process.env.SUPABASE_TOKEN_TTL_MS ||
 // Supabase Configuration (team / cloud mode)
 export const SUPABASE_URL = process.env.SUPABASE_URL || '';
 export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+
+/**
+ * Where the desktop asks for its database token: the cloud API's base URL,
+ * e.g. `https://alpha-fe-main.vercel.app/api`. Desktop only.
+ *
+ * The desktop used to mint its own token with SUPABASE_JWT_SECRET, which put
+ * the signing secret on every developer's machine -- and whoever holds it can
+ * sign any role for any workspace, which makes every policy advisory. Now the
+ * desktop proves who it is with its `gh` login and the cloud decides the role.
+ *
+ * The Vercel origin rather than Render's own hostname: the rewrite there
+ * reaches Render from networks that cannot reach it directly.
+ */
+export const ALPHA_CLOUD_API = (process.env.ALPHA_CLOUD_API || '').trim().replace(/\/+$/, '');
 
 // GitHub OAuth & Hosted Cloud Configuration
 export const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';

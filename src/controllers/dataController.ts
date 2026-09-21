@@ -3,6 +3,7 @@ import { currentIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
 import { mintSupabaseToken } from '../services/supabaseTokenService.js';
+import { exchangeGitHubToken } from '../services/databaseTokenExchange.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -115,6 +116,30 @@ dataRouter.get('/database/token', (req: Request, res: Response) => {
     // rather than letting the browser retry a 500 forever.
     return res.status(503).json({ error: err?.message ?? 'Database tokens are not configured.' });
   }
+});
+
+/**
+ * The desktop's way to the same token: a GitHub token in, a database token out.
+ *
+ * Public in `workspaceContext` because it authenticates itself -- the desktop
+ * has no session cookie to present. Everything in the minted token comes from
+ * GitHub, not from the caller; see `databaseTokenExchange.ts`. Cloud only: a
+ * desktop daemon has no business issuing tokens to anyone.
+ */
+dataRouter.post('/database/token/exchange', async (req: Request, res: Response) => {
+  if (!IS_CLOUD) {
+    return res.status(404).json({ error: 'Only the cloud service issues database tokens.' });
+  }
+
+  const githubToken = /^Bearer\s+(\S+)\s*$/i.exec(req.header('Authorization') ?? '')?.[1];
+  const result = await exchangeGitHubToken(
+    githubToken,
+    req.header('X-Workspace-Id') || undefined,
+    (login, workspaceId, role) => workspaceRegistry.resolve(login, workspaceId, role)
+  );
+
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  return res.json({ token: result.token, expiresAt: result.expiresAt });
 });
 
 /**

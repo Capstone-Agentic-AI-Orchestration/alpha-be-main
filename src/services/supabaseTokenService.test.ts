@@ -10,8 +10,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  * than assumed, and `rlsPolicies.test.ts` asserts the other end of the same
  * contract.
  */
-async function withSecret(secret: string) {
+async function withSecret(secret: string, mode: 'cloud' | 'desktop' = 'cloud') {
   process.env.SUPABASE_JWT_SECRET = secret;
+  process.env.ALPHA_MODE = mode;
   vi.resetModules();
   return import('./supabaseTokenService.js');
 }
@@ -23,10 +24,23 @@ beforeEach(() => vi.resetModules());
 afterEach(() => {
   delete process.env.SUPABASE_JWT_SECRET;
   delete process.env.SUPABASE_TOKEN_TTL_MS;
+  delete process.env.ALPHA_MODE;
   vi.resetModules();
 });
 
 describe('database tokens', () => {
+  /**
+   * The desktop used to sign its own tokens with this secret, choosing its
+   * own role. A desktop with the secret still in an old `.env` must refuse
+   * rather than quietly carry on.
+   */
+  it('refuses to mint outside cloud mode, even with the secret set', async () => {
+    const { mintSupabaseToken } = await withSecret('test-secret', 'desktop');
+    expect(() =>
+      mintSupabaseToken({ sub: 'LloydLim1', workspace_id: 'ws1', alpha_role: 'admin' })
+    ).toThrow(/only by the cloud/);
+  });
+
   it('carries exactly the claims the policies read', async () => {
     const { mintSupabaseToken } = await withSecret('test-secret');
     const { token } = mintSupabaseToken({
