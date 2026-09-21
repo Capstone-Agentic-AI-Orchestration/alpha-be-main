@@ -165,16 +165,24 @@ and the policies read claims from a token the API mints per session.
 | `CORS_ORIGIN` | `http://localhost:3000,http://localhost:5173` | — |
 | `SUPABASE_URL` | same as Render | For the board uplink |
 | `SUPABASE_ANON_KEY` | same as Render | — |
-| `SUPABASE_JWT_SECRET` | same as Render | Without it, cloud writes carry no identity and RLS rejects them |
+| `ALPHA_CLOUD_API` | `https://<vercel-app>.vercel.app/api` | Where the desktop gets its database token. Without it, cloud writes carry no identity and RLS rejects them |
 | `ALPHA_LOCAL_TOKEN` | optional | Set it if anything else on the machine could reach port 3001 |
 
-**Never on a developer machine:** `GITHUB_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`,
-`ALPHA_SESSION_SECRET`. Those are server credentials, and a private key inside a
-shipped `.exe` cannot be un-distributed. `githubService` warns at startup if it
-finds them.
+**Never on a developer machine:** `SUPABASE_JWT_SECRET`, `GITHUB_CLIENT_SECRET`,
+`GITHUB_APP_PRIVATE_KEY`, `ALPHA_SESSION_SECRET`. Those are server credentials,
+and a private key inside a shipped `.exe` cannot be un-distributed.
+`githubService` warns at startup if it finds the GitHub ones.
+
+`SUPABASE_JWT_SECRET` is the worst of them to leak: it signs database tokens,
+so whoever holds it can claim any role in any workspace and every policy
+becomes advisory. The desktop used to need it to sign its own token. It now
+presents its `gh` login to `ALPHA_CLOUD_API` at `/database/token/exchange`, and
+the cloud decides the login and role from GitHub. Minting refuses to run outside
+cloud mode, so a secret left in an old `.env` does nothing.
 
 Identity on the desktop comes from `gh auth login` — no OAuth, no cookie, no
-sign-in screen.
+sign-in screen. The `gh` token needs `read:org` (the default) for the cloud to
+read your teams; `gh auth refresh -s read:org` adds it if missing.
 
 ---
 
@@ -183,11 +191,8 @@ sign-in screen.
 | Missing | Symptom |
 | :--- | :--- |
 | `ALPHA_SESSION_SECRET` | Process exits at boot with an explanation |
-| `ALPHA_ORG` | Process exits at boot with an explanation, in both modes |
-| `GITHUB_CALLBACK_URL` | Sign-in screen shows "not configured" — there is no fallback address |
-| `GITHUB_APP_SLUG` | The App install link is omitted rather than pointing at a 404 |
-| `CORS_ORIGIN` | No browser origin is allowed; the web app's requests are blocked |
-| `SUPABASE_JWT_SECRET` | Cloud writes rejected by RLS; logged once |
+| `SUPABASE_JWT_SECRET` on Render | Browser and desktop token requests answer 503 |
+| `ALPHA_CLOUD_API` on a desktop | Cloud writes rejected by RLS; logged once every 5 minutes |
 | `GITHUB_CLIENT_ID` | Sign-in screen renders "not configured" instead of a dead button |
 | `GITHUB_CALLBACK_URL` wrong | Sign-in returns `#alpha_error=oauth_failed` |
 | `CORS_ORIGIN` missing the Vercel origin | Every request blocked in the browser console |

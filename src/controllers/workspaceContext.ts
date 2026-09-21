@@ -19,7 +19,9 @@ const PUBLIC_EXACT = [
   '/github/session',
   '/github/session/logout',
   '/github/app/install-url',
-  '/github/app/webhook'
+  '/github/app/webhook',
+  // The desktop has no session; this verifies the GitHub token it presents.
+  '/database/token/exchange'
 ];
 const PUBLIC_PREFIXES = ['/download/'];
 

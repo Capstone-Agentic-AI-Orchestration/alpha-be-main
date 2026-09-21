@@ -1,10 +1,29 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_JWT_SECRET } from '../config/env.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Issue } from '../models/index.js';
 import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
-import { mintSupabaseToken } from './supabaseTokenService.js';
+import { DatabaseTokenClient } from './databaseTokenClient.js';
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * The machine's GitHub token, as the identity the desktop presents.
+ *
+ * Read per exchange rather than cached: `gh auth login` as someone else, or
+ * `gh auth logout`, should change who the next token is for.
+ */
+async function githubCliToken(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The desktop's uplink to the shared board.
@@ -22,6 +41,11 @@ import { mintSupabaseToken } from './supabaseTokenService.js';
  * **Its payloads were incomplete.** `saveRunToCloud` sent neither
  * `workspace_id` nor `owner_id`, both of which are `NOT NULL`. Every insert
  * would have been rejected even with a valid token.
+ *
+ * The first fix for the credentials minted a token here, with the Supabase JWT
+ * secret -- which put that secret on every developer's machine and let the
+ * machine choose its own role. The token now comes from the cloud, in
+ * exchange for the machine's `gh` login; see `databaseTokenClient.ts`.
  */
 
 /** How often to repeat a sync failure, so a broken uplink is visible once and not endlessly. */
@@ -66,7 +90,12 @@ export function runToCloudRow(
 export class SupabaseService {
   private client: SupabaseClient | null = null;
   private lastFailureLoggedAt = 0;
-  private warnedAboutToken = false;
+  private readonly tokens = new DatabaseTokenClient({
+    cloudApi: ALPHA_CLOUD_API,
+    githubToken: githubCliToken,
+    workspaceId: currentWorkspaceId,
+    onFailure: (what, err) => this.reportFailure(what, err)
+  });
 
   constructor() {
     if (SUPABASE_URL && SUPABASE_ANON_KEY) {
@@ -89,7 +118,7 @@ export class SupabaseService {
            * a clearer signal than an exception thrown from inside the client's
            * internals.
            */
-          accessToken: async () => (await this.databaseToken()) ?? SUPABASE_ANON_KEY,
+          accessToken: async () => (await this.tokens.token()) ?? SUPABASE_ANON_KEY,
           realtime: {
             params: { eventsPerSecond: 20 }
           }
@@ -100,61 +129,6 @@ export class SupabaseService {
       }
     } else {
       logInfo('Supabase credentials not set — running in Solo SQLite mode');
-    }
-  }
-
-  /**
-   * A token carrying the three claims the policies read.
-   *
-   * Resolved from what this process already knows: the machine's GitHub login,
-   * the ambient workspace, and that user's role in it. That is correct because
-   * everything calling this runs on the desktop — the cloud process has no
-   * runner and syncs nothing. If that ever changes, the caller will have to
-   * pass its own identity rather than letting this infer one.
-   */
-  private async databaseToken(): Promise<string | null> {
-    if (!SUPABASE_JWT_SECRET) {
-      if (!this.warnedAboutToken) {
-        this.warnedAboutToken = true;
-        logError(
-          'SUPABASE_JWT_SECRET is not set, so cloud writes carry no identity and ' +
-            'row level security will reject them. Set it from Supabase → Settings → API.'
-        );
-      }
-      return null;
-    }
-
-    const identity = knownIdentity();
-    if (!identity) return null;
-
-    /**
-     * Imported here rather than at the top of the file.
-     *
-     * `workspaceRegistry` opens SQLite in a module-level singleton, so a
-     * top-level import would open a second handle to the database in every
-     * process that touches this service — including short-lived ones with no
-     * business holding it. On Windows that extra handle also stops a test's
-     * temporary database being deleted, which is how this was noticed.
-     *
-     * The same reason `identityService` defers its own import of the data
-     * layer, and the same module-shape problem the store-driver work exists to
-     * fix properly.
-     */
-    const { workspaceRegistry } = await import('./workspaceRegistry.js');
-
-    const workspaceId = currentWorkspaceId();
-    const context = workspaceRegistry.resolve(identity.login, workspaceId);
-    if (!context) return null;
-
-    try {
-      return mintSupabaseToken({
-        sub: context.userId,
-        workspace_id: context.workspaceId,
-        alpha_role: context.role
-      }).token;
-    } catch (err: any) {
-      logError('Could not mint a database token:', err?.message || err);
-      return null;
     }
   }
 

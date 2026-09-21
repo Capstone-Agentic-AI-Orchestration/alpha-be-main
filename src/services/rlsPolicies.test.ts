@@ -38,7 +38,9 @@ async function as<T>(
     `update auth._claims set v = '${JSON.stringify({
       sub: login,
       workspace_id: workspace,
-      alpha_role: role
+      alpha_role: role,
+      // What supabaseTokenService stamps; 0004 ignores claims without it.
+      iss: 'alpha'
     })}'::jsonb`
   );
   await db.exec('set role authenticated');
@@ -71,7 +73,8 @@ beforeAll(async () => {
     create role authenticated nologin;
   `);
 
-  for (const file of ['0001_control_plane_schema.sql', '0002_row_level_security.sql']) {
+  // Every migration, in order -- a hard-coded list silently skips the next one.
+  for (const file of fs.readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql')).sort()) {
     await db.exec(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8'));
   }
 
@@ -217,12 +220,18 @@ describe('a workspace is a hard boundary', () => {
  * the server would send.
  */
 describe('a real minted token satisfies the policies', () => {
+  afterAll(() => {
+    delete process.env.ALPHA_MODE;
+  });
+
   async function claimsFromRealToken(
     login: string,
     role: 'client' | 'dev' | 'pm' | 'admin',
     workspace = 'ws1'
   ) {
     process.env.SUPABASE_JWT_SECRET = 'integration-test-secret';
+    // Minting is cloud-only; this is the token the cloud would send.
+    process.env.ALPHA_MODE = 'cloud';
     const { mintSupabaseToken } = await import('./supabaseTokenService.js');
     const { token } = mintSupabaseToken({ sub: login, workspace_id: workspace, alpha_role: role });
     // Exactly what Supabase would hand the policies after verifying it.
@@ -262,6 +271,51 @@ describe('a real minted token satisfies the policies', () => {
   });
 });
 
+describe('only tokens Alpha issued are trusted', () => {
+  /**
+   * Supabase checks a token's signature, not its issuer, and Supabase Auth
+   * signs with the same secret. A token it minted -- or anything else signed
+   * with the project secret -- must read as nobody, however admin its claims.
+   */
+  async function asForeignIssuer<T>(fn: () => Promise<T>): Promise<T> {
+    await db.exec(
+      `update auth._claims set v = '${JSON.stringify({
+        sub: 'LloydLim1',
+        workspace_id: 'ws1',
+        alpha_role: 'admin',
+        // Anything but Alpha's issuer; Supabase's own keys say 'supabase'.
+        iss: 'supabase'
+      })}'::jsonb`
+    );
+    await db.exec('set role authenticated');
+    try {
+      return await fn();
+    } finally {
+      await db.exec('reset role');
+    }
+  }
+
+  it('grants an Alpha-issued admin token the workspace', async () => {
+    expect(await as('LloydLim1', 'admin', () => rows('select * from projects'))).toBe(1);
+  });
+
+  it('grants the same claims nothing when another issuer signed them', async () => {
+    expect(await asForeignIssuer(() => rows('select * from projects'))).toBe(0);
+    expect(await asForeignIssuer(() => rows('select * from prototype_runs'))).toBe(0);
+    expect(await asForeignIssuer(() => rows('select * from remote_actions'))).toBe(0);
+  });
+
+  it('does not let a foreign token read skills just by having a subject', async () => {
+    await db.exec(
+      `insert into skills (id, name, category, permissions, description)
+       values ('s-probe', 'Probe', 'test', 'read', 'visible to Alpha tokens only')
+       on conflict (id) do nothing`
+    );
+    expect(await as('Lloyd1020', 'dev', () => rows('select * from skills'))).toBe(1);
+    expect(await asForeignIssuer(() => rows('select * from skills'))).toBe(0);
+  });
+});
+
 describe('the audit log is append-only', () => {
   /**
    * There is no update or delete policy on `remote_actions`, and with RLS
@@ -272,5 +326,22 @@ describe('the audit log is append-only', () => {
     await as('Lloyd1020', 'dev', () => db.query(`delete from remote_actions where id='ra1'`));
     const left = await db.query('select * from remote_actions');
     expect(left.rows).toHaveLength(1);
+  });
+});
+
+describe("an agent's execution config is not shared", () => {
+  /**
+   * CLI flags and environment variables are input to a process on a
+   * developer's machine, and a shared row is writable by every developer and
+   * readable by every member -- clients included. `0003` keeps both out of the
+   * cloud rather than trusting a policy to guard them.
+   */
+  it('has no column for CLI arguments or environment variables', async () => {
+    const { rows: columns } = await db.query(
+      `select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'agents'
+          and column_name in ('custom_cli_args', 'env_vars')`
+    );
+    expect(columns).toEqual([]);
   });
 });
