@@ -41,7 +41,7 @@ async function as<T>(
       alpha_role: role
     })}'::jsonb`
   );
-  await db.exec('set role app');
+  await db.exec('set role authenticated');
   try {
     return await fn();
   } finally {
@@ -65,6 +65,10 @@ beforeAll(async () => {
     insert into auth._claims values ('{}'::jsonb);
     create function auth.jwt() returns jsonb
       language sql stable as $$ select v from auth._claims limit 1 $$;
+
+    -- Supabase's API roles, which the migrations grant to by name.
+    create role anon nologin;
+    create role authenticated nologin;
   `);
 
   for (const file of ['0001_control_plane_schema.sql', '0002_row_level_security.sql']) {
@@ -97,11 +101,13 @@ beforeAll(async () => {
     insert into remote_actions (id,workspace_id,actor,action,succeeded)
       values ('ra1','ws1','Lloyd1020','push',true);
 
-    create role app nologin;
-    grant usage on schema public, alpha, auth to app;
-    grant select on auth._claims to app;
-    grant select, insert, update, delete on all tables in schema public to app;
-    grant execute on all functions in schema alpha, auth to app;
+    -- What Supabase grants authenticated out of the box: the auth schema,
+    -- and table privileges on public through default privileges. Deliberately
+    -- NOT usage on alpha. That grant belongs to the migration, and granting it
+    -- here is how its absence went unnoticed.
+    grant usage on schema public, auth to authenticated;
+    grant select on auth._claims to authenticated;
+    grant select, insert, update, delete on all tables in schema public to authenticated;
   `);
 });
 
@@ -230,7 +236,7 @@ describe('a real minted token satisfies the policies', () => {
   ): Promise<T> {
     const claims = await claimsFromRealToken(login, role);
     await db.exec(`update auth._claims set v = '${JSON.stringify(claims)}'::jsonb`);
-    await db.exec('set role app');
+    await db.exec('set role authenticated');
     try { return await fn(); } finally { await db.exec('reset role'); }
   }
 

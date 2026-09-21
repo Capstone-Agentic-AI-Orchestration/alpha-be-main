@@ -71,6 +71,17 @@ language sql stable as $$
   select row_workspace is not distinct from alpha.workspace()
 $$;
 
+-- A policy runs as the caller, so every accessor above is resolved with the
+-- caller's privileges. Functions are executable by PUBLIC by default; a new
+-- schema is not usable by anyone but its owner. Without this grant every
+-- policy below fails with "permission denied for schema alpha" -- an error
+-- raised before the policy has decided anything.
+--
+-- `authenticated` is the role Alpha's minted tokens ask for. `anon` is granted
+-- too, so a tokenless request is refused by the policies and returns no rows,
+-- rather than erroring on the schema first.
+grant usage on schema alpha to anon, authenticated;
+
 -- ─────────────────────────────────────────────────────────────────────────
 -- Enable RLS everywhere
 -- ─────────────────────────────────────────────────────────────────────────

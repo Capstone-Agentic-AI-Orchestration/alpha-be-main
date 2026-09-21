@@ -53,6 +53,10 @@ beforeAll(async () => {
     insert into auth._claims values ('{}'::jsonb);
     create function auth.jwt() returns jsonb
       language sql stable as $$ select v from auth._claims limit 1 $$;
+
+    -- Supabase's API roles, which the migrations grant to by name.
+    create role anon nologin;
+    create role authenticated nologin;
   `);
 
   for (const file of ['0001_control_plane_schema.sql', '0002_row_level_security.sql']) {
