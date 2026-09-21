@@ -32,7 +32,27 @@ async function startApi() {
   // The daemon resolves this from `gh`; a test must not depend on a signed-in
   // machine, and the login is what the assertions are about.
   vi.doMock('../services/identityService.js', () => ({
-    currentIdentity: async () => ({ login: 'octocat', source: 'github' }),
+    /**
+     * An explicit role, stated rather than inherited.
+     *
+     * These tests exercise issue, thread and run behaviour, not RBAC. They used
+     * to get full access by accident: an identity with no role reached
+     * `workspaceRegistry.ensureMember`, whose `?? 'admin'` default made any
+     * unknown account an administrator. That default was the most dangerous
+     * line in the permission system and has been removed, so the precondition
+     * these tests always relied on now has to be written down.
+     *
+     * Admin because the routes under test span capabilities no single lower
+     * role holds. RBAC itself is covered by teamAccess.test.ts.
+     */
+    currentIdentity: async () => ({
+      login: 'octocat',
+      source: 'github',
+      role: 'admin',
+      access: 'granted',
+      github: 'ok',
+      teams: []
+    }),
     warmIdentity: () => {},
     knownIdentity: () => ({ login: 'octocat', source: 'github' })
   }));
@@ -41,6 +61,16 @@ async function startApi() {
   const { dataRouter } = await import('./dataController.js');
   const { workspaceContext } = await import('./workspaceContext.js');
   opened.push(sql.sqliteService);
+  /**
+   * The registry holds a second handle on the same file.
+   *
+   * `workspaceRegistry` opens SQLite in a module-level singleton, separately
+   * from sqliteService. Closing only one left the other open, and Windows will
+   * not unlink a file with an open handle — so every test in this file failed
+   * in teardown with EBUSY, after its assertions had already passed. For most
+   * of the Phase 0 work those failures were written off as Windows noise.
+   */
+  opened.push((await import('../services/workspaceRegistry.js')).workspaceRegistry);
 
   const app = express();
   app.use(express.json());
