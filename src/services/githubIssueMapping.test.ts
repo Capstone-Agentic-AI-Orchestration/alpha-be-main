@@ -35,13 +35,13 @@ const issue = (over: Partial<GitHubIssue> = {}): GitHubIssue => ({
 
 describe('parseRepoRef', () => {
   it('reads the forms a project might have recorded', () => {
-    const expected = { owner: 'Capstone-Agentic-AI-Orchestration', repo: 'alpha-be-main' };
+    const expected = { owner: 'example-org', repo: 'alpha-be-main' };
     for (const input of [
-      'https://github.com/Capstone-Agentic-AI-Orchestration/alpha-be-main',
-      'https://github.com/Capstone-Agentic-AI-Orchestration/alpha-be-main.git',
-      'https://github.com/Capstone-Agentic-AI-Orchestration/alpha-be-main/',
-      'git@github.com:Capstone-Agentic-AI-Orchestration/alpha-be-main.git',
-      'Capstone-Agentic-AI-Orchestration/alpha-be-main'
+      'https://github.com/example-org/alpha-be-main',
+      'https://github.com/example-org/alpha-be-main.git',
+      'https://github.com/example-org/alpha-be-main/',
+      'git@github.com:example-org/alpha-be-main.git',
+      'example-org/alpha-be-main'
     ]) {
       expect(parseRepoRef(input)).toEqual(expected);
     }

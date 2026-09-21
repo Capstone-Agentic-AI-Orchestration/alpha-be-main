@@ -87,8 +87,12 @@ export function hostOverrideNote(): string {
  * to resolve an org, an org to resolve a role, and a role to create a project.
  * Worse, the undefined org silently disabled the `no_team` access gate, so
  * every signed-in account fell through to the `?? 'admin'` default.
+ *
+ * Required, with no default. It used to fall back to one particular
+ * organisation, which tied every deployment -- and every teammate's desktop --
+ * to that org without saying so. `index.ts` refuses to start without it.
  */
-export const ALPHA_ORG = process.env.ALPHA_ORG || 'Capstone-Agentic-AI-Orchestration';
+export const ALPHA_ORG = (process.env.ALPHA_ORG || '').trim();
 
 /**
  * GitHub logins granted admin without a team, comma separated.
@@ -133,12 +137,12 @@ export const AGENTS_DIR = path.join(ALPHA_DIR, 'agents');
 // keeps every agent-writable path in a single place that is easy to reason about.
 export const WORKSPACES_DIR = path.join(ALPHA_DIR, 'workspaces');
 
-export const CORS_ORIGIN = process.env.CORS_ORIGIN || [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-].join(',');
+/**
+ * Origins allowed to call this API with credentials. No default: an unset
+ * allowlist admits no cross-origin browser at all, which is the safe reading.
+ * The desktop shell sets its own; a dev server's origin goes in `.env`.
+ */
+export const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
 
 const ALLOWED_ORIGINS = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 
@@ -307,13 +311,20 @@ export const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
  * `.env` — the state this repository has always been in — that default applies,
  * so the very first OAuth attempt would have redirected GitHub to a 404. The
  * flow has never been executed, so nothing depended on the wrong value.
+ *
+ * No default at all now: it names one deployment's hostname, and a guessed one
+ * sends GitHub's redirect somewhere the cookie cannot follow. Unset, sign-in
+ * reports itself as not configured rather than offering a link that breaks.
  */
-export const GITHUB_CALLBACK_URL =
-  process.env.GITHUB_CALLBACK_URL || 'http://localhost:3001/api/github/oauth/callback';
+export const GITHUB_CALLBACK_URL = process.env.GITHUB_CALLBACK_URL || '';
 export const GITHUB_SCOPE = process.env.GITHUB_SCOPE || 'repo,workflow,read:org';
 
 // GitHub App Configuration
 export const GITHUB_APP_ID = process.env.GITHUB_APP_ID || '';
 export const GITHUB_APP_PRIVATE_KEY = process.env.GITHUB_APP_PRIVATE_KEY || '';
 export const GITHUB_APP_WEBHOOK_SECRET = process.env.GITHUB_APP_WEBHOOK_SECRET || '';
-export const GITHUB_APP_SLUG = process.env.GITHUB_APP_SLUG || 'alpha-agentic-orchestrator';
+/**
+ * The App's URL name, from `github.com/apps/<slug>`. No default: the old one
+ * named an App that does not exist, so an unset value sent people to a 404.
+ */
+export const GITHUB_APP_SLUG = process.env.GITHUB_APP_SLUG || '';

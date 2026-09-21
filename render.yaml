@@ -37,8 +37,10 @@ services:
       - key: ALPHA_SESSION_SECRET
         generateValue: true
 
+      # The GitHub organisation roles come from. Prompted for, not written
+      # here: it names one deployment, and the daemon refuses to start without it.
       - key: ALPHA_ORG
-        value: Capstone-Agentic-AI-Orchestration
+        sync: false
 
       # PORT and HOST are deliberately absent. Render supplies PORT, and cloud
       # mode resolves HOST itself. Setting either here is how a deploy ends up

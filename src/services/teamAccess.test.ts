@@ -43,6 +43,8 @@ async function startWith(opts: {
   admins?: string[];
 }) {
   process.env.ALPHA_HOME = tmp;
+  // Configuration, not a default: the org is always named explicitly.
+  process.env.ALPHA_ORG = ORG;
   if (opts.admins) process.env.ALPHA_ADMINS = opts.admins.join(',');
   vi.resetModules();
 
@@ -81,12 +83,13 @@ afterEach(() => {
   for (const svc of opened) { try { svc.close(); } catch { /* already closed */ } }
   delete process.env.ALPHA_HOME;
   delete process.env.ALPHA_ADMINS;
+  delete process.env.ALPHA_ORG;
   fs.rmSync(tmp, { recursive: true, force: true });
   vi.restoreAllMocks();
   vi.doUnmock('node:child_process');
 });
 
-const ORG = 'Capstone-Agentic-AI-Orchestration';
+const ORG = 'example-org';
 
 describe('team-based access', () => {
   it('grants a project manager', async () => {
