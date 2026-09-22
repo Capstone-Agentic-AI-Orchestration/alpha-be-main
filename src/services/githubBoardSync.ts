@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { sqliteService } from './sqliteService.js';
-import { projectStore } from '../store/stores.js';
+import { issueStore, projectStore } from '../store/stores.js';
 import { logInfo, logError } from './../utils/logger.js';
 import { Issue, IssueComment, Project } from '../models/index.js';
 import {
@@ -158,7 +157,7 @@ function bodyFromGitHub(body: string): { content: string; authorName?: string } 
 }
 
 /** Pull an issue's comments onto the card. */
-async function syncCommentsFor(issue: Issue, report: SyncReport): Promise<void> {
+async function syncCommentsFor(issue: Issue, report: SyncReport, workspaceId: string): Promise<void> {
   if (!issue.githubRepo || !issue.githubNumber) return;
 
   let remote: GitHubComment[];
@@ -182,7 +181,7 @@ async function syncCommentsFor(issue: Issue, report: SyncReport): Promise<void> 
   for (const gh of remote) {
     if (known.has(gh.id)) continue;
     const { content, authorName } = bodyFromGitHub(gh.body ?? '');
-    sqliteService.addIssueComment({
+    await issueStore().addComment(workspaceId, {
       id: `gh-${issue.githubRepo}-${gh.id}`,
       issueId: issue.id,
       // Alpha's own comments come back as system or agent text; a teammate's
@@ -198,7 +197,7 @@ async function syncCommentsFor(issue: Issue, report: SyncReport): Promise<void> 
 }
 
 /** Publish any comment on this card that has not reached GitHub. */
-async function pushCommentsFor(issue: Issue, report: SyncReport): Promise<void> {
+async function pushCommentsFor(issue: Issue, report: SyncReport, workspaceId: string): Promise<void> {
   if (!issue.githubRepo || !issue.githubNumber) return;
 
   for (const comment of issue.comments ?? []) {
@@ -215,7 +214,7 @@ async function pushCommentsFor(issue: Issue, report: SyncReport): Promise<void> 
         { timeout: 30_000 }
       );
       const created = JSON.parse(stdout) as { id: number };
-      sqliteService.addIssueComment({ ...comment, githubId: created.id });
+      await issueStore().addComment(workspaceId, { ...comment, githubId: created.id });
       report.commentsPushed += 1;
     } catch (err: any) {
       logError(`Could not publish a comment on ${issue.identifier}:`, String(err?.message ?? err));
@@ -225,7 +224,7 @@ async function pushCommentsFor(issue: Issue, report: SyncReport): Promise<void> 
 }
 
 /** Read one project's repository onto the board. */
-async function syncProject(project: Project, report: SyncReport): Promise<void> {
+async function syncProject(project: Project, report: SyncReport, workspaceId: string): Promise<void> {
   const ownerRepo = repoForProject(project);
   if (!ownerRepo) {
     report.skipped.push({ project: project.key, reason: 'no GitHub repository attached' });
@@ -243,7 +242,7 @@ async function syncProject(project: Project, report: SyncReport): Promise<void> 
   }
 
   report.projects += 1;
-  const existing = sqliteService.getIssues().filter(i => i.projectId === project.id);
+  const existing = (await issueStore().list(workspaceId)).filter(i => i.projectId === project.id);
   const byNumber = new Map(
     existing.filter(i => i.githubRepo === ownerRepo && i.githubNumber).map(i => [i.githubNumber!, i])
   );
@@ -253,7 +252,7 @@ async function syncProject(project: Project, report: SyncReport): Promise<void> 
     const match = byNumber.get(mapped.githubNumber);
 
     if (!match) {
-      sqliteService.createIssue({
+      await issueStore().create(workspaceId, {
         projectId: project.id,
         identifier: identifierFor(project, mapped),
         title: mapped.title,
@@ -285,7 +284,7 @@ async function syncProject(project: Project, report: SyncReport): Promise<void> 
      * — spreading the whole mapped object would erase which agent is mid-run on
      * this card every time someone edited its title on github.com.
      */
-    sqliteService.updateIssue(match.id, {
+    await issueStore().update(workspaceId, match.id, {
       title: mapped.title,
       description: mapped.description,
       status: mapped.status,
@@ -319,7 +318,7 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
   };
 
   for (const project of await projectStore().list(workspaceId)) {
-    await syncProject(project, report);
+    await syncProject(project, report, workspaceId);
   }
 
   /**
@@ -332,13 +331,13 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
    * Re-read rather than reusing the earlier list — the issues written a moment
    * ago are not in it.
    */
-  for (const issue of sqliteService.getIssues()) {
+  for (const issue of await issueStore().list(workspaceId)) {
     if (!issue.githubRepo || !issue.githubNumber) continue;
-    await syncCommentsFor(issue, report);
+    await syncCommentsFor(issue, report, workspaceId);
     // Re-read once more: a pull may have just added comments this push would
     // otherwise consider missing and send straight back.
-    const fresh = sqliteService.getIssues().find(i => i.id === issue.id);
-    if (fresh) await pushCommentsFor(fresh, report);
+    const fresh = await issueStore().get(workspaceId, issue.id);
+    if (fresh) await pushCommentsFor(fresh, report, workspaceId);
   }
 
   logInfo(

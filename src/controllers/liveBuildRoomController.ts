@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { projectStore } from '../store/stores.js';
+import { issueStore, projectStore } from '../store/stores.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import {
@@ -102,6 +102,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
 
   // Read once for the whole response: every squad below looks itself up in it.
   const assignments = await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id);
+  const issues = await issueStore().list(workspaceId);
   const projectSquadIds = new Set(workspaceRegistry.listProjectSquadIds(req.workspace!, project.id));
   const squads = workspaceRegistry
     .scopeSquads(sqliteService.getSquads(), req.workspace!)
@@ -222,8 +223,8 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     },
     phases: phaseRows(currentRun),
     issue: selectedRun
-      ? sqliteService.getIssues().find(issue => issue.id === selectedRun.issueId)
-      : sqliteService.getIssues().find(issue => issue.projectId === project.id && issue.assignedSquadId === selectedSquad.id),
+      ? issues.find(issue => issue.id === selectedRun.issueId)
+      : issues.find(issue => issue.projectId === project.id && issue.assignedSquadId === selectedSquad.id),
     activeRun: selectedRun ? {
       ...selectedRun,
       memberRuns,

@@ -2,7 +2,7 @@ import { Request, Response, Router } from 'express';
 import { runnerService } from '../services/runnerService.js';
 import { squadRunner, SquadRunError } from '../services/squadRunner.js';
 import { sqliteService } from '../services/sqliteService.js';
-import { projectStore } from '../store/stores.js';
+import { issueStore, projectStore } from '../store/stores.js';
 import { githubService } from '../services/githubService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -110,7 +110,7 @@ runRouter.post('/runs/start', async (req: Request, res: Response) => {
     }
     if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
     if (!requireEntityWorkspace(req, res, 'agents', agentId)) return;
-    const issue = sqliteService.getIssues().find(item => item.id === issueId);
+    const issue = await issueStore().get(req.workspace!.workspaceId, issueId);
     if (!issue) return res.status(404).json({ error: 'Issue not found' });
     if (!requireProjectWorkspace(req, res, issue.projectId)) return;
     const run = await runnerService.startRun({
@@ -185,7 +185,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
   if (!approved) {
     const rejected = { ...run, status: 'changes_requested' as any, updatedAt: now };
     sqliteService.savePrototypeRun(rejected);
-    sqliteService.addIssueComment({
+    await issueStore().addComment(req.workspace!.workspaceId, {
       id: `comm-${run.id}-rejected`,
       issueId: run.issueId,
       authorType: 'system',
@@ -193,7 +193,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
       content: 'Changes requested. The run stopped at the review gate.',
       createdAt: now
     });
-    sqliteService.updateIssue(run.issueId, { status: 'todo' });
+    await issueStore().update(req.workspace!.workspaceId, run.issueId, { status: 'todo' });
     return res.json(rejected);
   }
 
@@ -254,7 +254,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
         succeeded: false
       });
 
-      sqliteService.addIssueComment({
+      await issueStore().addComment(req.workspace!.workspaceId, {
         id: `comm-${run.id}-merge-failed-${Date.parse(now)}`,
         issueId: run.issueId,
         authorType: 'system',
@@ -277,7 +277,7 @@ The run is still at the review gate.`,
   sqliteService.savePrototypeRun(updated);
 
   // Written to the comments table, not appended to an array in the browser.
-  sqliteService.addIssueComment({
+  await issueStore().addComment(req.workspace!.workspaceId, {
     id: `comm-${run.id}-approved`,
     issueId: run.issueId,
     authorType: 'system',
@@ -286,7 +286,7 @@ The run is still at the review gate.`,
     createdAt: now
   });
 
-  sqliteService.updateIssue(run.issueId, { status: 'done' });
+  await issueStore().update(req.workspace!.workspaceId, run.issueId, { status: 'done' });
   res.json(updated);
 });
 
@@ -352,7 +352,7 @@ runRouter.post('/squads/:id/run', async (req: Request, res: Response) => {
     const { issueId, plan, mission } = req.body;
     if (!issueId) return res.status(400).json({ error: 'issueId is required' });
     if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
-    const issue = sqliteService.getIssues().find(item => item.id === issueId);
+    const issue = await issueStore().get(req.workspace!.workspaceId, issueId);
     if (!issue) return res.status(404).json({ error: 'Issue not found' });
     if (!requireProjectWorkspace(req, res, issue.projectId)) return;
     if (!workspaceRegistry.squadAssignedToProject(req.workspace!, req.params.id, issue.projectId)) {
