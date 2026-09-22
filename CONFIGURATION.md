@@ -4,8 +4,10 @@ Every value, where it comes from, where it goes. Extracted from
 `src/config/env.ts`; [SETUP.md](SETUP.md) has the procedure.
 
 Three places get configured — **Render** (cloud API), **Vercel** (web app) and
-each **developer's machine** (desktop app) — and they want different things,
-because the cloud half and the desktop half have opposite jobs.
+the machine that **builds the desktop installer** — and they want different
+things, because the cloud half and the desktop half have opposite jobs. A
+teammate who installs the desktop app configures nothing: its settings travel
+inside the installer (§4).
 
 ---
 
@@ -158,7 +160,17 @@ and the policies read claims from a token the API mints per session.
 
 ## 4. A developer's machine — the desktop app
 
-`alpha-be-main/.env`, and most of it is already right by default.
+**Whoever installs the app configures nothing.** `prepare.mjs` bakes `ALPHA_ORG`,
+`ALPHA_CLOUD_API`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` into
+`build/app-config.json` inside the installer, and `main.js` reads that file into
+the environment at startup — filling only keys the machine has not already set,
+so a developer running from source still wins. The values below therefore have
+to be right on the machine that *builds* the release, not on every machine that
+runs it. Nobody clones a repository or copies a `.env` to use Alpha.
+
+What follows is `alpha-be-main/.env`: what the desktop half reads when run from
+source, and what the release build bakes in. Most of it is already right by
+default.
 
 | Variable | Value | Note |
 | :--- | :--- | :--- |
@@ -169,7 +181,7 @@ and the policies read claims from a token the API mints per session.
 | `CORS_ORIGIN` | `http://localhost:3000,http://localhost:5173` | — |
 | `SUPABASE_URL` | same as Render | For the board uplink |
 | `SUPABASE_ANON_KEY` | same as Render | — |
-| `ALPHA_CLOUD_API` | `https://<vercel-app>.vercel.app/api` | Where the desktop gets its database token. Without it, cloud writes carry no identity and RLS rejects them |
+| `ALPHA_CLOUD_API` | `https://<render>.onrender.com/api` | Where the desktop gets its database token — the Render service, note the `/api`. Not the Vercel origin: Vercel serves only the static web app and answers `/api/...` with `index.html`. Without it, cloud writes carry no identity and RLS rejects them |
 | `ALPHA_LOCAL_TOKEN` | optional | Set it if anything else on the machine could reach port 3001 |
 
 **Never on a developer machine:** `SUPABASE_JWT_SECRET`, `GITHUB_CLIENT_SECRET`,
