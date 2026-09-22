@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 
 import { DB_PATH, IS_CLOUD } from '../config/env.js';
 import { database } from '../store/database.js';
+import { agentStore, squadStore } from '../store/stores.js';
 import { PostgresWorkspaceDirectory } from '../store/postgresWorkspaceDirectory.js';
 import { SqliteWorkspaceDirectory } from '../store/sqliteWorkspaceDirectory.js';
 import type {
@@ -349,42 +350,33 @@ class WorkspaceRegistry {
    * project, the caller must be allowed to use that squad, and the agent's own
    * visibility setting must allow the caller.
    */
-  canAccessProjectAgent(
+  async canAccessProjectAgent(
     context: WorkspaceContext,
     projectId: string,
     squadId: string,
     agentId: string
-  ): boolean {
+  ): Promise<boolean> {
     if (!this.canAccessProject(context, projectId)) return false;
     if (!this.squadAssignedToProject(context, squadId, projectId)) return false;
     if (!this.canAccessSquad(context, squadId)) return false;
 
-    const squad = this.handle().prepare('SELECT member_agent_ids FROM squads WHERE id = ?').get(squadId) as
-      | { member_agent_ids?: string }
-      | undefined;
-    if (!this.parseIds(squad?.member_agent_ids).includes(agentId)) return false;
+    /*
+     * Read through the stores, not this file's SQLite handle. The roster is
+     * Postgres in the cloud, and asking the local file there answered "no such
+     * agent" for every agent that exists -- so a project manager saw an empty
+     * roster while the agents sat in the shared database.
+     */
+    const squad = await squadStore().get(context.workspaceId, squadId);
+    if (!squad?.memberAgentIds?.includes(agentId)) return false;
 
-    const agent = this.handle()
-      .prepare('SELECT allowed_users, owner, is_archived FROM agents WHERE id = ?')
-      .get(agentId) as { allowed_users?: string | null; owner?: string | null; is_archived?: number } | undefined;
-    if (!agent || Boolean(agent.is_archived)) return false;
-    if (!this.belongsTo('agents', agentId, context.workspaceId)) return false;
+    const agent = await agentStore().get(context.workspaceId, agentId);
+    if (!agent || agent.isArchived) return false;
 
-    const visibility = agent.allowed_users ?? 'team';
+    const visibility = agent.allowedUsers ?? 'team';
     if (visibility === 'admins') return context.role === 'admin';
     if (visibility === 'private') return agent.owner === context.userId;
     if (visibility === 'team') return context.role !== 'client';
     return visibility === 'everyone';
-  }
-
-  private parseIds(value?: string | null): string[] {
-    if (!value) return [];
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
-    } catch {
-      return [];
-    }
   }
 
   scopeProjectChildrenFromIds<T extends { id: string }>(

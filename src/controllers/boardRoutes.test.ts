@@ -41,7 +41,8 @@ async function startCloudApi() {
   const { PostgresWorkspaceDirectory } = await import('../store/postgresWorkspaceDirectory.js');
   const { PostgresProjectStore } = await import('../store/postgresProjectStore.js');
   const { PostgresIssueStore } = await import('../store/postgresIssueStore.js');
-  const { useIssueStore, useProjectStore } = await import('../store/stores.js');
+  const { PostgresAgentStore, PostgresSquadStore } = await import('../store/postgresAgentStore.js');
+  const { useAgentStores, useIssueStore, useProjectStore } = await import('../store/stores.js');
   const { workspaceContext } = await import('./workspaceContext.js');
   const { dataRouter } = await import('./dataController.js');
   const { jsonErrorHandler } = await import('./errorHandler.js');
@@ -57,6 +58,7 @@ async function startCloudApi() {
   workspaceRegistry.useDirectory(new PostgresWorkspaceDirectory(freshSqlFor(db), 'ws-default'));
   useProjectStore(new PostgresProjectStore(freshSqlFor(db)));
   useIssueStore(new PostgresIssueStore(freshSqlFor(db)));
+  useAgentStores(new PostgresAgentStore(freshSqlFor(db)), new PostgresSquadStore(freshSqlFor(db)));
   // Entity bindings are still SQLite in both modes; the board's rows move off
   // it in the slice after this one.
   opened.push(workspaceRegistry, sql.sqliteService);
@@ -100,7 +102,7 @@ beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-projectroutes-'));
   opened = [];
   session = { login: 'Admin1', role: 'admin' };
-  await db.exec('truncate issues, issue_comments, projects, workspaces, workspace_members cascade');
+  await db.exec('truncate issues, issue_comments, projects, agents, squads, workspaces, workspace_members cascade');
 });
 
 afterEach(() => {
@@ -247,5 +249,116 @@ describe('the cloud issue routes', () => {
 
     expect(res.status).toBe(403);
     expect((await db.query('select id from issues')).rows).toHaveLength(0);
+  });
+});
+
+describe('the cloud roster routes', () => {
+  it('serve the agents the workspace actually has in Postgres', async () => {
+    const app = await startCloudApi();
+    // One request first, so the directory has created the default workspace
+    // the roster hangs off — as it does on a real boot.
+    expect((await call(app, 'GET', '/api/agents')).body).toEqual([]);
+
+    const { PostgresAgentStore } = await import('../store/postgresAgentStore.js');
+    const { sqlFor: freshSqlFor } = await import('../store/testDatabase.js');
+    // What the cloud seeds at boot for the default workspace.
+    await new PostgresAgentStore(freshSqlFor(db)).ensureOfficial('ws-default');
+
+    const listed = await call(app, 'GET', '/api/agents');
+    expect(listed.status).toBe(200);
+    expect(listed.body.length).toBeGreaterThan(0);
+    expect(listed.body.every((agent: any) => agent.isSeeded)).toBe(true);
+
+    // And nothing machine-local rode along.
+    expect(listed.body.every((agent: any) => agent.customCliArgs === '')).toBe(true);
+  });
+
+  it('create, edit and archive an agent', async () => {
+    const app = await startCloudApi();
+
+    const created = await call(app, 'POST', '/api/agents', {
+      id: 'agent-mine',
+      name: 'Reviewer',
+      role: 'Review Agent',
+      avatar: '◆',
+      color: '#111111',
+      description: 'Reviews changes',
+      owner: 'Admin1',
+      isMine: true,
+      modelProvider: 'OpenAI',
+      modelName: 'gpt-5',
+      systemPrompt: 'Review carefully.',
+      autonomyLevel: 'Supervised',
+      skills: [],
+      mcpServers: [],
+      createdAt: new Date().toISOString()
+    });
+    expect(created.status).toBe(201);
+
+    const renamed = await call(app, 'PUT', '/api/agents/agent-mine', { name: 'Senior Reviewer' });
+    expect(renamed.body).toMatchObject({ name: 'Senior Reviewer' });
+
+    const { rows } = await db.query<{ name: string; workspace_id: string }>(
+      "select name, workspace_id from agents where id = 'agent-mine'"
+    );
+    expect(rows[0]).toMatchObject({ name: 'Senior Reviewer', workspace_id: 'ws-default' });
+  });
+
+  /**
+   * The check that reads the roster.
+   *
+   * It used to ask this process's SQLite, which in the cloud holds no agents
+   * at all — so every agent read as "not available", whatever the database
+   * said. A private agent is still refused; its owner still gets it.
+   */
+  it('decide agent visibility from the shared roster', async () => {
+    const app = await startCloudApi();
+    const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
+    const { PostgresAgentStore, PostgresSquadStore } = await import('../store/postgresAgentStore.js');
+    const { sqlFor: freshSqlFor } = await import('../store/testDatabase.js');
+
+    const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const agents = new PostgresAgentStore(freshSqlFor(db));
+    const squads = new PostgresSquadStore(freshSqlFor(db));
+    await agents.create('ws-default', {
+      id: 'agent-private',
+      name: 'Private',
+      role: 'Review Agent',
+      avatar: '◆',
+      color: '#111',
+      description: '',
+      owner: 'Someone-else',
+      isMine: false,
+      modelProvider: 'OpenAI',
+      modelName: 'gpt-5',
+      systemPrompt: '',
+      autonomyLevel: 'Supervised',
+      skills: [],
+      mcpServers: [],
+      allowedUsers: 'private',
+      createdAt: new Date().toISOString()
+    } as any);
+    await squads.create('ws-default', {
+      id: 'squad-1',
+      name: 'Squad',
+      description: '',
+      avatar: '◈',
+      color: '#111',
+      topology: 'Sequential',
+      memberAgentIds: ['agent-private'],
+      mission: '',
+      activeRunsCount: 0,
+      completedRunsCount: 0
+    } as any);
+    await workspaceRegistry.assignSquadProject('ws-default', 'squad-1', project.id, 'assigned');
+    workspaceRegistry.bind('projects', project.id, 'ws-default');
+    workspaceRegistry.bind('squads', 'squad-1', 'ws-default');
+    workspaceRegistry.bind('agents', 'agent-private', 'ws-default');
+
+    const asAdmin = (await workspaceRegistry.resolve('Admin1', 'ws-default', 'admin'))!;
+    expect(await workspaceRegistry.canAccessProjectAgent(asAdmin, project.id, 'squad-1', 'agent-private')).toBe(false);
+
+    const asOwner = (await workspaceRegistry.resolve('Someone-else', 'ws-default', 'admin'))!;
+    expect(await workspaceRegistry.canAccessProjectAgent(asOwner, project.id, 'squad-1', 'agent-private')).toBe(true);
   });
 });

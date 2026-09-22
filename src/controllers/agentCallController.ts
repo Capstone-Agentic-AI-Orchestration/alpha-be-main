@@ -9,7 +9,7 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { agentCallService } from '../services/agentCallService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
-import { projectStore } from '../store/stores.js';
+import { agentStore, projectStore, squadStore } from '../store/stores.js';
 import { route } from './asyncRoute.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
@@ -85,8 +85,15 @@ function getCallForCaller(req: Request, res: Response, id: string) {
   return call;
 }
 
-function requireCurrentProjectAgent(req: Request, res: Response, call: NonNullable<ReturnType<typeof sqliteService.getAgentCall>>): boolean {
-  if (!req.workspace || !workspaceRegistry.canAccessProjectAgent(req.workspace, call.projectId, call.squadId, call.agentId)) {
+async function requireCurrentProjectAgent(
+  req: Request,
+  res: Response,
+  call: NonNullable<ReturnType<typeof sqliteService.getAgentCall>>
+): Promise<boolean> {
+  const allowed =
+    req.workspace &&
+    (await workspaceRegistry.canAccessProjectAgent(req.workspace, call.projectId, call.squadId, call.agentId));
+  if (!allowed) {
     res.status(404).json({ error: 'The selected agent is no longer available for this project.' });
     return false;
   }
@@ -124,15 +131,35 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', async (req: Re
   if (!project) return;
 
   const assignedIds = workspaceRegistry.projectSquadIdsFor(req.workspace!, project.id);
-  const squads = sqliteService.getSquads().filter(squad => assignedIds.includes(squad.id));
-  const agents = sqliteService.getAgents();
+  const workspaceId = req.workspace!.workspaceId;
+  const squads = (await squadStore().list(workspaceId)).filter(squad => assignedIds.includes(squad.id));
+  const agents = await agentStore().list(workspaceId);
   const runtimes = sqliteService.getRuntimes();
   const modes = roleModes(req);
+
+  /**
+   * Visibility is a database question now, so every (squad, agent) pair is
+   * decided up front and the filters below stay synchronous.
+   *
+   * `.filter(async …)` would keep every agent, because a promise is truthy --
+   * which for a visibility check means showing private agents to everyone.
+   */
+  const visible = new Set<string>();
+  await Promise.all(
+    squads.flatMap(squad =>
+      (squad.memberAgentIds ?? []).map(async agentId => {
+        if (await workspaceRegistry.canAccessProjectAgent(req.workspace!, project.id, squad.id, agentId)) {
+          visible.add(`${squad.id}::${agentId}`);
+        }
+      })
+    )
+  );
+
   const visibleSquads = squads.map(squad => {
     const members = (squad.memberAgentIds ?? [])
       .map(agentId => agents.find(agent => agent.id === agentId))
       .filter((agent): agent is NonNullable<typeof agent> => Boolean(agent))
-      .filter(agent => workspaceRegistry.canAccessProjectAgent(req.workspace!, project.id, squad.id, agent.id))
+      .filter(agent => visible.has(`${squad.id}::${agent.id}`))
       .filter(agent => agentReadiness(agent, runtimes).status === 'ready')
       .map(agent => ({
         id: agent.id,
@@ -206,7 +233,7 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
     if (typeof squadId !== 'string' || typeof agentId !== 'string') {
       return res.status(400).json({ error: 'squadId and agentId are required.' });
     }
-    if (!workspaceRegistry.canAccessProjectAgent(req.workspace!, project.id, squadId, agentId)) {
+    if (!(await workspaceRegistry.canAccessProjectAgent(req.workspace!, project.id, squadId, agentId))) {
       return res.status(404).json({ error: 'That agent is not available for this project.' });
     }
 
@@ -288,7 +315,7 @@ agentCallRouter.post('/agent-calls/:id/confirm', async (req: Request, res: Respo
     const call = getCallForCaller(req, res, req.params.id);
     if (!call) return;
     if (call.operationMode !== 'implement') return res.status(409).json({ error: 'Only implement calls require confirmation.' });
-    if (!requireCurrentProjectAgent(req, res, call)) return;
+    if (!(await requireCurrentProjectAgent(req, res, call))) return;
     const updated = await agentCallService.confirm(call.id);
     res.json({ call: updated, agentMessage: responseForCall(updated) });
   } catch (error: any) {
@@ -325,7 +352,7 @@ agentCallRouter.post('/agent-calls/:id/retry', async (req: Request, res: Respons
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
     const call = getCallForCaller(req, res, req.params.id);
     if (!call) return;
-    if (!requireCurrentProjectAgent(req, res, call)) return;
+    if (!(await requireCurrentProjectAgent(req, res, call))) return;
     if (!roleModes(req).includes(call.operationMode)) return res.status(403).json({ error: 'Your workspace role cannot retry this call.' });
     const updated = await agentCallService.retry(call.id);
     res.json({ call: updated, agentMessage: responseForCall(updated) });
