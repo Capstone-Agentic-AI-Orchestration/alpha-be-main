@@ -123,7 +123,6 @@ export interface WorkspaceDirectory {
 
   createWorkspace(userId: string, input: { name: string; slug?: string }): Promise<WorkspaceSummary>;
   /** Join by invite code. Never by slug or id: both are visible to anyone who can see the workspace. */
-  joinWorkspace(userId: string, code: string, role: WorkspaceRole): Promise<WorkspaceSummary>;
   updateWorkspace(workspaceId: string, input: { name?: string; slug?: string }, callerRole: WorkspaceRole): Promise<WorkspaceSummary | null>;
 
   listMembers(workspaceId: string): Promise<WorkspaceMember[]>;
@@ -133,8 +132,8 @@ export interface WorkspaceDirectory {
    * Not an invitation: whoever runs this has already decided, and the person
    * finds the workspace waiting for them at their next sign-in. A membership
    * that was suspended or removed is restored, because this is a present
-   * decision by someone entitled to make it -- unlike an old invite code,
-   * which `joinWorkspace` still refuses for exactly that reason.
+   * decision by someone entitled to make it, made against a name rather
+   * than against a code anyone could have been handed.
    */
   addMember(workspaceId: string, userId: string, role: WorkspaceRole): Promise<WorkspaceMember>;
   updateMember(
@@ -203,22 +202,6 @@ export function slugify(value: string): string {
  */
 export function newJoinCode(slug: string): string {
   return `${slug}-${randomBytes(9).toString('base64url')}`;
-}
-
-/**
- * Whether an existing membership may be activated by an invite code.
- *
- * `invited` is what codes are for. `suspended` and `removed` were decided by
- * an admin, and an old code -- still in someone's chat history -- must not
- * undo that. The upsert this replaces set every one of them back to active.
- */
-export function assertJoinable(status: string): void {
-  if (status === 'suspended' || status === 'removed') {
-    throw new WorkspaceRequestError(
-      'Your access to this workspace was removed. Ask one of its admins to restore it.',
-      403
-    );
-  }
 }
 
 export const iso = (value: Date | string): string => new Date(value).toISOString();

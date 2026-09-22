@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 
 import type { Sql } from './database.js';
 import {
-  assertJoinable,
   iso,
   knownRole,
   newJoinCode,
@@ -219,43 +218,6 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
     );
 
     return this.summary(await this.workspaceRow(id), 'admin');
-  }
-
-  async joinWorkspace(userId: string, code: string, role: WorkspaceRole): Promise<WorkspaceSummary> {
-    const value = code.trim();
-    const { rows } = value
-      ? await this.sql.query<any>(
-          `select w.*, (select count(*) from workspace_members m
-                        where m.workspace_id = w.id and m.status = 'active') as member_count
-           from workspaces w where w.join_code = $1 and w.status = 'active'`,
-          [value]
-        )
-      : { rows: [] };
-    const workspace = rows[0];
-    if (!workspace) throw new WorkspaceRequestError('That invite code does not match a workspace.', 404);
-
-    const existing = (
-      await this.sql.query<{ id: string; role: string; status: string }>(
-        'select id, role, status from workspace_members where workspace_id = $1 and user_id = $2',
-        [workspace.id, userId]
-      )
-    ).rows[0];
-
-    if (existing) {
-      assertJoinable(existing.status);
-      await this.sql.query(
-        "update workspace_members set status = 'active', updated_at = now() where id = $1",
-        [existing.id]
-      );
-      return this.summary(workspace, knownRole(existing.role) ?? role);
-    }
-
-    await this.sql.query(
-      `insert into workspace_members (id, workspace_id, user_id, role, status)
-       values ($1, $2, $3, $4, 'active')`,
-      [`member-${randomUUID()}`, workspace.id, userId, role]
-    );
-    return this.summary(await this.workspaceRow(workspace.id), role);
   }
 
   async updateWorkspace(
