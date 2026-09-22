@@ -95,6 +95,16 @@ export function hostOverrideNote(): string {
 export const ALPHA_ORG = (process.env.ALPHA_ORG || '').trim();
 
 /**
+ * The repository the desktop app is released from, as `owner/name`.
+ *
+ * Named rather than derived from `ALPHA_ORG`: the desktop can live anywhere,
+ * and guessing at a name is how a deployment ends up silently serving another
+ * organisation's installer. Empty means this deployment offers no download,
+ * which the route says plainly instead of failing.
+ */
+export const ALPHA_DESKTOP_REPO = (process.env.ALPHA_DESKTOP_REPO || '').trim();
+
+/**
  * GitHub logins granted admin without a team, comma separated.
  *
  * A bridge, not the mechanism. Roles come from GitHub teams, and an `admins`
