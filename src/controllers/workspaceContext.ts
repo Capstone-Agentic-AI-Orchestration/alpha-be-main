@@ -151,6 +151,22 @@ export function requireProjectWorkspace(
   return true;
 }
 
+/**
+ * A project the caller may know about, which is not the same as one they work
+ * in: binding a folder and reading a project's details come before assignment.
+ */
+export function requireDiscoverableProject(
+  req: Request,
+  res: Response,
+  projectId: string
+): boolean {
+  if (!req.workspace || !workspaceRegistry.canDiscoverProject(req.workspace, projectId)) {
+    res.status(404).json({ error: 'Project not found in the active workspace.' });
+    return false;
+  }
+  return true;
+}
+
 /** A squad is visible only to its owner or to workspace roles with broad squad visibility. */
 export function requireSquadWorkspace(
   req: Request,

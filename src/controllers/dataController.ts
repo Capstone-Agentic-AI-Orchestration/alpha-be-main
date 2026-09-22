@@ -17,6 +17,14 @@ import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
 import { BuildStepError } from '../store/buildSteps.js';
 import { agentValidationError } from './agentValidation.js';
 import { checkWorkspace } from './workspaceValidation.js';
+import {
+  BindingError,
+  bindProject,
+  boundCheckoutStatus,
+  cloneAndBindProject,
+  projectBinding,
+  unbindProject
+} from '../services/projectBindings.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
 import {
   AGENT_FILE_MAX_BYTES,
@@ -33,6 +41,7 @@ import { Agent, Issue, IssueStatus } from '../models/index.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { SKILL_TOOLS } from '../services/toolPolicy.js';
 import {
+  requireDiscoverableProject,
   requireEntityWorkspace,
   requireProjectWorkspace,
   requireSquadWorkspace,
@@ -210,10 +219,26 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
 }));
 
 // --- Projects ---
+/**
+ * The workspace's projects, and which of them are this caller's work.
+ *
+ * Every project, not only the assigned ones: a developer could not see the
+ * project they were about to be put on, nor bind it to a folder on their
+ * machine before someone assigned them an issue in it. `assigned` says which
+ * are theirs to work in, so the app can separate what they are on from what
+ * the workspace has. Clients still see only what they are assigned to.
+ */
 dataRouter.get('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   const projects = await projectStore().list(req.workspace!.workspaceId);
-  res.json(workspaceRegistry.scopeProjects(projects, req.workspace!));
+  res.json(
+    workspaceRegistry
+      .discoverableProjects(projects, req.workspace!)
+      .map(project => ({
+        ...project,
+        assigned: workspaceRegistry.canAccessProject(req.workspace!, project.id)
+      }))
+  );
 }));
 
 dataRouter.post('/projects', route(async (req: Request, res: Response) => {
@@ -230,9 +255,77 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
  * while they are still typing it, rather than at the start of an agent run.
  */
 dataRouter.post('/projects/check-workspace', desktopOnly, (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
   res.json(checkWorkspace(req.body?.path));
 });
+
+/**
+ * Where this machine keeps a project's code.
+ *
+ * Read by anyone who can see the project -- the app shows "open in the
+ * desktop app" or the path, and both need the answer. Null in the cloud,
+ * truthfully: Render has no checkout of anything.
+ */
+dataRouter.get('/projects/:id/binding', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  res.json(IS_CLOUD ? null : projectBinding(req.params.id));
+}));
+
+/** Point this machine at a folder for a project. The developer's own act. */
+dataRouter.put('/projects/:id/binding', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  try {
+    res.json(await bindProject(project, req.body?.localDir));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+}));
+
+/**
+ * Clone the project's repository here and bind it, in one press.
+ *
+ * Idempotent: a checkout already at the managed path is bound rather than
+ * refused, so pressing it again after a failed clone finishes the job.
+ */
+dataRouter.post('/projects/:id/clone', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  try {
+    res.json(await cloneAndBindProject(project));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    // A clone can fail for a dozen reasons on the far side -- no access, no
+    // network, a repository that has moved -- and git says which.
+    return res.status(502).json({ error: String((err as Error)?.message ?? err) });
+  }
+}));
+
+/**
+ * What state this machine's checkout is in.
+ *
+ * Read from git each time rather than remembered: the developer works in this
+ * folder outside Alpha all day, and a remembered branch is a wrong one.
+ */
+dataRouter.get('/projects/:id/binding/status', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  res.json(await boundCheckoutStatus(req.params.id));
+}));
+
+dataRouter.delete('/projects/:id/binding', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  res.json({ success: unbindProject(req.params.id) });
+}));
 
 dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;

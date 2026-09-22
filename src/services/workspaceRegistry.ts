@@ -43,6 +43,7 @@ export type WorkspaceCapability =
   | 'workspace.read_members'
   | 'workspace.manage_members'
   | 'workspace.manage_settings'
+  | 'workspace.bind_local'
   | 'project.read'
   | 'project.create'
   | 'project.manage'
@@ -88,7 +89,14 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'squad.manage',
     'chat.read',
     'chat.write',
-    'deployment.read'
+    'deployment.read',
+    /*
+     * Point this machine at a folder for a project. A developer's own act on
+     * their own disk, which is why it is not `project.manage`: that is the
+     * right to change the project for everyone, and asking for it here meant
+     * only a project manager could attach their own checkout.
+     */
+    'workspace.bind_local'
   ],
   pm: [
     'workspace.read',
@@ -112,7 +120,8 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'deployment.read',
     'deployment.manage',
     'analytics.read',
-    'workspace.manage_settings'
+    'workspace.manage_settings',
+    'workspace.bind_local'
   ],
   admin: [
     'workspace.read',
@@ -309,6 +318,25 @@ class WorkspaceRegistry {
 
   can(role: WorkspaceRole, capability: WorkspaceCapability): boolean {
     return CAPABILITIES[role].includes(capability);
+  }
+
+  /**
+   * Whether this caller may know the project exists.
+   *
+   * Everyone inside the workspace may, clients aside: a developer has to be
+   * able to find the project they are about to be put on, and to bind it to a
+   * folder before anyone assigns them an issue in it. Discovery is not access
+   * -- `canAccessProject` below still decides whose issues, runs and chats a
+   * person may reach, and it stays assignment-scoped.
+   */
+  canDiscoverProject(context: WorkspaceContext, projectId: string): boolean {
+    if (!this.inWorkspace(context, 'projects', projectId)) return false;
+    return context.role !== 'client' || this.canAccessProject(context, projectId);
+  }
+
+  /** The workspace's projects, as this caller may discover them. */
+  discoverableProjects<T extends { id: string }>(rows: T[], context: WorkspaceContext): T[] {
+    return rows.filter(row => this.canDiscoverProject(context, row.id));
   }
 
   /**

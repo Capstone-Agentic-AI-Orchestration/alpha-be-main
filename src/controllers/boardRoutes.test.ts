@@ -162,19 +162,55 @@ describe('the cloud project routes', () => {
     expect(again.body.error).toMatch(/key is already taken/);
   });
 
-  it('show a developer nothing they are not assigned to', async () => {
+  /**
+   * Discovery is not access. A developer could not see the project they were
+   * about to be put on, nor bind it to a folder on their machine before
+   * someone assigned them an issue in it -- so the list now says what the
+   * workspace has, and which of it is theirs.
+   */
+  it('show a developer the workspace’s projects, and which are theirs', async () => {
     const admin = await startCloudApi();
     await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
 
     session = { login: 'Dev1', role: 'dev' };
     const dev = await startCloudApi();
-    expect((await call(dev, 'GET', '/api/projects')).body).toEqual([]);
+    expect((await call(dev, 'GET', '/api/projects')).body.map((p: any) => [p.key, p.assigned])).toEqual([
+      ['CHK', false]
+    ]);
 
-    // Assigned, and it appears.
     const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
     const project = (await db.query<{ id: string }>('select id from projects')).rows[0];
     await workspaceRegistry.assignProject('ws-default', project.id, 'Dev1');
-    expect((await call(dev, 'GET', '/api/projects')).body.map((p: any) => p.key)).toEqual(['CHK']);
+    expect((await call(dev, 'GET', '/api/projects')).body.map((p: any) => [p.key, p.assigned])).toEqual([
+      ['CHK', true]
+    ]);
+  });
+
+  /** A client is not internal: they see the work they commissioned, and no more. */
+  it('show a client only what they are assigned to', async () => {
+    const admin = await startCloudApi();
+    await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
+
+    session = { login: 'Client1', role: 'client' };
+    const client = await startCloudApi();
+    expect((await call(client, 'GET', '/api/projects')).body).toEqual([]);
+
+    const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
+    const project = (await db.query<{ id: string }>('select id from projects')).rows[0];
+    await workspaceRegistry.assignProject('ws-default', project.id, 'Client1');
+    expect((await call(client, 'GET', '/api/projects')).body.map((p: any) => p.key)).toEqual(['CHK']);
+  });
+
+  /** An issue is work, not a catalogue entry: it stays behind assignment. */
+  it('still show a developer no issues from a project they are not on', async () => {
+    const admin = await startCloudApi();
+    const project = (await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    await call(admin, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id });
+
+    session = { login: 'Dev1', role: 'dev' };
+    const dev = await startCloudApi();
+
+    expect((await call(dev, 'GET', '/api/issues')).body).toEqual([]);
   });
 
   it('refuse a developer creating one', async () => {

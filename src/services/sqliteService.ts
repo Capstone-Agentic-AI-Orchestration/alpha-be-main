@@ -20,6 +20,7 @@ import {
   RemoteAction,
   Workspace,
   ProjectBuildStep,
+  LocalProjectBinding,
   BuildStepPhase,
   AgentCall,
   AgentCallTarget,
@@ -106,6 +107,19 @@ function agentCallTargetFromRow(row: any): AgentCallTarget | undefined {
   };
 }
 
+/** A `local_project_bindings` row, as the rest of the app reads it. */
+function toBinding(row: any): LocalProjectBinding {
+  return {
+    projectId: row.project_id,
+    localDir: row.local_dir,
+    isManaged: Boolean(row.is_managed),
+    activeBranch: row.active_branch ?? undefined,
+    lastSyncedAt: row.last_synced_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 export class SQLiteService {
   private db: Database.Database;
 
@@ -152,6 +166,29 @@ export class SQLiteService {
         path TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         added_at TEXT NOT NULL
+      );
+
+      /*
+       * Where a project's code is on THIS machine.
+       *
+       * Never in the project row: that row is the team's, and a path from one
+       * developer's disk means nothing on another's -- the cloud store drops
+       * local paths on write for exactly that reason. So the folder lives
+       * here, keyed by the project's shared id, and each machine answers the
+       * question for itself.
+       *
+       * No foreign key to projects: a binding may be made for a project this
+       * machine has not pulled yet, and losing the project should not silently
+       * discard where its code was.
+       */
+      CREATE TABLE IF NOT EXISTS local_project_bindings (
+        project_id TEXT PRIMARY KEY,
+        local_dir TEXT NOT NULL,
+        is_managed INTEGER NOT NULL DEFAULT 0,
+        active_branch TEXT,
+        last_synced_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS projects (
@@ -1146,6 +1183,56 @@ export class SQLiteService {
   }
 
   // --- Allowed Paths ---
+  // --- Local project bindings ---
+
+  /** Where this machine keeps a project's code, if it has it. */
+  getProjectBinding(projectId: string): LocalProjectBinding | null {
+    const row = this.db
+      .prepare('SELECT * FROM local_project_bindings WHERE project_id = ?')
+      .get(projectId) as any;
+    return row ? toBinding(row) : null;
+  }
+
+  listProjectBindings(): LocalProjectBinding[] {
+    const rows = this.db.prepare('SELECT * FROM local_project_bindings').all() as any[];
+    return rows.map(toBinding);
+  }
+
+  saveProjectBinding(binding: {
+    projectId: string;
+    localDir: string;
+    isManaged?: boolean;
+    activeBranch?: string;
+    lastSyncedAt?: string;
+  }): LocalProjectBinding {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO local_project_bindings
+           (project_id, local_dir, is_managed, active_branch, last_synced_at, created_at, updated_at)
+         VALUES (@projectId, @localDir, @isManaged, @activeBranch, @lastSyncedAt, @now, @now)
+         ON CONFLICT(project_id) DO UPDATE SET
+           local_dir = excluded.local_dir,
+           is_managed = excluded.is_managed,
+           active_branch = excluded.active_branch,
+           last_synced_at = excluded.last_synced_at,
+           updated_at = excluded.updated_at`
+      )
+      .run({
+        projectId: binding.projectId,
+        localDir: binding.localDir,
+        isManaged: binding.isManaged ? 1 : 0,
+        activeBranch: binding.activeBranch ?? null,
+        lastSyncedAt: binding.lastSyncedAt ?? now,
+        now
+      });
+    return this.getProjectBinding(binding.projectId)!;
+  }
+
+  deleteProjectBinding(projectId: string): boolean {
+    return this.db.prepare('DELETE FROM local_project_bindings WHERE project_id = ?').run(projectId).changes > 0;
+  }
+
   addAllowedPath(filePath: string, name: string) {
     const normalized = path.resolve(filePath);
     const stmt = this.db.prepare(`

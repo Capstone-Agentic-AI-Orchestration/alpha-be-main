@@ -161,6 +161,24 @@ export interface Issue {
   updatedAt: string;
 }
 
+/**
+ * Where a project's code is on one machine.
+ *
+ * Machine-local by nature, so it is never part of the project row the team
+ * shares: a path from one developer's disk means nothing on another's. Each
+ * desktop answers this for itself, keyed by the project's shared id.
+ */
+export interface LocalProjectBinding {
+  projectId: string;
+  localDir: string;
+  /** True when Alpha cloned it; false when the developer pointed at a folder. */
+  isManaged: boolean;
+  activeBranch?: string;
+  lastSyncedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProjectResource {
   id: string;
   type: 'github_repo' | 'local_path' | 'local_dir' | 'documentation' | 'api_endpoint';
