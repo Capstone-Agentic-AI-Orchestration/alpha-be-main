@@ -250,7 +250,7 @@ function toBuildStep(row: BuildStepRow): ProjectBuildStep {
 /** `timestamptz` arrives as a Date from `pg` and PGlite alike. */
 type Timestamp = Date | string | null;
 
-interface ProjectRow {
+export interface ProjectRow {
   id: string;
   name: string;
   key: string;
@@ -286,7 +286,7 @@ function shareable(resources: ProjectResource[] = []): ProjectResource[] {
   return resources.filter(resource => !MACHINE_LOCAL.has(resource.type));
 }
 
-function toProject(row: ProjectRow): Project {
+export function toProject(row: ProjectRow): Project {
   return {
     id: row.id,
     name: row.name,

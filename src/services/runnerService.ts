@@ -16,7 +16,7 @@ import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, checkoutBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
 import { githubService } from './githubService.js';
 import { supabaseService } from './supabaseService.js';
-import { updateIssueAndPush } from './boardWriteThrough.js';
+import { updateIssueAndPush, addCommentAndShare } from './boardWriteThrough.js';
 import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
@@ -176,7 +176,7 @@ export class RunnerService extends EventEmitter {
       supabaseService.updateIssueInCloud(issueId, issueUpdate).catch(() => {});
     }
 
-    sqliteService.addIssueComment({
+    addCommentAndShare({
       id: `comm-${runId}-start`,
       issueId,
       authorType: 'agent',
@@ -877,7 +877,7 @@ ${issue.description}
         supabaseService.broadcastRunEvent(runId, { type: 'run_completed', payload: finalRun }).catch(() => {});
       }
 
-      sqliteService.addIssueComment({
+      addCommentAndShare({
         id: `comm-${runId}-complete`,
         issueId: issue.id,
         authorType: 'agent',

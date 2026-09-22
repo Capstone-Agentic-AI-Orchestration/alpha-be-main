@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Issue, IssueComment, IssueSubtask } from '../models/index.js';
 import type { Sql } from './database.js';
 import { nextIssueIdentifier, oneOwner, type IssueStore } from './issueStore.js';
@@ -73,7 +74,8 @@ export class PostgresIssueStore implements IssueStore {
 
     const issue: Issue = {
       ...input,
-      id: input.id || `issue-${Date.now()}`,
+      // Random as well as timed; see sqliteService.createIssue.
+      id: input.id || `issue-${Date.now()}-${randomUUID().slice(0, 8)}`,
       identifier,
       title: input.title || 'Untitled Issue',
       description: input.description ?? '',
@@ -252,7 +254,7 @@ export class PostgresIssueStore implements IssueStore {
 
 type Timestamp = Date | string;
 
-interface IssueRow {
+export interface IssueRow {
   id: string;
   identifier: string;
   title: string;
@@ -275,7 +277,7 @@ interface IssueRow {
   updated_at: Timestamp;
 }
 
-interface CommentRow {
+export interface CommentRow {
   id: string;
   issue_id: string;
   author_type: string;
@@ -290,7 +292,57 @@ interface CommentRow {
 
 const iso = (value: Timestamp): string => new Date(value).toISOString();
 
-function toIssue(row: IssueRow, comments: IssueComment[]): Issue {
+/**
+ * An issue as a row of `issues`, for writers that are not this store.
+ *
+ * The desktop shares its cards through the Data API rather than SQL, and has
+ * to send the same columns this store writes. Kept beside `toIssue` so the two
+ * directions are read together; `sharedBoard.test.ts` inserts one into the
+ * real migration, which is the only check a column name typo would fail.
+ */
+export function issueRow(workspaceId: string, issue: Issue): Record<string, unknown> {
+  return {
+    id: issue.id,
+    workspace_id: workspaceId,
+    identifier: issue.identifier,
+    title: issue.title,
+    description: issue.description ?? '',
+    status: issue.status,
+    priority: issue.priority,
+    project_id: issue.projectId,
+    assigned_agent_id: issue.assignedAgentId ?? null,
+    assigned_squad_id: issue.assignedSquadId ?? null,
+    assigned_human: issue.assignedHuman ?? null,
+    created_by: issue.createdBy ?? null,
+    labels: issue.labels ?? [],
+    subtasks: issue.subtasks ?? [],
+    branch_name: issue.branchName ?? null,
+    pr_url: issue.prUrl ?? null,
+    github_repo: issue.githubRepo ?? null,
+    github_number: issue.githubNumber ?? null,
+    github_url: issue.githubUrl ?? null,
+    created_at: issue.createdAt,
+    updated_at: issue.updatedAt
+  };
+}
+
+/** A comment as a row of `issue_comments`; see `issueRow`. */
+export function commentRow(comment: IssueComment): Record<string, unknown> {
+  return {
+    id: comment.id,
+    issue_id: comment.issueId,
+    author_type: comment.authorType,
+    author_name: comment.authorName,
+    author_avatar: comment.authorAvatar ?? null,
+    agent_id: comment.agentId ?? null,
+    content: comment.content,
+    is_thinking: comment.isThinking ?? false,
+    github_id: comment.githubId ?? null,
+    created_at: comment.createdAt || new Date().toISOString()
+  };
+}
+
+export function toIssue(row: IssueRow, comments: IssueComment[]): Issue {
   return {
     id: row.id,
     identifier: row.identifier,
@@ -316,7 +368,7 @@ function toIssue(row: IssueRow, comments: IssueComment[]): Issue {
   };
 }
 
-function toComment(row: CommentRow): IssueComment {
+export function toComment(row: CommentRow): IssueComment {
   return {
     id: row.id,
     issueId: row.issue_id,

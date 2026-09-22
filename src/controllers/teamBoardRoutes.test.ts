@@ -1,0 +1,213 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import express from 'express';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+/**
+ * A desktop on a team's board, through its routes.
+ *
+ * The uplink to Postgres is a stub that records what it was given, and GitHub
+ * is a stub that hands out issue numbers. What is under test is the desktop's
+ * side: that a developer can pull the team's board at all, that a card is
+ * born under GitHub's id, and that what this machine changes is handed to the
+ * team -- the issue before its comments, which the database would refuse
+ * otherwise.
+ */
+
+let tmp: string;
+let opened: { close(): void }[] = [];
+let role = 'dev';
+let sharing = true;
+let shared: string[];
+let githubFails = false;
+
+const now = '2026-09-22T10:00:00.000Z';
+const REPO = [{ id: 'r1', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }];
+
+const teamBoard = {
+  projects: async () => [
+    { id: 'gh-repo-100', name: 'checkout', key: 'CHK', description: '', color: '', icon: '', status: 'in_progress',
+      priority: 'medium', startDate: now, targetDate: '', leadType: 'agent', leadName: '', resources: REPO,
+      githubOrg: 'acme', createdAt: now, envVars: [] }
+  ],
+  issues: async () => [
+    { id: 'gh-issue-9001', identifier: 'CHK-7', title: 'Cart loses items', description: '', status: 'todo',
+      priority: 'high', projectId: 'gh-repo-100', labels: [], subtasks: [], comments: [],
+      githubRepo: 'acme/checkout', githubNumber: 7, createdAt: now, updatedAt: now }
+  ],
+  comments: async () => []
+};
+
+async function startApi() {
+  process.env.ALPHA_HOME = tmp;
+  delete process.env.ALPHA_MODE;
+  vi.resetModules();
+
+  vi.doMock('../services/identityService.js', () => ({
+    currentIdentity: async () => ({ login: 'Dev1', source: 'github', role, access: 'granted', github: 'ok', teams: [] }),
+    warmIdentity: () => {},
+    knownIdentity: () => ({ login: 'Dev1', source: 'github' })
+  }));
+  vi.doMock('../services/supabaseService.js', () => ({
+    supabaseService: {
+      sharesBoard: () => sharing,
+      isConfigured: () => sharing,
+      boardSource: () => teamBoard,
+      shareIssue: async (issue: any) => void shared.push(`issue ${issue.id}`),
+      unshareIssue: async (id: string) => void shared.push(`delete ${id}`),
+      shareComment: async (comment: any) => void shared.push(`comment ${comment.id}`),
+      saveRunToCloud: async () => {},
+      updateIssueInCloud: async () => {},
+      broadcastRunEvent: async () => {}
+    }
+  }));
+
+  const sql = await import('../services/sqliteService.js');
+  opened.push(sql.sqliteService);
+  opened.push((await import('../services/workspaceRegistry.js')).workspaceRegistry);
+  (await import('../services/githubApi.js')).useGitHubApi({
+    get: async () => ({ labels: [] }) as any,
+    getAll: async () => [],
+    post: async (p: string) => {
+      if (!p.endsWith('/issues')) return {} as any;
+      if (githubFails) throw new Error('GitHub 403 on POST /repos/acme/checkout/issues: Resource not accessible');
+      return { id: 777, number: 42, html_url: 'https://github.com/acme/checkout/issues/42' } as any;
+    },
+    patch: async () => ({}) as any,
+    put: async () => ({}) as any,
+    delete: async () => {}
+  });
+
+  const { dataRouter } = await import('./dataController.js');
+  const { workspaceContext } = await import('./workspaceContext.js');
+  const app = express();
+  app.use(express.json());
+  app.use('/api', workspaceContext);
+  app.use('/api', dataRouter);
+  return { svc: sql.sqliteService as any, app };
+}
+
+async function call(app: express.Express, method: string, url: string, body?: unknown) {
+  const { createServer } = await import('node:http');
+  const server = createServer(app);
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as { port: number };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${url}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    return { status: res.status, body: (await res.json().catch(() => null)) as any };
+  } finally {
+    await new Promise<void>(r => server.close(() => r()));
+  }
+}
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-teamboard-'));
+  opened = [];
+  role = 'dev';
+  sharing = true;
+  shared = [];
+  githubFails = false;
+});
+
+afterEach(async () => {
+  for (const handle of opened) {
+    try {
+      handle.close();
+    } catch {
+      /* already closed */
+    }
+  }
+  delete process.env.ALPHA_HOME;
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  } catch {
+    /* windows handle */
+  }
+  vi.doUnmock('../services/identityService.js');
+  vi.doUnmock('../services/supabaseService.js');
+  vi.resetModules();
+});
+
+describe('syncing a desktop on a team', () => {
+  /**
+   * The app has always shown developers the Sync button, and the route asked
+   * for `project.manage`, which no developer has.
+   */
+  it('lets a developer pull the team’s board', async () => {
+    const { svc, app } = await startApi();
+
+    const res = await call(app, 'POST', '/api/board/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ projectsImported: 1, created: 1, errors: [] });
+    const { runWithWorkspace } = await import('../services/workspaceContext.js');
+    expect(runWithWorkspace('ws-default', () => svc.getIssues()).map((i: any) => i.id)).toContain('gh-issue-9001');
+  });
+
+  it('still asks a desktop of its own for the right to read GitHub', async () => {
+    sharing = false;
+    const { app } = await startApi();
+
+    expect((await call(app, 'POST', '/api/board/sync')).status).toBe(403);
+  });
+});
+
+describe('a card made on a team’s desktop', () => {
+  async function withProject(app: express.Express) {
+    role = 'admin';
+    return (await call(app, 'POST', '/api/projects', { id: 'gh-repo-100', name: 'checkout', key: 'CHK', resources: REPO })).body;
+  }
+
+  /** One issue, one id, whichever copy of the board meets it first. */
+  it('is born under GitHub’s id', async () => {
+    const { app } = await startApi();
+    const project = await withProject(app);
+
+    const res = await call(app, 'POST', '/api/issues', { id: 'iss-browser', title: 'Add a thing', projectId: project.id });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ id: 'gh-issue-777', githubNumber: 42, githubRepo: 'acme/checkout' });
+  });
+
+  /** The database refuses a comment on an issue it does not have. */
+  it('is shared before its opening comment', async () => {
+    const { app } = await startApi();
+    const project = await withProject(app);
+
+    await call(app, 'POST', '/api/issues', { title: 'Add a thing', projectId: project.id });
+
+    expect(shared).toEqual(['issue gh-issue-777', 'comment comm-gh-issue-777-created']);
+  });
+
+  it('is still made, and says why, when GitHub refuses it', async () => {
+    githubFails = true;
+    const { app } = await startApi();
+    const project = await withProject(app);
+
+    const res = await call(app, 'POST', '/api/issues', { id: 'iss-browser', title: 'Add a thing', projectId: project.id });
+
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe('iss-browser');
+    expect(res.body.syncWarning).toMatch(/403/);
+  });
+
+  it('shares its changes, its comments and its removal', async () => {
+    const { app } = await startApi();
+    const project = await withProject(app);
+    const issue = (await call(app, 'POST', '/api/issues', { title: 'Add a thing', projectId: project.id })).body;
+    shared = [];
+
+    await call(app, 'PUT', `/api/issues/${issue.id}`, { priority: 'urgent' });
+    await call(app, 'POST', `/api/issues/${issue.id}/comments`, {
+      id: 'comm-note', authorType: 'user', authorName: 'Dev1', content: 'Looking at it'
+    });
+    await call(app, 'DELETE', `/api/issues/${issue.id}`);
+
+    expect(shared).toEqual([`issue ${issue.id}`, 'comment comm-note', `delete ${issue.id}`]);
+  });
+});

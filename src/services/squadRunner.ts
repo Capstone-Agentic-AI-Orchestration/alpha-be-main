@@ -3,6 +3,7 @@ import { runnerService } from './runnerService.js';
 import { totalTokens } from './runUsage.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Squad, SquadRun } from '../models/index.js';
+import { addCommentAndShare } from './boardWriteThrough.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -217,7 +218,7 @@ export class SquadRunner {
     if (!succeeded) {
       const reason = `${who} did not finish (${finished.status}). Stopped at member ${position} of ${total}.`;
       sqliteService.saveSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now });
-      sqliteService.addIssueComment({
+      addCommentAndShare({
         id: `comm-${squadRun.id}-stopped`,
         issueId: squadRun.issueId,
         authorType: 'system',
@@ -238,7 +239,7 @@ export class SquadRunner {
       const runs = sqliteService.getRunsForSquadRun(squadRun.id);
       const tokens = runs.reduce((sum, r) => sum + (totalTokens(r.usage) ?? 0), 0);
 
-      sqliteService.addIssueComment({
+      addCommentAndShare({
         id: `comm-${squadRun.id}-done`,
         issueId: squadRun.issueId,
         authorType: 'system',
