@@ -4,7 +4,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
+import { verifyDatabase } from './store/database.js';
 import { dataRouter } from './controllers/dataController.js';
 import { workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
@@ -63,6 +64,27 @@ if (!ALPHA_ORG) {
     'ALPHA_ORG is not set. Roles come from team membership in this GitHub ' +
       'organisation, so without it nobody can be given one. Set it to the ' +
       'organisation login, e.g. ALPHA_ORG=my-org.'
+  );
+  process.exit(1);
+}
+
+/**
+ * Refuse to start the cloud without its database.
+ *
+ * State the cloud keeps lives in Postgres. Falling back to a SQLite file
+ * would look like it worked -- until the next deploy replaced Render's disk
+ * and signed everybody out, which is exactly how it used to behave.
+ *
+ * The certificate authority is required alongside: the connection carries the
+ * database password, and a connection that cannot verify the server would
+ * hand it to anyone in the path. See DATABASE_CA_CERT.
+ */
+if (IS_CLOUD && (!DATABASE_URL || !DATABASE_CA_CERT)) {
+  logError(
+    `${DATABASE_URL ? 'DATABASE_CA_CERT' : 'DATABASE_URL'} is not set. Cloud mode keeps sessions in ` +
+      "Postgres and connects only when it can verify the server. From Supabase's dashboard: " +
+      'DATABASE_URL is Connect → Session pooler, with the database password; DATABASE_CA_CERT is ' +
+      'Database settings → SSL Configuration → Download certificate, pasted in whole.'
   );
   process.exit(1);
 }
@@ -301,9 +323,36 @@ runnerService.on('squad_run_failed', (data) => broadcast({ type: 'squad_run_fail
 // Subscribe chat events to WebSocket broadcast
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
 
-server.listen(PORT, HOST, () => {
+/**
+ * The cloud proves its database before taking traffic.
+ *
+ * A wrong password, an unverifiable certificate or a missing migration then
+ * fails the deploy at boot -- and Render, seeing no healthy instance, keeps
+ * the previous version serving -- instead of passing the health check and
+ * failing every sign-in after it.
+ */
+const databaseReady = IS_CLOUD ? verifyDatabase() : Promise.resolve();
+
+databaseReady.then(
+  () => server.listen(PORT, HOST, onListening),
+  (err: Error) => {
+    logError(`Cannot start: ${err.message}`);
+    process.exit(1);
+  }
+);
+
+function onListening(): void {
   logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${PORT}`);
   if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+
+  /**
+   * The database password on a developer's machine is the thing the whole
+   * token exchange exists to avoid. Unused here, but a copied `.env` is how it
+   * ends up in a backup, a screen share or a bug report.
+   */
+  if (IS_DESKTOP && DATABASE_URL) {
+    logError('DATABASE_URL is set on a desktop, which never uses it. Remove it: it is the database password.');
+  }
 
   /**
    * A dropped origin pattern is otherwise invisible.
@@ -392,4 +441,4 @@ server.listen(PORT, HOST, () => {
 
   // Initial runtime scan plus periodic catalog refresh in background.
   runtimeRefreshService.start();
-});
+}
