@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { Issue, IssueComment, Project } from '../models/index.js';
+import type { Agent, Issue, IssueComment, Project, Squad } from '../models/index.js';
 import { createTestDatabase } from '../store/testDatabase.js';
 import { withProjectDefaults } from '../store/projectStore.js';
 
@@ -64,12 +64,68 @@ const cloudComment = (over: Partial<IssueComment> = {}): IssueComment => ({
   ...over
 });
 
+const cloudAgent = (over: Partial<Agent> = {}): Agent =>
+  ({
+    id: 'agent-teammate',
+    name: 'Reviewer',
+    role: 'Reviewer',
+    avatar: '◆',
+    color: '#6366f1',
+    description: 'Reviews changes',
+    owner: 'PM1',
+    isMine: false,
+    modelProvider: 'anthropic',
+    modelName: 'claude-sonnet-5',
+    systemPrompt: 'Review carefully.',
+    autonomyLevel: 'supervised',
+    temperature: 0.7,
+    skills: [],
+    mcpServers: [],
+    customCliArgs: '',
+    envVars: [],
+    concurrencyLimit: 2,
+    isArchived: false,
+    allowedUsers: 'team',
+    createdAt: now,
+    ...over
+  }) as Agent;
+
+const cloudSquad = (over: Partial<Squad> = {}): Squad =>
+  ({
+    id: 'squad-web',
+    name: 'Web squad',
+    description: '',
+    avatar: '◈',
+    color: '#6366f1',
+    topology: 'Sequential',
+    leaderAgentId: undefined,
+    memberAgentIds: ['agent-teammate'],
+    mission: 'Ship the checkout',
+    activeRunsCount: 0,
+    completedRunsCount: 0,
+    ...over
+  }) as Squad;
+
+interface Board {
+  projects?: Project[];
+  issues?: Issue[];
+  comments?: IssueComment[];
+  agents?: Agent[];
+  squads?: Squad[];
+  owners?: Array<{ squad_id: string; user_id: string; status: string }>;
+  links?: Array<{ squad_id: string; project_id: string; relationship: string; status: string }>;
+}
+
 /** The team's board as the pull will read it. */
-function source(board: { projects?: Project[]; issues?: Issue[]; comments?: IssueComment[] } = {}) {
+function source(board: Board = {}) {
   return {
     projects: async () => board.projects ?? [cloudProject()],
     issues: async () => board.issues ?? [cloudIssue()],
-    comments: async () => board.comments ?? [cloudComment()]
+    comments: async () => board.comments ?? [cloudComment()],
+    agents: async () => board.agents ?? [],
+    squads: async () => board.squads ?? [],
+    squadOwners: async () => board.owners ?? [],
+    squadProjects: async () => board.links ?? []
   };
 }
 
@@ -191,6 +247,78 @@ describe('pulling the team board', () => {
   });
 });
 
+describe('the team’s roster', () => {
+  it('adds an agent this machine does not have', async () => {
+    const { svc, board, inWorkspace } = await load();
+
+    const report = await board.pullSharedBoard('ws-default', source({ agents: [cloudAgent()] }));
+
+    expect(report.agentsAdded).toBe(1);
+    const agent = inWorkspace(() => svc.getAgents()).find((a: Agent) => a.id === 'agent-teammate');
+    expect(agent).toMatchObject({ name: 'Reviewer', systemPrompt: 'Review carefully.' });
+  });
+
+  /**
+   * The persona file is this machine's authority on how an agent behaves, and
+   * `updateAgent` rewrites the file's frontmatter from whatever it is handed.
+   */
+  it('leaves alone what this machine’s persona file declares', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source({ agents: [cloudAgent()] }));
+    const { agentFilePath } = await import('./agentFileService.js');
+    fs.writeFileSync(
+      agentFilePath('agent-teammate'),
+      `---\nname: Reviewer\nmodel: claude-opus-5\n---\n\nMy own instructions.\n`
+    );
+
+    await board.pullSharedBoard(
+      'ws-default',
+      source({ agents: [cloudAgent({ modelName: 'claude-haiku-4-5', description: 'Reviews changes twice' })] })
+    );
+
+    const agent = inWorkspace(() => svc.getAgents()).find((a: Agent) => a.id === 'agent-teammate');
+    // The file decides the model; the team still decides everything else.
+    expect(agent.modelName).toBe('claude-opus-5');
+    expect(agent.description).toBe('Reviews changes twice');
+  });
+
+  it('adds a squad and keeps this machine’s own to publish', async () => {
+    const { svc, board, inWorkspace } = await load();
+    inWorkspace(() => svc.createSquad({ ...cloudSquad({ id: 'squad-mine', name: 'Mine' }) }));
+
+    const report = await board.pullSharedBoard('ws-default', source({ squads: [cloudSquad()] }));
+
+    expect(report.squadsAdded).toBe(1);
+    // This machine's own, the seeded core squad included, until they are published.
+    expect(report.unpublished.squads.map((s: Squad) => s.id)).toEqual(expect.arrayContaining(['squad-mine', 'squad-core']));
+    // The seeded roster is this machine's until it is published.
+    expect(report.unpublished.agents.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Without the assignment, a developer's squad run is refused here for a
+   * project a project manager assigned it to on the web.
+   */
+  it('mirrors who owns a squad and which projects it serves', async () => {
+    const { board } = await load();
+
+    await board.pullSharedBoard(
+      'ws-default',
+      source({
+        squads: [cloudSquad()],
+        owners: [{ squad_id: 'squad-web', user_id: 'Dev1', status: 'active' }],
+        links: [{ squad_id: 'squad-web', project_id: 'gh-repo-100', relationship: 'assigned', status: 'active' }]
+      })
+    );
+
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+    const links = await workspaceRegistry.listSquadProjectAssignments('ws-default', 'gh-repo-100');
+    expect(links.map(l => [l.squadId, l.status])).toEqual([['squad-web', 'active']]);
+    const context = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
+    expect(context?.access.squadOwners.get('squad-web')).toBe('Dev1');
+  });
+});
+
 describe('cards this machine made before it joined the team', () => {
   /**
    * Same repository, another id. Merging would mean rewriting every run and
@@ -244,6 +372,8 @@ describe('asSyncReport', () => {
 
     const shaped = board.asSyncReport({
       projectsAdded: 2, projectsUpdated: 1, issuesAdded: 5, issuesUpdated: 3, unchanged: 4, comments: 6,
+      agentsAdded: 0, agentsUpdated: 0, squadsAdded: 0, squadsUpdated: 0,
+      unpublished: { agents: [], squads: [] },
       conflicts: [{ project: 'MINE', detail: 'clash' }]
     });
 

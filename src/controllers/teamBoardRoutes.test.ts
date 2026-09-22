@@ -36,7 +36,16 @@ const teamBoard = {
       priority: 'high', projectId: 'gh-repo-100', labels: [], subtasks: [], comments: [],
       githubRepo: 'acme/checkout', githubNumber: 7, createdAt: now, updatedAt: now }
   ],
-  comments: async () => []
+  comments: async () => [],
+  agents: async () => [
+    { id: 'agent-teammate', name: 'Reviewer', role: 'Reviewer', avatar: '◆', color: '#6366f1', description: '',
+      owner: 'PM1', isMine: false, modelProvider: 'anthropic', modelName: 'claude-sonnet-5', systemPrompt: '',
+      autonomyLevel: 'supervised', temperature: 0.7, skills: [], mcpServers: [], customCliArgs: '', envVars: [],
+      concurrencyLimit: 2, isArchived: false, allowedUsers: 'team', createdAt: now }
+  ],
+  squads: async () => [],
+  squadOwners: async () => [],
+  squadProjects: async () => []
 };
 
 async function startApi() {
@@ -57,6 +66,10 @@ async function startApi() {
       shareIssue: async (issue: any) => void shared.push(`issue ${issue.id}`),
       unshareIssue: async (id: string) => void shared.push(`delete ${id}`),
       shareComment: async (comment: any) => void shared.push(`comment ${comment.id}`),
+      shareAgent: async (agent: any) => void shared.push(`agent ${agent.id}`),
+      unshareAgent: async (id: string) => void shared.push(`delete agent ${id}`),
+      shareSquad: async (squad: any, ownerId?: string) => void shared.push(`squad ${squad.id}${ownerId ? ` owned by ${ownerId}` : ''}`),
+      unshareSquad: async (id: string) => void shared.push(`delete squad ${id}`),
       saveRunToCloud: async () => {},
       updateIssueInCloud: async () => {},
       broadcastRunEvent: async () => {}
@@ -81,10 +94,12 @@ async function startApi() {
 
   const { dataRouter } = await import('./dataController.js');
   const { workspaceContext } = await import('./workspaceContext.js');
+  const { jsonErrorHandler } = await import('./errorHandler.js');
   const app = express();
   app.use(express.json());
   app.use('/api', workspaceContext);
   app.use('/api', dataRouter);
+  app.use(jsonErrorHandler);
   return { svc: sql.sqliteService as any, app };
 }
 
@@ -154,6 +169,62 @@ describe('syncing a desktop on a team', () => {
     const { app } = await startApi();
 
     expect((await call(app, 'POST', '/api/board/sync')).status).toBe(403);
+  });
+});
+
+describe('the roster on a team’s desktop', () => {
+  /**
+   * `0011` makes an issue's assignee a real reference again, so an agent this
+   * machine has and the team does not has to reach the cloud before a card
+   * assigned to it does.
+   */
+  it('publishes what the team does not have when it syncs', async () => {
+    const { app } = await startApi();
+
+    await call(app, 'POST', '/api/board/sync');
+
+    // The machine's seeded roster and core squad, not the one it just pulled.
+    expect(shared).toContain('agent agent-architect');
+    expect(shared.some(s => s.startsWith('squad squad-core'))).toBe(true);
+    expect(shared).not.toContain('agent agent-teammate');
+  });
+
+  it('shares an agent it makes, changes and removes', async () => {
+    role = 'admin';
+    const { app } = await startApi();
+    const agent = (await call(app, 'POST', '/api/agents', {
+      id: 'agent-mine', name: 'Mine', role: 'Developer', modelProvider: 'anthropic', modelName: 'claude-sonnet-5',
+      autonomyLevel: 'supervised', avatar: '◆', color: '#6366f1', description: 'Mine'
+    })).body;
+    shared = [];
+
+    await call(app, 'PUT', `/api/agents/${agent.id}`, { description: 'Changed' });
+    await call(app, 'DELETE', `/api/agents/${agent.id}`);
+
+    expect(shared).toEqual(['agent agent-mine', 'delete agent agent-mine']);
+  });
+
+  /** An agent belongs to whoever made it, so "private to its owner" means someone. */
+  it('records who made an agent', async () => {
+    role = 'admin';
+    const { app } = await startApi();
+
+    const agent = (await call(app, 'POST', '/api/agents', {
+      id: 'agent-mine', name: 'Mine', role: 'Developer', modelProvider: 'anthropic', modelName: 'claude-sonnet-5',
+      autonomyLevel: 'supervised', avatar: '◆', color: '#6366f1', description: 'Mine', owner: 'You'
+    })).body;
+
+    expect(agent.owner).toBe('Dev1');
+  });
+
+  it('shares a squad with its owner', async () => {
+    role = 'admin';
+    const { app } = await startApi();
+    shared = [];
+
+    await call(app, 'POST', '/api/squads', { id: 'squad-mine', name: 'Mine', topology: 'Sequential', memberAgentIds: [] });
+
+    expect(shared).toContain('squad squad-mine owned by Dev1');
   });
 });
 

@@ -185,7 +185,17 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
     const source = supabaseService.boardSource();
     if (!source) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
     try {
-      res.json(asSyncReport(await pullSharedBoard(req.workspace!.workspaceId, source)));
+      const pulled = await pullSharedBoard(req.workspace!.workspaceId, source);
+      /**
+       * Then this machine's own agents and squads, which the team does not
+       * have. An issue assigned to one of them names a row the cloud has to
+       * hold, or the assignment is refused when the card is shared.
+       */
+      for (const agent of pulled.unpublished.agents) await supabaseService.shareAgent(agent);
+      for (const squad of pulled.unpublished.squads) {
+        await supabaseService.shareSquad(squad, workspaceRegistry.squadOwnerId(req.workspace!, squad.id));
+      }
+      res.json(asSyncReport(pulled));
     } catch (err: any) {
       res.status(502).json({ error: `Could not read the team board: ${err?.message ?? err}` });
     }
@@ -340,11 +350,20 @@ dataRouter.get('/agents', route(async (req: Request, res: Response) => {
 
 dataRouter.post('/agents', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
+  /**
+   * Whose agent it is, by login.
+   *
+   * The field held the literal 'You', so "private to its owner" -- which the
+   * roster's visibility setting promises, and which `0011` now enforces in the
+   * database -- matched nobody at all, its creator included.
+   */
+  if (!req.body?.owner || req.body.owner === 'You') req.body.owner = req.workspace!.userId;
   const error = agentValidationError(req.body, { partial: false });
   if (error) return res.status(400).json({ error });
 
   const agent = await agentStore().create(req.workspace!.workspaceId, req.body);
   workspaceRegistry.bind('agents', agent.id, req.workspace!.workspaceId);
+  void supabaseService.shareAgent(agent);
   res.status(201).json(withFileOverlay(agent));
 }));
 
@@ -358,6 +377,7 @@ dataRouter.put('/agents/:id', route(async (req: Request, res: Response) => {
 
   const updated = await agentStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Agent not found' });
+  void supabaseService.shareAgent(updated);
   // Merged, like the list: a field the file owns must not appear to have taken
   // the value that was just written to the database.
   res.json(withFileOverlay(updated));
@@ -367,7 +387,10 @@ dataRouter.delete('/agents/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
   const deleted = await agentStore().remove(req.workspace!.workspaceId, req.params.id);
-  if (deleted) await workspaceRegistry.unbind('agents', req.params.id);
+  if (deleted) {
+    await workspaceRegistry.unbind('agents', req.params.id);
+    void supabaseService.unshareAgent(req.params.id);
+  }
   res.json({ success: deleted });
 }));
 
@@ -482,6 +505,7 @@ dataRouter.post('/agents/import', route(async (req: Request, res: Response) => {
     // without a second round trip.
     const created = await agentStore().create(req.workspace!.workspaceId, agent);
     workspaceRegistry.bind('agents', created.id, req.workspace!.workspaceId);
+    void supabaseService.shareAgent(created);
 
     logInfo(`Imported agent ${created.id} (${created.name})`);
     res.status(201).json({ agent: withFileOverlay(created), warnings });
@@ -810,6 +834,7 @@ dataRouter.post('/squads', route(async (req: Request, res: Response) => {
   const squad = await squadStore().create(req.workspace!.workspaceId, req.body);
   workspaceRegistry.bind('squads', squad.id, req.workspace!.workspaceId);
   await workspaceRegistry.bindSquadOwner(req.workspace!.workspaceId, squad.id, req.workspace!.userId);
+  void supabaseService.shareSquad(squad, req.workspace!.userId);
   res.status(201).json({ ...squad, ownerId: req.workspace!.userId });
 }));
 
@@ -832,6 +857,7 @@ dataRouter.put('/squads/:id', route(async (req: Request, res: Response) => {
 
   const updated = await squadStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Squad not found' });
+  void supabaseService.shareSquad(updated);
   res.json({
     ...updated,
     ownerId: workspaceRegistry.squadOwnerId(req.workspace!, updated.id)
@@ -842,7 +868,10 @@ dataRouter.delete('/squads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   const deleted = await squadStore().remove(req.workspace!.workspaceId, req.params.id);
-  if (deleted) await workspaceRegistry.unbind('squads', req.params.id);
+  if (deleted) {
+    await workspaceRegistry.unbind('squads', req.params.id);
+    void supabaseService.unshareSquad(req.params.id);
+  }
   if (!deleted) return res.status(404).json({ error: 'Squad not found' });
   res.json({ success: true });
 }));

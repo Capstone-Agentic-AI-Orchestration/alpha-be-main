@@ -264,7 +264,7 @@ export class PostgresSquadStore implements SquadStore {
   }
 }
 
-interface AgentRow {
+export interface AgentRow {
   id: string;
   name: string;
   role: string;
@@ -291,7 +291,7 @@ interface AgentRow {
   created_at: Date | string;
 }
 
-interface SquadRow {
+export interface SquadRow {
   id: string;
   name: string;
   description: string | null;
@@ -305,7 +305,7 @@ interface SquadRow {
   completed_runs_count: number | null;
 }
 
-function toAgent(row: AgentRow): Agent {
+export function toAgent(row: AgentRow): Agent {
   return {
     id: row.id,
     name: row.name,
@@ -342,7 +342,64 @@ function toAgent(row: AgentRow): Agent {
   };
 }
 
-function toSquad(row: SquadRow): Squad {
+/**
+ * An agent as a row of `agents`, for writers that are not this store.
+ *
+ * The desktop publishes its own agents through the Data API and has to send
+ * the same columns. `withoutMachineConfig` again here, not as a courtesy: the
+ * CLI arguments and environment of an agent are input to a process on the
+ * machine that runs it, and `0003` dropped the columns for them.
+ */
+export function agentRow(workspaceId: string, agent: Agent): Record<string, unknown> {
+  const shared = withoutMachineConfig(agent);
+  return {
+    id: shared.id,
+    workspace_id: workspaceId,
+    name: shared.name,
+    role: shared.role,
+    avatar: shared.avatar ?? '',
+    color: shared.color ?? '',
+    description: shared.description ?? '',
+    owner: shared.owner ?? null,
+    is_mine: shared.isMine ?? true,
+    model_provider: shared.modelProvider,
+    model_name: shared.modelName,
+    reasoning_effort: shared.reasoningEffort ?? null,
+    system_prompt: shared.systemPrompt ?? '',
+    autonomy_level: shared.autonomyLevel,
+    temperature: shared.temperature ?? 0.7,
+    skills: shared.skills ?? [],
+    mcp_servers: shared.mcpServers ?? [],
+    concurrency_limit: shared.concurrencyLimit ?? 2,
+    is_archived: shared.isArchived ?? false,
+    allowed_users: shared.allowedUsers ?? null,
+    template_key: shared.templateKey ?? null,
+    template_version: shared.templateVersion ?? null,
+    phase: shared.phase ?? null,
+    is_seeded: shared.isSeeded ?? false,
+    created_at: shared.createdAt || new Date().toISOString()
+  };
+}
+
+/** A squad as a row of `squads`; see `agentRow`. */
+export function squadRow(workspaceId: string, squad: Squad): Record<string, unknown> {
+  return {
+    id: squad.id,
+    workspace_id: workspaceId,
+    name: squad.name,
+    description: squad.description ?? '',
+    avatar: squad.avatar ?? '',
+    color: squad.color ?? '',
+    topology: squad.topology,
+    leader_agent_id: squad.leaderAgentId ?? null,
+    member_agent_ids: squad.memberAgentIds ?? [],
+    mission: squad.mission ?? '',
+    active_runs_count: squad.activeRunsCount ?? 0,
+    completed_runs_count: squad.completedRunsCount ?? 0
+  };
+}
+
+export function toSquad(row: SquadRow): Squad {
   return {
     id: row.id,
     name: row.name,

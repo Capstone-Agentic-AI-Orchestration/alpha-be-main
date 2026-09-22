@@ -3,8 +3,9 @@ import { promisify } from 'node:util';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API, IS_CLOUD } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, Issue, IssueComment } from '../models/index.js';
+import { PrototypeRun, Issue, IssueComment, Agent, Squad } from '../models/index.js';
 import { commentRow, issueRow } from '../store/postgresIssueStore.js';
+import { agentRow, squadRow } from '../store/postgresAgentStore.js';
 import { supabaseBoardSource, type SharedBoardSource } from './sharedBoard.js';
 import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
@@ -174,6 +175,69 @@ export class SupabaseService {
       if (error) throw error;
     } catch (err: any) {
       this.reportFailure(`share issue ${issue.identifier}`, err);
+    }
+  }
+
+  /**
+   * Put an agent or a squad of this machine's on the team's roster.
+   *
+   * Without this an issue assigned to a developer's own agent names something
+   * the cloud has no row for, which `0011` refuses outright. The machine's
+   * configuration -- CLI arguments, environment -- is left out by `agentRow`,
+   * and an agent marked private stays readable only by its owner, by policy.
+   */
+  async shareAgent(agent: Agent): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('agents').upsert(agentRow(currentWorkspaceId(), agent));
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`share agent ${agent.id}`, err);
+    }
+  }
+
+  async unshareAgent(agentId: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('agents').delete().eq('id', agentId);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`remove agent ${agentId}`, err);
+    }
+  }
+
+  async shareSquad(squad: Squad, ownerId?: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    const workspaceId = currentWorkspaceId();
+    try {
+      const { error } = await this.client.from('squads').upsert(squadRow(workspaceId, squad));
+      if (error) throw error;
+      if (!ownerId) return;
+      // One owner per squad since 0008, so the squad's id is the row's identity.
+      const { error: ownerError } = await this.client.from('workspace_squad_owners').upsert(
+        {
+          id: `squad-owner-${squad.id}`,
+          workspace_id: workspaceId,
+          squad_id: squad.id,
+          user_id: ownerId,
+          status: 'active',
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'workspace_id,squad_id' }
+      );
+      if (ownerError) throw ownerError;
+    } catch (err: any) {
+      this.reportFailure(`share squad ${squad.id}`, err);
+    }
+  }
+
+  async unshareSquad(squadId: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('squads').delete().eq('id', squadId);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`remove squad ${squadId}`, err);
     }
   }
 

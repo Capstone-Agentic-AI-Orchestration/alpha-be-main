@@ -369,6 +369,57 @@ describe('the audit log is append-only', () => {
   });
 });
 
+describe('an agent is readable by whoever it says may address it', () => {
+  /**
+   * A developer's agent carries a prompt they wrote, and desktops publish
+   * their agents here. Every member could read every row until `0011`, while
+   * the application had always hidden a private one from everyone but its
+   * owner -- so publishing would have handed those prompts to the team.
+   */
+  const seed = async () => {
+    await db.exec(`
+      insert into agents (id,workspace_id,name,role,model_provider,model_name,autonomy_level,owner,allowed_users) values
+        ('a-everyone','ws1','Open','Developer','anthropic','claude-sonnet-5','supervised','Lloyd1020','everyone'),
+        ('a-team','ws1','Team','Developer','anthropic','claude-sonnet-5','supervised','Lloyd1020','team'),
+        ('a-admins','ws1','Admins','Developer','anthropic','claude-sonnet-5','supervised','Lloyd1020','admins'),
+        ('a-lloyd','ws1','Mine','Developer','anthropic','claude-sonnet-5','supervised','Lloyd1020','private'),
+        ('a-zane','ws1','Theirs','Developer','anthropic','claude-sonnet-5','supervised','ZaneZamoraC1Cs','private')
+      on conflict (id) do nothing;
+    `);
+  };
+  const visible = async (login: string, role: 'client' | 'dev' | 'pm' | 'admin') =>
+    as(login, role, async () => (await db.query<{ id: string }>('select id from agents order by id')).rows.map(r => r.id));
+
+  it('keeps one developer’s private agent from another', async () => {
+    await seed();
+
+    expect(await visible('Lloyd1020', 'dev')).toEqual(['a-everyone', 'a-lloyd', 'a-team']);
+    expect(await visible('ZaneZamoraC1Cs', 'dev')).toEqual(['a-everyone', 'a-team', 'a-zane']);
+  });
+
+  it('shows a client only what is for everyone', async () => {
+    await seed();
+
+    expect(await visible('Client1', 'client')).toEqual(['a-everyone']);
+  });
+
+  /** An admin sees the admins-only agents, and still not a private one. */
+  it('shows an administrator the admin agents but not a private one', async () => {
+    await seed();
+
+    expect(await visible('Admin1', 'admin')).toEqual(['a-admins', 'a-everyone', 'a-team']);
+  });
+
+  it('refuses a write to someone else’s private agent', async () => {
+    await seed();
+
+    await as('Lloyd1020', 'dev', async () => {
+      const { rows } = await db.query(`update agents set name = 'Taken' where id = 'a-zane' returning id`);
+      expect(rows).toEqual([]);
+    });
+  });
+});
+
 describe("an agent's execution config is not shared", () => {
   /**
    * CLI flags and environment variables are input to a process on a

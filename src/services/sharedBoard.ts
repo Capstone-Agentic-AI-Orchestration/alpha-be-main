@@ -1,8 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import type { Issue, IssueComment, Project, ProjectResource } from '../models/index.js';
+import type { Agent, Issue, IssueComment, Project, ProjectResource, Squad } from '../models/index.js';
 import { toComment, toIssue, type CommentRow, type IssueRow } from '../store/postgresIssueStore.js';
 import { toProject, type ProjectRow } from '../store/postgresProjectStore.js';
+import { toAgent, toSquad, type AgentRow, type SquadRow } from '../store/postgresAgentStore.js';
+import { readAgentFile } from './agentFileService.js';
+import { workspaceRegistry } from './workspaceRegistry.js';
 import { repoForProject } from './githubIssueMapping.js';
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -41,6 +44,20 @@ import type { SyncReport } from './githubBoardSync.js';
  * team's out until the local one is removed. Nothing is ever deleted here.
  */
 
+/** Who owns a squad, and which projects it serves. */
+export interface SquadOwnerRow {
+  squad_id: string;
+  user_id: string;
+  status: string;
+}
+
+export interface SquadProjectRow {
+  squad_id: string;
+  project_id: string;
+  relationship: string;
+  status: string;
+}
+
 /** Where the team's board is read from. */
 export interface SharedBoardSource {
   projects(workspaceId: string): Promise<Project[]>;
@@ -48,6 +65,11 @@ export interface SharedBoardSource {
   issues(workspaceId: string): Promise<Issue[]>;
   /** Every comment on an issue this caller may see. */
   comments(): Promise<IssueComment[]>;
+  /** The agents this caller may address; a private one of someone else's is not among them. */
+  agents(workspaceId: string): Promise<Agent[]>;
+  squads(workspaceId: string): Promise<Squad[]>;
+  squadOwners(workspaceId: string): Promise<SquadOwnerRow[]>;
+  squadProjects(workspaceId: string): Promise<SquadProjectRow[]>;
 }
 
 export interface PullReport {
@@ -57,6 +79,16 @@ export interface PullReport {
   issuesUpdated: number;
   unchanged: number;
   comments: number;
+  agentsAdded: number;
+  agentsUpdated: number;
+  squadsAdded: number;
+  squadsUpdated: number;
+  /**
+   * This machine's own agents and squads that the team does not have, for the
+   * caller to publish. Read here, sent from `dataController`, which is where
+   * the uplink lives.
+   */
+  unpublished: { agents: Agent[]; squads: Squad[] };
   /** Cards this machine already has under another id; see the module comment. */
   conflicts: Array<{ project: string; detail: string }>;
 }
@@ -71,6 +103,8 @@ export function asSyncReport(pull: PullReport): SyncReport {
   return {
     projectsImported: pull.projectsAdded,
     projects: pull.projectsAdded + pull.projectsUpdated,
+    // Cards, which is what the app reports as new and updated. Agents and
+    // squads move too, and are in the log rather than in a count of issues.
     created: pull.issuesAdded,
     updated: pull.issuesUpdated + pull.projectsUpdated,
     unchanged: pull.unchanged,
@@ -116,6 +150,28 @@ export function supabaseBoardSource(client: SupabaseClient): SharedBoardSource {
         client.from('issue_comments').select('*').order('id').range(from, to)
       );
       return rows.map(toComment);
+    },
+    async agents(workspaceId) {
+      const rows = await everyRow<AgentRow>((from, to) =>
+        client.from('agents').select('*').eq('workspace_id', workspaceId).order('id').range(from, to)
+      );
+      return rows.map(toAgent);
+    },
+    async squads(workspaceId) {
+      const rows = await everyRow<SquadRow>((from, to) =>
+        client.from('squads').select('*').eq('workspace_id', workspaceId).order('id').range(from, to)
+      );
+      return rows.map(toSquad);
+    },
+    async squadOwners(workspaceId) {
+      return everyRow<SquadOwnerRow>((from, to) =>
+        client.from('workspace_squad_owners').select('*').eq('workspace_id', workspaceId).order('squad_id').range(from, to)
+      );
+    },
+    async squadProjects(workspaceId) {
+      return everyRow<SquadProjectRow>((from, to) =>
+        client.from('workspace_squad_projects').select('*').eq('workspace_id', workspaceId).order('squad_id').range(from, to)
+      );
     }
   };
 }
@@ -187,10 +243,14 @@ function differs<T extends object>(mine: T, next: Partial<T>): boolean {
 export async function pullSharedBoard(workspaceId: string, source: SharedBoardSource): Promise<PullReport> {
   // Read everything before writing anything, so a failure part-way through
   // the network leaves the local board as it was.
-  const [projects, issues, comments] = await Promise.all([
+  const [projects, issues, comments, agents, squads, owners, links] = await Promise.all([
     source.projects(workspaceId),
     source.issues(workspaceId),
-    source.comments()
+    source.comments(),
+    source.agents(workspaceId),
+    source.squads(workspaceId),
+    source.squadOwners(workspaceId),
+    source.squadProjects(workspaceId)
   ]);
 
   const report: PullReport = {
@@ -200,21 +260,151 @@ export async function pullSharedBoard(workspaceId: string, source: SharedBoardSo
     issuesUpdated: 0,
     unchanged: 0,
     comments: 0,
+    agentsAdded: 0,
+    agentsUpdated: 0,
+    squadsAdded: 0,
+    squadsUpdated: 0,
+    unpublished: { agents: [], squads: [] },
     conflicts: []
   };
 
   runWithWorkspace(workspaceId, () => {
+    // The roster first: an issue names an agent, and a squad names its members.
+    applyRoster(agents, squads, report);
     applyProjects(projects, report);
     applyIssues(issues, report);
     applyComments(comments, report);
   });
 
+  await applySquadBindings(workspaceId, owners, links);
+
   logInfo(
-    `Team board: ${report.projectsAdded} project(s) added, ${report.projectsUpdated} updated; ` +
+    `Team board: ${report.agentsAdded} agent(s) added, ${report.squadsAdded} squad(s) added; ` +
+      `${report.projectsAdded} project(s) added, ${report.projectsUpdated} updated; ` +
       `${report.issuesAdded} issue(s) added, ${report.issuesUpdated} updated; ${report.comments} comment(s)` +
       (report.conflicts.length ? `; ${report.conflicts.length} clash(es) with cards made on this machine` : '')
   );
   return report;
+}
+
+/**
+ * The team's agents and squads, onto this machine.
+ *
+ * What the local persona file declares is left alone: the file is this
+ * machine's authority on how an agent behaves, and `updateAgent` rewrites the
+ * file's frontmatter from whatever it is given. What this machine has and the
+ * team does not is collected to be published, so that an issue assigned to it
+ * is a reference the cloud can keep -- `0011` enforces that again.
+ */
+function applyRoster(agents: Agent[], squads: Squad[], report: PullReport): void {
+  const localAgents = sqliteService.getAgents();
+  const byId = new Map(localAgents.map(agent => [agent.id, agent]));
+
+  for (const cloud of agents) {
+    const mine = byId.get(cloud.id);
+    if (!mine) {
+      // Machine config is this machine's; the cloud has no column for it.
+      sqliteService.createAgent({ ...cloud, customCliArgs: '', envVars: [] });
+      report.agentsAdded += 1;
+      continue;
+    }
+
+    let declared: string[] = [];
+    try {
+      declared = Object.keys(readAgentFile(cloud.id) ?? {});
+    } catch {
+      // An unreadable persona file is not a reason to skip the update.
+    }
+    const next = sharedAgentFields(cloud, declared);
+    if (!differs(mine, next)) {
+      report.unchanged += 1;
+      continue;
+    }
+    sqliteService.updateAgent(cloud.id, next);
+    report.agentsUpdated += 1;
+  }
+
+  const shared = new Set(agents.map(agent => agent.id));
+  report.unpublished.agents = localAgents.filter(agent => !shared.has(agent.id));
+
+  const localSquads = sqliteService.getSquads();
+  const squadsById = new Map(localSquads.map(squad => [squad.id, squad]));
+  for (const cloud of squads) {
+    const mine = squadsById.get(cloud.id);
+    if (!mine) {
+      sqliteService.createSquad(cloud);
+      report.squadsAdded += 1;
+      continue;
+    }
+    if (!differs(mine, cloud)) {
+      report.unchanged += 1;
+      continue;
+    }
+    sqliteService.updateSquad(cloud.id, cloud);
+    report.squadsUpdated += 1;
+  }
+
+  const sharedSquads = new Set(squads.map(squad => squad.id));
+  report.unpublished.squads = localSquads.filter(squad => !sharedSquads.has(squad.id));
+}
+
+/** The fields of an agent the team decides, minus whatever its persona file declares here. */
+function sharedAgentFields(cloud: Agent, declaredInFile: string[]): Partial<Agent> {
+  const fields: Partial<Agent> = {
+    name: cloud.name,
+    role: cloud.role,
+    avatar: cloud.avatar,
+    color: cloud.color,
+    description: cloud.description,
+    modelProvider: cloud.modelProvider,
+    modelName: cloud.modelName,
+    reasoningEffort: cloud.reasoningEffort,
+    systemPrompt: cloud.systemPrompt,
+    autonomyLevel: cloud.autonomyLevel,
+    temperature: cloud.temperature,
+    skills: cloud.skills,
+    mcpServers: cloud.mcpServers,
+    concurrencyLimit: cloud.concurrencyLimit,
+    isArchived: cloud.isArchived,
+    allowedUsers: cloud.allowedUsers
+  };
+  for (const key of declaredInFile) delete fields[key as keyof Agent];
+  return fields;
+}
+
+/**
+ * Who owns which squad, and which projects it serves.
+ *
+ * Without the assignments a developer's squad run is refused here for a
+ * project a project manager assigned it to on the web -- the check reads this
+ * machine's copy.
+ */
+async function applySquadBindings(
+  workspaceId: string,
+  owners: SquadOwnerRow[],
+  links: SquadProjectRow[]
+): Promise<void> {
+  const squads = new Set(runWithWorkspace(workspaceId, () => sqliteService.getSquads()).map(squad => squad.id));
+  const projects = new Set(runWithWorkspace(workspaceId, () => sqliteService.getProjects()).map(project => project.id));
+
+  for (const owner of owners) {
+    if (!squads.has(owner.squad_id)) continue;
+    if (owner.status === 'active') await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
+  }
+
+  for (const link of links) {
+    if (!squads.has(link.squad_id) || !projects.has(link.project_id)) continue;
+    if (link.status === 'active') {
+      await workspaceRegistry.assignSquadProject(
+        workspaceId,
+        link.squad_id,
+        link.project_id,
+        link.relationship === 'owned' ? 'owned' : 'assigned'
+      );
+    } else {
+      await workspaceRegistry.removeSquadProject(workspaceId, link.squad_id, link.project_id);
+    }
+  }
 }
 
 function applyProjects(projects: Project[], report: PullReport): void {
