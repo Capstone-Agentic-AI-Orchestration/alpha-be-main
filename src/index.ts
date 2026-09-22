@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { verifyDatabase } from './store/database.js';
 import { dataRouter } from './controllers/dataController.js';
+import { downloadRouter } from './controllers/downloadController.js';
 import { seedDefaultWorkspace, workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
 import { sessionContext } from './controllers/sessionContext.js';
@@ -180,6 +181,7 @@ app.use('/api', (req, res, next) => {
 app.use('/api', sessionContext);
 app.use('/api', workspaceContext);
 app.use('/api', workspaceRouter);
+app.use('/api', downloadRouter);
 app.use('/api', dataRouter);
 app.use('/api', liveBuildRoomRouter);
 app.use('/api', agentCallRouter);
@@ -197,24 +199,6 @@ app.use('/api', workspaceRouter);
  * put the whole document into a toast.
  */
 app.use(jsonErrorHandler);
-
-app.get('/api/download/desktop', (req, res) => {
-  const zipPath = path.resolve('..', 'Alpha-v2-FullPlatform.zip');
-  if (fs.existsSync(zipPath)) {
-    res.download(zipPath, 'Alpha-Desktop-Windows-v2.0.0.zip');
-  } else {
-    res.status(404).json({ error: 'Desktop package bundle not found' });
-  }
-});
-
-app.get('/api/download/exe', (req, res) => {
-  const batPath = path.resolve('..', 'start-alpha.bat');
-  if (fs.existsSync(batPath)) {
-    res.download(batPath, 'Alpha-Launcher.bat');
-  } else {
-    res.status(404).json({ error: 'Launcher file not found' });
-  }
-});
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'healthy', version: '2.0.0', time: new Date().toISOString() });

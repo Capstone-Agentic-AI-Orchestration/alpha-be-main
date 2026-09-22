@@ -83,6 +83,7 @@ default in code, so each deployment names its own.
 | Variable | Source | Required |
 | :--- | :--- | :---: |
 | `ALPHA_ORG` | your GitHub organisation's login | yes — **the daemon exits without it** |
+| `ALPHA_DESKTOP_REPO` | `owner/name` of the desktop repository, e.g. `your-org/alpha-desktop` | no — without it the web app's download button says this deployment offers no desktop app |
 | `GITHUB_CLIENT_ID` | App → Client ID | yes |
 | `GITHUB_CLIENT_SECRET` | App → generate a client secret | yes |
 | `GITHUB_CALLBACK_URL` | `https://<render>.onrender.com/api/github/oauth/callback` | yes |
