@@ -71,6 +71,13 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
   ],
   dev: [
     'workspace.read',
+    /*
+     * Who else is in this workspace. Knowing your colleagues is not
+     * privileged -- the row-level policy on `workspace_members` says as much,
+     * and has all along, while this list did not: a developer's team view
+     * answered 403.
+     */
+    'workspace.read_members',
     'project.read',
     'issue.read',
     'issue.manage',
@@ -86,6 +93,13 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
   pm: [
     'workspace.read',
     'workspace.read_members',
+    /*
+     * A project manager staffs their own workspace: they put the developers
+     * and the other managers in it. Granting `admin` is still an admin's to
+     * do, which the route checks -- this capability says who may change a
+     * membership, not which roles they may hand out.
+     */
+    'workspace.manage_members',
     'project.read',
     'project.create',
     'project.manage',
@@ -237,6 +251,10 @@ class WorkspaceRegistry {
 
   listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
     return this.directory().listMembers(workspaceId);
+  }
+
+  addMember(workspaceId: string, userId: string, role: WorkspaceRole): Promise<WorkspaceMember> {
+    return this.directory().addMember(workspaceId, userId, role);
   }
 
   updateMember(

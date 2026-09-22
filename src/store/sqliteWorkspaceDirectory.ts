@@ -347,6 +347,41 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     return this.summary(row, callerRole);
   }
 
+  async addMember(workspaceId: string, userId: string, role: WorkspaceRole): Promise<WorkspaceMember> {
+    const login = userId.trim();
+    if (!login) throw new WorkspaceRequestError('Who to add is required.', 400);
+
+    const now = new Date().toISOString();
+    const existing = this.db
+      .prepare('SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+      .get(workspaceId, login) as any;
+
+    if (existing) {
+      this.db
+        .prepare("UPDATE workspace_members SET role = ?, status = 'active', updated_at = ? WHERE id = ?")
+        .run(role, now, existing.id);
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO workspace_members (id, workspace_id, user_id, role, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?)`
+        )
+        .run(`member-${randomUUID()}`, workspaceId, login, role, now, now);
+    }
+
+    const row = this.db
+      .prepare('SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
+      .get(workspaceId, login) as any;
+    return {
+      id: row.id,
+      userId: row.user_id,
+      role: knownRole(row.role) ?? role,
+      status: row.status as WorkspaceMemberStatus,
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at)
+    };
+  }
+
   async listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
     const rows = this.db
       .prepare('SELECT * FROM workspace_members WHERE workspace_id = ? ORDER BY created_at ASC')
