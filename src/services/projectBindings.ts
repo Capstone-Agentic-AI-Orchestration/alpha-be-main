@@ -6,6 +6,8 @@ import { githubService } from './githubService.js';
 import { repoForProject } from './githubIssueMapping.js';
 import { sqliteService } from './sqliteService.js';
 import { logInfo } from '../utils/logger.js';
+import { clonePathFor, isEmptyOrMissing, isExistingCheckout } from './workspaceService.js';
+import { checkoutStatus, type CheckoutStatus } from './localCheckout.js';
 
 /**
  * Binding a project to a folder on this machine.
@@ -99,4 +101,41 @@ export async function bindProject(
 
 export function unbindProject(projectId: string): boolean {
   return sqliteService.deleteProjectBinding(projectId);
+}
+
+/**
+ * Get the project's code onto this machine and bind it, in one act.
+ *
+ * The alternative is what a new collaborator does today: find the repository,
+ * clone it by hand somewhere, then come back and type the path. Alpha knows
+ * the repository and where it puts clones, so it can do both.
+ *
+ * Asking twice is not an error. A checkout already at the managed path is
+ * bound rather than refused -- which is what makes this safe to press again
+ * after a failure, and what makes "set up this project" idempotent. A folder
+ * that is not empty and is not a checkout is left strictly alone: Alpha did
+ * not put it there.
+ */
+export async function cloneAndBindProject(project: Project): Promise<BoundProject> {
+  const ownerRepo = repoForProject(project);
+  if (!ownerRepo) {
+    throw new BindingError(`${project.name} has no GitHub repository to clone.`, 'invalid_folder');
+  }
+
+  const { dir } = clonePathFor(ownerRepo);
+  if (!isExistingCheckout(dir)) {
+    if (!isEmptyOrMissing(dir)) {
+      throw new BindingError(`${dir} already holds something that is not a checkout.`, 'invalid_folder');
+    }
+    await githubService.cloneRepository(ownerRepo, path.dirname(dir));
+    logInfo(`Cloned ${ownerRepo} for ${project.key || project.name}`);
+  }
+
+  return bindProject(project, dir, { managed: true });
+}
+
+/** What state the bound checkout is in: branch, uncommitted work, unpushed commits. */
+export async function boundCheckoutStatus(projectId: string): Promise<CheckoutStatus | null> {
+  const binding = sqliteService.getProjectBinding(projectId);
+  return binding ? checkoutStatus(binding.localDir) : null;
 }

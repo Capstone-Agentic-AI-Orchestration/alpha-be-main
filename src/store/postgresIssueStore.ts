@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Issue, IssueComment, IssueSubtask } from '../models/index.js';
 import type { Sql } from './database.js';
 import { nextIssueIdentifier, oneOwner, type IssueStore } from './issueStore.js';
@@ -73,7 +74,8 @@ export class PostgresIssueStore implements IssueStore {
 
     const issue: Issue = {
       ...input,
-      id: input.id || `issue-${Date.now()}`,
+      // Random as well as timed; see sqliteService.createIssue.
+      id: input.id || `issue-${Date.now()}-${randomUUID().slice(0, 8)}`,
       identifier,
       title: input.title || 'Untitled Issue',
       description: input.description ?? '',

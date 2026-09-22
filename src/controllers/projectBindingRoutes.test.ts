@@ -20,6 +20,8 @@ import path from 'node:path';
 let tmp: string;
 let opened: { close(): void }[] = [];
 let role = 'dev';
+/** Where the stubbed clone put a checkout, so a test can assert on it. */
+let cloned: string[] = [];
 
 function aCheckout(name: string, origin?: string): string {
   const dir = path.join(tmp, name);
@@ -37,6 +39,36 @@ async function startApi() {
   process.env.ALPHA_HOME = path.join(tmp, 'home');
   delete process.env.ALPHA_MODE;
   vi.resetModules();
+
+  /**
+   * The clone is stubbed; everything downstream of it is not.
+   *
+   * What is under test is what Alpha does with the result -- where it puts it,
+   * whether it binds it, whether pressing twice is safe. Reaching GitHub
+   * would test GitHub.
+   */
+  vi.doMock('../services/githubService.js', async () => {
+    const actual = await vi.importActual<typeof import('../services/githubService.js')>('../services/githubService.js');
+    return {
+      ...actual,
+      githubService: {
+        ...actual.githubService,
+        cloneRepository: async (repo: string, intoDir: string) => {
+          const target = path.join(intoDir, repo.split('/').pop()!);
+          fs.mkdirSync(target, { recursive: true });
+          const git = (...args: string[]) => execFileSync('git', args, { cwd: target, stdio: 'ignore' });
+          git('init');
+          git('config', 'user.email', 'test@example.com');
+          git('config', 'user.name', 'Test');
+          git('commit', '--allow-empty', '-m', 'first');
+          git('remote', 'add', 'origin', `https://github.com/${repo}.git`);
+          cloned.push(target);
+          return target;
+        },
+        inspectLocalRepo: actual.githubService.inspectLocalRepo.bind(actual.githubService)
+      }
+    };
+  });
 
   vi.doMock('../services/identityService.js', () => ({
     currentIdentity: async () => ({ login: 'Dev1', source: 'github', role, access: 'granted', github: 'ok', teams: [] }),
@@ -89,6 +121,7 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-binding-'));
   opened = [];
   role = 'dev';
+  cloned = [];
 });
 
 afterEach(() => {
@@ -106,7 +139,54 @@ afterEach(() => {
     /* windows handle */
   }
   vi.doUnmock('../services/identityService.js');
+  vi.doUnmock('../services/githubService.js');
   vi.resetModules();
+});
+
+describe('the state of a bound checkout', () => {
+  /**
+   * Read from git each time. The developer works in this folder outside Alpha
+   * all day, so a remembered branch is a wrong one.
+   */
+  it('says the branch, and that there is nothing uncommitted', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+    const dir = aCheckout('checkout', 'https://github.com/acme/checkout.git');
+    await call(app, 'PUT', '/api/projects/p1/binding', { localDir: dir });
+
+    const status = (await call(app, 'GET', '/api/projects/p1/binding/status')).body;
+
+    expect(status).toMatchObject({ exists: true, clean: true, ahead: 0, behind: 0 });
+    expect(status.branch).toBeTruthy();
+  });
+
+  it('notices work that is not committed', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+    const dir = aCheckout('checkout', 'https://github.com/acme/checkout.git');
+    await call(app, 'PUT', '/api/projects/p1/binding', { localDir: dir });
+    fs.writeFileSync(path.join(dir, 'unfinished.ts'), 'half a thought');
+
+    expect((await call(app, 'GET', '/api/projects/p1/binding/status')).body.clean).toBe(false);
+  });
+
+  /** Folders get moved and deleted; the app should say so rather than guess. */
+  it('says so when the folder has gone', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+    const dir = aCheckout('checkout', 'https://github.com/acme/checkout.git');
+    await call(app, 'PUT', '/api/projects/p1/binding', { localDir: dir });
+    fs.rmSync(dir, { recursive: true, force: true });
+
+    expect((await call(app, 'GET', '/api/projects/p1/binding/status')).body).toMatchObject({ exists: false });
+  });
+
+  it('is nothing at all for a project with no binding', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+
+    expect((await call(app, 'GET', '/api/projects/p1/binding/status')).body).toBeNull();
+  });
 });
 
 describe('binding a project to a folder', () => {
@@ -204,6 +284,57 @@ describe('binding a project to a folder', () => {
     expect(resolveProjectWorkspace(project)).toEqual({ dir: path.resolve(dir), managed: false });
   });
 
+  it('is set up in one press: cloned, then bound', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+
+    const res = await call(app, 'POST', '/api/projects/p1/clone');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ projectId: 'p1', isManaged: true });
+    expect(cloned).toHaveLength(1);
+    expect(fs.existsSync(path.join(res.body.localDir, '.git'))).toBe(true);
+  });
+
+  /** So pressing it again after a failure finishes the job rather than refusing. */
+  it('binds what is already there rather than cloning twice', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+    await call(app, 'POST', '/api/projects/p1/clone');
+
+    const again = await call(app, 'POST', '/api/projects/p1/clone');
+
+    expect(again.status).toBe(200);
+    expect(cloned).toHaveLength(1);
+  });
+
+  /** Alpha did not put it there, so it does not touch it. */
+  it('leaves a folder it did not create alone', async () => {
+    const { app, svc } = await startApi();
+    await withProject(svc);
+    const { clonePathFor } = await import('../services/workspaceService.js');
+    const target = clonePathFor('acme/checkout').dir;
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'notes.txt'), 'mine');
+
+    const res = await call(app, 'POST', '/api/projects/p1/clone');
+
+    expect(res.status).toBe(400);
+    expect(cloned).toHaveLength(0);
+    expect(fs.readFileSync(path.join(target, 'notes.txt'), 'utf8')).toBe('mine');
+  });
+
+  it('will not clone a project with no repository', async () => {
+    const { app, svc } = await startApi();
+    const { runWithWorkspace } = await import('../services/workspaceContext.js');
+    runWithWorkspace('ws-default', () => svc.createProject({ id: 'p2', name: 'Local', key: 'LOC', resources: [] }));
+
+    const res = await call(app, 'POST', '/api/projects/p2/clone');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/no GitHub repository/);
+  });
+
   it('is not a client’s to make', async () => {
     role = 'client';
     const { app, svc } = await startApi();
@@ -211,6 +342,14 @@ describe('binding a project to a folder', () => {
     const dir = aCheckout('checkout', 'https://github.com/acme/checkout.git');
 
     expect((await call(app, 'PUT', '/api/projects/p1/binding', { localDir: dir })).status).toBe(403);
+  });
+
+  it('is not a client’s to clone either', async () => {
+    role = 'client';
+    const { app, svc } = await startApi();
+    await withProject(svc);
+
+    expect((await call(app, 'POST', '/api/projects/p1/clone')).status).toBe(403);
   });
 
   it('cannot be made for a project this workspace does not have', async () => {

@@ -1779,7 +1779,9 @@ export class SQLiteService {
 
     const complete: Issue = {
       ...issue,
-      id: issue.id || `issue-${Date.now()}`,
+      // Random as well as timed: two cards made in the same millisecond -- a
+      // sync pass, a test -- had the same id, and the second insert failed.
+      id: issue.id || `issue-${Date.now()}-${randomUUID().slice(0, 8)}`,
       identifier: issue.identifier || this.nextIssueIdentifier(projectId),
       title: issue.title || 'Untitled Issue',
       description: issue.description ?? '',

@@ -14,7 +14,14 @@ import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
 import { BuildStepError } from '../store/buildSteps.js';
 import { agentValidationError } from './agentValidation.js';
 import { checkWorkspace } from './workspaceValidation.js';
-import { BindingError, bindProject, projectBinding, unbindProject } from '../services/projectBindings.js';
+import {
+  BindingError,
+  bindProject,
+  boundCheckoutStatus,
+  cloneAndBindProject,
+  projectBinding,
+  unbindProject
+} from '../services/projectBindings.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
 import {
   AGENT_FILE_MAX_BYTES,
@@ -243,6 +250,40 @@ dataRouter.put('/projects/:id/binding', desktopOnly, route(async (req: Request, 
     if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
     throw err;
   }
+}));
+
+/**
+ * Clone the project's repository here and bind it, in one press.
+ *
+ * Idempotent: a checkout already at the managed path is bound rather than
+ * refused, so pressing it again after a failed clone finishes the job.
+ */
+dataRouter.post('/projects/:id/clone', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  try {
+    res.json(await cloneAndBindProject(project));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    // A clone can fail for a dozen reasons on the far side -- no access, no
+    // network, a repository that has moved -- and git says which.
+    return res.status(502).json({ error: String((err as Error)?.message ?? err) });
+  }
+}));
+
+/**
+ * What state this machine's checkout is in.
+ *
+ * Read from git each time rather than remembered: the developer works in this
+ * folder outside Alpha all day, and a remembered branch is a wrong one.
+ */
+dataRouter.get('/projects/:id/binding/status', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  res.json(await boundCheckoutStatus(req.params.id));
 }));
 
 dataRouter.delete('/projects/:id/binding', desktopOnly, route(async (req: Request, res: Response) => {
