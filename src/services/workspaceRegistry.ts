@@ -279,6 +279,10 @@ class WorkspaceRegistry {
     return this.directory().listSquadProjectAssignments(workspaceId, projectId);
   }
 
+  ensureDefaultWorkspace(): Promise<void> {
+    return this.directory().ensureDefaultWorkspace();
+  }
+
   // ── Checks, from the context loaded for this request ─────────────────────
 
   can(role: WorkspaceRole, capability: WorkspaceCapability): boolean {

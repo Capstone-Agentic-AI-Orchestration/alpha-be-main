@@ -45,7 +45,7 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
    * Every first-time caller is enrolled here, and the board's rows point at
    * it. Once per process, not once per request.
    */
-  private ensureDefaultWorkspace(): Promise<void> {
+  ensureDefaultWorkspace(): Promise<void> {
     this.seeded ??= this.sql
       .query(
         `insert into workspaces (id, name, slug, status, join_code, created_by)

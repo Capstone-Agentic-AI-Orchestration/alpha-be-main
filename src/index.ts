@@ -6,9 +6,8 @@ import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { verifyDatabase } from './store/database.js';
-import { agentStore } from './store/stores.js';
 import { dataRouter } from './controllers/dataController.js';
-import { workspaceRouter } from './controllers/workspaceController.js';
+import { seedDefaultWorkspace, workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
 import { sessionContext } from './controllers/sessionContext.js';
 import { runRouter } from './controllers/runController.js';
@@ -383,17 +382,8 @@ function onListening(): void {
   if (IS_CLOUD) {
     logInfo('Cloud mode: runner, runtime discovery and local scaffolding are disabled.');
 
-    /**
-     * The default workspace's roster, which nothing else creates.
-     *
-     * A workspace made through the API is seeded as it is created, but the
-     * default one is seeded by the directory as a bare row -- so without this
-     * the shared workspace everyone lands in has no agents at all. Idempotent
-     * on the template key, so running it on every boot adds nothing twice.
-     */
-    agentStore()
-      .ensureOfficial(DEFAULT_WORKSPACE_ID)
-      .catch(err => logError('Could not seed the default workspace roster:', err));
+    // The default workspace's row, roster and core squad; see seedDefaultWorkspace.
+    seedDefaultWorkspace().catch(err => logError('Could not seed the default workspace:', err));
     return;
   }
 

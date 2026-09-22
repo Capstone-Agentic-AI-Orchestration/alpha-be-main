@@ -362,3 +362,48 @@ describe('the cloud roster routes', () => {
     expect(await workspaceRegistry.canAccessProjectAgent(asOwner, project.id, 'squad-1', 'agent-private')).toBe(true);
   });
 });
+
+/**
+ * What a fresh deploy does before anyone signs in.
+ *
+ * The first version of this seeded the roster at boot straight into a
+ * database with no default workspace row yet -- that row was made by the first
+ * sign-in -- so every agent failed its foreign key, the error went to a log,
+ * and the shared workspace went live with no agents. The earlier test missed
+ * it by making a request first, which created the row. This one starts from
+ * nothing, as a real boot does.
+ */
+describe('the cloud boot', () => {
+  it('seeds the default workspace, its roster and its core squad into an empty database', async () => {
+    await startCloudApi();
+    const { seedDefaultWorkspace } = await import('./workspaceController.js');
+
+    await seedDefaultWorkspace();
+
+    const count = async (table: string) =>
+      Number((await db.query<{ n: number }>(`select count(*)::int as n from ${table}`)).rows[0].n);
+    expect(await count('workspaces')).toBe(1);
+    expect(await count('agents')).toBeGreaterThan(0);
+    expect(await count('squads')).toBe(1);
+  });
+
+  it('adds nothing on a second boot', async () => {
+    await startCloudApi();
+    const { seedDefaultWorkspace } = await import('./workspaceController.js');
+
+    await seedDefaultWorkspace();
+    const agents = (await db.query('select id from agents')).rows.length;
+    await seedDefaultWorkspace();
+
+    expect((await db.query('select id from agents')).rows).toHaveLength(agents);
+    expect((await db.query('select id from squads')).rows).toHaveLength(1);
+  });
+
+  /** Why the order matters, stated as the failure it prevents. */
+  it('cannot seed agents before the workspace row exists', async () => {
+    await startCloudApi();
+    const { agentStore } = await import('../store/stores.js');
+
+    await expect(agentStore().ensureOfficial('ws-default')).rejects.toThrow();
+  });
+});
