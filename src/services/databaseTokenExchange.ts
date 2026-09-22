@@ -28,12 +28,18 @@ export type ExchangeResult =
   | { ok: true; token: string; expiresAt: string; login: string; role: AlphaRole }
   | { ok: false; status: 401 | 403 | 502 | 503; error: string };
 
-/** The part of `workspaceRegistry.resolve` this needs, injected for testing. */
+/**
+ * The part of `workspaceRegistry.resolve` this needs, injected for testing.
+ * Awaited, because in the cloud it reads Postgres.
+ */
 export type ResolveWorkspace = (
   login: string,
   requestedWorkspaceId: string | undefined,
   role: AlphaRole
-) => { userId: string; workspaceId: string; role: AlphaRole } | null;
+) =>
+  | { userId: string; workspaceId: string; role: AlphaRole }
+  | null
+  | Promise<{ userId: string; workspaceId: string; role: AlphaRole } | null>;
 
 /**
  * How long a verified identity is reused.
@@ -120,7 +126,7 @@ export async function exchangeGitHubToken(
     identities.set(key, identity);
   }
 
-  const context = resolveWorkspace(identity.login, requestedWorkspaceId, identity.role);
+  const context = await resolveWorkspace(identity.login, requestedWorkspaceId, identity.role);
   if (!context) {
     return { ok: false, status: 403, error: 'You do not have access to the requested workspace.' };
   }

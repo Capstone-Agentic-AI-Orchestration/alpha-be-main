@@ -198,7 +198,7 @@ read your teams; `gh auth refresh -s read:org` adds it if missing.
 | `ALPHA_SESSION_SECRET` | Process exits at boot with an explanation |
 | `SUPABASE_JWT_SECRET` on Render | Browser and desktop token requests answer 503 |
 | `DATABASE_URL` or `DATABASE_CA_CERT` on Render | Process exits at boot with where to find the value; Render keeps the previous deploy serving |
-| Migration `0007` not applied | Process exits at boot: "reachable but not migrated" |
+| A migration in `supabase/migrations` not applied | Process exits at boot: "reachable but not migrated" |
 | `ALPHA_CLOUD_API` on a desktop | Cloud writes rejected by RLS; logged once every 5 minutes |
 | `GITHUB_CLIENT_ID` | Sign-in screen renders "not configured" instead of a dead button |
 | `GITHUB_CALLBACK_URL` wrong | Sign-in returns `#alpha_error=oauth_failed` |

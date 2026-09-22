@@ -38,7 +38,7 @@ function scopedSquadRun(req: Request, res: Response, runId: string) {
     res.status(404).json({ error: 'Squad run not found' });
     return null;
   }
-  if (!workspaceRegistry.squadAssignedToProject(req.workspace!.workspaceId, squadRun.squadId, squadRun.projectId)) {
+  if (!workspaceRegistry.squadAssignedToProject(req.workspace!, squadRun.squadId, squadRun.projectId)) {
     res.status(404).json({ error: 'Squad run not found' });
     return null;
   }
@@ -333,7 +333,7 @@ runRouter.get('/squad-runs', (req: Request, res: Response) => {
     .scope('squad_runs', sqliteService.getSquadRuns(), req.workspace!.workspaceId)
     .filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId))
     .filter(run => workspaceRegistry.canAccessSquad(req.workspace!, run.squadId))
-    .filter(run => workspaceRegistry.squadAssignedToProject(req.workspace!.workspaceId, run.squadId, run.projectId));
+    .filter(run => workspaceRegistry.squadAssignedToProject(req.workspace!, run.squadId, run.projectId));
   res.json(runs);
 });
 
@@ -354,11 +354,7 @@ runRouter.post('/squads/:id/run', async (req: Request, res: Response) => {
     const issue = sqliteService.getIssues().find(item => item.id === issueId);
     if (!issue) return res.status(404).json({ error: 'Issue not found' });
     if (!requireProjectWorkspace(req, res, issue.projectId)) return;
-    if (!workspaceRegistry.squadAssignedToProject(
-      req.workspace!.workspaceId,
-      req.params.id,
-      issue.projectId
-    )) {
+    if (!workspaceRegistry.squadAssignedToProject(req.workspace!, req.params.id, issue.projectId)) {
       return res.status(409).json({ error: 'Assign this squad to the project before starting a squad run.' });
     }
 

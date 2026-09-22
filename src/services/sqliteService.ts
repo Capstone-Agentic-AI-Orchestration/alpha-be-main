@@ -801,15 +801,28 @@ export class SQLiteService {
       VALUES (@id, @name, @slug, @organization, @createdAt, @updatedAt)
     `).run({ ...workspace, organization: workspace.organization ?? null });
 
-    // New workspaces start with the same official role catalogue and a reusable
-    // squad scaffold as the default. Projects and issues stay intentionally
-    // empty because those are the owner's work, not product seed data.
-    runWithWorkspace(workspace.id, () => {
-      this.ensureOfficialAgents(workspace.id);
+    this.seedWorkspace(workspace.id, workspace.name);
+    return workspace;
+  }
+
+  /**
+   * Give a workspace the agents and squad it starts life with.
+   *
+   * Separate from `createWorkspace` because the workspace row itself is no
+   * longer written here: membership decides who may open one, so the row is
+   * the directory's (Postgres in the cloud, SQLite on a desktop) while the
+   * agents and squads it seeds are still this store's.
+   *
+   * Projects and issues stay intentionally empty: those are the owner's work,
+   * not product seed data.
+   */
+  seedWorkspace(workspaceId: string, name: string): void {
+    runWithWorkspace(workspaceId, () => {
+      this.ensureOfficialAgents(workspaceId);
       const agents = this.getAgents();
       this.createSquad({
-        id: `squad-${workspace.id}`,
-        name: `${workspace.name} Core Squad`,
+        id: `squad-${workspaceId}`,
+        name: `${name} Core Squad`,
         description: 'Official Alpha roles working in sequence.',
         avatar: '◈',
         color: '#6366f1',
@@ -821,7 +834,6 @@ export class SQLiteService {
         completedRunsCount: 0
       });
     });
-    return workspace;
   }
 
   updateWorkspace(id: string, updates: Partial<Workspace>): Workspace | null {
