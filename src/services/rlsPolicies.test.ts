@@ -303,6 +303,75 @@ describe('only tokens Alpha issued are trusted', () => {
   });
 });
 
+describe('the board announces itself to its own workspace', () => {
+  /** As Realtime does: the channel's name is in `realtime.topic()`. */
+  async function onChannel<T>(topic: string, fn: () => Promise<T>): Promise<T> {
+    await db.exec(`select set_config('realtime.topic', '${topic}', false)`);
+    try {
+      return await fn();
+    } finally {
+      await db.exec(`select set_config('realtime.topic', '', false)`);
+    }
+  }
+
+  const heard = () => rows(`select * from realtime.messages where topic like 'workspace:%:board'`);
+
+  beforeAll(async () => {
+    await db.exec(`insert into workspaces (id,name,slug) values ('ws-elsewhere','Elsewhere','elsewhere')`);
+    // A write of each kind, from the owner, which is how the cloud writes.
+    await db.exec(`
+      insert into projects (id,workspace_id,name,key) values ('p-live','ws1','Live','LIVE');
+      insert into issues (id,workspace_id,identifier,title,status,priority,project_id)
+        values ('i-live','ws1','LIVE-1','Watch me','todo','high','p-live');
+      update issues set status = 'in_progress' where id = 'i-live';
+    `);
+  });
+
+  it('puts a message on the workspace channel for every write', async () => {
+    const messages = await db.query<{ topic: string; event: string }>(
+      `select topic, event from realtime.messages where topic = 'workspace:ws1:board' order by event`
+    );
+    // The project, the issue, and the issue's status change.
+    expect(messages.rows.length).toBeGreaterThanOrEqual(3);
+    expect(messages.rows.every(row => row.topic === 'workspace:ws1:board')).toBe(true);
+    expect(messages.rows.map(row => row.event)).toContain('UPDATE');
+  });
+
+  it('lets the workspace’s own people listen', async () => {
+    expect(await onChannel('workspace:ws1:board', () => as('Lloyd1020', 'dev', heard))).toBeGreaterThan(0);
+    expect(await onChannel('workspace:ws1:board', () => as('LloydLim1', 'pm', heard))).toBeGreaterThan(0);
+  });
+
+  /** A token minted for one workspace must not hear another's board. */
+  it('keeps another workspace’s members out', async () => {
+    expect(
+      await onChannel('workspace:ws1:board', () =>
+        as('Lloyd1020', 'dev', heard, 'ws-elsewhere')
+      )
+    ).toBe(0);
+  });
+
+  it('keeps everyone off a channel that is not theirs', async () => {
+    expect(await onChannel('workspace:ws-elsewhere:board', () => as('Lloyd1020', 'dev', heard))).toBe(0);
+  });
+
+  /**
+   * The announcement is made by the trigger, as its definer. A developer
+   * publishing on the board channel themselves is not part of the design --
+   * they write to the table and the table says so.
+   */
+  it('is not something a person may publish on', async () => {
+    const send = () =>
+      db.query(
+        `insert into realtime.messages (topic, extension, event, payload)
+         values (realtime.topic(), 'broadcast', 'forged', '{}'::jsonb)`
+      );
+    await expect(onChannel('workspace:ws1:board', () => as('Lloyd1020', 'dev', send))).rejects.toThrow(
+      /row-level security/
+    );
+  });
+});
+
 describe('a run channel is exactly as private as the run', () => {
   /**
    * Realtime evaluates a private channel by querying realtime.messages with
