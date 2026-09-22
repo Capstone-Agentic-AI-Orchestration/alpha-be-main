@@ -1,7 +1,5 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 import { issueStore, projectStore } from '../store/stores.js';
+import { githubApi } from './githubApi.js';
 import { logInfo, logError } from './../utils/logger.js';
 import { Issue, IssueComment, Project } from '../models/index.js';
 import {
@@ -11,8 +9,6 @@ import {
   parseRepoRef,
   MappedIssue
 } from './githubIssueMapping.js';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Pull the shared board down from GitHub.
@@ -66,22 +62,12 @@ export function repoForProject(project: Project): string | null {
 /**
  * Every issue in a repository, pull requests excluded.
  *
- * `--paginate` because a real board outgrows one page, and a board that
- * silently stopped at thirty cards would look like issues had been deleted.
+ * Every page, because a real board outgrows one, and a board that silently
+ * stopped at a hundred cards would look like issues had been deleted.
  */
 async function fetchIssues(ownerRepo: string): Promise<GitHubIssue[]> {
-  const { stdout } = await execFileAsync(
-    'gh',
-    ['api', `repos/${ownerRepo}/issues?state=all&per_page=100`, '--paginate'],
-    { timeout: 60_000, maxBuffer: 32 * 1024 * 1024 }
-  );
-
-  // --paginate concatenates JSON arrays; parse each and flatten.
-  const parsed: GitHubIssue[] = [];
-  for (const chunk of stdout.replace(/\]\s*\[/g, '],[').split(/(?<=\]),(?=\[)/)) {
-    if (chunk.trim()) parsed.push(...(JSON.parse(chunk) as GitHubIssue[]));
-  }
-  return parsed.filter(i => !isPullRequest(i));
+  const issues = await githubApi().getAll<GitHubIssue>(`/repos/${ownerRepo}/issues?state=all&per_page=100`);
+  return issues.filter(i => !isPullRequest(i));
 }
 
 /** An identifier for a card that came from GitHub, in the project's own scheme. */
@@ -125,8 +111,8 @@ function differs(existing: Issue, mapped: MappedIssue): boolean {
  *
  * ## Attribution
  *
- * `gh` posts as the token owner, so a comment from the Architect would appear
- * on GitHub as written by whoever is signed in. The real author is prefixed
+ * GitHub records the token's owner as the author, so a comment from the
+ * Architect would appear as written by whoever is signed in. The real author is prefixed
  * into the body rather than lost — a teammate reading the issue needs to know a
  * machine said it, not a person.
  */
@@ -162,15 +148,9 @@ async function syncCommentsFor(issue: Issue, report: SyncReport, workspaceId: st
 
   let remote: GitHubComment[];
   try {
-    const { stdout } = await execFileAsync(
-      'gh',
-      ['api', `repos/${issue.githubRepo}/issues/${issue.githubNumber}/comments?per_page=100`, '--paginate'],
-      { timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }
+    remote = await githubApi().getAll<GitHubComment>(
+      `/repos/${issue.githubRepo}/issues/${issue.githubNumber}/comments?per_page=100`
     );
-    remote = [];
-    for (const chunk of stdout.replace(/\]\s*\[/g, '],[').split(/(?<=\]),(?=\[)/)) {
-      if (chunk.trim()) remote.push(...(JSON.parse(chunk) as GitHubComment[]));
-    }
   } catch {
     // A comment fetch failing must not fail the issue's own sync.
     return;
@@ -207,13 +187,10 @@ async function pushCommentsFor(issue: Issue, report: SyncReport, workspaceId: st
     if (comment.isThinking) continue;
 
     try {
-      const { stdout } = await execFileAsync(
-        'gh',
-        ['api', `repos/${issue.githubRepo}/issues/${issue.githubNumber}/comments`,
-         '-f', `body=${bodyForGitHub(comment)}`],
-        { timeout: 30_000 }
+      const created = await githubApi().post<{ id: number }>(
+        `/repos/${issue.githubRepo}/issues/${issue.githubNumber}/comments`,
+        { body: bodyForGitHub(comment) }
       );
-      const created = JSON.parse(stdout) as { id: number };
       await issueStore().addComment(workspaceId, { ...comment, githubId: created.id });
       report.commentsPushed += 1;
     } catch (err: any) {
@@ -301,9 +278,9 @@ async function syncProject(project: Project, report: SyncReport, workspaceId: st
 /**
  * Read every project's repository onto the board.
  *
- * Sequential rather than parallel: `gh` spawns a process per call and a
- * workspace with a dozen repositories would otherwise open a dozen at once for
- * a job nobody is waiting on.
+ * Sequential rather than parallel: GitHub rate-limits per person, and a
+ * workspace with a dozen repositories would otherwise spend a dozen requests
+ * at once of the budget the person's own browsing also draws on.
  */
 export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncReport> {
   const report: SyncReport = {

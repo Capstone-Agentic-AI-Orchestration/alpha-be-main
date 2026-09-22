@@ -1,0 +1,151 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+import { IS_CLOUD } from '../config/env.js';
+import { currentGitHubIdentity } from './githubRequestContext.js';
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * GitHub's REST API, as the person making the request.
+ *
+ * The board sync and the issue push used to shell out to `gh api`. That works
+ * on a developer's machine and not at all on Render, where there is no `gh`:
+ * every "Sync board" a project manager pressed on the web failed for every
+ * project, and every card they moved stayed off GitHub. This is one path for
+ * both halves.
+ *
+ * ## Whose token
+ *
+ * In the cloud, the signed-in person's own OAuth token, which `sessionContext`
+ * puts on the request. Never a shared server credential: GitHub's permissions
+ * are per person, and a sync that ran as the App would show a project manager
+ * repositories they cannot open, and write to GitHub under nobody's name.
+ *
+ * On a desktop, the machine's `gh` login -- the same credential it already
+ * uses for everything else, read fresh so a `gh auth login` as someone else
+ * takes effect.
+ */
+export interface GitHubApi {
+  get<T>(path: string): Promise<T>;
+  /** Every page of a list, following GitHub's `Link: rel="next"`. */
+  getAll<T>(path: string): Promise<T[]>;
+  post<T>(path: string, body: unknown): Promise<T>;
+  patch<T>(path: string, body: unknown): Promise<T>;
+}
+
+/** A GitHub answer that was not a success, with its status for callers that branch on it. */
+export class GitHubApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'GitHubApiError';
+  }
+}
+
+const API = 'https://api.github.com';
+
+/**
+ * A bounded walk, not an unbounded one. Five thousand issues is past any board
+ * this product is for; a repository beyond it is better served by an error in
+ * the log than by a sync that never returns.
+ */
+const MAX_PAGES = 50;
+
+/** The token this request acts with. */
+export async function tokenForThisRequest(): Promise<string> {
+  const fromRequest = currentGitHubIdentity()?.token;
+  if (fromRequest) return fromRequest;
+
+  if (IS_CLOUD) {
+    // No person, no GitHub call: acting as the server instead would be acting
+    // with permissions nobody was granted.
+    throw new GitHubApiError('Sign in with GitHub to reach GitHub from here.', 401);
+  }
+
+  try {
+    const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
+    const token = stdout.trim();
+    if (token) return token;
+  } catch {
+    // Falls through to the message below, which says what to do about it.
+  }
+  throw new GitHubApiError('GitHub is not signed in on this machine. Run `gh auth login`.', 401);
+}
+
+/** The `rel="next"` target of a `Link` header, if there is one. */
+export function nextPage(link: string | null): string | null {
+  if (!link) return null;
+  for (const part of link.split(',')) {
+    const match = /<([^>]+)>\s*;\s*rel="next"/.exec(part);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+async function call(method: string, url: string, body?: unknown): Promise<Response> {
+  const token = await tokenForThisRequest();
+  const res = await fetch(url.startsWith('http') ? url : `${API}${url}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'Alpha',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    // GitHub's own message ("Not Found", "Resource not accessible by
+    // integration") is the useful part; the rest is the path it refers to.
+    let message = detail;
+    try {
+      message = (JSON.parse(detail) as { message?: string }).message ?? detail;
+    } catch {
+      /* not JSON */
+    }
+    throw new GitHubApiError(`GitHub ${res.status} on ${method} ${url}: ${message}`, res.status);
+  }
+  return res;
+}
+
+const restApi: GitHubApi = {
+  async get<T>(path: string): Promise<T> {
+    return (await call('GET', path)).json() as Promise<T>;
+  },
+
+  async getAll<T>(path: string): Promise<T[]> {
+    const items: T[] = [];
+    let url: string | null = path;
+    for (let page = 0; url && page < MAX_PAGES; page++) {
+      const res = await call('GET', url);
+      items.push(...((await res.json()) as T[]));
+      url = nextPage(res.headers.get('link'));
+    }
+    return items;
+  },
+
+  async post<T>(path: string, body: unknown): Promise<T> {
+    return (await call('POST', path, body)).json() as Promise<T>;
+  },
+
+  async patch<T>(path: string, body: unknown): Promise<T> {
+    return (await call('PATCH', path, body)).json() as Promise<T>;
+  }
+};
+
+let override: GitHubApi | null = null;
+
+export function githubApi(): GitHubApi {
+  return override ?? restApi;
+}
+
+/** For tests, which answer for GitHub rather than calling it. */
+export function useGitHubApi(api: GitHubApi | null): void {
+  override = api;
+}
