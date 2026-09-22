@@ -7,6 +7,8 @@ import { logInfo, logError } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
+import { ghEnvironment } from './alphaGitHubToken.js';
+
 /**
  * Who is using this copy of Alpha.
  *
@@ -143,7 +145,7 @@ async function fetchTeams(): Promise<TeamMembership[]> {
     const { stdout } = await execFileAsync(
       'gh',
       ['api', 'user/teams', '--paginate', '--jq', '.[] | .organization.login + "/" + .slug'],
-      { timeout: 15_000 }
+      { timeout: 15_000, env: ghEnvironment() }
     );
     return stdout
       .trim()
@@ -322,7 +324,9 @@ async function resolve(): Promise<Identity> {
   try {
     const { stdout } = await execFileAsync('gh', ['api', 'user', '--jq', '.login + "\\t" + (.name // "")'], {
       // A hung `gh` must not hold up the first issue anyone creates.
-      timeout: 10_000
+      timeout: 10_000,
+      // As Alpha's own account, not whichever one the terminal is signed into.
+      env: ghEnvironment()
     });
     const [login, name] = stdout.trim().split('\t');
     if (login) {

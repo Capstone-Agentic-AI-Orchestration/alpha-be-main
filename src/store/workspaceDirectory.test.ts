@@ -154,56 +154,10 @@ describe.each(backends)('the workspace directory ($name)', backend => {
     expect((await directory.listMembers(first.id))[0]).toMatchObject({ userId: 'Admin1', role: 'admin' });
   });
 
-  /** The code is the only thing standing between an account and a workspace. */
-  it('joins by invite code, and by nothing else', async () => {
-    const directory = await backend.open();
-    const workspace = await directory.createWorkspace('Admin1', { name: 'Team Alpha' });
-
-    await expect(directory.joinWorkspace('Dev1', workspace.slug, 'dev')).rejects.toThrow(/invite code/);
-    await expect(directory.joinWorkspace('Dev1', workspace.id, 'dev')).rejects.toThrow(/invite code/);
-    await expect(directory.joinWorkspace('Dev1', 'not-a-code', 'dev')).rejects.toThrow(/invite code/);
-
-    const joined = await directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev');
-    expect(joined).toMatchObject({ id: workspace.id, role: 'dev' });
-  });
-
-  it('will not let an old invite code undo a removal', async () => {
-    const directory = await backend.open();
-    const workspace = await directory.createWorkspace('Admin1', { name: 'Team Alpha' });
-    await directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev');
-
-    const member = (await directory.listMembers(workspace.id)).find(m => m.userId === 'Dev1')!;
-    await directory.updateMember(workspace.id, member.id, { status: 'removed' });
-
-    await expect(directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev')).rejects.toThrow(/removed/);
-  });
-
-  it('keeps the role an admin set when someone re-joins', async () => {
-    const directory = await backend.open();
-    const workspace = await directory.createWorkspace('Admin1', { name: 'Team Alpha' });
-    await directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev');
-
-    const member = (await directory.listMembers(workspace.id)).find(m => m.userId === 'Dev1')!;
-    await directory.updateMember(workspace.id, member.id, { role: 'pm' });
-
-    expect(await directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev')).toMatchObject({ role: 'pm' });
-  });
-
-  /** An invite code is an admin's to hand out; everyone else is shown nothing. */
-  it('shows the invite code to admins only', async () => {
-    const directory = await backend.open();
-    const workspace = await directory.createWorkspace('Admin1', { name: 'Team Alpha' });
-    const joined = await directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev');
-
-    expect(workspace.joinCode).toBeTruthy();
-    expect(joined.joinCode).toBeUndefined();
-    expect((await directory.listForUser('Dev1'))[0].joinCode).toBeUndefined();
-  });
-
   it('counts only active members', async () => {
     const directory = await backend.open();
     const workspace = await directory.createWorkspace('Admin1', { name: 'Team Alpha' });
-    await directory.joinWorkspace('Dev1', workspace.joinCode!, 'dev');
+    await directory.addMember(workspace.id, 'Dev1', 'dev');
     expect((await directory.listForUser('Admin1'))[0].memberCount).toBe(2);
 
     const member = (await directory.listMembers(workspace.id)).find(m => m.userId === 'Dev1')!;

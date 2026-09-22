@@ -246,10 +246,6 @@ class WorkspaceRegistry {
     return this.directory().createWorkspace(userId, input);
   }
 
-  joinWorkspace(userId: string, code: string, role: WorkspaceRole): Promise<WorkspaceSummary> {
-    return this.directory().joinWorkspace(userId, code, role);
-  }
-
   updateWorkspace(
     workspaceId: string,
     input: { name?: string; slug?: string },

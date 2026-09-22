@@ -143,28 +143,6 @@ workspaceRouter.post(
   })
 );
 
-/**
- * Join by invite code.
- *
- * The code only: the slug and the id are visible to anyone who can see the
- * workspace at all, and accepting those would have made every workspace open
- * to every signed-in account. A membership an admin suspended or removed is
- * not revived by an old code either.
- */
-workspaceRouter.post(
-  '/workspaces/join',
-  route(async (req, res) => {
-    const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-    if (!code) {
-      res.status(400).json({ error: 'An invite code is required' });
-      return;
-    }
-
-    const { userId, teamRole, role } = req.workspace!;
-    res.json(await workspaceRegistry.joinWorkspace(userId, code, teamRole ?? role));
-  })
-);
-
 workspaceRouter.put(
   '/workspaces/:id',
   route(async (req, res) => {

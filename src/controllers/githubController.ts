@@ -5,7 +5,7 @@ import { projectStore } from '../store/stores.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
 import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
-import { CORS_ORIGIN, ALPHA_ORG } from '../config/env.js';
+import { CORS_ORIGIN, ALPHA_ORG, GITHUB_CLIENT_ID } from '../config/env.js';
 import { fetchTeamsWithToken, roleForLogin } from '../services/identityService.js';
 import { sessionService } from '../services/sessionService.js';
 import { SESSION_COOKIE, clearedSessionCookie, readCookie, sessionCookie } from './sessionContext.js';
@@ -29,6 +29,23 @@ githubRouter.post('/github/auth/login', async (req: Request, res: Response) => {
   } catch (err: any) {
     res.status(503).json({ error: err?.message ?? 'Could not start GitHub login' });
   }
+});
+
+/**
+ * Which GitHub app a desktop should sign in to.
+ *
+ * An installed desktop carries only the four public settings baked into its
+ * build, and a client id is not one of them -- so it asks the deployment it
+ * belongs to rather than shipping a copy that would go stale if the app were
+ * ever replaced. Public by construction: this id appears in every
+ * authorisation URL GitHub ever shows a browser.
+ */
+githubRouter.get('/github/app/client', (_req: Request, res: Response) => {
+  if (!GITHUB_CLIENT_ID) {
+    res.status(503).json({ error: 'This deployment has no GitHub app configured.' });
+    return;
+  }
+  res.json({ clientId: GITHUB_CLIENT_ID });
 });
 
 githubRouter.post('/github/auth/logout', async (req: Request, res: Response) => {

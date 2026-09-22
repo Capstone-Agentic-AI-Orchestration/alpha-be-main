@@ -27,6 +27,9 @@ const PUBLIC_EXACT = [
   '/github/session/logout',
   '/github/app/install-url',
   '/github/app/webhook',
+  // A desktop asks this before it can sign in, so it cannot be behind a
+  // sign-in. The answer is a client id, which is public by construction.
+  '/github/app/client',
   // The desktop has no session; this verifies the GitHub token it presents.
   '/database/token/exchange'
 ];

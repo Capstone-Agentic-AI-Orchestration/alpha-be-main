@@ -15,13 +15,22 @@ import { RunPublishGate } from './runPublishGate.js';
 
 const execFileAsync = promisify(execFile);
 
+import { storedToken } from './alphaGitHubToken.js';
+
 /**
- * The machine's GitHub token, as the identity the desktop presents.
+ * The GitHub token the desktop presents as its identity.
  *
- * Read per exchange rather than cached: `gh auth login` as someone else, or
- * `gh auth logout`, should change who the next token is for.
+ * Alpha's own sign-in, so the row this machine writes carries the account
+ * chosen in the app rather than whichever one the terminal happens to hold.
+ * Read per exchange rather than cached: signing out, or signing in as someone
+ * else, should change who the next token is for.
+ *
+ * Falls back to the CLI for a daemon run from source, which has no sign-in of
+ * its own to do.
  */
 async function githubCliToken(): Promise<string | null> {
+  const own = storedToken();
+  if (own) return own;
   try {
     const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
     return stdout.trim() || null;

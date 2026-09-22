@@ -1,0 +1,282 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { ALPHA_CLOUD_API, ALPHA_DIR, GITHUB_CLIENT_ID, GITHUB_SCOPE } from '../config/env.js';
+import { logError, logInfo } from '../utils/logger.js';
+
+/**
+ * Alpha's own GitHub credential, so the desktop stops borrowing the machine's.
+ *
+ * ## What this replaces
+ *
+ * Identity used to be whatever `gh auth login` had been run as. That made the
+ * app an observer of a setting it did not own: the person shown in Alpha was
+ * decided outside it, could change under it without warning, and signing out of
+ * Alpha ran `gh auth logout` -- logging the machine out of GitHub for every
+ * other tool that used it. A shared machine, or one developer with two
+ * accounts, had no way to say which one Alpha was.
+ *
+ * Alpha now holds a token of its own, obtained by a sign-in inside the app.
+ * `gh` is still how the work gets done -- cloning, pushing, opening pull
+ * requests -- but it is handed this token through `GH_TOKEN`, which it prefers
+ * over anything stored on the machine. So the account is Alpha's, and the
+ * machine's own `gh` login is left exactly as the developer set it.
+ *
+ * ## Why the device flow
+ *
+ * A desktop app cannot keep a client secret: whatever ships inside an installer
+ * is readable by anyone who has the installer. The device flow exists for this
+ * case -- the app shows a short code, the person authorises it in a browser
+ * where GitHub can see who they are, and the app receives a token without ever
+ * holding a secret. It also means the sign-in works on a machine where the app
+ * cannot open a loopback port or register a URL scheme.
+ *
+ * ## Where the token lives
+ *
+ * A file in `ALPHA_DIR`, written `0600` -- readable by this user and nobody
+ * else on the machine. That is weaker than the OS keyring, and deliberately so
+ * for now: the daemon is a plain Node process that also runs from source, with
+ * no Electron to reach `safeStorage` through. The threat it does close is
+ * another account on a shared machine reading the file; the one it does not is
+ * a process already running as this user, which could equally read the keyring
+ * by asking the OS nicely.
+ */
+
+/** A GitHub sign-in that could not be completed, with something to do about it. */
+export class DeviceFlowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeviceFlowError';
+  }
+}
+
+interface StoredCredential {
+  token: string;
+  login?: string;
+  obtainedAt: string;
+}
+
+const TOKEN_FILE = path.join(ALPHA_DIR, 'github-credential.json');
+
+const DEVICE_CODE_URL = 'https://github.com/login/device/code';
+const ACCESS_TOKEN_URL = 'https://github.com/login/oauth/access_token';
+
+let cached: StoredCredential | null | undefined;
+
+/** The stored credential, or null. Read once and kept, since it rarely changes. */
+export function storedCredential(): StoredCredential | null {
+  if (cached !== undefined) return cached;
+  try {
+    cached = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as StoredCredential;
+    if (!cached?.token) cached = null;
+  } catch {
+    // No file, unreadable, or not JSON. All mean "not signed in", which is a
+    // state the caller handles rather than an error worth logging every time.
+    cached = null;
+  }
+  return cached;
+}
+
+export const storedToken = (): string | null => storedCredential()?.token ?? null;
+
+/**
+ * An environment that runs `gh` as Alpha rather than as the machine.
+ *
+ * `gh` prefers `GH_TOKEN` over any credential stored on the machine, so this
+ * one variable is the whole of the decoupling -- the CLI still does the
+ * cloning, the pushing and the pull requests, it just does them as the account
+ * chosen in the app.
+ *
+ * With no stored credential the environment is passed through untouched, so a
+ * daemon run from source by a developer who already has `gh` signed in keeps
+ * working while they are setting up.
+ */
+export function ghEnvironment(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const token = storedToken();
+  const base = { ...process.env, ...extra };
+  return token ? { ...base, GH_TOKEN: token } : base;
+}
+
+export function saveCredential(credential: StoredCredential): void {
+  fs.mkdirSync(ALPHA_DIR, { recursive: true });
+  // Written 0600 at creation rather than chmod-ed after, so it is never briefly
+  // world-readable. `mode` is ignored on Windows, where the user profile
+  // directory is the protection instead.
+  fs.writeFileSync(TOKEN_FILE, JSON.stringify(credential, null, 2) + '\n', { mode: 0o600 });
+  cached = credential;
+}
+
+/**
+ * Forget Alpha's sign-in. Nothing else on the machine is touched -- in
+ * particular, the developer's own `gh` login is none of Alpha's business.
+ */
+export function clearCredential(): void {
+  try {
+    fs.rmSync(TOKEN_FILE, { force: true });
+  } catch (err) {
+    logError('Could not remove the stored GitHub credential:', err);
+  }
+  cached = null;
+}
+
+/**
+ * The client id to sign in against.
+ *
+ * Configured directly when the daemon has it, which is how the cloud and a
+ * from-source desktop run. An installed desktop has no GitHub configuration of
+ * its own -- only the four public settings baked into the build -- so it asks
+ * the deployment it belongs to. A client id is public by construction: it
+ * appears in every authorisation URL a browser ever shows.
+ */
+export async function clientId(fetchImpl: typeof fetch = fetch): Promise<string> {
+  if (GITHUB_CLIENT_ID) return GITHUB_CLIENT_ID;
+  if (!ALPHA_CLOUD_API) {
+    throw new DeviceFlowError(
+      'This build has no GitHub client id and no ALPHA_CLOUD_API to ask for one, so it cannot sign in.'
+    );
+  }
+
+  try {
+    const res = await fetchImpl(`${ALPHA_CLOUD_API}/github/app/client`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const body = (await res.json()) as { clientId?: string };
+    if (!body.clientId) throw new Error('no clientId in the response');
+    return body.clientId;
+  } catch (err) {
+    throw new DeviceFlowError(
+      `Could not ask ${ALPHA_CLOUD_API} which GitHub app to sign in to: ${(err as Error).message}`
+    );
+  }
+}
+
+export interface DeviceCode {
+  /** Shown to the person; they type it into GitHub. */
+  userCode: string;
+  verificationUrl: string;
+  /** Held by Alpha, exchanged for the token. Never shown. */
+  deviceCode: string;
+  /** Seconds GitHub asks us to wait between polls. */
+  interval: number;
+  expiresIn: number;
+}
+
+export async function requestDeviceCode(fetchImpl: typeof fetch = fetch): Promise<DeviceCode> {
+  const id = await clientId(fetchImpl);
+  const res = await fetchImpl(DEVICE_CODE_URL, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    // A GitHub App ignores `scope` -- its access comes from the permissions it
+    // was installed with -- but an OAuth app needs it, and sending it costs
+    // nothing either way.
+    body: JSON.stringify({ client_id: id, scope: GITHUB_SCOPE.split(',').map(s => s.trim()).join(' ') })
+  });
+
+  const body = (await res.json().catch(() => ({}))) as Record<string, string>;
+  if (!res.ok || !body.device_code || !body.user_code) {
+    throw new DeviceFlowError(
+      body.error_description ||
+        body.error ||
+        `GitHub refused to start a sign-in (${res.status}). Check that device flow is enabled on the app.`
+    );
+  }
+
+  return {
+    userCode: body.user_code,
+    verificationUrl: body.verification_uri || 'https://github.com/login/device',
+    deviceCode: body.device_code,
+    interval: Number(body.interval) || 5,
+    expiresIn: Number(body.expires_in) || 900
+  };
+}
+
+/** One exchange attempt: the token, or why it is not ready. */
+type PollResult =
+  | { status: 'granted'; token: string }
+  | { status: 'pending'; slowDown: boolean }
+  | { status: 'failed'; message: string };
+
+export async function pollOnce(deviceCode: string, fetchImpl: typeof fetch = fetch): Promise<PollResult> {
+  const id = await clientId(fetchImpl);
+  const res = await fetchImpl(ACCESS_TOKEN_URL, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      client_id: id,
+      device_code: deviceCode,
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+    })
+  });
+
+  const body = (await res.json().catch(() => ({}))) as Record<string, string>;
+  if (body.access_token) return { status: 'granted', token: body.access_token };
+
+  switch (body.error) {
+    // The person has not finished in the browser yet. Expected, repeatedly.
+    case 'authorization_pending':
+      return { status: 'pending', slowDown: false };
+    // GitHub says we are asking too often; back off rather than get blocked.
+    case 'slow_down':
+      return { status: 'pending', slowDown: true };
+    case 'expired_token':
+      return { status: 'failed', message: 'That code expired. Start the sign-in again.' };
+    case 'access_denied':
+      return { status: 'failed', message: 'The sign-in was declined on GitHub.' };
+    default:
+      return {
+        status: 'failed',
+        message: body.error_description || body.error || 'GitHub would not complete the sign-in.'
+      };
+  }
+}
+
+/** Who a token belongs to, asked of GitHub rather than assumed. */
+export async function loginFor(token: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+  try {
+    const res = await fetchImpl('https://api.github.com/user', {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' }
+    });
+    if (!res.ok) return undefined;
+    return ((await res.json()) as { login?: string }).login;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Wait for the person to finish in their browser, then keep the token.
+ *
+ * Resolves when the sign-in completes and rejects when it cannot -- the caller
+ * runs this in the background while the UI polls the auth status, which is what
+ * it already did when `gh` drove this.
+ */
+export async function awaitAuthorization(
+  code: DeviceCode,
+  options: { fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<StoredCredential> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+
+  let interval = code.interval;
+  const deadline = Date.now() + code.expiresIn * 1000;
+
+  while (Date.now() < deadline) {
+    await sleep(interval * 1000);
+    const result = await pollOnce(code.deviceCode, fetchImpl);
+
+    if (result.status === 'granted') {
+      const credential: StoredCredential = {
+        token: result.token,
+        login: await loginFor(result.token, fetchImpl),
+        obtainedAt: new Date().toISOString()
+      };
+      saveCredential(credential);
+      logInfo(`Signed in to GitHub as ${credential.login ?? 'an account'} (Alpha's own credential)`);
+      return credential;
+    }
+
+    if (result.status === 'failed') throw new DeviceFlowError(result.message);
+    if (result.slowDown) interval += 5;
+  }
+
+  throw new DeviceFlowError('That code expired before it was authorised. Start the sign-in again.');
+}

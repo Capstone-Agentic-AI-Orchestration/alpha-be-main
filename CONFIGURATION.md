@@ -45,6 +45,7 @@ One App. The first three rows are the login half; the rest is the server half.
 | :--- | :--- |
 | Callback URL | `https://<render>.onrender.com/api/github/oauth/callback` |
 | Request user authorization (OAuth) during installation | **checked** |
+| Enable Device Flow | **checked** — the desktop app signs in with it |
 | Expire user authorization tokens | **unchecked** |
 | Homepage URL | `https://<vercel>.vercel.app` |
 | Webhook URL | `https://<render>.onrender.com/api/github/app/webhook` |
@@ -198,9 +199,21 @@ presents its `gh` login to `ALPHA_CLOUD_API` at `/database/token/exchange`, and
 the cloud decides the login and role from GitHub. Minting refuses to run outside
 cloud mode, so a secret left in an old `.env` does nothing.
 
-Identity on the desktop comes from `gh auth login` — no OAuth, no cookie, no
-sign-in screen. The `gh` token needs `read:org` (the default) for the cloud to
-read your teams; `gh auth refresh -s read:org` adds it if missing.
+Identity on the desktop is **Alpha’s own**, not the machine’s. Signing in from
+Connected Accounts runs GitHub’s device flow: the app shows a short code, you
+authorise it in a browser as whichever account you choose, and Alpha keeps the
+token it is given in `~/.alpha/github-credential.json` (written `0600`).
+
+`gh` still does the work — cloning, pushing, pull requests — but it is handed
+that token through `GH_TOKEN`, which it prefers over anything stored on the
+machine. So your own `gh auth login` is left exactly as you set it, and signing
+out of Alpha no longer runs `gh auth logout` and take your terminal with it.
+
+An installed desktop carries no GitHub configuration of its own, so it asks
+`ALPHA_CLOUD_API` for the client id to sign in against. A daemon run from
+source uses `GITHUB_CLIENT_ID` when set, and falls back to the machine’s `gh`
+when Alpha has no sign-in of its own — so working on Alpha does not require
+signing in to it.
 
 ---
 

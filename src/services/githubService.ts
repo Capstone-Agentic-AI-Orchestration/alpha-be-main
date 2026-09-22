@@ -1,5 +1,4 @@
 import { exec, execFile } from 'node:child_process';
-import crossSpawn from 'cross-spawn';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,6 +15,43 @@ import {
   GITHUB_APP_SLUG
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
+import {
+  DeviceFlowError,
+  awaitAuthorization,
+  clearCredential,
+  loginFor,
+  requestDeviceCode,
+  ghEnvironment,
+  storedCredential
+} from './alphaGitHubToken.js';
+
+type ExecOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeout?: number;
+  windowsHide?: boolean;
+  maxBuffer?: number;
+};
+
+const execGh = (args: string[], options: ExecOptions = {}) =>
+  execFileAsync('gh', args, { ...options, env: ghEnvironment(options.env) });
+
+/**
+ * Whether the CLI is here at all, asked once.
+ *
+ * The auth status is polled every couple of seconds while someone is signing
+ * in, and spawning a process each time to learn something that cannot change
+ * within a session is waste. A CLI installed while Alpha is running is picked
+ * up on the next start, which is soon enough.
+ */
+let ghInstalledAnswer: Promise<boolean> | null = null;
+
+function ghInstalled(): Promise<boolean> {
+  ghInstalledAnswer ??= execGh(['--version'], { timeout: 10_000, windowsHide: true })
+    .then(() => true)
+    .catch(() => false);
+  return ghInstalledAnswer;
+}
 
 /** How long an issued OAuth state stays valid. Long enough to sign in, short
  *  enough that a leaked URL is not reusable later. */
@@ -266,123 +302,68 @@ export interface IGitHubService {
 // 1. GhCliGitHubService: Local Desktop CLI Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 export class GhCliGitHubService implements IGitHubService {
-  private pendingLogin: ReturnType<typeof crossSpawn> | null = null;
-
+  /**
+   * Who Alpha is signed in as.
+   *
+   * Asked of the credential Alpha holds and of GitHub itself, not of `gh auth
+   * status`. Reading the CLI's status meant reporting the machine's account --
+   * the coupling this replaced -- and it kept reporting it even once Alpha was
+   * acting as somebody else.
+   *
+   * The name is fetched rather than taken from what was stored at sign-in: a
+   * token can be revoked on github.com, and an app that goes on claiming a name
+   * it no longer holds is worse than one that asks you to sign in again.
+   */
   async checkAuth(): Promise<GitHubAuthInfo> {
-    let raw: string;
-    try {
-      raw = (await execAsync('gh auth status')).stdout;
-    } catch (err: any) {
-      raw = `${err?.stdout ?? ''}\n${err?.stderr ?? ''}`.trim();
-      const notFound =
-        err?.code === 'ENOENT' ||
-        /not recognized as an internal|command not found|No such file or directory/i.test(
-          `${raw} ${err?.message ?? ''}`
-        );
-      if (notFound) return { authenticated: false, cliMissing: true, mode: 'cli' };
+    const credential = storedCredential();
+    // `gh` is still what does the work, so a missing CLI is worth reporting
+    // even when the sign-in itself is perfectly good.
+    const cliMissing = !(await ghInstalled());
 
-      if (!raw) {
-        logError('GitHub auth check failed:', err?.message || err);
-        return { authenticated: false, mode: 'cli' };
-      }
-    }
+    if (!credential) return { authenticated: false, mode: 'cli', cliMissing };
 
-    const envVarName = /\b(GH_TOKEN|GITHUB_TOKEN)\b/.exec(raw)?.[1];
-    const chunks = raw
-      .split('\n')
-      .reduce<string[][]>((acc, line) => {
-        if (line.includes('Logged in to') || line.includes('Failed to log in')) acc.push([]);
-        if (acc.length) acc[acc.length - 1].push(line);
-        return acc;
-      }, [])
-      .map(lines => lines.join('\n'));
-
-    const active = chunks.find(c => c.includes('Active account: true')) ?? chunks[0];
-
-    if (!active || active.includes('Failed to log in')) {
-      return { authenticated: false, envVarName, tokenSource: envVarName ? 'env' : undefined, mode: 'cli' };
-    }
-
-    const field = (label: string) =>
-      active.split('\n').find(l => l.includes(label))?.split(label)[1]?.trim();
-
-    const scopes = (field('Token scopes:') ?? '')
-      .split(',')
-      .map(s => s.trim().replace(/'/g, ''))
-      .filter(Boolean);
-
-    const usingEnv = /Logged in to github\.com account \S+ \((GH_TOKEN|GITHUB_TOKEN)\)/.test(active);
+    const login = await loginFor(credential.token);
+    if (!login) return { authenticated: false, mode: 'cli', tokenSource: 'oauth', cliMissing };
 
     return {
       authenticated: true,
-      username: /Logged in to github\.com account ([a-zA-Z0-9_-]+)/.exec(active)?.[1],
-      protocol: field('Git operations protocol:'),
-      scopes,
-      tokenSource: usingEnv ? 'env' : 'keyring',
-      envVarName: usingEnv ? envVarName : undefined,
-      mode: 'cli'
+      username: login,
+      protocol: 'https',
+      scopes: GITHUB_SCOPE.split(',').map(scope => scope.trim()).filter(Boolean),
+      tokenSource: 'oauth',
+      mode: 'cli',
+      cliMissing
     };
   }
 
+  /**
+   * Begin a sign-in, as Alpha rather than as the machine.
+   *
+   * This used to drive `gh auth login --web` and scrape the code out of its
+   * output, which signed *the machine* in -- changing an account the developer
+   * owns, for every other tool that uses the CLI. Alpha now runs the device
+   * flow itself and keeps the token it is given.
+   *
+   * Returns as soon as there is a code to show. The authorisation happens in a
+   * browser, on the person's own time, so waiting for it runs in the background
+   * while the UI polls `checkAuth` -- exactly as it did when `gh` drove this.
+   */
   async startDeviceLogin(): Promise<{ code: string; verificationUrl: string }> {
-    if (this.pendingLogin) {
-      this.pendingLogin.kill();
-      this.pendingLogin = null;
-    }
+    const code = await requestDeviceCode();
 
-    return new Promise((resolve, reject) => {
-      const child = crossSpawn(
-        'gh',
-        ['auth', 'login', '--web', '--hostname', 'github.com', '--git-protocol', 'https'],
-        { stdio: ['pipe', 'pipe', 'pipe'] }
-      );
-
-      this.pendingLogin = child;
-      child.on('exit', () => {
-        if (this.pendingLogin === child) this.pendingLogin = null;
-      });
-
-      let buffer = '';
-      let settled = false;
-
-      const inspect = (chunk: unknown) => {
-        buffer += String(chunk);
-        const code = /([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(buffer);
-        if (code && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          resolve({ code: code[1], verificationUrl: 'https://github.com/login/device' });
-        }
-      };
-
-      child.stdout?.on('data', inspect);
-      child.stderr?.on('data', inspect);
-
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        child.kill();
-        reject(new Error('GitHub CLI did not return a device code. Is gh installed?'));
-      }, 20000);
-
-      child.on('error', (err: NodeJS.ErrnoException) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(
-          new Error(
-            err.code === 'ENOENT'
-              ? 'GitHub CLI is not installed. Install with `winget install GitHub.cli`.'
-              : `Could not start GitHub CLI: ${err.message}`
-          )
-        );
-      });
+    void awaitAuthorization(code).catch(err => {
+      // Nothing awaits this: the UI learns the sign-in worked by seeing
+      // `authenticated` turn true, and learns it did not by the code it is
+      // showing expiring. Logged so the reason is not lost either way.
+      logError('GitHub sign-in did not complete:', err instanceof Error ? err.message : err);
     });
+
+    return { code: code.userCode, verificationUrl: code.verificationUrl };
   }
 
   async listOrganizations(): Promise<Array<{ login: string; role: string }>> {
     try {
-      const { stdout } = await execFileAsync('gh', [
+      const { stdout } = await execGh([
         'api',
         'user/memberships/orgs',
         '--paginate',
@@ -401,14 +382,22 @@ export class GhCliGitHubService implements IGitHubService {
     }
   }
 
+  /**
+   * Sign Alpha out, and nothing else.
+   *
+   * This used to run `gh auth logout`, which signed the machine out of GitHub
+   * for every other tool that used the CLI -- pressing sign out in one app took
+   * the terminal down with it. Alpha forgets its own token and leaves the
+   * developer's `gh` login exactly as they set it.
+   */
   async logout(): Promise<void> {
-    await execFileAsync('gh', ['auth', 'logout', '--hostname', 'github.com']);
-    logInfo('Signed out of GitHub via CLI');
+    clearCredential();
+    logInfo("Signed out of GitHub. Alpha's credential is gone; the machine's own `gh` login is untouched.");
   }
 
   async listRepositories(limit = 30): Promise<GitHubRepo[]> {
     try {
-      const { stdout } = await execFileAsync('gh', [
+      const { stdout } = await execGh([
         'repo', 'list',
         '--limit', String(Math.max(1, Math.min(200, Math.trunc(Number(limit) || 30)))),
         '--json', 'name,nameWithOwner,url,isPrivate,defaultBranchRef'
@@ -437,8 +426,8 @@ export class GhCliGitHubService implements IGitHubService {
     }
 
     try {
-      await execFileAsync('gh', args, sourceDir ? { cwd: sourceDir } : {});
-      const { stdout: viewOut } = await execFileAsync('gh', ['repo', 'view', target, '--json', 'url,nameWithOwner']);
+      await execGh(args, sourceDir ? { cwd: sourceDir } : {});
+      const { stdout: viewOut } = await execGh(['repo', 'view', target, '--json', 'url,nameWithOwner']);
       const info = JSON.parse(viewOut);
       logInfo(`Created GitHub repository ${info.nameWithOwner} via CLI`);
       return info;
@@ -452,7 +441,7 @@ export class GhCliGitHubService implements IGitHubService {
   async getRepository(ownerRepo: string): Promise<RemoteRepoInfo> {
     assertOwnerRepo(ownerRepo);
     try {
-      const { stdout } = await execFileAsync('gh', [
+      const { stdout } = await execGh([
         'api',
         `repos/${ownerRepo}`,
         '--jq',
@@ -480,7 +469,7 @@ export class GhCliGitHubService implements IGitHubService {
     assertOwnerRepo(ownerRepo);
     const capped = Math.max(1, Math.min(100, Math.trunc(limit)));
     try {
-      const { stdout } = await execFileAsync('gh', [
+      const { stdout } = await execGh([
         'api',
         `repos/${ownerRepo}/branches?per_page=${capped}`,
         '--jq',
@@ -499,7 +488,7 @@ export class GhCliGitHubService implements IGitHubService {
     try {
       // Raw media type returns the file body directly, so nothing has to be
       // base64-decoded here and a large file is not doubled in memory.
-      const { stdout } = await execFileAsync('gh', [
+      const { stdout } = await execGh([
         'api',
         `repos/${ownerRepo}/contents/${safePath}${query}`,
         '-H',
@@ -520,15 +509,15 @@ export class GhCliGitHubService implements IGitHubService {
     const target = path.join(intoDir, folder);
     if (fs.existsSync(target)) throw new Error(`Destination already exists: ${target}`);
 
-    await execFileAsync('gh', ['repo', 'clone', repo, target]);
+    await execGh(['repo', 'clone', repo, target]);
     logInfo(`Cloned ${repo} into ${target}`);
     return target;
   }
 
   async forkRepository(repo: string, cloneInto?: string): Promise<string> {
-    await execFileAsync('gh', ['repo', 'fork', repo, '--clone=false']);
+    await execGh(['repo', 'fork', repo, '--clone=false']);
     if (cloneInto) {
-      const who = await execFileAsync('gh', ['api', 'user', '--jq', '.login']);
+      const who = await execGh(['api', 'user', '--jq', '.login']);
       const login = String(who.stdout).trim();
       const forkName = repo.split('/').pop();
       return this.cloneRepository(`${login}/${forkName}`, cloneInto);
@@ -589,7 +578,7 @@ export class GhCliGitHubService implements IGitHubService {
         'databaseId,name,status,conclusion,headBranch,headSha,url,createdAt,updatedAt'
       ];
       if (ownerRepo) args.push('--repo', ownerRepo);
-      const { stdout } = await execFileAsync('gh', args, ownerRepo ? {} : { cwd });
+      const { stdout } = await execGh(args, ownerRepo ? {} : { cwd });
       return JSON.parse(stdout);
     } catch (err: any) {
       logError('Failed to list GitHub workflow runs via CLI:', err?.message || err);
@@ -611,7 +600,7 @@ export class GhCliGitHubService implements IGitHubService {
     let workflow: string | undefined = options.workflow?.trim() || inspection.workflows[0];
     if (!workflow && ownerRepo) {
       try {
-        const { stdout } = await execFileAsync('gh', [
+        const { stdout } = await execGh([
           'workflow',
           'list',
           '--repo',
@@ -652,7 +641,7 @@ export class GhCliGitHubService implements IGitHubService {
         ...(ownerRepo ? ['--repo', ownerRepo] : []),
         ...workflowInputArgs(options.inputs)
       ];
-      await execFileAsync('gh', args, ownerRepo ? {} : { cwd });
+      await execGh(args, ownerRepo ? {} : { cwd });
     } catch (err: any) {
       const detail = String(err?.stderr || err?.message || err).trim();
       throw new Error(`GitHub Actions workflow dispatch failed: ${detail}`);
@@ -669,7 +658,7 @@ export class GhCliGitHubService implements IGitHubService {
       if (ownerRepo) assertOwnerRepo(ownerRepo);
       const args = ['run', 'view', String(runId), '--log-failed'];
       if (ownerRepo) args.push('--repo', ownerRepo);
-      const { stdout } = await execFileAsync('gh', args, ownerRepo ? {} : { cwd });
+      const { stdout } = await execGh(args, ownerRepo ? {} : { cwd });
       return stdout;
     } catch (err: any) {
       return err?.stdout || 'Failed to pull workflow error logs';
@@ -751,7 +740,7 @@ export class GhCliGitHubService implements IGitHubService {
     const args = ['pr', 'create', '--title', title, '--body', body, '--base', base];
     if (headBranch) args.push('--head', headBranch);
 
-    const { stdout } = await execFileAsync('gh', args, { cwd });
+    const { stdout } = await execGh(args, { cwd });
     return stdout.trim();
   }
 

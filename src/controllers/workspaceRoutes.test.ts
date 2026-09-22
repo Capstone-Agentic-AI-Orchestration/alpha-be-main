@@ -165,30 +165,26 @@ describe('POST /workspaces', () => {
   });
 });
 
+/**
+ * Joining is gone, and stays gone.
+ *
+ * A project manager puts people in a workspace, so an invite code -- which
+ * outlives the conversation it was pasted into, and names nobody -- was a
+ * second way in that nobody administered. Asserted rather than merely deleted,
+ * because a route that quietly returns is exactly the kind of regression a
+ * removal invites.
+ */
 describe('POST /workspaces/join', () => {
-  it('joins with the invite code, at the role GitHub gives', async () => {
+  it('is not a route, even with a real code', async () => {
     const { app, registry } = await startApi();
     const workspace = await registry.createWorkspace('Owner1', { name: 'Team Alpha' });
 
     identity = { login: 'Dev1', role: 'dev' };
     const res = await call(app, 'POST', '/api/workspaces/join', { body: { code: workspace.joinCode } });
 
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ id: workspace.id, role: 'dev' });
-    // And it is theirs from then on.
-    expect((await call(app, 'GET', '/api/workspaces')).body.map((w: any) => w.id)).toContain(workspace.id);
-  });
-
-  /** The slug is on every listing; accepting it would open every workspace. */
-  it('refuses the slug, the id, and a code that matches nothing', async () => {
-    const { app, registry } = await startApi();
-    const workspace = await registry.createWorkspace('Owner1', { name: 'Team Alpha' });
-    identity = { login: 'Dev1', role: 'dev' };
-
-    expect((await call(app, 'POST', '/api/workspaces/join', { body: { code: workspace.slug } })).status).toBe(404);
-    expect((await call(app, 'POST', '/api/workspaces/join', { body: { code: workspace.id } })).status).toBe(404);
-    expect((await call(app, 'POST', '/api/workspaces/join', { body: { code: 'nope' } })).status).toBe(404);
-    expect((await call(app, 'POST', '/api/workspaces/join', { body: {} })).status).toBe(400);
+    expect(res.status).toBe(404);
+    // And the caller is no nearer the workspace for having tried.
+    expect((await call(app, 'GET', '/api/workspaces')).body.map((w: any) => w.id)).not.toContain(workspace.id);
   });
 });
 

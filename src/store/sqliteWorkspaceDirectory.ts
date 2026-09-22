@@ -2,7 +2,6 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 
 import {
-  assertJoinable,
   iso,
   knownRole,
   newJoinCode,
@@ -292,35 +291,6 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
 
     const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as any;
     return this.summary(row, 'admin');
-  }
-
-  async joinWorkspace(userId: string, code: string, role: WorkspaceRole): Promise<WorkspaceSummary> {
-    const value = code.trim();
-    const row = value
-      ? (this.db.prepare("SELECT * FROM workspaces WHERE join_code = ? AND status = 'active'").get(value) as any)
-      : null;
-    if (!row) throw new WorkspaceRequestError('That invite code does not match a workspace.', 404);
-
-    const existing = this.db
-      .prepare('SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
-      .get(row.id, userId) as { id: string; role: string; status: string } | undefined;
-
-    const now = new Date().toISOString();
-    if (existing) {
-      assertJoinable(existing.status);
-      this.db
-        .prepare("UPDATE workspace_members SET status = 'active', updated_at = ? WHERE id = ?")
-        .run(now, existing.id);
-      return this.summary(row, knownRole(existing.role) ?? role);
-    }
-
-    this.db
-      .prepare(
-        `INSERT INTO workspace_members (id, workspace_id, user_id, role, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'active', ?, ?)`
-      )
-      .run(`member-${randomUUID()}`, row.id, userId, role, now, now);
-    return this.summary(row, role);
   }
 
   async updateWorkspace(
