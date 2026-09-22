@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { IS_CLOUD } from '../config/env.js';
+import { IS_CLOUD, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { currentGitHubIdentity } from './githubRequestContext.js';
 import { storedToken } from './alphaGitHubToken.js';
 
@@ -75,14 +75,18 @@ export async function tokenForThisRequest(): Promise<string> {
   if (own) return own;
 
   /**
-   * Otherwise the machine's `gh`, for a daemon run from source.
+   * Otherwise the machine's `gh`, but only from source.
    *
-   * Not a fallback for the installed app -- it signs in for itself, and an
-   * installed copy that quietly borrowed the machine's account is the
-   * behaviour this replaced. It is here because a developer working on Alpha
-   * has `gh` signed in already and should not have to complete a device flow
-   * to run the thing they are editing.
+   * An installed copy signs in for itself. Letting it fall through to the CLI
+   * put back exactly what the in-app sign-in removed -- the app opening onto
+   * the board as whoever the terminal was signed in as, having asked nobody.
+   * A developer running Alpha from a checkout has `gh` already and should not
+   * complete a device flow to run what they are editing.
    */
+  if (IS_PACKAGED_DESKTOP) {
+    throw new GitHubApiError('Alpha is not signed in to GitHub. Sign in from Connected Accounts.', 401);
+  }
+
   try {
     const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
     const token = stdout.trim();

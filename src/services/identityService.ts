@@ -2,12 +2,12 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { ALPHA_ORG, ALPHA_ADMINS } from '../config/env.js';
+import { ALPHA_ORG, ALPHA_ADMINS, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
-import { ghEnvironment } from './alphaGitHubToken.js';
+import { ghEnvironment, storedToken } from './alphaGitHubToken.js';
 
 /**
  * Who is using this copy of Alpha.
@@ -321,6 +321,19 @@ function localIdentity(): Identity {
 }
 
 async function resolve(): Promise<Identity> {
+  /**
+   * An installed copy that has not signed in is signed out.
+   *
+   * Asking `gh` here would answer with the machine's account, which is how the
+   * app came up on the board as whoever the terminal was -- the in-app sign-in
+   * never got a chance to be asked for. `signed_out` is what puts the sign-in
+   * screen in front of the person instead.
+   */
+  if (IS_PACKAGED_DESKTOP && !storedToken()) {
+    githubState = 'signed_out';
+    return localIdentity();
+  }
+
   try {
     const { stdout } = await execFileAsync('gh', ['api', 'user', '--jq', '.login + "\\t" + (.name // "")'], {
       // A hung `gh` must not hold up the first issue anyone creates.

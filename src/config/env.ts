@@ -31,6 +31,20 @@ export const ALPHA_MODE: AlphaMode = process.env.ALPHA_MODE === 'cloud' ? 'cloud
 export const IS_CLOUD = ALPHA_MODE === 'cloud';
 export const IS_DESKTOP = !IS_CLOUD;
 
+/**
+ * An installed desktop app, as opposed to a daemon someone is running from a
+ * checkout. Set by the Electron shell from `app.isPackaged`.
+ *
+ * The difference matters for one thing only: whether the machine's `gh` login
+ * may stand in for a sign-in Alpha has not got. For a developer editing Alpha
+ * it should -- they have `gh` set up and should not complete a device flow to
+ * run what they are working on. For an installed copy it must not, because
+ * borrowing the machine's account is the behaviour the in-app sign-in replaced.
+ * Without this the fallback silently reinstated it: the app opened straight
+ * onto the board, signed in as whoever the terminal was.
+ */
+export const IS_PACKAGED_DESKTOP = process.env.ALPHA_PACKAGED === '1';
+
 export const PORT = Number(process.env.PORT || 3001);
 /**
  * Loopback on the desktop, public in the cloud.

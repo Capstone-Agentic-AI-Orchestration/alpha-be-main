@@ -4,7 +4,6 @@ import type { Sql } from './database.js';
 import {
   iso,
   knownRole,
-  newJoinCode,
   slugify,
   WorkspaceRequestError,
   type WorkspaceAccess,
@@ -47,8 +46,8 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
   ensureDefaultWorkspace(): Promise<void> {
     this.seeded ??= this.sql
       .query(
-        `insert into workspaces (id, name, slug, status, join_code, created_by)
-         values ($1, 'Alpha Workspace', 'alpha-workspace', 'active', 'alpha-default', 'system')
+        `insert into workspaces (id, name, slug, status, created_by)
+         values ($1, 'Alpha Workspace', 'alpha-workspace', 'active', 'system')
          on conflict (id) do nothing`,
         [this.defaultWorkspaceId]
       )
@@ -64,8 +63,6 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
       status: row.status,
       role,
       memberCount: Number(row.member_count ?? 0),
-      // The invite code is an admin's to hand out, and nobody else's to read.
-      ...(role === 'admin' ? { joinCode: row.join_code ?? undefined } : {}),
       createdAt: iso(row.created_at),
       updatedAt: iso(row.updated_at)
     };
@@ -201,9 +198,9 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
 
     const id = `workspace-${randomUUID()}`;
     await this.sql.query(
-      `insert into workspaces (id, name, slug, status, join_code, created_by)
-       values ($1, $2, $3, 'active', $4, $5)`,
-      [id, name, slug, newJoinCode(slug), userId]
+      `insert into workspaces (id, name, slug, status, created_by)
+       values ($1, $2, $3, 'active', $4)`,
+      [id, name, slug, userId]
     );
     /*
      * Not one transaction, deliberately: `Sql` is a single statement at a

@@ -180,7 +180,8 @@ describe('POST /workspaces/join', () => {
     const workspace = await registry.createWorkspace('Owner1', { name: 'Team Alpha' });
 
     identity = { login: 'Dev1', role: 'dev' };
-    const res = await call(app, 'POST', '/api/workspaces/join', { body: { code: workspace.joinCode } });
+    // Any code at all: there is no longer a column for one, let alone a route.
+    const res = await call(app, 'POST', '/api/workspaces/join', { body: { code: 'team-alpha-whatever' } });
 
     expect(res.status).toBe(404);
     // And the caller is no nearer the workspace for having tried.
