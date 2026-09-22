@@ -1,7 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { agentStore, issueStore, projectStore, squadStore } from '../store/stores.js';
-import { sqliteService } from '../services/sqliteService.js';
+import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import {
   requireProjectWorkspace,
@@ -115,8 +114,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       )
     }));
 
-  const squadRuns = workspaceRegistry
-    .scope('squad_runs', sqliteService.getSquadRuns(), workspaceId)
+  const squadRuns = (await runStore().listSquadRuns(workspaceId))
     .filter(run => run.projectId === project.id && projectSquadIds.has(run.squadId))
     .filter(run => workspaceRegistry.canAccessSquad(req.workspace!, run.squadId))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
@@ -126,7 +124,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
 
   const selectedRun = squadRun && squadRun.squadId === selectedSquad.id ? squadRun : undefined;
   const memberRuns = selectedRun
-    ? sqliteService.getRunsForSquadRun(selectedRun.id)
+    ? (await runStore().runsForSquadRun(workspaceId, selectedRun.id))
       .filter(run => run.projectId === project.id)
       .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))
     : [];
