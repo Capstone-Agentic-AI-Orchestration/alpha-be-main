@@ -40,7 +40,8 @@ async function startCloudApi() {
   const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
   const { PostgresWorkspaceDirectory } = await import('../store/postgresWorkspaceDirectory.js');
   const { PostgresProjectStore } = await import('../store/postgresProjectStore.js');
-  const { useProjectStore } = await import('../store/stores.js');
+  const { PostgresIssueStore } = await import('../store/postgresIssueStore.js');
+  const { useIssueStore, useProjectStore } = await import('../store/stores.js');
   const { workspaceContext } = await import('./workspaceContext.js');
   const { dataRouter } = await import('./dataController.js');
   const { jsonErrorHandler } = await import('./errorHandler.js');
@@ -55,6 +56,7 @@ async function startCloudApi() {
 
   workspaceRegistry.useDirectory(new PostgresWorkspaceDirectory(freshSqlFor(db), 'ws-default'));
   useProjectStore(new PostgresProjectStore(freshSqlFor(db)));
+  useIssueStore(new PostgresIssueStore(freshSqlFor(db)));
   // Entity bindings are still SQLite in both modes; the board's rows move off
   // it in the slice after this one.
   opened.push(workspaceRegistry, sql.sqliteService);
@@ -98,7 +100,7 @@ beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-projectroutes-'));
   opened = [];
   session = { login: 'Admin1', role: 'admin' };
-  await db.exec('truncate projects, workspaces, workspace_members cascade');
+  await db.exec('truncate issues, issue_comments, projects, workspaces, workspace_members cascade');
 });
 
 afterEach(() => {
@@ -178,5 +180,72 @@ describe('the cloud project routes', () => {
     const res = await call(app, 'POST', '/api/projects', { name: 'Mine', key: 'MINE' });
     expect(res.status).toBe(403);
     expect((await db.query('select id from projects')).rows).toHaveLength(0);
+  });
+});
+
+describe('the cloud issue routes', () => {
+  /** Every issue hangs off a project, so each test starts with one. */
+  async function withProject(app: express.Express) {
+    const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    return project.id as string;
+  }
+
+  it('create a card, numbered in the project’s scheme, with its opening comment', async () => {
+    const app = await startCloudApi();
+    const projectId = await withProject(app);
+
+    const created = await call(app, 'POST', '/api/issues', { title: 'Cart loses items', projectId });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ identifier: 'CHK-101', title: 'Cart loses items' });
+    // The opening comment is written where the real identifier is known.
+    expect(created.body.comments.map((c: any) => c.content)).toEqual([
+      expect.stringContaining('CHK-101 created by')
+    ]);
+
+    const { rows } = await db.query<{ workspace_id: string }>('select workspace_id from issues');
+    expect(rows).toEqual([{ workspace_id: 'ws-default' }]);
+  });
+
+  it('list, update and delete the rows that are actually there', async () => {
+    const app = await startCloudApi();
+    const projectId = await withProject(app);
+    const issue = (await call(app, 'POST', '/api/issues', { title: 'Cart loses items', projectId })).body;
+
+    expect((await call(app, 'GET', '/api/issues')).body.map((i: any) => i.id)).toEqual([issue.id]);
+
+    const moved = await call(app, 'PUT', `/api/issues/${issue.id}`, { status: 'in_progress' });
+    expect(moved.body).toMatchObject({ status: 'in_progress', title: 'Cart loses items' });
+
+    expect((await call(app, 'DELETE', `/api/issues/${issue.id}`)).body).toEqual({ success: true });
+    expect((await db.query('select id from issues')).rows).toHaveLength(0);
+  });
+
+  it('add a comment to a card', async () => {
+    const app = await startCloudApi();
+    const projectId = await withProject(app);
+    const issue = (await call(app, 'POST', '/api/issues', { title: 'Cart loses items', projectId })).body;
+
+    const added = await call(app, 'POST', `/api/issues/${issue.id}/comments`, {
+      id: 'c-manual',
+      authorType: 'user',
+      authorName: 'LloydLim1',
+      content: 'Reproduced on staging.'
+    });
+    expect(added.status).toBe(201);
+
+    const read = (await call(app, 'GET', '/api/issues')).body[0];
+    expect(read.comments.map((c: any) => c.content)).toContain('Reproduced on staging.');
+  });
+
+  it('refuse a client, who has no business in the tracker', async () => {
+    const admin = await startCloudApi();
+    const projectId = await withProject(admin);
+
+    session = { login: 'Client1', role: 'client' };
+    const client = await startCloudApi();
+    const res = await call(client, 'POST', '/api/issues', { title: 'Mine', projectId });
+
+    expect(res.status).toBe(403);
+    expect((await db.query('select id from issues')).rows).toHaveLength(0);
   });
 });

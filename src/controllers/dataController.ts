@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { projectStore } from '../store/stores.js';
+import { issueStore, projectStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -546,7 +546,7 @@ dataRouter.get('/issues', route(async (req: Request, res: Response) => {
   const allowedProjectIds = workspaceRegistry.projectIdsFor(req.workspace!, projects.map(project => project.id));
   res.json(workspaceRegistry.scopeProjectChildrenFromIds(
     'issues',
-    sqliteService.getIssues(),
+    await issueStore().list(req.workspace!.workspaceId),
     req.workspace!,
     allowedProjectIds,
     issue => issue.projectId
@@ -580,7 +580,7 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'projectId is required for a workspace-scoped issue.' });
   }
   if (!requireProjectWorkspace(req, res, rest.projectId)) return;
-  const issue = sqliteService.createIssue({ ...rest, createdBy: rest.createdBy || identity.login });
+  const issue = await issueStore().create(req.workspace!.workspaceId, { ...rest, createdBy: rest.createdBy || identity.login });
   workspaceRegistry.bind('issues', issue.id, req.workspace!.workspaceId);
 
   /**
@@ -589,7 +589,7 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
    * Composed by the browser before, against the identifier it had guessed — so
    * it named an issue that did not exist under that name.
    */
-  sqliteService.addIssueComment({
+  await issueStore().addComment(req.workspace!.workspaceId, {
     id: `comm-${issue.id}-created`,
     issueId: issue.id,
     authorType: 'system',
@@ -600,7 +600,7 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
 
   // Re-read so the response carries the comment rather than making the client
   // guess at one.
-  let saved = sqliteService.getIssues().find(i => i.id === issue.id) ?? issue;
+  let saved = await issueStore().get(req.workspace!.workspaceId, issue.id) ?? issue;
 
   /**
    * Publish it, so it is a card everyone can see rather than a row on one
@@ -612,8 +612,8 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
    */
   const push = await pushIssue(saved, req.workspace!.workspaceId);
   if (push.patch) {
-    sqliteService.updateIssue(saved.id, push.patch);
-    saved = sqliteService.getIssues().find(i => i.id === saved.id) ?? saved;
+    await issueStore().update(req.workspace!.workspaceId, saved.id, push.patch);
+    saved = await issueStore().get(req.workspace!.workspaceId, saved.id) ?? saved;
   }
 
   // 201 with a warning rather than an error: the issue exists locally and
@@ -624,7 +624,7 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
 dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
-  const before = sqliteService.getIssues().find(i => i.id === req.params.id);
+  const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!before) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
@@ -634,7 +634,7 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
     return res.status(status).json({ error: transitionError });
   }
 
-  const updated = sqliteService.updateIssue(req.params.id, req.body);
+  const updated = await issueStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Issue not found' });
 
   /**
@@ -646,9 +646,9 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
   if (!needsPush(before, updated)) return res.json(updated);
 
   const push = await pushIssue(updated, req.workspace!.workspaceId);
-  if (push.patch) sqliteService.updateIssue(updated.id, push.patch);
+  if (push.patch) await issueStore().update(req.workspace!.workspaceId, updated.id, push.patch);
 
-  const saved = sqliteService.getIssues().find(i => i.id === updated.id) ?? updated;
+  const saved = await issueStore().get(req.workspace!.workspaceId, updated.id) ?? updated;
   /**
    * A failed push is reported, never swallowed.
    *
@@ -669,7 +669,7 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
 dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
-  const before = sqliteService.getIssues().find(i => i.id === req.params.id);
+  const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!before) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
@@ -697,41 +697,41 @@ dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
     });
   }
 
-  const updated = sqliteService.updateIssue(before.id, { status: 'done' });
+  const updated = await issueStore().update(req.workspace!.workspaceId, before.id, { status: 'done' });
   if (!updated) return res.status(404).json({ error: 'Issue not found' });
 
   if (!needsPush(before, updated)) return res.json(updated);
 
   const push = await pushIssue(updated, req.workspace!.workspaceId);
-  if (push.patch) sqliteService.updateIssue(updated.id, push.patch);
+  if (push.patch) await issueStore().update(req.workspace!.workspaceId, updated.id, push.patch);
 
-  const saved = sqliteService.getIssues().find(i => i.id === updated.id) ?? updated;
+  const saved = await issueStore().get(req.workspace!.workspaceId, updated.id) ?? updated;
   res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
 });
 
 dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
-  const issue = sqliteService.getIssues().find(item => item.id === req.params.id);
+  const issue = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!issue) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
-  const deleted = sqliteService.deleteIssue(req.params.id);
+  const deleted = await issueStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) await workspaceRegistry.unbind('issues', req.params.id);
   res.json({ success: deleted });
 }));
 
-dataRouter.post('/issues/:id/comments', (req: Request, res: Response) => {
+dataRouter.post('/issues/:id/comments', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
-  const issue = sqliteService.getIssues().find(item => item.id === req.params.id);
+  const issue = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!issue) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
-  const comment = sqliteService.addIssueComment({
+  const comment = await issueStore().addComment(req.workspace!.workspaceId, {
     ...req.body,
     issueId: req.params.id
   });
   res.status(201).json(comment);
-});
+}));
 
 // --- Squads ---
 dataRouter.get('/squads', (req: Request, res: Response) => {

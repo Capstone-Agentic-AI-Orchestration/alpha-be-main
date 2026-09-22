@@ -1669,17 +1669,20 @@ export class SQLiteService {
       status: r.status,
       priority: r.priority,
       projectId: r.project_id,
-      assignedAgentId: r.assigned_agent_id,
+      // `?? undefined` rather than the raw NULL: `Issue` declares these
+      // optional, and a null reaching the API is a field the cloud store
+      // reports as absent and this one reported as present-and-empty.
+      assignedAgentId: r.assigned_agent_id ?? undefined,
       assignedSquadId: r.assigned_squad_id ?? undefined,
       createdBy: r.created_by ?? undefined,
       githubRepo: r.github_repo ?? undefined,
       githubNumber: r.github_number ?? undefined,
       githubUrl: r.github_url ?? undefined,
-      assignedHuman: r.assigned_human,
+      assignedHuman: r.assigned_human ?? undefined,
       labels: JSON.parse(r.labels || '[]'),
       subtasks: JSON.parse(r.subtasks || '[]'),
-      branchName: r.branch_name,
-      prUrl: r.pr_url,
+      branchName: r.branch_name ?? undefined,
+      prUrl: r.pr_url ?? undefined,
       comments: commentsByIssue.get(r.id) || [],
       createdAt: r.created_at,
       updatedAt: r.updated_at
