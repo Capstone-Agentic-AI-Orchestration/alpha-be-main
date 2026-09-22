@@ -1475,6 +1475,13 @@ export class SQLiteService {
     stmt.run({
       ...a,
       workspaceId: this.workspaceId(),
+      // As in createSquad: an unbound named parameter fails the insert, so
+      // what a caller may reasonably omit takes its default here.
+      avatar: a.avatar ?? '',
+      color: a.color ?? '',
+      description: a.description ?? '',
+      owner: a.owner ?? 'You',
+      systemPrompt: a.systemPrompt ?? '',
       isMine: a.isMine ? 1 : 0,
       isArchived: a.isArchived ? 1 : 0,
       temperature: a.temperature ?? 0.7,
@@ -2041,6 +2048,13 @@ export class SQLiteService {
       description: squad.description ?? '',
       avatar: squad.avatar ?? '',
       color: squad.color ?? '',
+      // Every named parameter has to be bound, and a caller that leaves one
+      // out -- a lean client, a squad pulled from the team's board -- would
+      // otherwise fail the insert rather than take the obvious default.
+      mission: squad.mission ?? '',
+      leaderAgentId: squad.leaderAgentId ?? null,
+      activeRunsCount: squad.activeRunsCount ?? 0,
+      completedRunsCount: squad.completedRunsCount ?? 0,
       memberAgentIds: JSON.stringify(squad.memberAgentIds || [])
     });
     return squad;

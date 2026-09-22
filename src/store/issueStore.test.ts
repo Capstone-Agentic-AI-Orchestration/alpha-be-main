@@ -53,6 +53,8 @@ interface Stores {
    * without pretending that difference away.
    */
   seedSquad(id: string): Promise<void>;
+  /** An agent to assign to. Since `0011` the cloud refuses an assignee it has no row for. */
+  seedAgent(id: string): Promise<void>;
 }
 
 async function openSqlite(): Promise<Stores> {
@@ -66,6 +68,15 @@ async function openSqlite(): Promise<Stores> {
   return {
     issues: new SqliteIssueStore(),
     projects: new SqliteProjectStore(),
+    seedAgent: async id => {
+      (sql.sqliteService as any).createAgent({
+        id, name: 'Agent', role: 'Developer', avatar: '◆', color: '#6366f1', description: '',
+        owner: 'octocat', isMine: true, modelProvider: 'anthropic', modelName: 'claude-sonnet-5',
+        systemPrompt: '', autonomyLevel: 'supervised', temperature: 0.7, skills: [], mcpServers: [],
+        customCliArgs: '', envVars: [], concurrencyLimit: 2, isArchived: false,
+        createdAt: new Date().toISOString()
+      });
+    },
     seedSquad: async id => {
       (sql.sqliteService as any).createSquad({
         id,
@@ -91,7 +102,11 @@ async function openPostgres(): Promise<Stores> {
   return {
     issues: new PostgresIssueStore(sqlFor(pg)),
     projects: new PostgresProjectStore(sqlFor(pg)),
-    // No roster in the cloud yet; an assignment is kept as given.
+    seedAgent: async id => {
+      await pg.exec(`insert into agents (id, workspace_id, name, role, model_provider, model_name, autonomy_level, owner)
+        values ('${id}', '${WS}', 'Agent', 'Developer', 'anthropic', 'claude-sonnet-5', 'supervised', 'octocat')`);
+    },
+    // Squads are only referenced by id; the cloud has no constraint on them.
     seedSquad: async () => undefined
   };
 }
@@ -225,6 +240,7 @@ describe.each(backends)('the issue store ($name)', backend => {
     const stores = await backend.open();
     const projectId = await withProject(stores);
     await stores.seedSquad('squad-1');
+    await stores.seedAgent('agent-1');
     const issue = await stores.issues.create(WS, { title: 'Fix cart', projectId, assignedAgentId: 'agent-1' });
 
     const updated = await stores.issues.update(WS, issue.id, { assignedSquadId: 'squad-1' });
@@ -278,20 +294,44 @@ describe.each(backends)('the issue store ($name)', backend => {
 });
 
 /**
- * The cloud has no agent roster yet, and must not quietly discard an
- * assignment because of it. `0009` drops the foreign key that would refuse
- * one; it returns when agents move, in the next slice.
+ * An assignee is a real agent again.
+ *
+ * `0009` dropped the foreign key while the roster was per-machine and the
+ * cloud could not have known the agent an issue named. Desktops publish their
+ * agents now, so `0011` enforces it once more -- and a card outlives the agent
+ * it was assigned to.
  */
-describe('the cloud store keeps an assignment it cannot yet verify', () => {
-  it('stores an agent id that is in no roster', async () => {
+describe('the cloud store on an issue’s assignee', () => {
+  it('keeps an assignment to an agent it has', async () => {
+    const stores = await openPostgres();
+    const projectId = await withProject(stores);
+    await stores.seedAgent('agent-architect');
+
+    const issue = await stores.issues.create(WS, { title: 'Fix cart', projectId, assignedAgentId: 'agent-architect' });
+
+    expect((await stores.issues.get(WS, issue.id))!.assignedAgentId).toBe('agent-architect');
+  });
+
+  it('refuses one it has never met', async () => {
     const stores = await openPostgres();
     const projectId = await withProject(stores);
 
-    const issue = await stores.issues.create(WS, {
-      title: 'Fix cart',
-      projectId,
-      assignedAgentId: 'agent-architect'
-    });
-    expect((await stores.issues.get(WS, issue.id))!.assignedAgentId).toBe('agent-architect');
+    const write = stores.issues.create(WS, { title: 'Fix cart', projectId, assignedAgentId: 'agent-nobody' });
+
+    await expect(write).rejects.toThrow();
+  });
+
+  /** Retiring an agent must not delete the work it was assigned. */
+  it('empties the assignment when the agent is deleted', async () => {
+    const stores = await openPostgres();
+    const projectId = await withProject(stores);
+    await stores.seedAgent('agent-architect');
+    const issue = await stores.issues.create(WS, { title: 'Fix cart', projectId, assignedAgentId: 'agent-architect' });
+
+    await pg.exec(`delete from agents where id = 'agent-architect'`);
+
+    const read = await stores.issues.get(WS, issue.id);
+    expect(read).toMatchObject({ title: 'Fix cart' });
+    expect(read!.assignedAgentId).toBeUndefined();
   });
 });
