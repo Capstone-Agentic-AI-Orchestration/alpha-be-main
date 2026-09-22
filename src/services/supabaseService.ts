@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API } from '../config/env.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API, IS_CLOUD } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, Issue } from '../models/index.js';
+import { PrototypeRun, Issue, IssueComment } from '../models/index.js';
+import { commentRow, issueRow } from '../store/postgresIssueStore.js';
+import { supabaseBoardSource, type SharedBoardSource } from './sharedBoard.js';
 import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
 import { DatabaseTokenClient } from './databaseTokenClient.js';
@@ -140,6 +142,70 @@ export class SupabaseService {
 
   isConfigured(): boolean {
     return !!(this.client && SUPABASE_URL && SUPABASE_ANON_KEY);
+  }
+
+  /**
+   * Whether this desktop works on the team's board rather than a board of its
+   * own: signed in to a cloud, so its projects and issues are the cloud's and
+   * its changes go back there. Never true of the cloud itself, which is the
+   * board.
+   */
+  sharesBoard(): boolean {
+    return !IS_CLOUD && this.isConfigured();
+  }
+
+  /** Where to read the team's board from, as this developer. */
+  boardSource(): SharedBoardSource | null {
+    return this.client ? supabaseBoardSource(this.client) : null;
+  }
+
+  /**
+   * Put a card this desktop made or changed on the team's board.
+   *
+   * The whole row, not the changed fields: a card made here does not exist in
+   * the cloud until this runs, and an upsert of the full row is both the insert
+   * and the update. Awaited by callers that write comments next, which the
+   * database refuses on an issue it does not have.
+   */
+  async shareIssue(issue: Issue): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('issues').upsert(issueRow(currentWorkspaceId(), issue));
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`share issue ${issue.identifier}`, err);
+    }
+  }
+
+  /** Take a card this desktop deleted off the team's board too. */
+  async unshareIssue(issueId: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('issues').delete().eq('id', issueId);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`remove issue ${issueId}`, err);
+    }
+  }
+
+  /**
+   * Put a comment this desktop wrote -- a run summary, mostly -- on the team's
+   * board, where the cloud's sync publishes it to GitHub.
+   *
+   * Insert-or-nothing rather than an upsert: the policy lets a developer add a
+   * comment, not rewrite one, and a comment that is already there is already
+   * shared.
+   */
+  async shareComment(comment: IssueComment): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client
+        .from('issue_comments')
+        .upsert(commentRow(comment), { onConflict: 'id', ignoreDuplicates: true });
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`share comment on ${comment.issueId}`, err);
+    }
   }
 
   getClient(): SupabaseClient | null {

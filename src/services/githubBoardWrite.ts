@@ -92,32 +92,74 @@ async function repoForIssue(issue: Issue, workspaceId: string): Promise<string |
   return project ? repoForProject(project) : null;
 }
 
+/** The GitHub issue a card became. */
+export interface PublishedIssue {
+  githubRepo: string;
+  githubNumber: number;
+  githubUrl: string;
+  /** GitHub's own id for the issue, which the card's id is made from. */
+  githubIssueId: number;
+}
+
 /**
  * Create the GitHub issue for a card that does not have one.
  *
- * Returns the fields to store back, so the card knows which issue it is. A
- * project with no repository is not an error — a local-only board is a valid
- * way to use Alpha, and it simply has nothing to push to.
+ * Returns which issue it became, so the card can store it. A project with no
+ * repository is not an error — a local-only board is a valid way to use
+ * Alpha, and it simply has nothing to push to.
  */
-export async function pushNewIssue(issue: Issue, workspaceId: string): Promise<Partial<Issue> | null> {
+export async function pushNewIssue(issue: Issue, workspaceId: string): Promise<PublishedIssue | null> {
   const ownerRepo = await repoForIssue(issue, workspaceId);
   if (!ownerRepo) return null;
 
   await ensureLabels(ownerRepo);
 
   const labels = labelsForWrite(issue.status, issue.priority, issue.labels ?? []);
-  const created = await githubApi().post<{ number: number; html_url: string }>(`/repos/${ownerRepo}/issues`, {
+  const created = await githubApi().post<{ id: number; number: number; html_url: string }>(`/repos/${ownerRepo}/issues`, {
     title: issue.title,
     body: issue.description ?? '',
     labels
   });
 
-  logInfo(`Pushed ${issue.identifier} to ${ownerRepo}#${created.number}`);
+  logInfo(`Pushed ${issue.identifier ?? issue.title} to ${ownerRepo}#${created.number}`);
   return {
     githubRepo: ownerRepo,
     githubNumber: created.number,
-    githubUrl: created.html_url
+    githubUrl: created.html_url,
+    githubIssueId: created.id
   };
+}
+
+/** The fields a card stores about the GitHub issue it became. */
+export const publishedFields = ({ githubRepo, githubNumber, githubUrl }: PublishedIssue): Partial<Issue> => ({
+  githubRepo,
+  githubNumber,
+  githubUrl
+});
+
+/**
+ * Publish a card that does not exist yet, so it can be born under GitHub's id.
+ *
+ * A card created here and then pushed kept the id it was created with, while
+ * every other copy of the board -- the cloud's sync, a teammate's desktop --
+ * met the same issue first on GitHub and named it after GitHub's id. Two ids
+ * for one issue, and a run on either one unknown to the other. Publishing
+ * first means there is only ever the one.
+ *
+ * Reports rather than throws, like `pushIssue`: a card whose publish failed is
+ * still created, locally, and says why.
+ */
+export async function publishNewIssue(
+  draft: Issue,
+  workspaceId: string
+): Promise<{ published: PublishedIssue | null; error?: string }> {
+  try {
+    return { published: await pushNewIssue(draft, workspaceId) };
+  } catch (err: any) {
+    const detail = String(err?.stderr || err?.message || err).trim();
+    logError(`Could not publish ${draft.title} to GitHub:`, detail);
+    return { published: null, error: detail };
+  }
 }
 
 /**
@@ -177,8 +219,8 @@ export async function pushIssue(
 ): Promise<{ pushed: boolean; error?: string; patch?: Partial<Issue> }> {
   try {
     if (!issue.githubNumber) {
-      const patch = await pushNewIssue(issue, workspaceId);
-      return patch ? { pushed: true, patch } : { pushed: false };
+      const published = await pushNewIssue(issue, workspaceId);
+      return published ? { pushed: true, patch: publishedFields(published) } : { pushed: false };
     }
     await pushIssueUpdate(issue);
     return { pushed: true };

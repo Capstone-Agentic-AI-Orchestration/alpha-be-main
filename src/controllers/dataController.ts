@@ -7,7 +7,10 @@ import { githubService } from '../services/githubService.js';
 import { mintSupabaseToken } from '../services/supabaseTokenService.js';
 import { exchangeGitHubToken } from '../services/databaseTokenExchange.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
-import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
+import { pushIssue, needsPush, publishNewIssue, publishedFields } from '../services/githubBoardWrite.js';
+import { issueIdFor } from '../services/githubRepoDiscovery.js';
+import { supabaseService } from '../services/supabaseService.js';
+import { pullSharedBoard, asSyncReport } from '../services/sharedBoard.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { machineRuntimes } from '../services/machineRuntimes.js';
 import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
@@ -167,6 +170,28 @@ dataRouter.post('/database/token/exchange', async (req: Request, res: Response) 
  * make the board move under someone mid-sentence. The UI calls this on demand.
  */
 dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
+  /**
+   * On a team's desktop, the team's board.
+   *
+   * Pulled from the cloud rather than synced from GitHub: the cloud is the one
+   * writer that reads GitHub, and a desktop reading it too would name the same
+   * issues under ids of its own. Anyone who can see projects may pull -- it
+   * changes nothing but this machine's copy -- which also ends developers
+   * being refused their own board: this route asked for `project.manage`, which
+   * no developer has, while the app showed them the Sync button.
+   */
+  if (supabaseService.sharesBoard()) {
+    if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+    const source = supabaseService.boardSource();
+    if (!source) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+    try {
+      res.json(asSyncReport(await pullSharedBoard(req.workspace!.workspaceId, source)));
+    } catch (err: any) {
+      res.status(502).json({ error: `Could not read the team board: ${err?.message ?? err}` });
+    }
+    return;
+  }
+
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const report = await syncBoardFromGitHub(req.workspace!.workspaceId);
   // 200 even with per-project errors: a workspace where one repository is
@@ -584,7 +609,7 @@ dataRouter.get('/issues', route(async (req: Request, res: Response) => {
  * Dropping both here rather than trusting the client keeps one authority for
  * each, and the numbering stays right no matter who is calling.
  */
-dataRouter.post('/issues', async (req: Request, res: Response) => {
+dataRouter.post('/issues', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   const { identifier: _ignored, comments: _alsoIgnored, ...rest } = req.body ?? {};
 
@@ -597,8 +622,25 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'projectId is required for a workspace-scoped issue.' });
   }
   if (!requireProjectWorkspace(req, res, rest.projectId)) return;
-  const issue = await issueStore().create(req.workspace!.workspaceId, { ...rest, createdBy: rest.createdBy || identity.login });
-  workspaceRegistry.bind('issues', issue.id, req.workspace!.workspaceId);
+  const workspaceId = req.workspace!.workspaceId;
+  const draft = { status: 'todo', priority: 'medium', labels: [], ...rest, createdBy: rest.createdBy || identity.login } as Issue;
+
+  /**
+   * Published first, so the card is born under GitHub's id.
+   *
+   * It used to be created and then pushed, keeping the id it was created with,
+   * while the cloud's sync and every teammate's desktop met the same issue on
+   * GitHub and named it after GitHub's id instead: one issue, two cards, and a
+   * run on either unknown to the other. Awaited because the response carries
+   * the issue number, and a card that does not know which GitHub issue it is
+   * cannot be updated later. A project with no repository publishes nothing.
+   */
+  const { published, error: publishError } = await publishNewIssue(draft, workspaceId);
+  const issue = await issueStore().create(workspaceId, {
+    ...draft,
+    ...(published ? { id: issueIdFor(published.githubIssueId), ...publishedFields(published) } : {})
+  });
+  workspaceRegistry.bind('issues', issue.id, workspaceId);
 
   /**
    * The opening comment, written where the real identifier is known.
@@ -617,28 +659,19 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
 
   // Re-read so the response carries the comment rather than making the client
   // guess at one.
-  let saved = await issueStore().get(req.workspace!.workspaceId, issue.id) ?? issue;
+  const saved = await issueStore().get(workspaceId, issue.id) ?? issue;
 
-  /**
-   * Publish it, so it is a card everyone can see rather than a row on one
-   * laptop.
-   *
-   * Awaited rather than fired and forgotten: the response carries the issue
-   * number, and a card that does not know which GitHub issue it is cannot be
-   * updated later. A project with no repository pushes nothing and is fine.
-   */
-  const push = await pushIssue(saved, req.workspace!.workspaceId);
-  if (push.patch) {
-    await issueStore().update(req.workspace!.workspaceId, saved.id, push.patch);
-    saved = await issueStore().get(req.workspace!.workspaceId, saved.id) ?? saved;
-  }
+  // On a team's desktop, the card goes on the team's board -- the issue first,
+  // since the database refuses a comment on an issue it does not have.
+  await supabaseService.shareIssue(saved);
+  for (const comment of saved.comments ?? []) void supabaseService.shareComment(comment);
 
   // 201 with a warning rather than an error: the issue exists locally and
   // refusing it now would lose work the person already did.
-  res.status(201).json(push.error ? { ...saved, syncWarning: push.error } : saved);
-});
+  res.status(201).json(publishError ? { ...saved, syncWarning: publishError } : saved);
+}));
 
-dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
+dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
@@ -660,12 +693,16 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
    * Assigning an agent or attaching a branch is Alpha's own business, and
    * calling GitHub for it would spend a request to change nothing.
    */
-  if (!needsPush(before, updated)) return res.json(updated);
+  if (!needsPush(before, updated)) {
+    void supabaseService.shareIssue(updated);
+    return res.json(updated);
+  }
 
   const push = await pushIssue(updated, req.workspace!.workspaceId);
   if (push.patch) await issueStore().update(req.workspace!.workspaceId, updated.id, push.patch);
 
   const saved = await issueStore().get(req.workspace!.workspaceId, updated.id) ?? updated;
+  void supabaseService.shareIssue(saved);
   /**
    * A failed push is reported, never swallowed.
    *
@@ -674,7 +711,7 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
    * sync silently reverts it.
    */
   res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
-});
+}));
 
 /**
  * Complete an issue after a human review checkpoint.
@@ -683,7 +720,7 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
  * explicit reviewed flag gives clients a narrow, auditable write path, while
  * active runs remain owned by the runner or the run approval endpoint.
  */
-dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
+dataRouter.post('/issues/:id/complete', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
@@ -717,14 +754,18 @@ dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
   const updated = await issueStore().update(req.workspace!.workspaceId, before.id, { status: 'done' });
   if (!updated) return res.status(404).json({ error: 'Issue not found' });
 
-  if (!needsPush(before, updated)) return res.json(updated);
+  if (!needsPush(before, updated)) {
+    void supabaseService.shareIssue(updated);
+    return res.json(updated);
+  }
 
   const push = await pushIssue(updated, req.workspace!.workspaceId);
   if (push.patch) await issueStore().update(req.workspace!.workspaceId, updated.id, push.patch);
 
   const saved = await issueStore().get(req.workspace!.workspaceId, updated.id) ?? updated;
+  void supabaseService.shareIssue(saved);
   res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
-});
+}));
 
 dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
@@ -733,7 +774,10 @@ dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   if (!issue) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
   const deleted = await issueStore().remove(req.workspace!.workspaceId, req.params.id);
-  if (deleted) await workspaceRegistry.unbind('issues', req.params.id);
+  if (deleted) {
+    await workspaceRegistry.unbind('issues', req.params.id);
+    void supabaseService.unshareIssue(req.params.id);
+  }
   res.json({ success: deleted });
 }));
 
@@ -747,6 +791,7 @@ dataRouter.post('/issues/:id/comments', route(async (req: Request, res: Response
     ...req.body,
     issueId: req.params.id
   });
+  void supabaseService.shareComment(comment);
   res.status(201).json(comment);
 }));
 
