@@ -48,6 +48,39 @@ const SUPABASE_STUBS = `
   alter table realtime.messages enable row level security;
   create function realtime.topic() returns text
     language sql stable as $$ select nullif(current_setting('realtime.topic', true), '') $$;
+
+  /*
+   * What Supabase's own broadcast_changes does, as far as a test can see:
+   * it puts a row on the channel. Stubbed rather than skipped so the triggers
+   * in 0012 run for real -- a trigger that errors takes the write down with
+   * it, which is the failure worth catching here.
+   */
+  create function realtime.broadcast_changes(
+    topic_name text,
+    event_name text,
+    operation text,
+    table_name text,
+    table_schema text,
+    new_record record default null,
+    old_record record default null
+  ) returns void
+  language plpgsql as $$
+  begin
+    insert into realtime.messages (topic, extension, event, payload)
+    values (
+      topic_name,
+      'broadcast',
+      event_name,
+      jsonb_build_object(
+        'operation', operation,
+        'table', table_name,
+        'schema', table_schema,
+        'record', case when new_record is null then null else to_jsonb(new_record) end,
+        'old_record', case when old_record is null then null else to_jsonb(old_record) end
+      )
+    );
+  end;
+  $$;
 `;
 
 /** A fresh database, migrated. Close it in `afterAll`. */
