@@ -41,7 +41,7 @@ beforeEach(async () => {
   githubCalls = [];
   await db.exec(
     'truncate project_build_steps, prototype_runs, squad_runs, remote_actions, issues, issue_comments, ' +
-      'projects, agents, squads, workspace_members, workspaces cascade'
+      'chat_messages, chat_threads, projects, agents, squads, workspace_members, workspaces cascade'
   );
 });
 
@@ -67,6 +67,7 @@ async function startCloudApi() {
   const { PostgresIssueStore } = await import('../store/postgresIssueStore.js');
   const { PostgresAgentStore, PostgresSquadStore } = await import('../store/postgresAgentStore.js');
   const { PostgresRunStore } = await import('../store/postgresRunStore.js');
+  const { PostgresChatStore } = await import('../store/postgresChatStore.js');
   const stores = await import('../store/stores.js');
   const { sqlFor } = await import('../store/testDatabase.js');
   const { useGitHubApi } = await import('../services/githubApi.js');
@@ -76,6 +77,7 @@ async function startCloudApi() {
   stores.useIssueStore(new PostgresIssueStore(sqlFor(db)));
   stores.useAgentStores(new PostgresAgentStore(sqlFor(db)), new PostgresSquadStore(sqlFor(db)));
   stores.useRunStore(new PostgresRunStore(sqlFor(db)));
+  stores.useChatStore(new PostgresChatStore(sqlFor(db)));
 
   const record = (method: string) => async (p: string, body?: unknown) => {
     githubCalls.push({ method, path: p, body });
@@ -164,7 +166,6 @@ const DESKTOP_ONLY: Array<[string, string]> = [
   ['POST', '/api/chat/threads'],
   ['PUT', '/api/chat/threads/t1'],
   ['PUT', '/api/chat/threads/t1/target'],
-  ['GET', '/api/chat/threads/t1/messages'],
   ['DELETE', '/api/chat/threads/t1'],
   ['DELETE', '/api/chat/threads/t1/messages'],
   ['POST', '/api/chat/messages'],
@@ -212,11 +213,10 @@ describe('the cloud, without SQLite', () => {
   });
 
   /** None, rather than a scan of Render's disk that finds none every time. */
-  it('reports no runtimes and no conversations', async () => {
+  it('reports no runtimes', async () => {
     const app = await startCloudApi();
 
     expect((await call(app, 'GET', '/api/runtimes')).body).toEqual([]);
-    expect((await call(app, 'GET', '/api/chat/threads')).body).toEqual([]);
   });
 
   it('serves Alpha’s own skills', async () => {
@@ -251,6 +251,59 @@ describe('the cloud, without SQLite', () => {
     const res = await call(app, 'POST', '/api/chat/messages', {});
     expect(res.status).not.toBe(409);
     expect(res.status).toBeGreaterThanOrEqual(401);
+  });
+});
+
+describe('a person’s own conversations, on the web', () => {
+  /**
+   * A conversation is had on the desktop, which publishes it under its
+   * owner's login. Reading it back on the web is this person's own history --
+   * and nobody else's: there is no project-manager bypass, by design.
+   */
+  async function seedThreads() {
+    await db.exec(`insert into workspaces (id, name, slug) values ('ws-default', 'Alpha', 'alpha')`);
+    await db.exec(`insert into chat_threads (id, workspace_id, owner_id, title, last_message_at) values
+      ('t-mine', 'ws-default', 'Admin1', 'Mine', now()),
+      ('t-theirs', 'ws-default', 'Dev9', 'Theirs', now())`);
+    await db.exec(`insert into chat_messages (id, thread_id, sender_type, sender_name, content) values
+      ('m-mine', 't-mine', 'user', 'Admin1', 'my prompt'),
+      ('m-theirs', 't-theirs', 'user', 'Dev9', 'their prompt')`);
+  }
+
+  it('lists the ones this person is having', async () => {
+    await seedThreads();
+    const app = await startCloudApi();
+
+    const threads = (await call(app, 'GET', '/api/chat/threads')).body;
+
+    expect(threads.map((t: any) => t.id)).toEqual(['t-mine']);
+  });
+
+  it('reads back what was said in them', async () => {
+    await seedThreads();
+    const app = await startCloudApi();
+
+    const messages = (await call(app, 'GET', '/api/chat/threads/t-mine/messages')).body;
+
+    expect(messages.map((m: any) => m.content)).toEqual(['my prompt']);
+  });
+
+  /** Thread ids are minted by clients, so knowing one must not be enough. */
+  it('will not read a colleague’s, even knowing the id', async () => {
+    await seedThreads();
+    const app = await startCloudApi();
+
+    const res = await call(app, 'GET', '/api/chat/threads/t-theirs/messages');
+
+    expect(res.status).toBe(404);
+    expect(JSON.stringify(res.body)).not.toContain('their prompt');
+  });
+
+  it('still answers agents only on the desktop', async () => {
+    await seedThreads();
+    const app = await startCloudApi();
+
+    expect((await call(app, 'POST', '/api/chat/messages', { threadId: 't-mine', content: 'hi' })).status).toBe(409);
   });
 });
 
