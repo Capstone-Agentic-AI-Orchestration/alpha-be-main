@@ -1,20 +1,23 @@
 import { Request, Response, Router } from 'express';
 import { runtimeRefreshService } from '../services/runtimeRefreshService.js';
-import { sqliteService } from '../services/sqliteService.js';
+import { IS_CLOUD } from '../config/env.js';
+import { machineRuntimes } from '../services/machineRuntimes.js';
 import { requireWorkspaceCapability } from './workspaceContext.js';
+import { desktopOnly } from './desktopOnly.js';
 
 export const runtimeRouter = Router();
 
 runtimeRouter.get('/runtimes', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
-  const cached = sqliteService.getRuntimes();
-  if (cached.length > 0) {
+  const cached = machineRuntimes();
+  // Empty in the cloud because there are none, not because nobody has looked.
+  if (cached.length > 0 || IS_CLOUD) {
     return res.json(cached);
   }
   runtimeRefreshService.refresh(true).then(r => res.json(r)).catch(err => res.status(500).json({ error: err.message }));
 });
 
-runtimeRouter.post('/runtimes/scan', async (req: Request, res: Response) => {
+runtimeRouter.post('/runtimes/scan', desktopOnly, async (req: Request, res: Response) => {
   try {
     const runtimes = await runtimeRefreshService.refresh(true);
     res.json(runtimes);
@@ -23,7 +26,7 @@ runtimeRouter.post('/runtimes/scan', async (req: Request, res: Response) => {
   }
 });
 
-runtimeRouter.post('/runtimes/:id/refresh', async (req: Request, res: Response) => {
+runtimeRouter.post('/runtimes/:id/refresh', desktopOnly, async (req: Request, res: Response) => {
   try {
     const runtime = await runtimeRefreshService.refreshOne(req.params.id);
     res.json(runtime);

@@ -6,6 +6,8 @@ import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { desktopOnly } from './desktopOnly.js';
+import { IS_CLOUD } from '../config/env.js';
 
 export const chatRouter = Router();
 
@@ -25,6 +27,13 @@ export const chatRouter = Router();
  */
 chatRouter.get('/chat/threads', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  /**
+   * None in the cloud. A conversation is with an agent, which runs in the
+   * desktop app, and its messages stay on that machine until the desktop
+   * publishes them owner-only to Postgres itself. An empty list rather than a
+   * refusal, because the web app loads this with everything else at startup.
+   */
+  if (IS_CLOUD) return res.json([]);
   res.json(
     workspaceRegistry.scope(
       'chat_threads',
@@ -53,7 +62,7 @@ chatRouter.get('/chat/threads', (req: Request, res: Response) => {
  * caller got wrong. 201 and 200 keep the difference visible to anyone reading
  * the wire.
  */
-chatRouter.post('/chat/threads', (req: Request, res: Response) => {
+chatRouter.post('/chat/threads', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   const id = typeof req.body?.id === 'string' ? req.body.id : undefined;
 
@@ -91,7 +100,7 @@ chatRouter.post('/chat/threads', (req: Request, res: Response) => {
  * not what it was told. `projectId: null` clears it and returns the thread to
  * the managed workspace root.
  */
-chatRouter.put('/chat/threads/:id', route(async (req: Request, res: Response) => {
+chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const { projectId } = req.body ?? {};
@@ -136,7 +145,7 @@ chatRouter.put('/chat/threads/:id', route(async (req: Request, res: Response) =>
  * that field is the participant history and must not make an old participant
  * answer every future message.
  */
-chatRouter.put('/chat/threads/:id/target', route(async (req: Request, res: Response) => {
+chatRouter.put('/chat/threads/:id/target', desktopOnly, route(async (req: Request, res: Response) => {
   const { targetAgentId = null, targetSquadId = null } = req.body ?? {};
 
   if (
@@ -164,7 +173,7 @@ chatRouter.put('/chat/threads/:id/target', route(async (req: Request, res: Respo
   return res.json(updated);
 }));
 
-chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
+chatRouter.get('/chat/threads/:id/messages', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   res.json(sqliteService.getChatMessages(req.params.id));
@@ -178,7 +187,7 @@ chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
  * in SQLite. That was invisible while hydration was also wiping the client's
  * copy, because a deleted thread came back empty and looked deleted.
  */
-chatRouter.delete('/chat/threads/:id', route(async (req: Request, res: Response) => {
+chatRouter.delete('/chat/threads/:id', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const deleted = sqliteService.deleteChatThread(req.params.id);
@@ -187,7 +196,7 @@ chatRouter.delete('/chat/threads/:id', route(async (req: Request, res: Response)
   res.json({ success: true });
 }));
 
-chatRouter.delete('/chat/threads/:id/messages', (req: Request, res: Response) => {
+chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const removed = sqliteService.clearChatMessages(req.params.id);
@@ -195,7 +204,7 @@ chatRouter.delete('/chat/threads/:id/messages', (req: Request, res: Response) =>
   res.json({ success: true, removed });
 });
 
-chatRouter.post('/chat/messages', async (req: Request, res: Response) => {
+chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     const { threadId, content, senderName, targetAgentId, targetSquadId } = req.body;
     if (!threadId || !content) {

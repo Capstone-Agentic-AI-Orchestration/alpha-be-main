@@ -1,4 +1,5 @@
-import type { Project, ProjectResource } from '../models/index.js';
+import type { BuildStepPhase, Project, ProjectBuildStep, ProjectResource } from '../models/index.js';
+import { BuildStepError, normalizeBuildSteps } from './buildSteps.js';
 import type { Sql } from './database.js';
 import { withProjectDefaults, type ProjectStore } from './projectStore.js';
 
@@ -115,6 +116,135 @@ export class PostgresProjectStore implements ProjectStore {
     );
     return rows.length > 0;
   }
+
+  async getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null> {
+    if (!(await this.get(workspaceId, projectId))) return null;
+    const { rows } = await this.sql.query<BuildStepRow>(
+      `select * from project_build_steps
+       where workspace_id = $1 and project_id = $2
+       order by position asc, created_at asc`,
+      [workspaceId, projectId]
+    );
+    return rows.map(toBuildStep);
+  }
+
+  async saveBuildSteps(workspaceId: string, projectId: string, input: unknown): Promise<ProjectBuildStep[] | null> {
+    if (!(await this.get(workspaceId, projectId))) return null;
+
+    const { rows: owned } = await this.sql.query<{ agents: string[] | null; squads: string[] | null }>(
+      `select
+         (select array_agg(id) from agents where workspace_id = $1) as agents,
+         (select array_agg(id) from squads where workspace_id = $1) as squads`,
+      [workspaceId]
+    );
+    const steps = normalizeBuildSteps(
+      projectId,
+      input,
+      new Set(owned[0]?.agents ?? []),
+      new Set(owned[0]?.squads ?? [])
+    );
+
+    /**
+     * Ids come from the client, and the key is global. One already used by
+     * another project's step is refused rather than written over -- the upsert
+     * below would skip it, but only after the rest of the list had been saved.
+     */
+    const { rows: taken } = await this.sql.query<{ id: string }>(
+      `select id from project_build_steps
+       where id = any($1::text[]) and not (workspace_id = $2 and project_id = $3)`,
+      [steps.map(step => step.id), workspaceId, projectId]
+    );
+    if (taken.length > 0) {
+      throw new BuildStepError(`Build step id ${taken[0].id} belongs to another project`);
+    }
+
+    /**
+     * Replace the list in one statement, so a reader never sees half of it.
+     *
+     * The shared connection pool offers no transaction, and a delete followed
+     * by an insert would leave a moment with no steps at all. Steps no longer
+     * listed are deleted and the rest upserted, all at once; the `where` on the
+     * upsert keeps it to this project's rows even so.
+     */
+    await this.sql.query(
+      `with incoming as (
+         select * from jsonb_to_recordset($3::jsonb) as s(
+           id text, label text, phase text, agent_id text, squad_id text, position integer,
+           enabled boolean, required boolean, approval_gate boolean, depends_on jsonb)
+       ),
+       removed as (
+         delete from project_build_steps
+         where workspace_id = $1 and project_id = $2 and id not in (select id from incoming)
+       )
+       insert into project_build_steps
+         (id, workspace_id, project_id, label, phase, agent_id, squad_id, position,
+          enabled, required, approval_gate, depends_on)
+       select id, $1, $2, label, phase, agent_id, squad_id, position,
+              enabled, required, approval_gate, depends_on
+       from incoming
+       on conflict (id) do update set
+         label = excluded.label, phase = excluded.phase, agent_id = excluded.agent_id,
+         squad_id = excluded.squad_id, position = excluded.position, enabled = excluded.enabled,
+         required = excluded.required, approval_gate = excluded.approval_gate,
+         depends_on = excluded.depends_on, updated_at = now()
+       where project_build_steps.workspace_id = excluded.workspace_id
+         and project_build_steps.project_id = excluded.project_id`,
+      [
+        workspaceId,
+        projectId,
+        JSON.stringify(
+          steps.map(step => ({
+            id: step.id,
+            label: step.label,
+            phase: step.phase,
+            agent_id: step.agentId ?? null,
+            squad_id: step.squadId ?? null,
+            position: step.position,
+            enabled: step.enabled,
+            required: step.required,
+            approval_gate: step.approvalGate,
+            depends_on: step.dependsOn ?? []
+          }))
+        )
+      ]
+    );
+
+    return this.getBuildSteps(workspaceId, projectId);
+  }
+}
+
+interface BuildStepRow {
+  id: string;
+  project_id: string;
+  label: string;
+  phase: string;
+  agent_id: string | null;
+  squad_id: string | null;
+  position: number;
+  enabled: boolean;
+  required: boolean;
+  approval_gate: boolean;
+  depends_on: string[] | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+function toBuildStep(row: BuildStepRow): ProjectBuildStep {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    label: row.label,
+    phase: row.phase as BuildStepPhase,
+    agentId: row.agent_id ?? undefined,
+    squadId: row.squad_id ?? undefined,
+    position: Number(row.position) || 0,
+    enabled: row.enabled,
+    required: row.required,
+    approvalGate: row.approval_gate,
+    dependsOn: row.depends_on ?? [],
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
 }
 
 /** `timestamptz` arrives as a Date from `pg` and PGlite alike. */

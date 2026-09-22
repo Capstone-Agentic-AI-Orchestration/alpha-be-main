@@ -42,7 +42,8 @@ async function startCloudApi() {
   const { PostgresProjectStore } = await import('../store/postgresProjectStore.js');
   const { PostgresIssueStore } = await import('../store/postgresIssueStore.js');
   const { PostgresAgentStore, PostgresSquadStore } = await import('../store/postgresAgentStore.js');
-  const { useAgentStores, useIssueStore, useProjectStore } = await import('../store/stores.js');
+  const { PostgresRunStore } = await import('../store/postgresRunStore.js');
+  const { useAgentStores, useIssueStore, useProjectStore, useRunStore } = await import('../store/stores.js');
   const { workspaceContext } = await import('./workspaceContext.js');
   const { dataRouter } = await import('./dataController.js');
   const { jsonErrorHandler } = await import('./errorHandler.js');
@@ -59,8 +60,9 @@ async function startCloudApi() {
   useProjectStore(new PostgresProjectStore(freshSqlFor(db)));
   useIssueStore(new PostgresIssueStore(freshSqlFor(db)));
   useAgentStores(new PostgresAgentStore(freshSqlFor(db)), new PostgresSquadStore(freshSqlFor(db)));
-  // Entity bindings are still SQLite in both modes; the board's rows move off
-  // it in the slice after this one.
+  // The issue lifecycle guard reads runs, to refuse a status change mid-run.
+  useRunStore(new PostgresRunStore(freshSqlFor(db)));
+  // Nothing here opens SQLite any more; closed in case a regression does.
   opened.push(workspaceRegistry, sql.sqliteService);
 
   const app = express();

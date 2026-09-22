@@ -83,6 +83,12 @@ const fakeGitHub = {
   },
   patch: async (p: string) => {
     throw new Error(`unexpected PATCH ${p}`);
+  },
+  put: async (p: string) => {
+    throw new Error(`unexpected PUT ${p}`);
+  },
+  delete: async (p: string) => {
+    throw new Error(`unexpected DELETE ${p}`);
   }
 };
 

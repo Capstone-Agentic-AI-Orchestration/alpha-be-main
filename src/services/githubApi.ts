@@ -32,6 +32,8 @@ export interface GitHubApi {
   getAll<T>(path: string): Promise<T[]>;
   post<T>(path: string, body: unknown): Promise<T>;
   patch<T>(path: string, body: unknown): Promise<T>;
+  put<T>(path: string, body: unknown): Promise<T>;
+  delete(path: string): Promise<void>;
 }
 
 /** A GitHub answer that was not a success, with its status for callers that branch on it. */
@@ -136,6 +138,15 @@ const restApi: GitHubApi = {
 
   async patch<T>(path: string, body: unknown): Promise<T> {
     return (await call('PATCH', path, body)).json() as Promise<T>;
+  },
+
+  async put<T>(path: string, body: unknown): Promise<T> {
+    return (await call('PUT', path, body)).json() as Promise<T>;
+  },
+
+  async delete(path: string): Promise<void> {
+    // 204 No Content: there is no body to read.
+    await call('DELETE', path);
   }
 };
 

@@ -74,6 +74,19 @@ export interface WorkspaceAccess {
   squadOwners: ReadonlyMap<string, string>;
   /** Which squads serve which projects. */
   squadProjects: ReadonlyArray<{ squadId: string; projectId: string }>;
+  /**
+   * The projects and squads that are in this workspace at all.
+   *
+   * Postgres only. There every row carries its `workspace_id`, and this is how
+   * a check answers "is that project in this workspace" without the desktop's
+   * side table of bindings -- which on Render was a file emptied by every
+   * deploy, after which no project outside the default workspace was reachable
+   * by anyone. Absent on a desktop, where the bindings are still the answer.
+   */
+  workspaceRows?: {
+    projects: ReadonlySet<string>;
+    squads: ReadonlySet<string>;
+  };
 }
 
 export interface WorkspaceContext {

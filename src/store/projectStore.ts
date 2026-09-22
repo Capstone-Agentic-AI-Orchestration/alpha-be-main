@@ -1,4 +1,4 @@
-import type { Project } from '../models/index.js';
+import type { Project, ProjectBuildStep } from '../models/index.js';
 
 /**
  * Projects, as the board sees them.
@@ -19,6 +19,14 @@ export interface ProjectStore {
   create(workspaceId: string, input: Partial<Project>): Promise<Project>;
   update(workspaceId: string, id: string, updates: Partial<Project>): Promise<Project | null>;
   remove(workspaceId: string, id: string): Promise<boolean>;
+
+  /** A project's build steps in order, or null if the project is not in this workspace. */
+  getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null>;
+  /**
+   * Replace a project's build steps with `steps`, in that order. Null if the
+   * project is not in this workspace; `BuildStepError` if the list is invalid.
+   */
+  saveBuildSteps(workspaceId: string, projectId: string, steps: unknown): Promise<ProjectBuildStep[] | null>;
 }
 
 /**

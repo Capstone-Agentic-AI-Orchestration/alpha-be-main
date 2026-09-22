@@ -34,7 +34,13 @@ const fakeGitHub = {
   get: async (p: string) => answer({ method: 'GET', path: p }),
   getAll: async (p: string) => answer({ method: 'GET', path: p }),
   post: async (p: string, body: unknown) => answer({ method: 'POST', path: p, body }),
-  patch: async (p: string, body: unknown) => answer({ method: 'PATCH', path: p, body })
+  patch: async (p: string, body: unknown) => answer({ method: 'PATCH', path: p, body }),
+  put: async (p: string) => {
+    throw new Error(`unexpected PUT ${p}`);
+  },
+  delete: async (p: string) => {
+    throw new Error(`unexpected DELETE ${p}`);
+  }
 };
 
 async function loadService() {

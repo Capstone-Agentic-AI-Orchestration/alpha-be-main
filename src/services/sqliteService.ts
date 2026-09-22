@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR } from '../config/env.js';
+import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
 import {
   Project,
   Issue,
@@ -35,6 +35,8 @@ import {
 import { discoverInstalledSkills } from './skillDiscoveryService.js';
 import { currentWorkspaceId, DEFAULT_WORKSPACE_ID, runWithWorkspace } from './workspaceContext.js';
 import { analyticsFrom } from './runAnalytics.js';
+import { BUILTIN_SKILLS } from './builtinSkills.js';
+import { normalizeBuildSteps } from '../store/buildSteps.js';
 
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
@@ -980,13 +982,7 @@ export class SQLiteService {
     this.addAllowedPath(WORKSPACES_DIR, 'Alpha managed workspaces');
 
     // Default Skills
-    const defaultSkills: Skill[] = [
-      { id: 'sk-fs', name: 'Filesystem Operations', category: 'File Operations', permissions: 'write', description: 'Read, write, create, delete, and grep files within project directory.', isEnabled: true, commandExample: 'fs.read_file("src/index.ts")' },
-      { id: 'sk-bash', name: 'Terminal & Shell', category: 'Terminal', permissions: 'full_execution', description: 'Execute terminal commands (e.g. npm test, vitest, tsc, cargo build).', isEnabled: true, commandExample: 'bash.exec("npm test")' },
-      { id: 'sk-git', name: 'Git & GitHub', category: 'Git', permissions: 'write', description: 'Create branches, stage files, commit changes, create PRs, and inspect diffs.', isEnabled: true, commandExample: 'git.diff()' },
-      { id: 'sk-browser', name: 'Web & Headless Browser', category: 'Browser', permissions: 'read_only', description: 'Fetch documentation, query web endpoints, and parse markdown.', isEnabled: true, commandExample: 'browser.fetch("https://docs.anthropic.com")' },
-      { id: 'sk-code-exec', name: 'Code Execution Sandbox', category: 'Code Execution', permissions: 'full_execution', description: 'Run isolated scripts to verify algorithms or test patches.', isEnabled: true, commandExample: 'code.eval("Math.max(1, 2)")' }
-    ];
+    const defaultSkills = BUILTIN_SKILLS;
 
     const insertSkill = this.db.prepare(`
       INSERT OR IGNORE INTO skills (id, name, category, permissions, description, is_enabled, command_example)
@@ -1310,12 +1306,7 @@ export class SQLiteService {
       .prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?')
       .get(projectId, workspaceId);
     if (!project) throw new Error('Project not found');
-    if (!Array.isArray(input)) throw new Error('steps must be an array');
 
-    const phases = new Set<BuildStepPhase>([
-      'requirements', 'architecture', 'implementation', 'database',
-      'validation', 'review', 'delivery'
-    ]);
     const agentIds = new Set(
       (this.db.prepare('SELECT id FROM agents WHERE workspace_id = ?').all(workspaceId) as Array<{ id: string }>)
         .map(row => row.id)
@@ -1325,45 +1316,7 @@ export class SQLiteService {
         .map(row => row.id)
     );
 
-    const now = new Date().toISOString();
-    const seenIds = new Set<string>();
-    const normalized = input.map((raw, index) => {
-      const label = String(raw.label ?? '').trim();
-      if (!label) throw new Error(`Build step ${index + 1} needs a label`);
-
-      const phase = String(raw.phase ?? 'implementation') as BuildStepPhase;
-      if (!phases.has(phase)) throw new Error(`Unsupported build step phase: ${phase}`);
-
-      const agentId = typeof raw.agentId === 'string' && raw.agentId ? raw.agentId : undefined;
-      const squadId = typeof raw.squadId === 'string' && raw.squadId ? raw.squadId : undefined;
-      if (agentId && squadId) throw new Error(`Build step ${index + 1} cannot target both an agent and a squad`);
-      if (agentId && !agentIds.has(agentId)) throw new Error(`Agent not found for build step ${index + 1}`);
-      if (squadId && !squadIds.has(squadId)) throw new Error(`Squad not found for build step ${index + 1}`);
-
-      let id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `build-step-${randomUUID()}`;
-      if (seenIds.has(id)) id = `build-step-${randomUUID()}`;
-      seenIds.add(id);
-
-      const dependsOn = Array.isArray(raw.dependsOn)
-        ? raw.dependsOn.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-        : [];
-
-      return {
-        id,
-        projectId,
-        label,
-        phase,
-        agentId,
-        squadId,
-        position: index,
-        enabled: raw.enabled !== false,
-        required: raw.required !== false,
-        approvalGate: raw.approvalGate === true,
-        dependsOn,
-        createdAt: now,
-        updatedAt: now
-      } satisfies ProjectBuildStep;
-    });
+    const normalized = normalizeBuildSteps(projectId, input, agentIds, squadIds);
 
     const replace = this.db.transaction(() => {
       this.db.prepare(
@@ -2757,4 +2710,60 @@ export class SQLiteService {
   }
 }
 
-export const sqliteService = new SQLiteService();
+/** Raised when cloud code reaches the desktop's store. */
+export class DesktopStoreInCloudError extends Error {
+  constructor() {
+    super(
+      'The cloud keeps no SQLite file: everything it serves is in Postgres. ' +
+        'This path reached the desktop store, and on Render anything written there is gone at the next deploy.'
+    );
+    this.name = 'DesktopStoreInCloudError';
+  }
+}
+
+let instance: SQLiteService | null = null;
+
+function open(): SQLiteService {
+  if (IS_CLOUD) throw new DesktopStoreInCloudError();
+  return (instance ??= new SQLiteService());
+}
+
+/**
+ * Open the desktop store now, if it is not already.
+ *
+ * For `workspaceRegistry`, whose handle shares this file: this service owns
+ * the file's schema and must create its tables before anything else does, or
+ * the registry's narrower `CREATE TABLE IF NOT EXISTS` wins and this one's
+ * later inserts name columns the table does not have. Opening at import used
+ * to guarantee the order without anyone saying so.
+ */
+export function openDesktopStore(): void {
+  open();
+}
+
+/**
+ * The desktop's store, opened on first use and never in the cloud.
+ *
+ * It used to open at import, so the cloud created `alpha.db` on Render's disk
+ * the moment any route file loaded it -- and every path that had not moved to
+ * Postgres read and wrote that file without complaint, losing it all at the
+ * next deploy. Refusing makes a missed path fail where it is, loudly, instead
+ * of silently keeping data nobody will see again.
+ *
+ * A proxy so the hundreds of `sqliteService.x()` call sites stay as they are.
+ */
+export const sqliteService: SQLiteService = new Proxy({} as SQLiteService, {
+  get(_target, prop) {
+    // Closing a store that was never opened closes nothing, in either mode.
+    if (prop === 'close' && !instance) return () => {};
+    const service = open();
+    const value = Reflect.get(service, prop, service);
+    return typeof value === 'function' ? value.bind(service) : value;
+  },
+  set(_target, prop, value) {
+    return Reflect.set(open(), prop, value);
+  },
+  has(_target, prop) {
+    return Reflect.has(open(), prop);
+  }
+});

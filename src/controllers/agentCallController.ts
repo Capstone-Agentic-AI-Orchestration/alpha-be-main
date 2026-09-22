@@ -12,6 +12,7 @@ import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { agentStore, projectStore, squadStore } from '../store/stores.js';
 import { route } from './asyncRoute.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
+import { desktopOnly } from './desktopOnly.js';
 
 const execFileAsync = promisify(execFile);
 const MODES = new Set<AgentCallMode>(['ask', 'review', 'revise', 'implement']);
@@ -120,7 +121,7 @@ async function branchForProject(project: { resources: Array<{ branchOrMachine?: 
   }
 }
 
-agentCallRouter.get('/projects/:projectId/chat/available-agents', async (req: Request, res: Response) => {
+agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   if (req.workspace?.role === 'client') {
@@ -194,7 +195,7 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', async (req: Re
   });
 });
 
-agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', async (req: Request, res: Response) => {
+agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', desktopOnly, async (req: Request, res: Response) => {
   let savedUserMessageId: string | undefined;
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
@@ -284,14 +285,14 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
   }
 });
 
-agentCallRouter.get('/agent-calls/:id', (req: Request, res: Response) => {
+agentCallRouter.get('/agent-calls/:id', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   const call = getCallForCaller(req, res, req.params.id);
   if (!call) return;
   res.json({ call, agentMessage: responseForCall(call) });
 });
 
-agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', route(async (req: Request, res: Response) => {
+agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   const project = await getProject(req, res, req.params.projectId);
   if (!project) return;
@@ -308,7 +309,7 @@ agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', r
   res.json({ calls });
 }));
 
-agentCallRouter.post('/agent-calls/:id/confirm', async (req: Request, res: Response) => {
+agentCallRouter.post('/agent-calls/:id/confirm', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
@@ -323,7 +324,7 @@ agentCallRouter.post('/agent-calls/:id/confirm', async (req: Request, res: Respo
   }
 });
 
-agentCallRouter.post('/agent-calls/:id/apply-patch', async (req: Request, res: Response) => {
+agentCallRouter.post('/agent-calls/:id/apply-patch', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     if (req.body?.confirmed !== true) return res.status(400).json({ error: 'Explicit patch confirmation is required.' });
@@ -336,7 +337,7 @@ agentCallRouter.post('/agent-calls/:id/apply-patch', async (req: Request, res: R
   }
 });
 
-agentCallRouter.post('/agent-calls/:id/cancel', (req: Request, res: Response) => {
+agentCallRouter.post('/agent-calls/:id/cancel', desktopOnly, (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
     const call = getCallForCaller(req, res, req.params.id);
@@ -347,7 +348,7 @@ agentCallRouter.post('/agent-calls/:id/cancel', (req: Request, res: Response) =>
   }
 });
 
-agentCallRouter.post('/agent-calls/:id/retry', async (req: Request, res: Response) => {
+agentCallRouter.post('/agent-calls/:id/retry', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
     const call = getCallForCaller(req, res, req.params.id);
@@ -361,7 +362,7 @@ agentCallRouter.post('/agent-calls/:id/retry', async (req: Request, res: Respons
   }
 });
 
-agentCallRouter.post('/agent-calls/:id/follow-up', async (req: Request, res: Response) => {
+agentCallRouter.post('/agent-calls/:id/follow-up', desktopOnly, async (req: Request, res: Response) => {
   let savedFollowUpMessageId: string | undefined;
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
