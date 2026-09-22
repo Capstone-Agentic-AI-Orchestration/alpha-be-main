@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PGlite } from '@electric-sql/pglite';
-import fs from 'node:fs';
-import path from 'node:path';
+import type { PGlite } from '@electric-sql/pglite';
 
+import { createTestDatabase } from '../store/testDatabase.js';
 import { runToCloudRow } from './supabaseService.js';
 import type { PrototypeRun } from '../models/index.js';
 
@@ -22,8 +21,6 @@ import type { PrototypeRun } from '../models/index.js';
  * payload into the real migration.
  */
 
-const MIGRATIONS = path.resolve(__dirname, '../../supabase/migrations');
-
 let db: PGlite;
 
 const run: PrototypeRun = {
@@ -42,34 +39,9 @@ const run: PrototypeRun = {
 } as PrototypeRun;
 
 beforeAll(async () => {
-  db = new PGlite();
-
-  // The stub Supabase would otherwise provide. RLS is not the subject here —
-  // `rlsPolicies.test.ts` covers that — so this runs as superuser and the
-  // policies do not apply.
-  await db.exec(`
-    create schema if not exists auth;
-    create table auth._claims (v jsonb);
-    insert into auth._claims values ('{}'::jsonb);
-    create function auth.jwt() returns jsonb
-      language sql stable as $$ select v from auth._claims limit 1 $$;
-
-    -- Supabase's API roles, which the migrations grant to by name.
-    create role anon nologin;
-    create role authenticated nologin;
-
-    -- Supabase Realtime's authorization table, which 0006 writes policies on.
-    create schema if not exists realtime;
-    create table realtime.messages (topic text not null, extension text not null, event text, payload jsonb);
-    alter table realtime.messages enable row level security;
-    create function realtime.topic() returns text
-      language sql stable as $$ select nullif(current_setting('realtime.topic', true), '') $$;
-  `);
-
-  // Every migration, in order -- a hard-coded list silently skips the next one.
-  for (const file of fs.readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql')).sort()) {
-    await db.exec(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8'));
-  }
+  // RLS is not the subject here -- `rlsPolicies.test.ts` covers that -- so this
+  // runs as superuser and the policies do not apply.
+  db = await createTestDatabase();
 
   await db.exec(`
     insert into workspaces (id,name,slug) values ('ws1','Alpha','alpha');

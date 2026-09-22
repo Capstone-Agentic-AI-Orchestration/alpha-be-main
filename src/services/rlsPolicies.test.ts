@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PGlite } from '@electric-sql/pglite';
-import fs from 'node:fs';
-import path from 'node:path';
+import type { PGlite } from '@electric-sql/pglite';
+
+import { createTestDatabase } from '../store/testDatabase.js';
 
 /**
  * What the row-level security policies actually enforce.
@@ -22,8 +22,6 @@ import path from 'node:path';
  * PGlite is Postgres compiled to WebAssembly — the real planner and the real
  * policy machinery, with no container to start.
  */
-
-const MIGRATIONS = path.resolve(__dirname, '../../supabase/migrations');
 
 let db: PGlite;
 
@@ -54,44 +52,9 @@ async function as<T>(
 const rows = async (sql: string) => (await db.query(sql)).rows.length;
 
 beforeAll(async () => {
-  db = new PGlite();
-
-  /**
-   * Supabase supplies `auth.jwt()`; PGlite does not. A table-backed stub lets
-   * a test swap claims between calls, which is the whole point — the policies
-   * are functions of the token.
-   */
-  await db.exec(`
-    create schema if not exists auth;
-    create table auth._claims (v jsonb);
-    insert into auth._claims values ('{}'::jsonb);
-    create function auth.jwt() returns jsonb
-      language sql stable as $$ select v from auth._claims limit 1 $$;
-
-    -- Supabase's API roles, which the migrations grant to by name.
-    create role anon nologin;
-    create role authenticated nologin;
-
-    -- Supabase Realtime's authorization surface, which 0006 writes policies
-    -- on: a private channel's join and sends are checked as SELECT and
-    -- INSERT on realtime.messages, with the channel name in realtime.topic().
-    create schema if not exists realtime;
-    create table realtime.messages (
-      topic text not null,
-      extension text not null,
-      event text,
-      payload jsonb,
-      private boolean default true
-    );
-    alter table realtime.messages enable row level security;
-    create function realtime.topic() returns text
-      language sql stable as $$ select nullif(current_setting('realtime.topic', true), '') $$;
-  `);
-
-  // Every migration, in order -- a hard-coded list silently skips the next one.
-  for (const file of fs.readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql')).sort()) {
-    await db.exec(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8'));
-  }
+  // Supabase's `auth.jwt()` is stubbed there as a one-row table, which is how
+  // `as()` swaps the caller's claims between statements.
+  db = await createTestDatabase();
 
   // Seeded as superuser, for whom RLS does not apply.
   await db.exec(`

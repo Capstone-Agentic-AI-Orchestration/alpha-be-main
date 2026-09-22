@@ -80,13 +80,22 @@ export function clearedSessionCookie(): string {
  * A missing or expired cookie is not refused here. Some routes are public, and
  * a blanket 401 in this middleware would make the sign-in page itself
  * unreachable. `workspaceContext` decides who may proceed.
+ *
+ * An unreachable session store is not "signed out", though. Answering nobody
+ * would send a signed-in person to the sign-in page, where signing in writes
+ * to the same store that just failed; it is passed on as the error it is.
+ * Express 4 does not catch a rejected promise itself, hence the explicit
+ * `next(err)`.
  */
 export function sessionContext(req: Request, res: Response, next: NextFunction): void {
   if (!IS_CLOUD) return next();
 
-  const session = sessionService.resolve(readCookie(req, SESSION_COOKIE));
-  if (!session) return next();
-
-  req.session = session;
-  withGitHubIdentity({ token: session.githubToken, login: session.login }, () => next());
+  sessionService.resolve(readCookie(req, SESSION_COOKIE)).then(
+    session => {
+      if (!session) return next();
+      req.session = session;
+      withGitHubIdentity({ token: session.githubToken, login: session.login }, () => next());
+    },
+    err => next(err)
+  );
 }

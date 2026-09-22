@@ -301,6 +301,45 @@ export const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || '';
  */
 export const SUPABASE_TOKEN_TTL_MS = Number(process.env.SUPABASE_TOKEN_TTL_MS || 10 * 60 * 1000);
 
+/**
+ * The cloud's own connection to Postgres: Supabase's session-pooler URL, with
+ * the database password in it. Cloud only, and required there -- `index.ts`
+ * refuses to start without it, because the alternative is state on Render's
+ * disk, which every deploy and every free-tier spin-down replaces.
+ *
+ * Never on a developer's machine. The password connects as the tables' owner,
+ * which row-level security does not restrict: holding it is holding every
+ * workspace's data. The desktop reaches Postgres only through the Data API,
+ * with a short-lived token the cloud minted for one login. `database()` refuses
+ * to open a connection outside cloud mode, and the desktop build's settings
+ * allowlist does not carry this value.
+ */
+export const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
+
+/**
+ * The certificate authority that signed the database's TLS certificate, as
+ * PEM. Required with DATABASE_URL. Supabase's is downloadable from the
+ * dashboard: Database settings → SSL Configuration.
+ *
+ * The connection carries the database password, so the server has to prove it
+ * is the database before that is sent. Supabase signs its pooler certificates
+ * with its own root, which is not in Node's trust store -- so without this
+ * value the only way to connect would be to skip verification, and a
+ * connection that skips it hands the password to anyone who can sit in the
+ * path. There is no such fallback: no authority, no connection.
+ *
+ * Literal `\n` sequences are read as newlines, for hosts whose settings pages
+ * take one line.
+ */
+export const DATABASE_CA_CERT = process.env.DATABASE_CA_CERT || '';
+
+/**
+ * Connections the cloud holds open at once. Small, because Supabase's free
+ * tier caps the pooler's clients per project and one Render instance does not
+ * need many.
+ */
+export const DATABASE_POOL_MAX = Number(process.env.DATABASE_POOL_MAX || 5);
+
 // Supabase Configuration (team / cloud mode)
 export const SUPABASE_URL = process.env.SUPABASE_URL || '';
 export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';

@@ -1,4 +1,4 @@
-import { Request, Response, Router } from 'express';
+import { NextFunction, Request, Response, Router } from 'express';
 import { githubService } from '../services/githubService.js';
 import { createScaffoldedRepository } from '../services/repoScaffoldService.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -102,7 +102,7 @@ githubRouter.get('/github/oauth/callback', async (req: Request, res: Response) =
       return res.redirect(`${redirectOrigin}/#alpha_error=no_team`);
     }
 
-    const { cookieValue } = sessionService.create({
+    const { cookieValue } = await sessionService.create({
       login: result.username,
       role,
       githubToken: result.token
@@ -126,11 +126,21 @@ githubRouter.get('/github/session', (req: Request, res: Response) => {
   return res.json({ login, name, role, expiresAt });
 });
 
-/** Sign out: revoke server-side, then clear the cookie. */
-githubRouter.post('/github/session/logout', (req: Request, res: Response) => {
-  sessionService.revoke(readCookie(req, SESSION_COOKIE));
+/**
+ * Sign out: revoke server-side, and clear the cookie.
+ *
+ * The cookie is cleared first, whatever the revoke does: a browser asked to
+ * sign out should forget the session even when the server could not reach
+ * its store to end it.
+ */
+githubRouter.post('/github/session/logout', async (req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Set-Cookie', clearedSessionCookie());
-  return res.json({ success: true });
+  try {
+    await sessionService.revoke(readCookie(req, SESSION_COOKIE));
+    return res.json({ success: true });
+  } catch (err) {
+    return next(err);
+  }
 });
 
 // ─── GitHub App Integration ──────────────────────────────────────────────────

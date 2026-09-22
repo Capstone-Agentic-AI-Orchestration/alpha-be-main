@@ -93,6 +93,8 @@ default in code, so each deployment names its own.
 | `SUPABASE_URL` | Supabase → Settings → API | yes |
 | `SUPABASE_ANON_KEY` | Supabase → Settings → API | yes |
 | `SUPABASE_JWT_SECRET` | Supabase → Settings → API → JWT Secret | yes |
+| `DATABASE_URL` | Supabase → **Connect** → **Session pooler** URI, with the database password in place of `[YOUR-PASSWORD]` | yes — **the daemon exits without it** |
+| `DATABASE_CA_CERT` | Supabase → Database settings → **SSL Configuration** → Download certificate; paste the whole file | yes — **the daemon exits without it** |
 | `CORS_ORIGIN` | the Vercel origin | yes |
 | `ALPHA_ADMINS` | `LloydLim1` | temporary |
 
@@ -111,6 +113,7 @@ default in code, so each deployment names its own.
 | Variable | Default | Change it when |
 | :--- | :--- | :--- |
 | `SESSION_TTL_MS` | `604800000` (7 days) | You want shorter browser sessions |
+| `DATABASE_POOL_MAX` | `5` | Supabase reports the pooler's client limit reached |
 | `SUPABASE_TOKEN_TTL_MS` | `600000` (10 min) | Rarely — un-revocable, so short is the point |
 | `GITHUB_SCOPE` | `repo,workflow,read:org` | Before showing a real client, to narrow the consent screen |
 
@@ -169,9 +172,11 @@ and the policies read claims from a token the API mints per session.
 | `ALPHA_LOCAL_TOKEN` | optional | Set it if anything else on the machine could reach port 3001 |
 
 **Never on a developer machine:** `SUPABASE_JWT_SECRET`, `GITHUB_CLIENT_SECRET`,
-`GITHUB_APP_PRIVATE_KEY`, `ALPHA_SESSION_SECRET`. Those are server credentials,
-and a private key inside a shipped `.exe` cannot be un-distributed.
-`githubService` warns at startup if it finds the GitHub ones.
+`GITHUB_APP_PRIVATE_KEY`, `ALPHA_SESSION_SECRET`, `DATABASE_URL`. Those are
+server credentials, and a private key inside a shipped `.exe` cannot be
+un-distributed. `githubService` warns at startup if it finds the GitHub ones,
+and the daemon if it finds `DATABASE_URL` — which is the database password, and
+connects as the tables' owner, past every RLS policy.
 
 `SUPABASE_JWT_SECRET` is the worst of them to leak: it signs database tokens,
 so whoever holds it can claim any role in any workspace and every policy
@@ -192,6 +197,8 @@ read your teams; `gh auth refresh -s read:org` adds it if missing.
 | :--- | :--- |
 | `ALPHA_SESSION_SECRET` | Process exits at boot with an explanation |
 | `SUPABASE_JWT_SECRET` on Render | Browser and desktop token requests answer 503 |
+| `DATABASE_URL` or `DATABASE_CA_CERT` on Render | Process exits at boot with where to find the value; Render keeps the previous deploy serving |
+| Migration `0007` not applied | Process exits at boot: "reachable but not migrated" |
 | `ALPHA_CLOUD_API` on a desktop | Cloud writes rejected by RLS; logged once every 5 minutes |
 | `GITHUB_CLIENT_ID` | Sign-in screen renders "not configured" instead of a dead button |
 | `GITHUB_CALLBACK_URL` wrong | Sign-in returns `#alpha_error=oauth_failed` |

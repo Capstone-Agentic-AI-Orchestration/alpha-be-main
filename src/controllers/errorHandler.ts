@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { DatabaseError } from '../store/database.js';
 import { logError } from '../utils/logger.js';
 
 /**
@@ -64,6 +65,21 @@ export function jsonErrorHandler(
     return res.status(409).json({
       error: 'That refers to something which no longer exists. Reload and try again.'
     });
+  }
+
+  /**
+   * Postgres, answered in words rather than in the driver's.
+   *
+   * A driver error names the pooler's host and the database user, which is
+   * the shape of the infrastructure and no use to the person who hit it. The
+   * detail goes to the log; they get a sentence, and a 503 when the database
+   * could not be reached, since that is worth retrying.
+   */
+  if (err instanceof DatabaseError) {
+    logError('Database error:', err.cause);
+    return err.unavailable
+      ? res.status(503).json({ error: 'The database is unreachable right now. Try again in a moment.' })
+      : res.status(500).json({ error: err.message });
   }
 
   /**

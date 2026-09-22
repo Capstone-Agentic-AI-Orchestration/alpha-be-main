@@ -86,6 +86,17 @@ services:
       - key: SUPABASE_JWT_SECRET
         sync: false
 
+      # The cloud's own Postgres connection, where sessions live so a deploy
+      # does not sign everyone out. Supabase → Connect → Session pooler, with
+      # the database password filled in. The daemon exits without it.
+      - key: DATABASE_URL
+        sync: false
+      # Supabase → Database settings → SSL Configuration → Download
+      # certificate, pasted whole. The connection carries the password, so it
+      # is made only once the server is verified; no certificate, no start.
+      - key: DATABASE_CA_CERT
+        sync: false
+
       # The Vercel origin, plus a preview pattern if you want previews to reach
       # the API. Pin a label you control — a bare https://*.vercel.app is
       # refused at parse time, because it would admit every tenant on Vercel:
