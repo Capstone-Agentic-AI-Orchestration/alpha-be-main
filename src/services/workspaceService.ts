@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { WORKSPACES_DIR } from '../config/env.js';
+import { IS_CLOUD, WORKSPACES_DIR } from '../config/env.js';
 import { sqliteService } from './sqliteService.js';
 import { Project } from '../models/index.js';
 import { logInfo } from '../utils/logger.js';
@@ -102,8 +102,22 @@ export interface ProjectWorkspace {
 }
 
 export function resolveProjectWorkspace(
-  project: Pick<Project, 'name' | 'resources'>
+  project: Pick<Project, 'id' | 'name' | 'resources'>
 ): ProjectWorkspace | null {
+  /**
+   * What this machine was told, first.
+   *
+   * A binding is the developer's own answer for this project -- a folder they
+   * chose, or a clone Alpha made here -- and the project row cannot carry it:
+   * the row is the team's, and the cloud drops local paths on write. Before
+   * bindings, a shared project had nowhere to say where its code was on any
+   * particular laptop.
+   */
+  if (!IS_CLOUD && project.id) {
+    const binding = sqliteService.getProjectBinding(project.id);
+    if (binding) return { dir: path.resolve(binding.localDir), managed: binding.isManaged };
+  }
+
   const resources = project.resources ?? [];
   const managed = resources.find(r => r.type === 'github_repo' && r.localPath);
   const attached = resources.find(r => r.type === 'local_path' || r.type === 'local_dir');
