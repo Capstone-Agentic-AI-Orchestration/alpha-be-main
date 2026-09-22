@@ -286,6 +286,29 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
     return this.summary(await this.workspaceRow(workspaceId), callerRole);
   }
 
+  async addMember(workspaceId: string, userId: string, role: WorkspaceRole): Promise<WorkspaceMember> {
+    const login = userId.trim();
+    if (!login) throw new WorkspaceRequestError('Who to add is required.', 400);
+
+    const { rows } = await this.sql.query<any>(
+      `insert into workspace_members (id, workspace_id, user_id, role, status)
+       values ($1, $2, $3, $4, 'active')
+       on conflict (workspace_id, user_id) do update
+         set role = excluded.role, status = 'active', updated_at = now()
+       returning *`,
+      [`member-${randomUUID()}`, workspaceId, login, role]
+    );
+    const row = rows[0];
+    return {
+      id: row.id,
+      userId: row.user_id,
+      role: knownRole(row.role) ?? role,
+      status: row.status as WorkspaceMemberStatus,
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at)
+    };
+  }
+
   async listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
     const { rows } = await this.sql.query<any>(
       'select * from workspace_members where workspace_id = $1 order by created_at asc',

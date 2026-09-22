@@ -1,6 +1,8 @@
 import { Request, Response, Router } from 'express';
 
 import { route } from './asyncRoute.js';
+import { ALPHA_ORG } from '../config/env.js';
+import { githubApi } from '../services/githubApi.js';
 import { agentStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
@@ -179,6 +181,81 @@ workspaceRouter.put(
       return;
     }
     res.json(updated);
+  })
+);
+
+/**
+ * Put someone in this workspace, now.
+ *
+ * Not an invite: a project manager staffing their workspace knows who they
+ * want, and a code they have to pass along -- which the person then has to
+ * find, paste and accept -- is a step that exists for strangers. The person
+ * finds the workspace waiting at their next sign-in.
+ *
+ * Granting `admin` stays an admin's to do. A project manager may staff their
+ * workspace with developers, managers and clients; making someone an
+ * administrator of it is the one thing that would let them hand out the
+ * database claims an admin carries.
+ */
+workspaceRouter.post(
+  '/workspaces/:id/members',
+  route(async (req, res) => {
+    if (!sameWorkspace(req, res)) return;
+    if (!requireWorkspaceCapability(req, res, 'workspace.manage_members')) return;
+
+    const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+    const role = req.body?.role;
+    if (!userId) {
+      res.status(400).json({ error: 'userId is required' });
+      return;
+    }
+    if (!ROLES.includes(role)) {
+      res.status(400).json({ error: `role must be one of ${ROLES.join(', ')}` });
+      return;
+    }
+    if (role === 'admin' && req.workspace!.role !== 'admin') {
+      res.status(403).json({ error: 'Only an admin can make someone an admin of this workspace.' });
+      return;
+    }
+
+    res.status(201).json(await workspaceRegistry.addMember(req.params.id, userId, role));
+  })
+);
+
+/**
+ * Who there is to add: the organisation's people, minus this workspace's.
+ *
+ * Read as the caller, so it lists the members they can see on GitHub and no
+ * more. Without it, staffing a workspace means typing logins exactly right.
+ */
+workspaceRouter.get(
+  '/workspaces/:id/members/candidates',
+  route(async (req, res) => {
+    if (!sameWorkspace(req, res)) return;
+    if (!requireWorkspaceCapability(req, res, 'workspace.manage_members')) return;
+    if (!ALPHA_ORG) {
+      res.status(503).json({ error: 'No GitHub organisation is configured for this deployment.' });
+      return;
+    }
+
+    let people: Array<{ login: string; avatar_url?: string }>;
+    try {
+      people = await githubApi().getAll(`/orgs/${ALPHA_ORG}/members?per_page=100`);
+    } catch (err: any) {
+      res.status(502).json({ error: `Could not read the ${ALPHA_ORG} members: ${err?.message ?? err}` });
+      return;
+    }
+
+    const taken = new Set(
+      (await workspaceRegistry.listMembers(req.params.id))
+        .filter(member => member.status === 'active')
+        .map(member => member.userId.toLowerCase())
+    );
+    res.json(
+      people
+        .filter(person => !taken.has(person.login.toLowerCase()))
+        .map(person => ({ login: person.login, avatarUrl: person.avatar_url ?? null }))
+    );
   })
 );
 

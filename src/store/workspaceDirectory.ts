@@ -127,6 +127,16 @@ export interface WorkspaceDirectory {
   updateWorkspace(workspaceId: string, input: { name?: string; slug?: string }, callerRole: WorkspaceRole): Promise<WorkspaceSummary | null>;
 
   listMembers(workspaceId: string): Promise<WorkspaceMember[]>;
+  /**
+   * Put someone in this workspace, at this role, now.
+   *
+   * Not an invitation: whoever runs this has already decided, and the person
+   * finds the workspace waiting for them at their next sign-in. A membership
+   * that was suspended or removed is restored, because this is a present
+   * decision by someone entitled to make it -- unlike an old invite code,
+   * which `joinWorkspace` still refuses for exactly that reason.
+   */
+  addMember(workspaceId: string, userId: string, role: WorkspaceRole): Promise<WorkspaceMember>;
   updateMember(
     workspaceId: string,
     memberId: string,

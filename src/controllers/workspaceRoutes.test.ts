@@ -193,13 +193,14 @@ describe('POST /workspaces/join', () => {
 });
 
 describe('members', () => {
-  it('are listed for a PM or admin, and not for a developer', async () => {
+  /** Knowing who your colleagues are is not privileged; the database policy always said so. */
+  it('are listed for everyone in the workspace, developers included', async () => {
     const { app } = await startApi();
     expect((await call(app, 'GET', '/api/workspaces/ws-default/members')).status).toBe(200);
 
     identity = { login: 'Dev1', role: 'dev' };
     const { app: devApp } = await startApi();
-    expect((await call(devApp, 'GET', '/api/workspaces/ws-default/members')).status).toBe(403);
+    expect((await call(devApp, 'GET', '/api/workspaces/ws-default/members')).status).toBe(200);
   });
 
   it('cannot be read through another workspace’s id', async () => {
@@ -226,12 +227,143 @@ describe('members', () => {
     ).toBe(400);
     expect((await call(app, 'PATCH', '/api/workspaces/ws-default/members/nobody', { body: { role: 'pm' } })).status).toBe(404);
 
-    identity = { login: 'Dev1', role: 'dev' };
+    // Dev2, not Dev1: the promotion above made Dev1 a project manager here,
+    // and a project manager may change a membership.
+    identity = { login: 'Dev2', role: 'dev' };
     const { app: devApp } = await startApi();
     expect(
       (await call(devApp, 'PATCH', `/api/workspaces/ws-default/members/${member.id}`, { body: { role: 'admin' } }))
         .status
     ).toBe(403);
+  });
+});
+
+describe('staffing a workspace', () => {
+  /**
+   * A project manager decides who is in their workspace, and the person is in
+   * it -- no code to pass along, nothing for them to accept.
+   */
+  it('puts someone in it at once, when a project manager says so', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app, registry } = await startApi();
+
+    const added = await call(app, 'POST', '/api/workspaces/ws-default/members', {
+      body: { userId: 'Dev1', role: 'dev' }
+    });
+
+    expect(added.status).toBe(201);
+    expect(added.body).toMatchObject({ userId: 'Dev1', role: 'dev', status: 'active' });
+    const members = await registry.listMembers('ws-default');
+    expect(members.map((m: any) => m.userId)).toContain('Dev1');
+  });
+
+  it('changes the role rather than refusing, the second time', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app, registry } = await startApi();
+    await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'Dev1', role: 'dev' } });
+
+    const again = await call(app, 'POST', '/api/workspaces/ws-default/members', {
+      body: { userId: 'Dev1', role: 'pm' }
+    });
+
+    expect(again.status).toBe(201);
+    expect(again.body.role).toBe('pm');
+    expect((await registry.listMembers('ws-default')).filter((m: any) => m.userId === 'Dev1')).toHaveLength(1);
+  });
+
+  /** A present decision by someone entitled to make it, unlike an old invite code. */
+  it('restores a membership that had been removed', async () => {
+    const { app, registry } = await startApi();
+    await registry.listForUser('Dev1', 'dev');
+    const member = (await registry.listMembers('ws-default')).find((m: any) => m.userId === 'Dev1')!;
+    await registry.updateMember('ws-default', member.id, { status: 'removed' });
+
+    identity = { login: 'PM1', role: 'pm' };
+    const { app: pmApp } = await startApi();
+    const added = await call(pmApp, 'POST', '/api/workspaces/ws-default/members', {
+      body: { userId: 'Dev1', role: 'dev' }
+    });
+
+    expect(added.body.status).toBe('active');
+    void app;
+  });
+
+  /** The one role a project manager cannot hand out is the one that hands out claims. */
+  it('will not let a project manager make an admin', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await startApi();
+
+    const res = await call(app, 'POST', '/api/workspaces/ws-default/members', {
+      body: { userId: 'Dev1', role: 'admin' }
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/admin/i);
+  });
+
+  it('lets an admin make one', async () => {
+    const { app } = await startApi();
+
+    const res = await call(app, 'POST', '/api/workspaces/ws-default/members', {
+      body: { userId: 'Dev1', role: 'admin' }
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.role).toBe('admin');
+  });
+
+  it('is not a developer’s to do', async () => {
+    identity = { login: 'Dev1', role: 'dev' };
+    const { app } = await startApi();
+
+    const res = await call(app, 'POST', '/api/workspaces/ws-default/members', {
+      body: { userId: 'Someone', role: 'dev' }
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses a role that does not exist, and a missing person', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await startApi();
+
+    expect((await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'Dev1', role: 'root' } })).status).toBe(400);
+    expect((await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { role: 'dev' } })).status).toBe(400);
+  });
+
+  it('cannot staff another workspace through its id', async () => {
+    const { app, registry } = await startApi();
+    const other = await registry.createWorkspace('Someone-else', { name: 'Not yours' });
+
+    const res = await call(app, 'POST', `/api/workspaces/${other.id}/members`, {
+      body: { userId: 'Dev1', role: 'dev' }
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  /** Typing a login exactly right is not a staffing workflow. */
+  it('offers the organisation’s people, minus the ones already here', async () => {
+    process.env.ALPHA_ORG = 'acme';
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await startApi();
+    const { useGitHubApi } = await import('../services/githubApi.js');
+    useGitHubApi({
+      get: async () => ({}) as any,
+      getAll: async () => [{ login: 'Dev1', avatar_url: 'https://avatars/1' }, { login: 'PM1' }] as any,
+      post: async () => ({}) as any,
+      patch: async () => ({}) as any,
+      put: async () => ({}) as any,
+      delete: async () => {}
+    });
+    await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'PM1', role: 'pm' } });
+
+    const res = await call(app, 'GET', '/api/workspaces/ws-default/members/candidates');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([{ login: 'Dev1', avatarUrl: 'https://avatars/1' }]);
+    useGitHubApi(null);
+    delete process.env.ALPHA_ORG;
   });
 });
 
