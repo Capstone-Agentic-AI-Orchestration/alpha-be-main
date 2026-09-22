@@ -40,20 +40,48 @@ export const workspaceRouter = Router();
  */
 export async function seedRoster(workspaceId: string, name: string): Promise<void> {
   await agentStore().ensureOfficial(workspaceId);
+  await squadStore().create(workspaceId, await coreSquad(workspaceId, `squad-${workspaceId}`, name));
+}
+
+/**
+ * The default workspace's roster, on every boot.
+ *
+ * Nothing else creates it: a workspace made through the API is seeded as it
+ * is made, but the default one is the directory's, and the directory makes it
+ * as a bare row. Idempotent throughout -- the official agents are keyed on
+ * their template, and the core squad is created only if it is not there --
+ * so a boot that has run before adds nothing.
+ *
+ * The row comes first. Every agent and squad has a foreign key to its
+ * workspace, and this used to run before anything had created the default
+ * one, so it failed that key and left the workspace everyone lands in with no
+ * agents at all.
+ */
+export async function seedDefaultWorkspace(): Promise<void> {
+  const workspaceId = workspaceRegistry.getDefaultWorkspaceId();
+  await workspaceRegistry.ensureDefaultWorkspace();
+  await agentStore().ensureOfficial(workspaceId);
+  // `squad-core` is the id the desktop's own default squad has always had.
+  if (!(await squadStore().get(workspaceId, 'squad-core'))) {
+    await squadStore().create(workspaceId, await coreSquad(workspaceId, 'squad-core', 'Alpha'));
+  }
+}
+
+async function coreSquad(workspaceId: string, id: string, name: string) {
   const agents = await agentStore().list(workspaceId);
-  await squadStore().create(workspaceId, {
-    id: `squad-${workspaceId}`,
+  return {
+    id,
     name: `${name} Core Squad`,
     description: 'Official Alpha roles working in sequence.',
     avatar: '◈',
     color: '#6366f1',
-    topology: 'Sequential',
+    topology: 'Sequential' as const,
     leaderAgentId: agents.find(agent => agent.role === 'Manager Agent')?.id ?? agents[0]?.id,
     memberAgentIds: agents.map(agent => agent.id),
     mission: 'Research, plan, build, review, and validate approved project work.',
     activeRunsCount: 0,
     completedRunsCount: 0
-  });
+  };
 }
 
 const ROLES: readonly WorkspaceRole[] = ['client', 'dev', 'pm', 'admin'];

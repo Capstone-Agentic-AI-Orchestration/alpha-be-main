@@ -135,6 +135,17 @@ export interface WorkspaceDirectory {
   ): Promise<WorkspaceSquadProjectAssignment>;
   removeSquadProject(workspaceId: string, squadId: string, projectId: string): Promise<boolean>;
   listSquadProjectAssignments(workspaceId: string, projectId?: string): Promise<WorkspaceSquadProjectAssignment[]>;
+
+  /**
+   * Make sure the default workspace's row exists.
+   *
+   * Everything a workspace owns -- its agents, squads, projects -- has a
+   * foreign key to that row, so anything seeded into the default workspace has
+   * to wait for it. It used to be created only by the first sign-in, which is
+   * after boot: the roster seeded at boot failed its key and the shared
+   * workspace started with no agents at all.
+   */
+  ensureDefaultWorkspace(): Promise<void>;
 }
 
 // ── Rules both implementations share ──────────────────────────────────────

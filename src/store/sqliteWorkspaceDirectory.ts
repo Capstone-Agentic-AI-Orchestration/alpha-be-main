@@ -481,6 +481,9 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     return result.changes > 0;
   }
 
+  /** Already true: `migrate()` inserts the row when the directory opens. */
+  async ensureDefaultWorkspace(): Promise<void> {}
+
   async listSquadProjectAssignments(
     workspaceId: string,
     projectId?: string
