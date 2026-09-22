@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 
 import { IS_CLOUD } from '../config/env.js';
 import { currentGitHubIdentity } from './githubRequestContext.js';
+import { storedToken } from './alphaGitHubToken.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -22,9 +23,11 @@ const execFileAsync = promisify(execFile);
  * are per person, and a sync that ran as the App would show a project manager
  * repositories they cannot open, and write to GitHub under nobody's name.
  *
- * On a desktop, the machine's `gh` login -- the same credential it already
- * uses for everything else, read fresh so a `gh auth login` as someone else
- * takes effect.
+ * On a desktop, the token Alpha was signed in with -- its own, not the
+ * machine's. It used to read `gh auth token`, which meant the app acted as
+ * whichever account the developer last used in their terminal, and changed
+ * underneath it when they switched. A daemon run from source still falls back
+ * to `gh`, so working on Alpha does not require signing in to it.
  */
 export interface GitHubApi {
   get<T>(path: string): Promise<T>;
@@ -67,6 +70,19 @@ export async function tokenForThisRequest(): Promise<string> {
     throw new GitHubApiError('Sign in with GitHub to reach GitHub from here.', 401);
   }
 
+  // Alpha's own sign-in, which is the account the person chose in the app.
+  const own = storedToken();
+  if (own) return own;
+
+  /**
+   * Otherwise the machine's `gh`, for a daemon run from source.
+   *
+   * Not a fallback for the installed app -- it signs in for itself, and an
+   * installed copy that quietly borrowed the machine's account is the
+   * behaviour this replaced. It is here because a developer working on Alpha
+   * has `gh` signed in already and should not have to complete a device flow
+   * to run the thing they are editing.
+   */
   try {
     const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
     const token = stdout.trim();
@@ -74,7 +90,7 @@ export async function tokenForThisRequest(): Promise<string> {
   } catch {
     // Falls through to the message below, which says what to do about it.
   }
-  throw new GitHubApiError('GitHub is not signed in on this machine. Run `gh auth login`.', 401);
+  throw new GitHubApiError('Alpha is not signed in to GitHub. Sign in from Connected Accounts.', 401);
 }
 
 /** The `rel="next"` target of a `Link` header, if there is one. */
