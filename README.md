@@ -7,6 +7,14 @@ Alpha's five run stages, and broadcasts progress over WebSocket.
 It is **not** a cloud service. It runs on the developer's own workstation, beside
 the code the agents edit.
 
+## Other documents
+
+- [DESKTOP_APP.md](DESKTOP_APP.md) — how to install Alpha, sign in, and how it
+  keeps itself updated; and, for maintainers, how to publish a release
+- [SETUP.md](SETUP.md) — standing the whole deployment up from nothing
+- [CONFIGURATION.md](CONFIGURATION.md) — every setting, where it comes from, and
+  what breaks without it
+
 ## Design constraints
 
 **Alpha stores no AI provider credentials.** Agents run by spawning `claude` or
