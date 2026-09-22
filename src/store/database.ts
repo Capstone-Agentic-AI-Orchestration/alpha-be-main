@@ -153,7 +153,7 @@ export async function verifyDatabase(): Promise<void> {
       'Check DATABASE_URL: it should be the Supabase session pooler URL, with the database password.';
     // 3F000 no such schema, 42P01 no such table: reachable, but not migrated.
     if (state === '3F000' || state === '42P01') {
-      hint = 'The database is reachable but not migrated: apply supabase/migrations in order, through 0007.';
+      hint = 'The database is reachable but not migrated: apply every file in supabase/migrations, in filename order.';
     } else if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ALTNAME/.test(code)) {
       hint =
         "The database's certificate did not verify against DATABASE_CA_CERT. Use the certificate from " +

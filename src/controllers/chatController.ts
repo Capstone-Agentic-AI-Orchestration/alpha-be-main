@@ -1,4 +1,5 @@
 import { Request, Response, Router } from 'express';
+import { route } from './asyncRoute.js';
 import { chatService } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
@@ -176,14 +177,14 @@ chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
  * in SQLite. That was invisible while hydration was also wiping the client's
  * copy, because a deleted thread came back empty and looked deleted.
  */
-chatRouter.delete('/chat/threads/:id', (req: Request, res: Response) => {
+chatRouter.delete('/chat/threads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const deleted = sqliteService.deleteChatThread(req.params.id);
-  if (deleted) workspaceRegistry.unbind('chat_threads', req.params.id);
+  if (deleted) await workspaceRegistry.unbind('chat_threads', req.params.id);
   if (!deleted) return res.status(404).json({ error: 'Thread not found' });
   res.json({ success: true });
-});
+}));
 
 chatRouter.delete('/chat/threads/:id/messages', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;

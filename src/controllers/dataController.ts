@@ -1,4 +1,5 @@
 import { Request, Response, Router } from 'express';
+import { route } from './asyncRoute.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -218,13 +219,13 @@ dataRouter.put('/projects/:id', (req: Request, res: Response) => {
   res.json(updated);
 });
 
-dataRouter.delete('/projects/:id', (req: Request, res: Response) => {
+dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   if (!requireProjectWorkspace(req, res, req.params.id)) return;
   const deleted = sqliteService.deleteProject(req.params.id);
-  if (deleted) workspaceRegistry.unbind('projects', req.params.id);
+  if (deleted) await workspaceRegistry.unbind('projects', req.params.id);
   res.json({ success: deleted });
-});
+}));
 
 // --- Project Build Room ---
 dataRouter.get('/projects/:id/build-steps', (req: Request, res: Response) => {
@@ -318,13 +319,13 @@ dataRouter.put('/agents/:id', (req: Request, res: Response) => {
   res.json(withFileOverlay(updated));
 });
 
-dataRouter.delete('/agents/:id', (req: Request, res: Response) => {
+dataRouter.delete('/agents/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
   const deleted = sqliteService.deleteAgent(req.params.id);
-  if (deleted) workspaceRegistry.unbind('agents', req.params.id);
+  if (deleted) await workspaceRegistry.unbind('agents', req.params.id);
   res.json({ success: deleted });
-});
+}));
 
 /**
  * The agent's persona file — `~/.alpha/agents/{id}.md` — as text.
@@ -705,16 +706,16 @@ dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
   res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
 });
 
-dataRouter.delete('/issues/:id', (req: Request, res: Response) => {
+dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const issue = sqliteService.getIssues().find(item => item.id === req.params.id);
   if (!issue) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
   const deleted = sqliteService.deleteIssue(req.params.id);
-  if (deleted) workspaceRegistry.unbind('issues', req.params.id);
+  if (deleted) await workspaceRegistry.unbind('issues', req.params.id);
   res.json({ success: deleted });
-});
+}));
 
 dataRouter.post('/issues/:id/comments', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
@@ -735,17 +736,17 @@ dataRouter.get('/squads', (req: Request, res: Response) => {
   const squads = workspaceRegistry.scopeSquads(sqliteService.getSquads(), req.workspace!);
   res.json(squads.map(squad => ({
     ...squad,
-    ownerId: workspaceRegistry.squadOwnerId(req.workspace!.workspaceId, squad.id)
+    ownerId: workspaceRegistry.squadOwnerId(req.workspace!, squad.id)
   })));
 });
 
-dataRouter.post('/squads', (req: Request, res: Response) => {
+dataRouter.post('/squads', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   const squad = sqliteService.createSquad(req.body);
   workspaceRegistry.bind('squads', squad.id, req.workspace!.workspaceId);
-  workspaceRegistry.bindSquadOwner(req.workspace!.workspaceId, squad.id, req.workspace!.userId);
+  await workspaceRegistry.bindSquadOwner(req.workspace!.workspaceId, squad.id, req.workspace!.userId);
   res.status(201).json({ ...squad, ownerId: req.workspace!.userId });
-});
+}));
 
 /**
  * Edit and delete, which squads did not have.
@@ -768,54 +769,53 @@ dataRouter.put('/squads/:id', (req: Request, res: Response) => {
   if (!updated) return res.status(404).json({ error: 'Squad not found' });
   res.json({
     ...updated,
-    ownerId: workspaceRegistry.squadOwnerId(req.workspace!.workspaceId, updated.id)
+    ownerId: workspaceRegistry.squadOwnerId(req.workspace!, updated.id)
   });
 });
 
-dataRouter.delete('/squads/:id', (req: Request, res: Response) => {
+dataRouter.delete('/squads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   const deleted = sqliteService.deleteSquad(req.params.id);
-  if (deleted) workspaceRegistry.unbind('squads', req.params.id);
+  if (deleted) await workspaceRegistry.unbind('squads', req.params.id);
   if (!deleted) return res.status(404).json({ error: 'Squad not found' });
   res.json({ success: true });
-});
+}));
 
-dataRouter.get('/squads/:id/projects', (req: Request, res: Response) => {
+dataRouter.get('/squads/:id/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
-  const assignments = workspaceRegistry
-    .listSquadProjectAssignments(req.workspace!.workspaceId)
+  const assignments = (await workspaceRegistry.listSquadProjectAssignments(req.workspace!.workspaceId))
     .filter(assignment => assignment.squadId === req.params.id && assignment.status === 'active')
     .filter(assignment => workspaceRegistry.canAccessProject(req.workspace!, assignment.projectId));
   res.json(assignments);
-});
+}));
 
-dataRouter.put('/squads/:id/projects/:projectId', (req: Request, res: Response) => {
+dataRouter.put('/squads/:id/projects/:projectId', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
   const relationship = req.body?.relationship === 'owned' ? 'owned' : 'assigned';
-  res.status(201).json(workspaceRegistry.assignSquadProject(
+  res.status(201).json(await workspaceRegistry.assignSquadProject(
     req.workspace!.workspaceId,
     req.params.id,
     req.params.projectId,
     relationship
   ));
-});
+}));
 
-dataRouter.delete('/squads/:id/projects/:projectId', (req: Request, res: Response) => {
+dataRouter.delete('/squads/:id/projects/:projectId', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
-  const removed = workspaceRegistry.removeSquadProject(
+  const removed = await workspaceRegistry.removeSquadProject(
     req.workspace!.workspaceId,
     req.params.id,
     req.params.projectId
   );
   if (!removed) return res.status(404).json({ error: 'Squad project assignment not found.' });
   res.json({ success: true });
-});
+}));
 
 // --- Skills ---
 /*

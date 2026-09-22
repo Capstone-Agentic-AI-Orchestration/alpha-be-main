@@ -150,6 +150,12 @@ if (process.env.ALPHA_LOCAL_TOKEN) {
  * Every workspace-owned API request runs with one explicit data scope.
  * Existing callers that do not send a header remain on the migrated default
  * workspace, while the browser can switch scopes without another daemon.
+ *
+ * Whether the workspace exists, and whether this caller belongs to it, is
+ * `workspaceContext`'s answer a few lines below — it asks the directory,
+ * which in the cloud is Postgres. This used to check the id against the local
+ * SQLite file and 404 anything missing, which would refuse every workspace
+ * that lives in Postgres, on a disk that is empty after each deploy.
  */
 app.use('/api', (req, res, next) => {
   if (
@@ -158,11 +164,7 @@ app.use('/api', (req, res, next) => {
     req.path.startsWith('/workspaces/')
   ) return next();
 
-  const workspaceId = req.header('X-Workspace-Id') || DEFAULT_WORKSPACE_ID;
-  if (!sqliteService.getWorkspace(workspaceId)) {
-    return res.status(404).json({ error: `Workspace not found: ${workspaceId}` });
-  }
-  return runWithWorkspace(workspaceId, next);
+  return runWithWorkspace(req.header('X-Workspace-Id') || DEFAULT_WORKSPACE_ID, next);
 });
 
 // API Routes

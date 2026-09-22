@@ -1,4 +1,5 @@
 import { Request, Response, Router } from 'express';
+import { route } from './asyncRoute.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import {
@@ -86,7 +87,7 @@ liveBuildRoomRouter.get('/live-build-room/projects', (req: Request, res: Respons
  * That keeps authorization in one place and prevents a client from combining
  * a permitted project with a squad or run from another project.
  */
-liveBuildRoomRouter.get('/projects/:projectId/live-build-room', (req: Request, res: Response) => {
+liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
   if (!workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, req.params.projectId)) {
@@ -97,16 +98,18 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', (req: Request, r
   const project = sqliteService.getProjects().find(item => item.id === req.params.projectId);
   if (!project) return res.status(404).json({ error: 'Project not found.' });
 
-  const projectSquadIds = new Set(workspaceRegistry.listProjectSquadIds(workspaceId, project.id));
+  // Read once for the whole response: every squad below looks itself up in it.
+  const assignments = await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id);
+  const projectSquadIds = new Set(workspaceRegistry.listProjectSquadIds(req.workspace!, project.id));
   const squads = workspaceRegistry
     .scopeSquads(sqliteService.getSquads(), req.workspace!)
     .filter(squad => projectSquadIds.has(squad.id))
     .map(squad => ({
       ...squad,
-      ownerId: workspaceRegistry.squadOwnerId(workspaceId, squad.id),
-      assignment: workspaceRegistry
-        .listSquadProjectAssignments(workspaceId, project.id)
-        .find(assignment => assignment.squadId === squad.id && assignment.status === 'active')
+      ownerId: workspaceRegistry.squadOwnerId(req.workspace!, squad.id),
+      assignment: assignments.find(
+        assignment => assignment.squadId === squad.id && assignment.status === 'active'
+      )
     }));
 
   const squadRuns = workspaceRegistry
@@ -199,7 +202,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', (req: Request, r
     },
     squad: {
       ...selectedSquad,
-      ownerId: workspaceRegistry.squadOwnerId(workspaceId, selectedSquad.id),
+      ownerId: workspaceRegistry.squadOwnerId(req.workspace!, selectedSquad.id),
       projectIds: Array.from(projectSquadIds),
       memberCount: selectedSquad.memberAgentIds.length
     },
@@ -235,4 +238,4 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', (req: Request, r
     artifacts,
     lastUpdated: selectedRun?.updatedAt ?? project.createdAt
   });
-});
+}));
