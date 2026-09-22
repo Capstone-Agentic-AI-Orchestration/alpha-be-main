@@ -23,7 +23,6 @@ export interface WorkspaceSummary {
   status: 'active' | 'archived';
   role: WorkspaceRole;
   memberCount: number;
-  joinCode?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -193,15 +192,6 @@ export function slugify(value: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
   return slug || `workspace-${Date.now()}`;
-}
-
-/**
- * An invite code: the slug, for a person reading it, and 72 random bits, for
- * nobody guessing it. Joining accepts nothing else, so this is the whole of
- * what stands between an account and a workspace it was not invited to.
- */
-export function newJoinCode(slug: string): string {
-  return `${slug}-${randomBytes(9).toString('base64url')}`;
 }
 
 export const iso = (value: Date | string): string => new Date(value).toISOString();

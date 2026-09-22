@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import {
   iso,
   knownRole,
-  newJoinCode,
   slugify,
   WorkspaceRequestError,
   type WorkspaceAccess,
@@ -41,7 +40,6 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
         name TEXT NOT NULL,
         slug TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL DEFAULT 'active',
-        join_code TEXT NOT NULL UNIQUE,
         created_by TEXT NOT NULL,
         settings_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
@@ -112,11 +110,12 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       "ALTER TABLE workspaces ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'",
       "ALTER TABLE workspaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
       "ALTER TABLE workspaces ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'",
-      // SQLite refuses ADD COLUMN with UNIQUE, so join_code lands nullable and a
-      // partial index supplies the uniqueness, skipping rows that predate it.
-      'ALTER TABLE workspaces ADD COLUMN join_code TEXT',
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_join_code ON workspaces(join_code) WHERE join_code IS NOT NULL',
-      "ALTER TABLE workspace_squad_projects ADD COLUMN relationship TEXT NOT NULL DEFAULT 'assigned'"
+      "ALTER TABLE workspace_squad_projects ADD COLUMN relationship TEXT NOT NULL DEFAULT 'assigned'",
+      // Joining by code is gone, so the column it read goes too. The index
+      // first: SQLite refuses to drop a column an index still names. A desktop
+      // that never had either simply fails both, which this loop ignores.
+      'DROP INDEX IF EXISTS idx_workspaces_join_code',
+      'ALTER TABLE workspaces DROP COLUMN join_code'
     ]) {
       try {
         this.db.exec(statement);
@@ -128,10 +127,10 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     const now = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO workspaces (id, name, slug, status, join_code, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, 'active', ?, ?, ?, ?)`
+        `INSERT OR IGNORE INTO workspaces (id, name, slug, status, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?, ?)`
       )
-      .run(this.defaultWorkspaceId, 'Alpha Workspace', 'alpha-workspace', 'alpha-default', 'system', now, now);
+      .run(this.defaultWorkspaceId, 'Alpha Workspace', 'alpha-workspace', 'system', now, now);
   }
 
   private summary(row: any, role: WorkspaceRole): WorkspaceSummary {
@@ -151,7 +150,6 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       role,
       memberCount,
       // The invite code is an admin's to hand out, and nobody else's to read.
-      ...(role === 'admin' ? { joinCode: row.join_code } : {}),
       createdAt: iso(row.created_at),
       updatedAt: iso(row.updated_at)
     };
@@ -276,10 +274,10 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO workspaces (id, name, slug, status, join_code, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, 'active', ?, ?, ?, ?)`
+          `INSERT INTO workspaces (id, name, slug, status, created_by, created_at, updated_at)
+           VALUES (?, ?, ?, 'active', ?, ?, ?)`
         )
-        .run(id, name, slug, newJoinCode(slug), userId, now, now);
+        .run(id, name, slug, userId, now, now);
 
       this.db
         .prepare(
