@@ -1,6 +1,9 @@
 import { IS_CLOUD } from '../config/env.js';
 import { database } from './database.js';
 import { PostgresAgentStore, PostgresSquadStore } from './postgresAgentStore.js';
+import { PostgresRunStore } from './postgresRunStore.js';
+import { SqliteRunStore } from './sqliteRunStore.js';
+import type { RunStore } from './runStore.js';
 import { SqliteAgentStore, SqliteSquadStore } from './sqliteAgentStore.js';
 import type { AgentStore, SquadStore } from './agentStore.js';
 import { PostgresIssueStore } from './postgresIssueStore.js';
@@ -58,4 +61,16 @@ export function squadStore(): SquadStore {
 export function useAgentStores(agent: AgentStore | null, squad: SquadStore | null): void {
   agents = agent;
   squads = squad;
+}
+
+let runs: RunStore | null = null;
+
+export function runStore(): RunStore {
+  runs ??= IS_CLOUD ? new PostgresRunStore(database()) : new SqliteRunStore();
+  return runs;
+}
+
+/** For tests, which supply their own store rather than a mode's. */
+export function useRunStore(store: RunStore | null): void {
+  runs = store;
 }

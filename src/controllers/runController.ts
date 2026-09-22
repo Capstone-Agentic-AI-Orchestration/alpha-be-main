@@ -1,8 +1,9 @@
 import { Request, Response, Router } from 'express';
 import { runnerService } from '../services/runnerService.js';
 import { squadRunner, SquadRunError } from '../services/squadRunner.js';
-import { sqliteService } from '../services/sqliteService.js';
-import { issueStore, projectStore } from '../store/stores.js';
+import { route } from './asyncRoute.js';
+import { agentStore, issueStore, projectStore, runStore } from '../store/stores.js';
+import { analyticsFrom } from '../services/runAnalytics.js';
 import { githubService } from '../services/githubService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -16,9 +17,9 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 
 export const runRouter = Router();
 
-function scopedRun(req: Request, res: Response, runId: string) {
+async function scopedRun(req: Request, res: Response, runId: string) {
   if (!requireEntityWorkspace(req, res, 'prototype_runs', runId)) return null;
-  const run = sqliteService.getPrototypeRuns().find(item => item.id === runId);
+  const run = await runStore().get(req.workspace!.workspaceId, runId);
   if (!run) {
     res.status(404).json({ error: 'Run not found' });
     return null;
@@ -27,9 +28,9 @@ function scopedRun(req: Request, res: Response, runId: string) {
   return run;
 }
 
-function scopedSquadRun(req: Request, res: Response, runId: string) {
+async function scopedSquadRun(req: Request, res: Response, runId: string) {
   if (!requireEntityWorkspace(req, res, 'squad_runs', runId)) return null;
-  const squadRun = sqliteService.getSquadRun(runId);
+  const squadRun = await runStore().getSquadRun(req.workspace!.workspaceId, runId);
   if (!squadRun) {
     res.status(404).json({ error: 'Squad run not found' });
     return null;
@@ -46,23 +47,21 @@ function scopedSquadRun(req: Request, res: Response, runId: string) {
   return squadRun;
 }
 
-runRouter.get('/runs', (req: Request, res: Response) => {
+runRouter.get('/runs', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'deployment.read')) return;
-  const runs = workspaceRegistry
-    .scope('prototype_runs', sqliteService.getPrototypeRuns(), req.workspace!.workspaceId)
+  const runs = (await runStore().list(req.workspace!.workspaceId))
     .filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId));
   res.json(runs);
-});
+}));
 
-runRouter.get('/analytics', (req: Request, res: Response) => {
+runRouter.get('/analytics', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'analytics.read')) return;
   // Financial and token telemetry are intentionally not part of the product
   // contract. Persisted runner data may still contain it for migration, but
   // this endpoint exposes only workspace-scoped operational signals.
-  const scopedRuns = workspaceRegistry
-    .scope('prototype_runs', sqliteService.getPrototypeRuns(), req.workspace!.workspaceId)
-    .filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId));
-  const all = sqliteService.getAnalytics() as any;
+  const allRuns = await runStore().list(req.workspace!.workspaceId);
+  const scopedRuns = allRuns.filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId));
+  const all = analyticsFrom(allRuns, await agentStore().list(req.workspace!.workspaceId)) as any;
   const judged = scopedRuns.filter(run => ['completed', 'failed', 'cancelled', 'changes_requested'].includes(run.status));
   const completed = judged.filter(run => run.status === 'completed').length;
   const durations = scopedRuns
@@ -84,7 +83,6 @@ runRouter.get('/analytics', (req: Request, res: Response) => {
     if (run.status === 'completed') buckets[index].completed += 1;
     if (run.status === 'failed') buckets[index].failed += 1;
   }
-  const allRuns = sqliteService.getPrototypeRuns();
   const fullWorkspace = scopedRuns.length === allRuns.length;
   res.json({
     totalRuns24h: scopedRuns.length,
@@ -99,7 +97,7 @@ runRouter.get('/analytics', (req: Request, res: Response) => {
       ? (all.modelBreakdown || []).map((item: any) => ({ modelName: item.modelName, percentage: item.percentage, totalCalls: item.totalCalls }))
       : []
   });
-});
+}));
 
 runRouter.post('/runs/start', async (req: Request, res: Response) => {
   try {
@@ -129,7 +127,7 @@ runRouter.post('/runs/start', async (req: Request, res: Response) => {
 runRouter.post('/runs/:id/cancel', async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
-    const run = scopedRun(req, res, req.params.id);
+    const run = await scopedRun(req, res, req.params.id);
     if (!run) return;
     await runnerService.cancelRun(req.params.id);
     res.json({ success: true });
@@ -167,7 +165,7 @@ runRouter.post('/runs/:id/cancel', async (req: Request, res: Response) => {
  */
 runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'deployment.manage')) return;
-  const run = scopedRun(req, res, req.params.id);
+  const run = await scopedRun(req, res, req.params.id);
   if (!run) return;
   const { approved } = req.body ?? {};
   if (typeof approved !== 'boolean') {
@@ -184,7 +182,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
 
   if (!approved) {
     const rejected = { ...run, status: 'changes_requested' as any, updatedAt: now };
-    sqliteService.savePrototypeRun(rejected);
+    await runStore().save(req.workspace!.workspaceId, rejected, req.workspace!.userId);
     await issueStore().addComment(req.workspace!.workspaceId, {
       id: `comm-${run.id}-rejected`,
       issueId: run.issueId,
@@ -222,7 +220,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
       logInfo(`Merged ${run.prUrl} for run ${run.id}`);
       mergeNote = `Merged ${run.prUrl}.${result ? ` ${result}` : ''}`;
       // A person did this, not an agent — the trail should say so.
-      sqliteService.recordRemoteAction({
+      await runStore().recordRemoteAction(req.workspace!.workspaceId, {
         runId: run.id,
         agentId: run.agentId,
         issueId: run.issueId,
@@ -243,7 +241,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
        */
       const detail = String(err?.stderr || err?.message || err).trim();
       logError(`Merge failed for run ${run.id}:`, detail);
-      sqliteService.recordRemoteAction({
+      await runStore().recordRemoteAction(req.workspace!.workspaceId, {
         runId: run.id,
         agentId: run.agentId,
         issueId: run.issueId,
@@ -274,7 +272,7 @@ The run is still at the review gate.`,
   }
 
   const updated = { ...run, status: 'completed' as const, updatedAt: now };
-  sqliteService.savePrototypeRun(updated);
+  await runStore().save(req.workspace!.workspaceId, updated, req.workspace!.userId);
 
   // Written to the comments table, not appended to an array in the browser.
   await issueStore().addComment(req.workspace!.workspaceId, {
@@ -297,16 +295,16 @@ The run is still at the review gate.`,
  * overwritten by the next stage and says nothing about who acted. Alpha's own
  * pushes and the agent's arrive here side by side, distinguished by `actor`.
  */
-runRouter.get('/runs/:id/remote-actions', (req: Request, res: Response) => {
+runRouter.get('/runs/:id/remote-actions', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'deployment.read')) return;
-  if (!scopedRun(req, res, req.params.id)) return;
-  res.json(sqliteService.getRemoteActions(req.params.id));
-});
+  if (!(await scopedRun(req, res, req.params.id))) return;
+  res.json(await runStore().listRemoteActions(req.workspace!.workspaceId, req.params.id));
+}));
 
 runRouter.post('/runs/:id/retry', async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
-    const existing = scopedRun(req, res, req.params.id);
+    const existing = await scopedRun(req, res, req.params.id);
     if (!existing) return;
 
     const newRun = await runnerService.startRun({
@@ -328,22 +326,21 @@ runRouter.post('/runs/:id/retry', async (req: Request, res: Response) => {
  * The frontend's "run squad" button never called anything — it incremented a
  * counter and set a 4.5 second timer. This is what it calls now.
  */
-runRouter.get('/squad-runs', (req: Request, res: Response) => {
+runRouter.get('/squad-runs', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
-  const runs = workspaceRegistry
-    .scope('squad_runs', sqliteService.getSquadRuns(), req.workspace!.workspaceId)
+  const runs = (await runStore().listSquadRuns(req.workspace!.workspaceId))
     .filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId))
     .filter(run => workspaceRegistry.canAccessSquad(req.workspace!, run.squadId))
     .filter(run => workspaceRegistry.squadAssignedToProject(req.workspace!, run.squadId, run.projectId));
   res.json(runs);
-});
+}));
 
-runRouter.get('/squad-runs/:id', (req: Request, res: Response) => {
+runRouter.get('/squad-runs/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
-  const squadRun = scopedSquadRun(req, res, req.params.id);
+  const squadRun = await scopedSquadRun(req, res, req.params.id);
   if (!squadRun) return;
-  res.json({ ...squadRun, runs: sqliteService.getRunsForSquadRun(squadRun.id) });
-});
+  res.json({ ...squadRun, runs: await runStore().runsForSquadRun(req.workspace!.workspaceId, squadRun.id) });
+}));
 
 runRouter.post('/squads/:id/run', async (req: Request, res: Response) => {
   try {
@@ -366,7 +363,7 @@ runRouter.post('/squads/:id/run', async (req: Request, res: Response) => {
       mission
     });
     workspaceRegistry.bind('squad_runs', squadRun.id, req.workspace!.workspaceId);
-    for (const run of sqliteService.getRunsForSquadRun(squadRun.id)) {
+    for (const run of await runStore().runsForSquadRun(req.workspace!.workspaceId, squadRun.id)) {
       workspaceRegistry.bind('prototype_runs', run.id, req.workspace!.workspaceId);
     }
     res.status(201).json(squadRun);
