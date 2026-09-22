@@ -21,6 +21,7 @@ import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
 import { workspaceRegistry, WorkspaceRole } from './workspaceRegistry.js';
 import { RUNS_DIR } from '../config/env.js';
+import { saveChatMessageAndShare, createThreadAndShare } from './chatWriteThrough.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -223,7 +224,7 @@ export class ChatService extends EventEmitter {
 
     let thread = sqliteService.getChatThreads().find(t => t.id === threadId);
     if (!thread) {
-      thread = sqliteService.createChatThread({
+      thread = createThreadAndShare({
         id: threadId,
         title: content.slice(0, 40) || 'New Conversation',
         lastMessageSnippet: content.slice(0, 100),
@@ -248,7 +249,7 @@ export class ChatService extends EventEmitter {
       content,
       timestamp: now
     };
-    sqliteService.saveChatMessage(userMessage);
+    saveChatMessageAndShare(userMessage);
 
     /**
      * 2. Resolve who is being addressed — and only from THIS message.
@@ -277,7 +278,7 @@ export class ChatService extends EventEmitter {
 
     if (!addressed.length) {
       const reply = await this.generateDefaultReply(content, threadId);
-      sqliteService.saveChatMessage(reply);
+      saveChatMessageAndShare(reply);
       this.emit('chat_message', reply);
       return { userMessage, agentMessage: reply, agentMessages: [reply] };
     }
@@ -324,7 +325,7 @@ export class ChatService extends EventEmitter {
         timestamp: new Date().toISOString()
       };
 
-      sqliteService.saveChatMessage(message);
+      saveChatMessageAndShare(message);
       this.emit('chat_message', message);
       agentMessages.push(message);
     }

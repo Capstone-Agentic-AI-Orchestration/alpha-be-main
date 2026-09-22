@@ -70,6 +70,10 @@ async function startApi() {
       unshareAgent: async (id: string) => void shared.push(`delete agent ${id}`),
       shareSquad: async (squad: any, ownerId?: string) => void shared.push(`squad ${squad.id}${ownerId ? ` owned by ${ownerId}` : ''}`),
       unshareSquad: async (id: string) => void shared.push(`delete squad ${id}`),
+      shareThread: async (thread: any) => void shared.push(`thread ${thread.id}`),
+      shareMessage: async (message: any) => void shared.push(`message ${message.id}`),
+      unshareThread: async (id: string) => void shared.push(`delete thread ${id}`),
+      unshareMessages: async (id: string) => void shared.push(`clear thread ${id}`),
       saveRunToCloud: async () => {},
       updateIssueInCloud: async () => {},
       broadcastRunEvent: async () => {}
@@ -93,12 +97,14 @@ async function startApi() {
   });
 
   const { dataRouter } = await import('./dataController.js');
+  const { chatRouter } = await import('./chatController.js');
   const { workspaceContext } = await import('./workspaceContext.js');
   const { jsonErrorHandler } = await import('./errorHandler.js');
   const app = express();
   app.use(express.json());
   app.use('/api', workspaceContext);
   app.use('/api', dataRouter);
+  app.use('/api', chatRouter);
   app.use(jsonErrorHandler);
   return { svc: sql.sqliteService as any, app };
 }
@@ -225,6 +231,43 @@ describe('the roster on a team’s desktop', () => {
     await call(app, 'POST', '/api/squads', { id: 'squad-mine', name: 'Mine', topology: 'Sequential', memberAgentIds: [] });
 
     expect(shared).toContain('squad squad-mine owned by Dev1');
+  });
+});
+
+describe('a conversation on a team’s desktop', () => {
+  /**
+   * A developer's conversations lived in one file on one machine: reinstall
+   * the app and they were gone. They are theirs rather than the team's, so
+   * they go up under their own login and nobody else can read them back.
+   */
+  it('is published, and so is what is said in it', async () => {
+    const { app } = await startApi();
+
+    const thread = (await call(app, 'POST', '/api/chat/threads', { id: 'thread-1', title: 'About the cart' })).body;
+    await call(app, 'PUT', `/api/chat/threads/${thread.id}/target`, { targetAgentId: 'agent-architect' });
+
+    expect(shared).toEqual(['thread thread-1', 'thread thread-1']);
+  });
+
+  it('stops being published when it is deleted or emptied', async () => {
+    const { app } = await startApi();
+    await call(app, 'POST', '/api/chat/threads', { id: 'thread-1', title: 'About the cart' });
+    shared = [];
+
+    await call(app, 'DELETE', '/api/chat/threads/thread-1/messages');
+    await call(app, 'DELETE', '/api/chat/threads/thread-1');
+
+    expect(shared).toEqual(['clear thread thread-1', 'delete thread thread-1']);
+  });
+
+  /** Reading is this person's own history; answering is still the machine's. */
+  it('is listed back from the store, not from the file', async () => {
+    const { app } = await startApi();
+    await call(app, 'POST', '/api/chat/threads', { id: 'thread-1', title: 'About the cart' });
+
+    const threads = (await call(app, 'GET', '/api/chat/threads')).body;
+
+    expect(threads.map((t: any) => t.id)).toEqual(['thread-1']);
   });
 });
 

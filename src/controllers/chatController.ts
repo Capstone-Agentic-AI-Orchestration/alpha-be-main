@@ -1,13 +1,18 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { agentStore, projectStore, squadStore } from '../store/stores.js';
+import { agentStore, chatStore, projectStore, squadStore } from '../store/stores.js';
 import { chatService } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import {
+  clearMessagesAndShare,
+  createThreadAndShare,
+  deleteThreadAndShare,
+  shareThread
+} from '../services/chatWriteThrough.js';
 import { desktopOnly } from './desktopOnly.js';
-import { IS_CLOUD } from '../config/env.js';
 
 export const chatRouter = Router();
 
@@ -25,23 +30,22 @@ export const chatRouter = Router();
  * `0002_row_level_security.sql`, because the desktop reaches that database
  * without passing through this route.
  */
-chatRouter.get('/chat/threads', (req: Request, res: Response) => {
+chatRouter.get('/chat/threads', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   /**
-   * None in the cloud. A conversation is with an agent, which runs in the
-   * desktop app, and its messages stay on that machine until the desktop
-   * publishes them owner-only to Postgres itself. An empty list rather than a
-   * refusal, because the web app loads this with everything else at startup.
+   * The same conversations on the web as on the desktop that had them: the
+   * desktop publishes each one under its owner's login, and the cloud reads
+   * back only that login's. Answering agents is still the desktop's, but
+   * reading what was said is not.
    */
-  if (IS_CLOUD) return res.json([]);
   res.json(
     workspaceRegistry.scope(
       'chat_threads',
-      sqliteService.getChatThreads(req.workspace!.userId),
+      await chatStore().listThreads(req.workspace!.workspaceId, req.workspace!.userId),
       req.workspace!.workspaceId
     )
   );
-});
+}));
 
 /**
  * Create a conversation, idempotently on the id the client chose.
@@ -67,7 +71,9 @@ chatRouter.post('/chat/threads', desktopOnly, (req: Request, res: Response) => {
   const id = typeof req.body?.id === 'string' ? req.body.id : undefined;
 
   const existing = id
-    ? workspaceRegistry.scope('chat_threads', sqliteService.getChatThreads(req.workspace!.userId), req.workspace!.workspaceId).find(t => t.id === id)
+    ? workspaceRegistry
+        .scope('chat_threads', sqliteService.getChatThreads(req.workspace!.userId), req.workspace!.workspaceId)
+        .find(t => t.id === id)
     : undefined;
   if (existing) return res.status(200).json(existing);
 
@@ -85,7 +91,7 @@ chatRouter.post('/chat/threads', desktopOnly, (req: Request, res: Response) => {
    * attributed to someone else, or read one by claiming to own it. The
    * middleware already decided who this is.
    */
-  const thread = sqliteService.createChatThread({
+  const thread = createThreadAndShare({
     ...req.body,
     ownerId: req.workspace!.userId
   });
@@ -113,6 +119,7 @@ chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res:
 
   const updated = sqliteService.setChatThreadProject(req.params.id, projectId);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
+  shareThread(updated);
 
   /**
    * Say which directory that actually resolved to.
@@ -170,14 +177,25 @@ chatRouter.put('/chat/threads/:id/target', desktopOnly, route(async (req: Reques
 
   const updated = sqliteService.setChatThreadTarget(req.params.id, targetAgentId, targetSquadId);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
+  shareThread(updated);
   return res.json(updated);
 }));
 
-chatRouter.get('/chat/threads/:id/messages', desktopOnly, (req: Request, res: Response) => {
+/**
+ * One conversation's messages, to whoever is having it.
+ *
+ * The workspace check alone was not enough: a thread id is minted by the
+ * client, and any member who had one could read a colleague's prompts. The
+ * store answers null for a thread that is not this caller's, which reads the
+ * same as a thread that does not exist -- which is all they should learn.
+ */
+chatRouter.get('/chat/threads/:id/messages', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
-  res.json(sqliteService.getChatMessages(req.params.id));
-});
+  const messages = await chatStore().messages(req.workspace!.workspaceId, req.params.id, req.workspace!.userId);
+  if (!messages) return res.status(404).json({ error: 'Thread not found' });
+  res.json(messages);
+}));
 
 /**
  * Delete a conversation, or empty one.
@@ -190,7 +208,7 @@ chatRouter.get('/chat/threads/:id/messages', desktopOnly, (req: Request, res: Re
 chatRouter.delete('/chat/threads/:id', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
-  const deleted = sqliteService.deleteChatThread(req.params.id);
+  const deleted = deleteThreadAndShare(req.params.id);
   if (deleted) await workspaceRegistry.unbind('chat_threads', req.params.id);
   if (!deleted) return res.status(404).json({ error: 'Thread not found' });
   res.json({ success: true });
@@ -199,7 +217,7 @@ chatRouter.delete('/chat/threads/:id', desktopOnly, route(async (req: Request, r
 chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
-  const removed = sqliteService.clearChatMessages(req.params.id);
+  const removed = clearMessagesAndShare(req.params.id);
   if (removed < 0) return res.status(404).json({ error: 'Thread not found' });
   res.json({ success: true, removed });
 });

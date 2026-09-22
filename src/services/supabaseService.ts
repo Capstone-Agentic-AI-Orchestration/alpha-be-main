@@ -3,9 +3,10 @@ import { promisify } from 'node:util';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API, IS_CLOUD } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, Issue, IssueComment, Agent, Squad } from '../models/index.js';
+import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread } from '../models/index.js';
 import { commentRow, issueRow } from '../store/postgresIssueStore.js';
 import { agentRow, squadRow } from '../store/postgresAgentStore.js';
+import { messageRow, threadRow } from '../store/postgresChatStore.js';
 import { supabaseBoardSource, type SharedBoardSource } from './sharedBoard.js';
 import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
@@ -238,6 +239,56 @@ export class SupabaseService {
       if (error) throw error;
     } catch (err: any) {
       this.reportFailure(`remove squad ${squadId}`, err);
+    }
+  }
+
+  /**
+   * Keep this person's own copy of a conversation.
+   *
+   * Theirs, not the team's: the policies scope `chat_threads` and
+   * `chat_messages` to the owner, with no project-manager bypass. What
+   * oversight sees is the work -- runs, stages, patches -- not the prompts.
+   */
+  async shareThread(thread: ChatThread): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    const login = knownIdentity()?.login;
+    if (!login) return;
+    try {
+      const { error } = await this.client.from('chat_threads').upsert(threadRow(currentWorkspaceId(), login, thread));
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`share conversation ${thread.id}`, err);
+    }
+  }
+
+  async shareMessage(message: ChatMessage): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('chat_messages').upsert(messageRow(message));
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`share message in ${message.threadId}`, err);
+    }
+  }
+
+  /** Its messages go with it, by the schema's `on delete cascade`. */
+  async unshareThread(threadId: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('chat_threads').delete().eq('id', threadId);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`remove conversation ${threadId}`, err);
+    }
+  }
+
+  async unshareMessages(threadId: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('chat_messages').delete().eq('thread_id', threadId);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`clear conversation ${threadId}`, err);
     }
   }
 

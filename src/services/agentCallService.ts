@@ -20,6 +20,7 @@ import { resolveAgentLogged } from './personaService.js';
 import { runCliTurn } from './cliRunner.js';
 import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
+import { saveChatMessageAndShare } from './chatWriteThrough.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH_BYTES = 2_000_000;
@@ -241,7 +242,7 @@ export class AgentCallService extends EventEmitter {
       revisionTarget: call.revisionTarget,
       timestamp: new Date().toISOString()
     };
-    sqliteService.saveChatMessage(message);
+    saveChatMessageAndShare(message);
     this.emit('agent_call.patch_applied', { call, message });
     return { call: sqliteService.getAgentCall(id)!, message };
   }
@@ -324,7 +325,7 @@ export class AgentCallService extends EventEmitter {
         toolsExecuted: [],
         timestamp: new Date().toISOString()
       };
-      sqliteService.saveChatMessage(resultMessage);
+      saveChatMessageAndShare(resultMessage);
       const completed = sqliteService.updateAgentCall(id, {
         status: 'completed',
         resultMessageId: resultMessage.id,
@@ -350,7 +351,7 @@ export class AgentCallService extends EventEmitter {
         revisionTarget: current.revisionTarget,
         timestamp: new Date().toISOString()
       };
-      sqliteService.saveChatMessage(failureMessage);
+      saveChatMessageAndShare(failureMessage);
       const failed = sqliteService.updateAgentCall(id, {
         status: 'failed',
         resultMessageId: failureMessage.id,

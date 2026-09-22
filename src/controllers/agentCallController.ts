@@ -13,6 +13,7 @@ import { agentStore, projectStore, squadStore } from '../store/stores.js';
 import { route } from './asyncRoute.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
+import { saveChatMessageAndShare } from '../services/chatWriteThrough.js';
 
 const execFileAsync = promisify(execFile);
 const MODES = new Set<AgentCallMode>(['ask', 'review', 'revise', 'implement']);
@@ -263,7 +264,7 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
       revisionTarget: target,
       timestamp: now
     };
-    sqliteService.saveChatMessage(userMessage);
+    saveChatMessageAndShare(userMessage);
     savedUserMessageId = userMessage.id;
 
     const call = await agentCallService.create({
@@ -386,7 +387,7 @@ agentCallRouter.post('/agent-calls/:id/follow-up', desktopOnly, async (req: Requ
       revisionTarget: previous.revisionTarget,
       timestamp: new Date().toISOString()
     };
-    sqliteService.saveChatMessage(message);
+    saveChatMessageAndShare(message);
     savedFollowUpMessageId = message.id;
     const updated = await agentCallService.followUp(previous.id, instruction, message.id);
     res.status(201).json({ call: updated, userMessage: message, agentMessage: responseForCall(updated) });

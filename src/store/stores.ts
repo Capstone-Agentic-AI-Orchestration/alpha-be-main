@@ -10,6 +10,9 @@ import { PostgresIssueStore } from './postgresIssueStore.js';
 import { PostgresProjectStore } from './postgresProjectStore.js';
 import { SqliteIssueStore } from './sqliteIssueStore.js';
 import { SqliteProjectStore } from './sqliteProjectStore.js';
+import { PostgresChatStore } from './postgresChatStore.js';
+import { SqliteChatStore } from './sqliteChatStore.js';
+import type { ChatStore } from './chatStore.js';
 import type { IssueStore } from './issueStore.js';
 import type { ProjectStore } from './projectStore.js';
 
@@ -30,6 +33,18 @@ export function projectStore(): ProjectStore {
 /** For tests, which supply their own store rather than a mode's. */
 export function useProjectStore(store: ProjectStore | null): void {
   projects = store;
+}
+
+let chats: ChatStore | null = null;
+
+export function chatStore(): ChatStore {
+  chats ??= IS_CLOUD ? new PostgresChatStore(database()) : new SqliteChatStore();
+  return chats;
+}
+
+/** For tests, which supply their own store rather than a mode's. */
+export function useChatStore(store: ChatStore | null): void {
+  chats = store;
 }
 
 let issues: IssueStore | null = null;
