@@ -6,9 +6,10 @@ import {
   GitHubIssue,
   isPullRequest,
   mapIssue,
-  parseRepoRef,
+  repoForProject,
   MappedIssue
 } from './githubIssueMapping.js';
+import { importOrgRepositories, issueIdFor } from './githubRepoDiscovery.js';
 
 /**
  * Pull the shared board down from GitHub.
@@ -35,6 +36,8 @@ import {
  */
 
 export interface SyncReport {
+  /** Projects made for organisation repositories seen for the first time. */
+  projectsImported: number;
   /** Projects that had a GitHub repository to read. */
   projects: number;
   created: number;
@@ -49,15 +52,7 @@ export interface SyncReport {
   errors: Array<{ project: string; detail: string }>;
 }
 
-/** The repository a project's issues live in, if it has one. */
-export function repoForProject(project: Project): string | null {
-  for (const resource of project.resources ?? []) {
-    if (resource.type !== 'github_repo') continue;
-    const ref = parseRepoRef(resource.pathOrUrl);
-    if (ref) return `${ref.owner}/${ref.repo}`;
-  }
-  return null;
-}
+export { repoForProject };
 
 /**
  * Every issue in a repository, pull requests excluded.
@@ -230,6 +225,8 @@ async function syncProject(project: Project, report: SyncReport, workspaceId: st
 
     if (!match) {
       await issueStore().create(workspaceId, {
+        // GitHub's id, so every copy of the board names this card the same way.
+        id: raw.id ? issueIdFor(raw.id) : undefined,
         projectId: project.id,
         identifier: identifierFor(project, mapped),
         title: mapped.title,
@@ -284,6 +281,7 @@ async function syncProject(project: Project, report: SyncReport, workspaceId: st
  */
 export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncReport> {
   const report: SyncReport = {
+    projectsImported: 0,
     projects: 0,
     created: 0,
     updated: 0,
@@ -293,6 +291,10 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
     skipped: [],
     errors: []
   };
+
+  // Repositories first, so a repository new since the last sync has its
+  // issues read in this one rather than the next.
+  await importOrgRepositories(workspaceId, report);
 
   for (const project of await projectStore().list(workspaceId)) {
     await syncProject(project, report, workspaceId);
@@ -318,7 +320,7 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
   }
 
   logInfo(
-    `Board sync: ${report.created} created, ${report.updated} updated, ` +
+    `Board sync: ${report.projectsImported} project(s) imported, ${report.created} created, ${report.updated} updated, ` +
       `${report.unchanged} unchanged across ${report.projects} project(s); ` +
       `comments ${report.commentsPulled} in / ${report.commentsPushed} out` +
       (report.errors.length ? `, ${report.errors.length} failed` : '')

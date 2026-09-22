@@ -1,4 +1,4 @@
-import { IssueStatus, IssuePriority } from '../models/index.js';
+import { IssueStatus, IssuePriority, Project } from '../models/index.js';
 
 /**
  * Translating between an Alpha issue and a GitHub issue.
@@ -96,8 +96,20 @@ export function parseRepoRef(input: string | undefined | null): RepoRef | null {
   return null;
 }
 
-/** A GitHub issue, in the shape `gh api` returns. */
+/** The repository a project's issues live in, if it has one. */
+export function repoForProject(project: Project): string | null {
+  for (const resource of project.resources ?? []) {
+    if (resource.type !== 'github_repo') continue;
+    const ref = parseRepoRef(resource.pathOrUrl);
+    if (ref) return `${ref.owner}/${ref.repo}`;
+  }
+  return null;
+}
+
+/** A GitHub issue, in the shape the REST API returns. */
 export interface GitHubIssue {
+  /** GitHub's own id for the issue: global, and stable for the issue's life. */
+  id?: number;
   number: number;
   title: string;
   body?: string | null;

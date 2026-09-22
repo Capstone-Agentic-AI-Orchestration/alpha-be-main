@@ -158,17 +158,17 @@ dataRouter.post('/database/token/exchange', async (req: Request, res: Response) 
 /**
  * Read the shared board down from GitHub.
  *
- * Explicit rather than automatic: a sync spawns `gh` once per project and
- * rewrites cards, and doing that on a timer nobody asked for would make the
- * board move under someone mid-sentence. The UI calls this on demand.
+ * Explicit rather than automatic: a sync makes GitHub requests for every
+ * project and rewrites cards, and doing that on a timer nobody asked for would
+ * make the board move under someone mid-sentence. The UI calls this on demand.
  */
-dataRouter.post('/board/sync', async (req: Request, res: Response) => {
+dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const report = await syncBoardFromGitHub(req.workspace!.workspaceId);
   // 200 even with per-project errors: a workspace where one repository is
   // unreachable still synced the others, and the report says which failed.
   res.json(report);
-});
+}));
 
 // --- Projects ---
 dataRouter.get('/projects', route(async (req: Request, res: Response) => {
