@@ -1,7 +1,7 @@
 import { Request, Response, Router } from 'express';
 
 import { route } from './asyncRoute.js';
-import { sqliteService } from '../services/sqliteService.js';
+import { agentStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -30,6 +30,31 @@ import { requireProjectWorkspace, requireWorkspaceCapability } from './workspace
  * about membership, and states the role it requires.
  */
 export const workspaceRouter = Router();
+
+/**
+ * The agents and squad a new workspace starts with.
+ *
+ * Through the stores, so a cloud workspace gets its roster in Postgres and a
+ * desktop one in SQLite. Projects and issues stay empty on purpose: those are
+ * the owner's work, not product seed data.
+ */
+export async function seedRoster(workspaceId: string, name: string): Promise<void> {
+  await agentStore().ensureOfficial(workspaceId);
+  const agents = await agentStore().list(workspaceId);
+  await squadStore().create(workspaceId, {
+    id: `squad-${workspaceId}`,
+    name: `${name} Core Squad`,
+    description: 'Official Alpha roles working in sequence.',
+    avatar: '◈',
+    color: '#6366f1',
+    topology: 'Sequential',
+    leaderAgentId: agents.find(agent => agent.role === 'Manager Agent')?.id ?? agents[0]?.id,
+    memberAgentIds: agents.map(agent => agent.id),
+    mission: 'Research, plan, build, review, and validate approved project work.',
+    activeRunsCount: 0,
+    completedRunsCount: 0
+  });
+}
 
 const ROLES: readonly WorkspaceRole[] = ['client', 'dev', 'pm', 'admin'];
 const STATUSES: readonly WorkspaceMemberStatus[] = ['invited', 'active', 'suspended', 'removed'];
@@ -83,9 +108,7 @@ workspaceRouter.post(
       name,
       slug: typeof req.body?.slug === 'string' ? req.body.slug : undefined
     });
-    // The agents and squad a new workspace starts with; the row itself is the
-    // directory's.
-    sqliteService.seedWorkspace(workspace.id, workspace.name);
+    await seedRoster(workspace.id, workspace.name);
     res.status(201).json(workspace);
   })
 );

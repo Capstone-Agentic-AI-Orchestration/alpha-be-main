@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { projectStore } from '../store/stores.js';
+import { agentStore, projectStore, squadStore } from '../store/stores.js';
 import { chatService } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
@@ -136,7 +136,7 @@ chatRouter.put('/chat/threads/:id', route(async (req: Request, res: Response) =>
  * that field is the participant history and must not make an old participant
  * answer every future message.
  */
-chatRouter.put('/chat/threads/:id/target', (req: Request, res: Response) => {
+chatRouter.put('/chat/threads/:id/target', route(async (req: Request, res: Response) => {
   const { targetAgentId = null, targetSquadId = null } = req.body ?? {};
 
   if (
@@ -151,18 +151,18 @@ chatRouter.put('/chat/threads/:id/target', (req: Request, res: Response) => {
   }
 
   if (targetAgentId) {
-    const agent = sqliteService.getAgents().find(a => a.id === targetAgentId && !a.isArchived);
-    if (!agent) return res.status(404).json({ error: 'Agent not found or archived' });
+    const agent = await agentStore().get(req.workspace!.workspaceId, targetAgentId);
+    if (!agent || agent.isArchived) return res.status(404).json({ error: 'Agent not found or archived' });
   }
 
-  if (targetSquadId && !sqliteService.getSquads().some(squad => squad.id === targetSquadId)) {
+  if (targetSquadId && !(await squadStore().get(req.workspace!.workspaceId, targetSquadId))) {
     return res.status(404).json({ error: 'Squad not found' });
   }
 
   const updated = sqliteService.setChatThreadTarget(req.params.id, targetAgentId, targetSquadId);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
   return res.json(updated);
-});
+}));
 
 chatRouter.get('/chat/threads/:id/messages', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;

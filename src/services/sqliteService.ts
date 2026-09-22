@@ -897,7 +897,8 @@ export class SQLiteService {
    * old full-stack Developer intentionally remains a legacy custom agent while
    * Backend and Frontend are seeded as separate official roles.
    */
-  private ensureOfficialAgents(workspaceId = this.workspaceId()): void {
+  /** Public for the store adapter, which offers it as `ensureOfficial`. */
+  ensureOfficialAgents(workspaceId = this.workspaceId()): void {
     const linkLegacy = this.db.transaction(() => {
       const stmt = this.db.prepare(`
         UPDATE agents

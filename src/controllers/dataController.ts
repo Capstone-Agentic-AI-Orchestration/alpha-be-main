@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { issueStore, projectStore } from '../store/stores.js';
+import { agentStore, issueStore, projectStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -288,25 +288,25 @@ function withFileOverlay(agent: Agent, runtimes = sqliteService.getRuntimes()) {
   return { ...merged, readiness: agentReadiness(merged, runtimes) };
 }
 
-dataRouter.get('/agents', (req: Request, res: Response) => {
+dataRouter.get('/agents', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   // Runtimes read once for the whole roster, not once per agent.
   const runtimes = sqliteService.getRuntimes();
-  const agents = workspaceRegistry.scope('agents', sqliteService.getAgents(), req.workspace!.workspaceId);
+  const agents = await agentStore().list(req.workspace!.workspaceId);
   res.json(agents.map(a => withFileOverlay(a, runtimes)));
-});
+}));
 
-dataRouter.post('/agents', (req: Request, res: Response) => {
+dataRouter.post('/agents', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const error = agentValidationError(req.body, { partial: false });
   if (error) return res.status(400).json({ error });
 
-  const agent = sqliteService.createAgent(req.body);
+  const agent = await agentStore().create(req.workspace!.workspaceId, req.body);
   workspaceRegistry.bind('agents', agent.id, req.workspace!.workspaceId);
   res.status(201).json(withFileOverlay(agent));
-});
+}));
 
-dataRouter.put('/agents/:id', (req: Request, res: Response) => {
+dataRouter.put('/agents/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
   // A PUT here carries only the fields being changed, so absent ones are not
@@ -314,17 +314,17 @@ dataRouter.put('/agents/:id', (req: Request, res: Response) => {
   const error = agentValidationError(req.body, { partial: true });
   if (error) return res.status(400).json({ error });
 
-  const updated = sqliteService.updateAgent(req.params.id, req.body);
+  const updated = await agentStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Agent not found' });
   // Merged, like the list: a field the file owns must not appear to have taken
   // the value that was just written to the database.
   res.json(withFileOverlay(updated));
-});
+}));
 
 dataRouter.delete('/agents/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
-  const deleted = sqliteService.deleteAgent(req.params.id);
+  const deleted = await agentStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) await workspaceRegistry.unbind('agents', req.params.id);
   res.json({ success: deleted });
 }));
@@ -368,10 +368,10 @@ function personaPayload(id: string, agent: Agent) {
   };
 }
 
-dataRouter.get('/agents/:id/persona', (req: Request, res: Response) => {
+dataRouter.get('/agents/:id/persona', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
-  const agent = sqliteService.getAgents().find(a => a.id === req.params.id);
+  const agent = await agentStore().get(req.workspace!.workspaceId, req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
   try {
@@ -380,12 +380,12 @@ dataRouter.get('/agents/:id/persona', (req: Request, res: Response) => {
     // agentFilePath throws on an id that would escape the agents directory.
     res.status(400).json({ error: err?.message ?? 'Could not read the persona file' });
   }
-});
+}));
 
-dataRouter.put('/agents/:id/persona', (req: Request, res: Response) => {
+dataRouter.put('/agents/:id/persona', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
-  const agent = sqliteService.getAgents().find(a => a.id === req.params.id);
+  const agent = await agentStore().get(req.workspace!.workspaceId, req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
   const { content } = req.body ?? {};
@@ -407,7 +407,7 @@ dataRouter.put('/agents/:id/persona', (req: Request, res: Response) => {
     logError('Could not save persona file', err?.message ?? String(err));
     res.status(400).json({ error: err?.message ?? 'Could not save the persona file' });
   }
-});
+}));
 
 /**
  * Import an agent from a persona file someone shared.
@@ -421,7 +421,7 @@ dataRouter.put('/agents/:id/persona', (req: Request, res: Response) => {
  * same agent twice produces two agents instead of silently overwriting one —
  * and so an id from elsewhere never becomes a path segment.
  */
-dataRouter.post('/agents/import', (req: Request, res: Response) => {
+dataRouter.post('/agents/import', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const { content } = req.body ?? {};
 
@@ -433,12 +433,12 @@ dataRouter.post('/agents/import', (req: Request, res: Response) => {
   }
 
   try {
-    const existingIds = sqliteService.getAgents().map(a => a.id);
+    const existingIds = (await agentStore().list(req.workspace!.workspaceId)).map(a => a.id);
     const { agent, warnings } = agentFromFileContent(content, existingIds);
 
     // createAgent writes the persona file too, so the body arrives on disk
     // without a second round trip.
-    const created = sqliteService.createAgent(agent);
+    const created = await agentStore().create(req.workspace!.workspaceId, agent);
     workspaceRegistry.bind('agents', created.id, req.workspace!.workspaceId);
 
     logInfo(`Imported agent ${created.id} (${created.name})`);
@@ -447,7 +447,7 @@ dataRouter.post('/agents/import', (req: Request, res: Response) => {
     logError('Agent import failed', err?.message ?? String(err));
     res.status(400).json({ error: err?.message ?? 'Could not import this persona file' });
   }
-});
+}));
 
 /**
  * One turn of the conversational agent builder.
@@ -734,18 +734,18 @@ dataRouter.post('/issues/:id/comments', route(async (req: Request, res: Response
 }));
 
 // --- Squads ---
-dataRouter.get('/squads', (req: Request, res: Response) => {
+dataRouter.get('/squads', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
-  const squads = workspaceRegistry.scopeSquads(sqliteService.getSquads(), req.workspace!);
+  const squads = workspaceRegistry.scopeSquads(await squadStore().list(req.workspace!.workspaceId), req.workspace!);
   res.json(squads.map(squad => ({
     ...squad,
     ownerId: workspaceRegistry.squadOwnerId(req.workspace!, squad.id)
   })));
-});
+}));
 
 dataRouter.post('/squads', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
-  const squad = sqliteService.createSquad(req.body);
+  const squad = await squadStore().create(req.workspace!.workspaceId, req.body);
   workspaceRegistry.bind('squads', squad.id, req.workspace!.workspaceId);
   await workspaceRegistry.bindSquadOwner(req.workspace!.workspaceId, squad.id, req.workspace!.userId);
   res.status(201).json({ ...squad, ownerId: req.workspace!.userId });
@@ -761,25 +761,25 @@ dataRouter.post('/squads', route(async (req: Request, res: Response) => {
  * A PUT carries only the fields being changed, like the agent and project
  * routes above — absent ones are left as they are rather than cleared.
  */
-dataRouter.put('/squads/:id', (req: Request, res: Response) => {
+dataRouter.put('/squads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   if (req.body?.name !== undefined && !String(req.body.name).trim()) {
     return res.status(400).json({ error: 'name cannot be empty' });
   }
 
-  const updated = sqliteService.updateSquad(req.params.id, req.body);
+  const updated = await squadStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Squad not found' });
   res.json({
     ...updated,
     ownerId: workspaceRegistry.squadOwnerId(req.workspace!, updated.id)
   });
-});
+}));
 
 dataRouter.delete('/squads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
-  const deleted = sqliteService.deleteSquad(req.params.id);
+  const deleted = await squadStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) await workspaceRegistry.unbind('squads', req.params.id);
   if (!deleted) return res.status(404).json({ error: 'Squad not found' });
   res.json({ success: true });

@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { issueStore, projectStore } from '../store/stores.js';
+import { agentStore, issueStore, projectStore, squadStore } from '../store/stores.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import {
@@ -105,7 +105,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const issues = await issueStore().list(workspaceId);
   const projectSquadIds = new Set(workspaceRegistry.listProjectSquadIds(req.workspace!, project.id));
   const squads = workspaceRegistry
-    .scopeSquads(sqliteService.getSquads(), req.workspace!)
+    .scopeSquads(await squadStore().list(workspaceId), req.workspace!)
     .filter(squad => projectSquadIds.has(squad.id))
     .map(squad => ({
       ...squad,
@@ -130,7 +130,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       .filter(run => run.projectId === project.id)
       .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))
     : [];
-  const membersById = new Map(sqliteService.getAgents().map(agent => [agent.id, agent]));
+  const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
   const memberRunByAgent = new Map(memberRuns.map(run => [run.agentId, run]));
 
   const agentCards = selectedSquad.memberAgentIds.map((agentId, memberIndex) => {
