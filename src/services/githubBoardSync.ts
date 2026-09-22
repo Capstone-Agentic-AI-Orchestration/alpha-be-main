@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { sqliteService } from './sqliteService.js';
+import { projectStore } from '../store/stores.js';
 import { logInfo, logError } from './../utils/logger.js';
 import { Issue, IssueComment, Project } from '../models/index.js';
 import {
@@ -305,7 +306,7 @@ async function syncProject(project: Project, report: SyncReport): Promise<void> 
  * workspace with a dozen repositories would otherwise open a dozen at once for
  * a job nobody is waiting on.
  */
-export async function syncBoardFromGitHub(): Promise<SyncReport> {
+export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncReport> {
   const report: SyncReport = {
     projects: 0,
     created: 0,
@@ -317,7 +318,7 @@ export async function syncBoardFromGitHub(): Promise<SyncReport> {
     errors: []
   };
 
-  for (const project of sqliteService.getProjects()) {
+  for (const project of await projectStore().list(workspaceId)) {
     await syncProject(project, report);
   }
 

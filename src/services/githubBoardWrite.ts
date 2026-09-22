@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { sqliteService } from './sqliteService.js';
+import { projectStore } from '../store/stores.js';
 import { logInfo, logError } from './../utils/logger.js';
 import { Issue, IssueStatus, IssuePriority } from '../models/index.js';
 import { repoForProject } from './githubBoardSync.js';
@@ -95,8 +95,8 @@ export async function ensureLabels(ownerRepo: string): Promise<void> {
 }
 
 /** The repository an issue's project points at, or null for a local-only card. */
-function repoForIssue(issue: Issue): string | null {
-  const project = sqliteService.getProjects().find(p => p.id === issue.projectId);
+async function repoForIssue(issue: Issue, workspaceId: string): Promise<string | null> {
+  const project = await projectStore().get(workspaceId, issue.projectId);
   return project ? repoForProject(project) : null;
 }
 
@@ -112,8 +112,8 @@ async function ghJson<T>(args: string[]): Promise<T> {
  * project with no repository is not an error — a local-only board is a valid
  * way to use Alpha, and it simply has nothing to push to.
  */
-export async function pushNewIssue(issue: Issue): Promise<Partial<Issue> | null> {
-  const ownerRepo = repoForIssue(issue);
+export async function pushNewIssue(issue: Issue, workspaceId: string): Promise<Partial<Issue> | null> {
+  const ownerRepo = await repoForIssue(issue, workspaceId);
   if (!ownerRepo) return null;
 
   await ensureLabels(ownerRepo);
@@ -188,10 +188,13 @@ export async function pushIssueUpdate(issue: Issue): Promise<void> {
  * failure here must not undo that, but it must be visible — a board showing a
  * state GitHub never accepted is the failure this whole path exists to avoid.
  */
-export async function pushIssue(issue: Issue): Promise<{ pushed: boolean; error?: string; patch?: Partial<Issue> }> {
+export async function pushIssue(
+  issue: Issue,
+  workspaceId: string
+): Promise<{ pushed: boolean; error?: string; patch?: Partial<Issue> }> {
   try {
     if (!issue.githubNumber) {
-      const patch = await pushNewIssue(issue);
+      const patch = await pushNewIssue(issue, workspaceId);
       return patch ? { pushed: true, patch } : { pushed: false };
     }
     await pushIssueUpdate(issue);

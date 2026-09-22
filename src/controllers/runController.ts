@@ -2,6 +2,7 @@ import { Request, Response, Router } from 'express';
 import { runnerService } from '../services/runnerService.js';
 import { squadRunner, SquadRunError } from '../services/squadRunner.js';
 import { sqliteService } from '../services/sqliteService.js';
+import { projectStore } from '../store/stores.js';
 import { githubService } from '../services/githubService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -205,7 +206,7 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
   let mergeNote = 'No pull request was opened, so there was nothing to merge.';
 
   if (run.prUrl) {
-    const project = sqliteService.getProjects().find(p => p.id === run.projectId);
+    const project = await projectStore().get(req.workspace!.workspaceId, run.projectId);
     const workspace = project ? resolveProjectWorkspace(project) : null;
 
     if (!workspace) {

@@ -9,6 +9,8 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { agentCallService } from '../services/agentCallService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
+import { projectStore } from '../store/stores.js';
+import { route } from './asyncRoute.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
 const execFileAsync = promisify(execFile);
@@ -32,9 +34,9 @@ function roleModes(req: Request): AgentCallMode[] {
   return req.workspace?.role === 'pm' ? ['ask', 'review'] : ['ask', 'review', 'revise', 'implement'];
 }
 
-function getProject(req: Request, res: Response, projectId: string) {
+async function getProject(req: Request, res: Response, projectId: string) {
   if (!requireProjectWorkspace(req, res, projectId)) return null;
-  const project = sqliteService.getProjects().find(item => item.id === projectId);
+  const project = await projectStore().get(req.workspace!.workspaceId, projectId);
   if (!project) {
     res.status(404).json({ error: 'Project not found in the active workspace.' });
     return null;
@@ -118,7 +120,7 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', async (req: Re
     return res.status(403).json({ error: 'Clients cannot address internal agents.' });
   }
 
-  const project = getProject(req, res, req.params.projectId);
+  const project = await getProject(req, res, req.params.projectId);
   if (!project) return;
 
   const assignedIds = workspaceRegistry.projectSquadIdsFor(req.workspace!, project.id);
@@ -170,7 +172,7 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
     if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
-    const project = getProject(req, res, req.params.projectId);
+    const project = await getProject(req, res, req.params.projectId);
     if (!project) return;
     if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.threadId)) return;
 
@@ -262,9 +264,9 @@ agentCallRouter.get('/agent-calls/:id', (req: Request, res: Response) => {
   res.json({ call, agentMessage: responseForCall(call) });
 });
 
-agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', (req: Request, res: Response) => {
+agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
-  const project = getProject(req, res, req.params.projectId);
+  const project = await getProject(req, res, req.params.projectId);
   if (!project) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.threadId)) return;
   const thread = sqliteService.getChatThreads().find(item => item.id === req.params.threadId);
@@ -277,7 +279,7 @@ agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', (
     threadId: thread.id
   });
   res.json({ calls });
-});
+}));
 
 agentCallRouter.post('/agent-calls/:id/confirm', async (req: Request, res: Response) => {
   try {

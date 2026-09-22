@@ -87,9 +87,20 @@ export function jsonErrorHandler(
    */
   if (err instanceof DatabaseError) {
     logError('Database error:', err.cause);
-    return err.unavailable
-      ? res.status(503).json({ error: 'The database is unreachable right now. Try again in a moment.' })
-      : res.status(500).json({ error: err.message });
+    if (err.unavailable) {
+      return res.status(503).json({ error: 'The database is unreachable right now. Try again in a moment.' });
+    }
+    // A duplicate reads the same either side of the store driver: 409, naming
+    // the field, as the SQLite branch above already answers.
+    if (err.sqlState === '23505') {
+      const field = err.duplicateField;
+      return res.status(409).json({
+        error: field
+          ? `That ${field} is already taken. Choose a different one.`
+          : 'Something with those details already exists.'
+      });
+    }
+    return res.status(500).json({ error: err.message });
   }
 
   /**

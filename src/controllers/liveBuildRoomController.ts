@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
+import { projectStore } from '../store/stores.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import {
@@ -66,9 +67,10 @@ function phaseRows(run: any | undefined) {
 }
 
 /** Return only projects that can actually open a room for this caller. */
-liveBuildRoomRouter.get('/live-build-room/projects', (req: Request, res: Response) => {
+liveBuildRoomRouter.get('/live-build-room/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
-  const projects = workspaceRegistry.scopeProjects(sqliteService.getProjects(), req.workspace!);
+  const all = await projectStore().list(req.workspace!.workspaceId);
+  const projects = workspaceRegistry.scopeProjects(all, req.workspace!);
   res.json(projects
     .filter(project => workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, project.id))
     .map(project => ({
@@ -77,7 +79,7 @@ liveBuildRoomRouter.get('/live-build-room/projects', (req: Request, res: Respons
       name: project.name,
       color: project.color
     })));
-});
+}));
 
 /**
  * Project-scoped execution room.
@@ -95,7 +97,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   }
 
   const workspaceId = req.workspace!.workspaceId;
-  const project = sqliteService.getProjects().find(item => item.id === req.params.projectId);
+  const project = await projectStore().get(workspaceId, req.params.projectId);
   if (!project) return res.status(404).json({ error: 'Project not found.' });
 
   // Read once for the whole response: every squad below looks itself up in it.

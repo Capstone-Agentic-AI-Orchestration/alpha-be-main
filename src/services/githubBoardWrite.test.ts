@@ -96,7 +96,7 @@ describe('pushing a new issue', () => {
     const { svc, write } = await loadService();
     const issue = plant(svc);
 
-    const result = await write.pushIssue(issue);
+    const result = await write.pushIssue(issue, 'ws-default');
 
     expect(result.pushed).toBe(true);
     expect(result.patch).toMatchObject({
@@ -108,7 +108,7 @@ describe('pushing a new issue', () => {
 
   it('sends the status and priority as labels', async () => {
     const { svc, write } = await loadService();
-    await write.pushIssue(plant(svc, { status: 'in_progress', priority: 'high' }));
+    await write.pushIssue(plant(svc, { status: 'in_progress', priority: 'high' }), 'ws-default');
 
     const create = argsOf('POST')[0] ?? calls.find(c => c.join(' ').includes('repos/o/r/issues'))!;
     const sent = create.join(' ');
@@ -122,7 +122,7 @@ describe('pushing a new issue', () => {
     svc.createProject({ id: 'p2', name: 'Local', key: 'LOC', resources: [] });
     const issue = svc.createIssue({ id: 'iss-2', projectId: 'p2', title: 'Local only' });
 
-    const result = await write.pushIssue(issue);
+    const result = await write.pushIssue(issue, 'ws-default');
 
     expect(result.pushed).toBe(false);
     expect(result.error).toBeUndefined();
@@ -145,7 +145,7 @@ describe('label bootstrapping', () => {
       return '';
     };
     const { svc, write } = await loadService();
-    await write.pushIssue(plant(svc));
+    await write.pushIssue(plant(svc), 'ws-default');
 
     const created = calls.filter(c => c.join(' ').includes('repos/o/r/labels') && c.includes('-f'));
     expect(created.length).toBeGreaterThan(0);
@@ -154,15 +154,15 @@ describe('label bootstrapping', () => {
 
   it('does not create a label that already exists', async () => {
     const { svc, write } = await loadService();
-    await write.pushIssue(plant(svc));
+    await write.pushIssue(plant(svc), 'ws-default');
     expect(calls.filter(c => c.join(' ').includes('/labels') && c.includes('-f'))).toHaveLength(0);
   });
 
   it('checks a repository only once per process', async () => {
     const { svc, write } = await loadService();
     const issue = plant(svc);
-    await write.pushIssue(issue);
-    await write.pushIssue(issue);
+    await write.pushIssue(issue, 'ws-default');
+    await write.pushIssue(issue, 'ws-default');
     expect(calls.filter(c => c.join(' ').includes('/labels?per_page'))).toHaveLength(1);
   });
 });
@@ -179,7 +179,7 @@ describe('pushing an update', () => {
     const { svc, write } = await loadService();
     const issue = plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'review' });
 
-    await write.pushIssue(issue);
+    await write.pushIssue(issue, 'ws-default');
 
     const patch = calls.find(c => c.includes('PATCH'))!.join(' ');
     expect(patch).toContain('labels[]=bug');            // read back from GitHub
@@ -189,7 +189,7 @@ describe('pushing an update', () => {
 
   it('closes the issue for done and writes no done label', async () => {
     const { svc, write } = await loadService();
-    await write.pushIssue(plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'done' }));
+    await write.pushIssue(plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'done' }), 'ws-default');
 
     const patch = calls.find(c => c.includes('PATCH'))!.join(' ');
     expect(patch).toContain('state=closed');
@@ -199,7 +199,7 @@ describe('pushing an update', () => {
 
   it('reopens the issue for any other status', async () => {
     const { svc, write } = await loadService();
-    await write.pushIssue(plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'in_progress' }));
+    await write.pushIssue(plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'in_progress' }), 'ws-default');
 
     expect(calls.find(c => c.includes('PATCH'))!.join(' ')).toContain('state=open');
   });
@@ -215,7 +215,7 @@ describe('pushing an update', () => {
     const { svc, write } = await loadService();
     const issue = plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'review', labels: ['bug'] });
 
-    const result = await write.pushIssue(issue);
+    const result = await write.pushIssue(issue, 'ws-default');
 
     expect(result.pushed).toBe(true);
     expect(calls.find(c => c.includes('PATCH'))!.join(' ')).toContain('labels[]=bug');
@@ -233,7 +233,7 @@ describe('failure reporting', () => {
       args.join(' ').includes('/labels?per_page') ? '' : new Error('gh: 403 Forbidden');
     const { svc, write } = await loadService();
 
-    const result = await write.pushIssue(plant(svc));
+    const result = await write.pushIssue(plant(svc), 'ws-default');
 
     expect(result.pushed).toBe(false);
     expect(result.error).toContain('403');

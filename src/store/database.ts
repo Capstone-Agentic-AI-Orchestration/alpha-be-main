@@ -49,6 +49,19 @@ export class DatabaseError extends Error {
   get unavailable(): boolean {
     return !this.sqlState || /^(08|53|57)/.test(this.sqlState);
   }
+
+  /**
+   * The column a duplicate collided on, when the server refused a unique
+   * constraint (23505). Postgres names it in the error's detail --
+   * `Key (key)=(CHK) already exists.` -- which is the difference between a
+   * message someone can act on and one they can only report.
+   */
+  get duplicateField(): string | null {
+    if (this.sqlState !== '23505') return null;
+    const detail = (this.cause as { detail?: unknown })?.detail;
+    const match = typeof detail === 'string' ? /Key \(([^)]+)\)=/.exec(detail) : null;
+    return match ? match[1] : null;
+  }
 }
 
 /**

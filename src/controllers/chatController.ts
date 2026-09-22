@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
+import { projectStore } from '../store/stores.js';
 import { chatService } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
@@ -90,7 +91,7 @@ chatRouter.post('/chat/threads', (req: Request, res: Response) => {
  * not what it was told. `projectId: null` clears it and returns the thread to
  * the managed workspace root.
  */
-chatRouter.put('/chat/threads/:id', (req: Request, res: Response) => {
+chatRouter.put('/chat/threads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
   if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
   const { projectId } = req.body ?? {};
@@ -116,8 +117,8 @@ chatRouter.put('/chat/threads/:id', (req: Request, res: Response) => {
    * confidently wrong answer.
    */
   const project = projectId
-    ? sqliteService.getProjects().find(p => p.id === projectId)
-    : undefined;
+    ? await projectStore().get(req.workspace!.workspaceId, projectId)
+    : null;
   const workspace = project ? resolveProjectWorkspace(project) : null;
 
   res.json({
@@ -125,7 +126,7 @@ chatRouter.put('/chat/threads/:id', (req: Request, res: Response) => {
     workspaceDir: workspace?.dir ?? null,
     workspaceManaged: workspace?.managed ?? null
   });
-});
+}));
 
 /**
  * Choose who answers an unmentioned message in a conversation.

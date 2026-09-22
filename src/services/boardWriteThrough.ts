@@ -1,4 +1,5 @@
 import { sqliteService } from './sqliteService.js';
+import { currentWorkspaceId } from './workspaceContext.js';
 import { pushIssue } from './githubBoardWrite.js';
 import { logError } from '../utils/logger.js';
 import { Issue } from '../models/index.js';
@@ -31,7 +32,12 @@ export function updateIssueAndPush(issueId: string, updates: Partial<Issue>): vo
    * the UI reads; a slow or unreachable GitHub must not fail a run that
    * otherwise succeeded, and no caller has anything to do with the result.
    */
-  void pushIssue(updated)
+  /*
+   * The workspace comes from the async-local value the request or run is
+   * already inside. Correct on a desktop, where the runner originates every
+   * one of these and one process serves one person.
+   */
+  void pushIssue(updated, currentWorkspaceId())
     .then(result => {
       /*
        * A repository attached after the issue was filed leaves the card with no
