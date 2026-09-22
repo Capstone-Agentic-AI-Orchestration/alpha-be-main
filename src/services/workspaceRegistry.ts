@@ -14,6 +14,7 @@ import type {
   WorkspaceSummary
 } from '../store/workspaceDirectory.js';
 import { DEFAULT_WORKSPACE_ID } from './workspaceContext.js';
+import { DesktopStoreInCloudError, openDesktopStore } from './sqliteService.js';
 
 export type {
   WorkspaceContext,
@@ -133,9 +134,9 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
  *    assigned to. Postgres in the cloud, SQLite on the desktop, behind
  *    `WorkspaceDirectory`. Asynchronous, because Postgres is.
  *  - **Entity bindings** — which workspace a project, issue, run or thread
- *    belongs to. Still SQLite in both, because the entities themselves still
- *    are; the Postgres tables carry a `workspace_id` column of their own and
- *    this side table disappears when the board moves with them.
+ *    belongs to. On a desktop, a side table in SQLite. In the cloud there is
+ *    no side table: every Postgres row carries its own `workspace_id`, and
+ *    `inWorkspace` answers from the rows (see `WorkspaceAccess.workspaceRows`).
  *
  * The permission checks stay synchronous. They run over every row of every
  * list, and a database round trip each is what made "await everywhere"
@@ -156,7 +157,10 @@ class WorkspaceRegistry {
    * ephemeral disk before any of that could be decided.
    */
   private handle(): Database.Database {
+    // The cloud's bindings are the rows' own workspace_id; see inWorkspace.
+    if (IS_CLOUD) throw new DesktopStoreInCloudError();
     if (!this.db) {
+      openDesktopStore();
       const db = new Database(DB_PATH);
       db.pragma('journal_mode = WAL');
       db.pragma('busy_timeout = 5000');
@@ -295,7 +299,7 @@ class WorkspaceRegistry {
    * intentionally empty rather than a reason to fall back to all projects.
    */
   canAccessProject(context: WorkspaceContext, projectId: string): boolean {
-    if (!this.belongsTo('projects', projectId, context.workspaceId)) return false;
+    if (!this.inWorkspace(context, 'projects', projectId)) return false;
     if (context.role === 'pm' || context.role === 'admin') return true;
     return context.access.assignedProjectIds.has(projectId);
   }
@@ -309,7 +313,7 @@ class WorkspaceRegistry {
   }
 
   canAccessSquad(context: WorkspaceContext, squadId: string): boolean {
-    if (!this.belongsTo('squads', squadId, context.workspaceId)) return false;
+    if (!this.inWorkspace(context, 'squads', squadId)) return false;
     if (context.role === 'pm' || context.role === 'admin') return true;
     return context.access.squadOwners.get(squadId) === context.userId;
   }
@@ -398,6 +402,26 @@ class WorkspaceRegistry {
 
   // ── Entity bindings ──────────────────────────────────────────────────────
 
+  /**
+   * Whether an entity is in the caller's workspace at all.
+   *
+   * In the cloud each row says so itself. Projects and squads are checked
+   * against the ids loaded with the request, because the permission checks
+   * that ask about them run synchronously over whole lists. Every other kind
+   * is read through a store that selects `where workspace_id = $1`, so a row
+   * from another workspace is not found by the read that follows the check --
+   * that read is the check, and this one does not repeat it.
+   *
+   * On a desktop, the bindings table.
+   */
+  inWorkspace(context: WorkspaceContext, entityType: EntityType, entityId: string): boolean {
+    const rows = context.access.workspaceRows;
+    if (!rows) return this.belongsTo(entityType, entityId, context.workspaceId);
+    if (entityType === 'projects') return rows.projects.has(entityId);
+    if (entityType === 'squads') return rows.squads.has(entityId);
+    return true;
+  }
+
   entityWorkspace(entityType: EntityType, entityId: string): string | null {
     const row = this.handle()
       .prepare('SELECT workspace_id FROM workspace_entity_bindings WHERE entity_type = ? AND entity_id = ?')
@@ -406,6 +430,8 @@ class WorkspaceRegistry {
   }
 
   bind(entityType: EntityType, entityId: string, workspaceId: string): void {
+    // A Postgres row is born with its workspace_id; there is nothing to record.
+    if (IS_CLOUD) return;
     this.handle()
       .prepare(
         `INSERT INTO workspace_entity_bindings (entity_type, entity_id, workspace_id, created_at)
@@ -417,9 +443,11 @@ class WorkspaceRegistry {
 
   /** Forget an entity. A deleted squad also gives up its owner. */
   async unbind(entityType: EntityType, entityId: string): Promise<void> {
-    this.handle()
-      .prepare('DELETE FROM workspace_entity_bindings WHERE entity_type = ? AND entity_id = ?')
-      .run(entityType, entityId);
+    if (!IS_CLOUD) {
+      this.handle()
+        .prepare('DELETE FROM workspace_entity_bindings WHERE entity_type = ? AND entity_id = ?')
+        .run(entityType, entityId);
+    }
     if (entityType === 'squads') await this.directory().releaseSquadOwner(entityId);
   }
 
@@ -428,7 +456,14 @@ class WorkspaceRegistry {
     return bound ? bound === workspaceId : workspaceId === this.defaultWorkspaceId;
   }
 
+  /**
+   * The rows of this workspace.
+   *
+   * In the cloud, every one: they were read from a store that selected by
+   * workspace_id, which is the only place cloud rows come from.
+   */
   scope<T extends { id: string }>(entityType: EntityType, rows: T[], workspaceId: string): T[] {
+    if (IS_CLOUD) return rows;
     return rows.filter(row => this.belongsTo(entityType, row.id, workspaceId));
   }
 }

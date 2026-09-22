@@ -161,6 +161,8 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
       assigned: string[] | null;
       owners: Array<{ squadId: string; userId: string }> | null;
       squad_projects: Array<{ squadId: string; projectId: string }> | null;
+      projects: string[] | null;
+      squads: string[] | null;
     }>(
       `select
          (select array_agg(project_id) from workspace_project_assignments
@@ -168,7 +170,9 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
          (select json_agg(json_build_object('squadId', squad_id, 'userId', user_id))
           from workspace_squad_owners where workspace_id = $1 and status = 'active') as owners,
          (select json_agg(json_build_object('squadId', squad_id, 'projectId', project_id))
-          from workspace_squad_projects where workspace_id = $1 and status = 'active') as squad_projects`,
+          from workspace_squad_projects where workspace_id = $1 and status = 'active') as squad_projects,
+         (select array_agg(id) from projects where workspace_id = $1) as projects,
+         (select array_agg(id) from squads where workspace_id = $1) as squads`,
       [workspaceId, userId]
     );
 
@@ -176,7 +180,11 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
     return {
       assignedProjectIds: new Set(row?.assigned ?? []),
       squadOwners: new Map((row?.owners ?? []).map(owner => [owner.squadId, owner.userId])),
-      squadProjects: row?.squad_projects ?? []
+      squadProjects: row?.squad_projects ?? [],
+      workspaceRows: {
+        projects: new Set(row?.projects ?? []),
+        squads: new Set(row?.squads ?? [])
+      }
     };
   }
 

@@ -1,4 +1,4 @@
-import type { Project } from '../models/index.js';
+import type { Project, ProjectBuildStep } from '../models/index.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import type { ProjectStore } from './projectStore.js';
@@ -15,6 +15,16 @@ import type { ProjectStore } from './projectStore.js';
  * way: the store's callers now name the workspace, so the ambient value has
  * one place left to be set rather than being assumed everywhere.
  */
+/** `sqliteService` says a project is missing by throwing; the interface says it with null. */
+function orNullWhenMissing<T>(read: () => T): T | null {
+  try {
+    return read();
+  } catch (err) {
+    if ((err as Error)?.message === 'Project not found') return null;
+    throw err;
+  }
+}
+
 export class SqliteProjectStore implements ProjectStore {
   async list(workspaceId: string): Promise<Project[]> {
     return runWithWorkspace(workspaceId, () => sqliteService.getProjects());
@@ -34,5 +44,15 @@ export class SqliteProjectStore implements ProjectStore {
 
   async remove(workspaceId: string, id: string): Promise<boolean> {
     return runWithWorkspace(workspaceId, () => sqliteService.deleteProject(id));
+  }
+
+  async getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null> {
+    return runWithWorkspace(workspaceId, () => orNullWhenMissing(() => sqliteService.getProjectBuildSteps(projectId)));
+  }
+
+  async saveBuildSteps(workspaceId: string, projectId: string, steps: unknown): Promise<ProjectBuildStep[] | null> {
+    return runWithWorkspace(workspaceId, () =>
+      orNullWhenMissing(() => sqliteService.saveProjectBuildSteps(projectId, steps as Array<Partial<ProjectBuildStep>>))
+    );
   }
 }

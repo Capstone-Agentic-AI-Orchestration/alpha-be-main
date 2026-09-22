@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { agentStore, issueStore, projectStore, squadStore } from '../store/stores.js';
+import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -9,6 +9,9 @@ import { exchangeGitHubToken } from '../services/databaseTokenExchange.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush } from '../services/githubBoardWrite.js';
 import { sqliteService } from '../services/sqliteService.js';
+import { machineRuntimes } from '../services/machineRuntimes.js';
+import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
+import { BuildStepError } from '../store/buildSteps.js';
 import { agentValidationError } from './agentValidation.js';
 import { checkWorkspace } from './workspaceValidation.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
@@ -33,6 +36,7 @@ import {
   requireWorkspaceCapability
 } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { desktopOnly } from './desktopOnly.js';
 
 export const dataRouter = Router();
 
@@ -190,7 +194,7 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
  * Separate from the update so the panel can tell someone their path is wrong
  * while they are still typing it, rather than at the start of an agent run.
  */
-dataRouter.post('/projects/check-workspace', (req: Request, res: Response) => {
+dataRouter.post('/projects/check-workspace', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   res.json(checkWorkspace(req.body?.path));
 });
@@ -211,7 +215,11 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
     (r: any) => r?.type === 'local_path' || r?.type === 'local_dir'
   );
 
-  if (attached) {
+  /**
+   * Not in the cloud, which has no folder of anyone's to check: the path is on
+   * a developer's disk, and the Postgres store drops local paths on write.
+   */
+  if (attached && !IS_CLOUD) {
     const check = checkWorkspace(attached.pathOrUrl);
     if (!check.ok) return res.status(400).json({ error: check.detail });
   }
@@ -230,26 +238,35 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
 }));
 
 // --- Project Build Room ---
-dataRouter.get('/projects/:id/build-steps', (req: Request, res: Response) => {
-  try {
-    res.json(sqliteService.getProjectBuildSteps(req.params.id));
-  } catch (error: any) {
-    const message = error?.message ?? 'Could not load project build steps';
-    res.status(message === 'Project not found' ? 404 : 400).json({ error: message });
-  }
-});
 
-dataRouter.put('/projects/:id/build-steps', (req: Request, res: Response) => {
+/**
+ * A project's build steps.
+ *
+ * These two routes checked nothing: any signed-in caller could read or replace
+ * the steps of any project, in any workspace, by id. Reading now needs the
+ * project to be one you can see; replacing it, the role the database's own
+ * policy already required ("overseers write build steps").
+ */
+dataRouter.get('/projects/:id/build-steps', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  const steps = await projectStore().getBuildSteps(req.workspace!.workspaceId, req.params.id);
+  if (!steps) return res.status(404).json({ error: 'Project not found' });
+  res.json(steps);
+}));
+
+dataRouter.put('/projects/:id/build-steps', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireProjectWorkspace(req, res, req.params.id)) return;
   try {
-    if (!Array.isArray(req.body?.steps)) {
-      return res.status(400).json({ error: 'steps must be an array' });
-    }
-    res.json(sqliteService.saveProjectBuildSteps(req.params.id, req.body.steps));
-  } catch (error: any) {
-    const message = error?.message ?? 'Could not save project build steps';
-    res.status(message === 'Project not found' ? 404 : 400).json({ error: message });
+    const steps = await projectStore().saveBuildSteps(req.workspace!.workspaceId, req.params.id, req.body?.steps);
+    if (!steps) return res.status(404).json({ error: 'Project not found' });
+    res.json(steps);
+  } catch (err) {
+    if (err instanceof BuildStepError) return res.status(400).json({ error: err.message });
+    throw err;
   }
-});
+}));
 
 // --- Agents ---
 
@@ -265,7 +282,7 @@ dataRouter.put('/projects/:id/build-steps', (req: Request, res: Response) => {
  * save would appear to work and then revert on reload. The client uses it to
  * mark those fields read-only and point at the persona file instead.
  */
-function withFileOverlay(agent: Agent, runtimes = sqliteService.getRuntimes()) {
+function withFileOverlay(agent: Agent, runtimes = machineRuntimes()) {
   let overlay: ReturnType<typeof readAgentFile> = null;
   try {
     overlay = readAgentFile(agent.id);
@@ -291,7 +308,7 @@ function withFileOverlay(agent: Agent, runtimes = sqliteService.getRuntimes()) {
 dataRouter.get('/agents', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   // Runtimes read once for the whole roster, not once per agent.
-  const runtimes = sqliteService.getRuntimes();
+  const runtimes = machineRuntimes();
   const agents = await agentStore().list(req.workspace!.workspaceId);
   res.json(agents.map(a => withFileOverlay(a, runtimes)));
 }));
@@ -368,7 +385,7 @@ function personaPayload(id: string, agent: Agent) {
   };
 }
 
-dataRouter.get('/agents/:id/persona', route(async (req: Request, res: Response) => {
+dataRouter.get('/agents/:id/persona', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
   const agent = await agentStore().get(req.workspace!.workspaceId, req.params.id);
@@ -382,7 +399,7 @@ dataRouter.get('/agents/:id/persona', route(async (req: Request, res: Response) 
   }
 }));
 
-dataRouter.put('/agents/:id/persona', route(async (req: Request, res: Response) => {
+dataRouter.put('/agents/:id/persona', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
   const agent = await agentStore().get(req.workspace!.workspaceId, req.params.id);
@@ -455,7 +472,7 @@ dataRouter.post('/agents/import', route(async (req: Request, res: Response) => {
  * Declared before no route that could shadow it — `/agents/:id` is a GET-less
  * PUT/DELETE pair, so `/agents/builder/message` cannot be captured by it.
  */
-dataRouter.post('/agents/builder/message', async (req: Request, res: Response) => {
+dataRouter.post('/agents/builder/message', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
     const result = await sendBuilderMessage({
@@ -494,8 +511,8 @@ function isIssueStatus(value: unknown): value is IssueStatus {
   return typeof value === 'string' && ISSUE_STATUSES.includes(value as IssueStatus);
 }
 
-function activeRunForIssue(issueId: string) {
-  return sqliteService.getPrototypeRuns().find(run =>
+async function activeRunForIssue(workspaceId: string, issueId: string) {
+  return (await runStore().list(workspaceId)).find(run =>
     run.issueId === issueId && ACTIVE_RUN_STATUSES.has(run.status)
   );
 }
@@ -507,14 +524,14 @@ function activeRunForIssue(issueId: string) {
  * review gate by sending { status: 'agent_running' } or { status: 'done' } to
  * PUT /issues/:id.
  */
-function statusTransitionError(issue: Issue, requestedStatus: unknown): string | null {
+async function statusTransitionError(workspaceId: string, issue: Issue, requestedStatus: unknown): Promise<string | null> {
   if (requestedStatus === undefined || requestedStatus === issue.status) return null;
 
   if (!isIssueStatus(requestedStatus)) {
     return 'status must be one of: ' + ISSUE_STATUSES.join(', ') + '.';
   }
 
-  const activeRun = activeRunForIssue(issue.id);
+  const activeRun = await activeRunForIssue(workspaceId, issue.id);
 
   if (requestedStatus === 'agent_running') {
     return 'Start an agent run through POST /api/runs/start; direct status changes to Agent Running are not allowed.';
@@ -628,7 +645,7 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
   if (!before) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
-  const transitionError = statusTransitionError(before, req.body?.status);
+  const transitionError = await statusTransitionError(req.workspace!.workspaceId, before, req.body?.status);
   if (transitionError) {
     const status = isIssueStatus(req.body?.status) ? 409 : 400;
     return res.status(status).json({ error: transitionError });
@@ -679,7 +696,7 @@ dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
 
   if (before.status === 'done') return res.json(before);
 
-  const activeRun = activeRunForIssue(before.id);
+  const activeRun = await activeRunForIssue(req.workspace!.workspaceId, before.id);
   if (activeRun) {
     if (activeRun.status === 'awaiting_approval') {
       return res.status(409).json({
@@ -835,8 +852,11 @@ dataRouter.delete('/squads/:id/projects/:projectId', route(async (req: Request, 
  */
 dataRouter.get('/skills', (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
+  // Only Alpha's own in the cloud: installed skills are found on a machine's
+  // disk, and switching one on or off changes what that machine's agents get.
+  const skills = IS_CLOUD ? [...BUILTIN_SKILLS] : sqliteService.scanSkills();
   res.json(
-    sqliteService.scanSkills().map(skill => ({
+    skills.map(skill => ({
       ...skill,
       grantedTools: SKILL_TOOLS[skill.id] ?? []
     }))
@@ -844,7 +864,7 @@ dataRouter.get('/skills', (req: Request, res: Response) => {
 });
 
 /** Force a fresh filesystem scan after a skill is installed or removed. */
-dataRouter.post('/skills/scan', (req: Request, res: Response) => {
+dataRouter.post('/skills/scan', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   res.json(
     sqliteService.scanSkills().map(skill => ({
@@ -854,7 +874,7 @@ dataRouter.post('/skills/scan', (req: Request, res: Response) => {
   );
 });
 
-dataRouter.put('/skills/:id', (req: Request, res: Response) => {
+dataRouter.put('/skills/:id', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const { isEnabled } = req.body;
   sqliteService.setSkillEnabled(req.params.id, Boolean(isEnabled));

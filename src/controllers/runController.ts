@@ -14,6 +14,9 @@ import {
   requireWorkspaceCapability
 } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { IS_CLOUD } from '../config/env.js';
+import { mergePullRequestOverApi } from '../services/githubPullRequests.js';
+import { desktopOnly } from './desktopOnly.js';
 
 export const runRouter = Router();
 
@@ -99,7 +102,7 @@ runRouter.get('/analytics', route(async (req: Request, res: Response) => {
   });
 }));
 
-runRouter.post('/runs/start', async (req: Request, res: Response) => {
+runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const { issueId, agentId, plan, scenario } = req.body;
@@ -124,7 +127,7 @@ runRouter.post('/runs/start', async (req: Request, res: Response) => {
   }
 });
 
-runRouter.post('/runs/:id/cancel', async (req: Request, res: Response) => {
+runRouter.post('/runs/:id/cancel', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const run = await scopedRun(req, res, req.params.id);
@@ -163,7 +166,7 @@ runRouter.post('/runs/:id/cancel', async (req: Request, res: Response) => {
  * are answerable by a person and then approvable again, so the honest state is
  * "still awaiting approval, and here is why".
  */
-runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
+runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'deployment.manage')) return;
   const run = await scopedRun(req, res, req.params.id);
   if (!run) return;
@@ -205,9 +208,14 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
 
   if (run.prUrl) {
     const project = await projectStore().get(req.workspace!.workspaceId, run.projectId);
-    const workspace = project ? resolveProjectWorkspace(project) : null;
+    /**
+     * In the cloud, through GitHub's API as the person approving. There is no
+     * working copy on Render for `gh` to run in -- and approving is the one
+     * thing a project manager on the web must be able to finish.
+     */
+    const workspace = IS_CLOUD ? null : project ? resolveProjectWorkspace(project) : null;
 
-    if (!workspace) {
+    if (!workspace && !IS_CLOUD) {
       return res.status(409).json({
         error:
           `This run's project has no working copy on this machine, so ${run.prUrl} cannot be merged from here. ` +
@@ -216,7 +224,9 @@ runRouter.post('/runs/:id/approve', async (req: Request, res: Response) => {
     }
 
     try {
-      const result = await githubService.mergePullRequest(workspace.dir, run.prUrl);
+      const result = workspace
+        ? await githubService.mergePullRequest(workspace.dir, run.prUrl)
+        : await mergePullRequestOverApi(run.prUrl);
       logInfo(`Merged ${run.prUrl} for run ${run.id}`);
       mergeNote = `Merged ${run.prUrl}.${result ? ` ${result}` : ''}`;
       // A person did this, not an agent — the trail should say so.
@@ -286,7 +296,7 @@ The run is still at the review gate.`,
 
   await issueStore().update(req.workspace!.workspaceId, run.issueId, { status: 'done' });
   res.json(updated);
-});
+}));
 
 /**
  * Everything that touched a remote during this run.
@@ -301,7 +311,7 @@ runRouter.get('/runs/:id/remote-actions', route(async (req: Request, res: Respon
   res.json(await runStore().listRemoteActions(req.workspace!.workspaceId, req.params.id));
 }));
 
-runRouter.post('/runs/:id/retry', async (req: Request, res: Response) => {
+runRouter.post('/runs/:id/retry', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const existing = await scopedRun(req, res, req.params.id);
@@ -342,7 +352,7 @@ runRouter.get('/squad-runs/:id', route(async (req: Request, res: Response) => {
   res.json({ ...squadRun, runs: await runStore().runsForSquadRun(req.workspace!.workspaceId, squadRun.id) });
 }));
 
-runRouter.post('/squads/:id/run', async (req: Request, res: Response) => {
+runRouter.post('/squads/:id/run', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'squad.run')) return;
     if (!requireSquadWorkspace(req, res, req.params.id)) return;

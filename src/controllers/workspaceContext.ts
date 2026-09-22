@@ -123,10 +123,10 @@ export function requireWorkspaceCapability(
 export function requireEntityWorkspace(
   req: Request,
   res: Response,
-  entityType: Parameters<typeof workspaceRegistry.belongsTo>[0],
+  entityType: Parameters<typeof workspaceRegistry.inWorkspace>[1],
   entityId: string
 ): boolean {
-  if (!req.workspace || !workspaceRegistry.belongsTo(entityType, entityId, req.workspace.workspaceId)) {
+  if (!req.workspace || !workspaceRegistry.inWorkspace(req.workspace, entityType, entityId)) {
     res.status(404).json({ error: 'Resource not found in the active workspace.' });
     return false;
   }

@@ -13,6 +13,7 @@ import { mcpNameError, mcpServerError, toServerSpec } from './mcpValidation.js';
 import { logInfo } from '../utils/logger.js';
 import { requireWorkspaceCapability } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { desktopOnly } from './desktopOnly.js';
 
 export const mcpRouter = Router();
 
@@ -88,7 +89,7 @@ function serverViews(workspaceId?: string): McpServerView[] {
   });
 }
 
-mcpRouter.get('/mcp/servers', (req: Request, res: Response) => {
+mcpRouter.get('/mcp/servers', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
   try {
     res.json(serverViews(req.workspace!.workspaceId));
@@ -97,7 +98,7 @@ mcpRouter.get('/mcp/servers', (req: Request, res: Response) => {
   }
 });
 
-mcpRouter.put('/mcp/servers/:name', (req: Request, res: Response) => {
+mcpRouter.put('/mcp/servers/:name', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const { name } = req.params;
 
@@ -118,7 +119,7 @@ mcpRouter.put('/mcp/servers/:name', (req: Request, res: Response) => {
   }
 });
 
-mcpRouter.delete('/mcp/servers/:name', (req: Request, res: Response) => {
+mcpRouter.delete('/mcp/servers/:name', desktopOnly, (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   const { name } = req.params;
 
