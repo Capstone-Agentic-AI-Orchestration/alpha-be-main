@@ -1,7 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, ALPHA_CLOUD_API, IS_CLOUD } from '../config/env.js';
+import {
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
+  ALPHA_CLOUD_API,
+  IS_CLOUD,
+  IS_PACKAGED_DESKTOP
+} from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread } from '../models/index.js';
 import { commentRow, issueRow } from '../store/postgresIssueStore.js';
@@ -31,6 +37,9 @@ import { storedToken } from './alphaGitHubToken.js';
 async function githubCliToken(): Promise<string | null> {
   const own = storedToken();
   if (own) return own;
+  // An installed copy has its own sign-in; borrowing the machine's would write
+  // board rows under an account nobody chose in the app.
+  if (IS_PACKAGED_DESKTOP) return null;
   try {
     const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
     return stdout.trim() || null;

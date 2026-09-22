@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 /**
@@ -109,5 +111,27 @@ describe('failures', () => {
 
     await expect(call).rejects.toMatchObject({ status: 403 });
     await expect(call).rejects.toThrow(/403 .*Resource not accessible by integration/);
+  });
+});
+
+/**
+ * An installed desktop signs in for itself.
+ *
+ * The `gh` fallback exists so a developer can run Alpha from a checkout without
+ * completing a device flow. Letting an installed copy use it too silently put
+ * back the thing the in-app sign-in removed: the app opened straight onto the
+ * board as whoever the terminal happened to be, having asked nobody.
+ */
+describe('an installed desktop with no sign-in of its own', () => {
+  it('refuses rather than borrowing the machine account', async () => {
+    process.env.ALPHA_PACKAGED = '1';
+    process.env.ALPHA_HOME = path.join(os.tmpdir(), `alpha-no-credential-${Date.now()}`);
+    try {
+      const { tokenForThisRequest } = await load('desktop');
+      await expect(tokenForThisRequest()).rejects.toThrow(/not signed in/i);
+    } finally {
+      process.env.ALPHA_PACKAGED = '';
+      process.env.ALPHA_HOME = '';
+    }
   });
 });
