@@ -3,11 +3,18 @@ import { IS_CLOUD } from '../config/env.js';
 import { currentIdentity } from '../services/identityService.js';
 import { workspaceRegistry, WorkspaceRole } from '../services/workspaceRegistry.js';
 
+/**
+ * Paths that answer before anyone is known.
+ *
+ * Matched on path, not on method — so anything listed here is public for
+ * every verb. `/workspaces` used to be on this list, for the browser's "which
+ * workspaces do I have" call on boot, and that exemption silently covered
+ * `POST /workspaces` too: anyone at all could create one. The listing needs a
+ * caller anyway, to be a listing of *theirs*, so both moved behind the gate.
+ */
 const PUBLIC_EXACT = [
   '/health',
   '/me',
-  '/workspaces',
-  '/workspaces/join',
   '/github/auth',
   '/github/auth/login',
   '/github/auth/logout',
@@ -84,7 +91,7 @@ export async function workspaceContext(
       return;
     }
 
-    const context = workspaceRegistry.resolve(
+    const context = await workspaceRegistry.resolve(
       caller.login,
       req.header('X-Workspace-Id') || undefined,
       caller.role

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { DatabaseError } from '../store/database.js';
+import { WorkspaceRequestError } from '../store/workspaceDirectory.js';
 import { logError } from '../utils/logger.js';
 
 /**
@@ -65,6 +66,15 @@ export function jsonErrorHandler(
     return res.status(409).json({
       error: 'That refers to something which no longer exists. Reload and try again.'
     });
+  }
+
+  /**
+   * A workspace request refused for a reason the caller can act on: an invite
+   * code that matches nothing, a slug already taken, access an admin removed.
+   * The store raises these, and the message is written to be read.
+   */
+  if (err instanceof WorkspaceRequestError) {
+    return res.status(err.status).json({ error: err.message });
   }
 
   /**
