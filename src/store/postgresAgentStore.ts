@@ -313,7 +313,7 @@ export function toAgent(row: AgentRow): Agent {
     avatar: row.avatar ?? '',
     color: row.color ?? '',
     description: row.description ?? '',
-    owner: row.owner ?? 'You',
+    owner: row.owner ?? 'Unassigned',
     isMine: row.is_mine ?? true,
     modelProvider: row.model_provider as Agent['modelProvider'],
     modelName: row.model_name,

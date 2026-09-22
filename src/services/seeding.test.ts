@@ -77,7 +77,26 @@ describe('seeding runs once', () => {
     const svc = await startDaemon();
     expect(svc.getProjects()).toHaveLength(0);
     expect(svc.getIssues()).toHaveLength(0);
-    expect(svc.getSquads()).toHaveLength(1);
+    expect(svc.getSquads()).toEqual([
+      expect.objectContaining({
+        id: 'squad-core',
+        completedRunsCount: 0
+      })
+    ]);
+  });
+
+  it('repairs the retired starter run counter on a database with no run history', async () => {
+    const first = await startDaemon();
+    first.close();
+
+    const db = new Database(dbPath());
+    db.prepare("UPDATE squads SET completed_runs_count = 12 WHERE id = 'squad-core'").run();
+    db.close();
+
+    const restarted = await startDaemon();
+    expect(restarted.getSquads().find(squad => squad.id === 'squad-core')).toMatchObject({
+      completedRunsCount: 0
+    });
   });
 
   it('records that it seeded, rather than leaving it to be inferred', async () => {
