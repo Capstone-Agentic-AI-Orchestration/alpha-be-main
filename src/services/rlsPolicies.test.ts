@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 
 import { createTestDatabase } from '../store/testDatabase.js';
@@ -212,6 +212,13 @@ describe('a real minted token satisfies the policies', () => {
     process.env.SUPABASE_JWT_SECRET = 'integration-test-secret';
     // Minting is cloud-only; this is the token the cloud would send.
     process.env.ALPHA_MODE = 'cloud';
+    /*
+     * Re-evaluated so the settings above are the ones it reads. `config/env`
+     * reads the environment once, at import, and anything else in this file
+     * that reaches it -- the test database does, for its error type -- would
+     * otherwise have already fixed the mode as desktop.
+     */
+    vi.resetModules();
     const { mintSupabaseToken } = await import('./supabaseTokenService.js');
     const { token } = mintSupabaseToken({ sub: login, workspace_id: workspace, alpha_role: role });
     // Exactly what Supabase would hand the policies after verifying it.

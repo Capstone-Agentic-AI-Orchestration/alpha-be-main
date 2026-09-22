@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
+import { projectStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -163,24 +164,25 @@ dataRouter.post('/database/token/exchange', async (req: Request, res: Response) 
  */
 dataRouter.post('/board/sync', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
-  const report = await syncBoardFromGitHub();
+  const report = await syncBoardFromGitHub(req.workspace!.workspaceId);
   // 200 even with per-project errors: a workspace where one repository is
   // unreachable still synced the others, and the report says which failed.
   res.json(report);
 });
 
 // --- Projects ---
-dataRouter.get('/projects', (req: Request, res: Response) => {
+dataRouter.get('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
-  res.json(workspaceRegistry.scopeProjects(sqliteService.getProjects(), req.workspace!));
-});
+  const projects = await projectStore().list(req.workspace!.workspaceId);
+  res.json(workspaceRegistry.scopeProjects(projects, req.workspace!));
+}));
 
-dataRouter.post('/projects', (req: Request, res: Response) => {
+dataRouter.post('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.create')) return;
-  const project = sqliteService.createProject(req.body);
+  const project = await projectStore().create(req.workspace!.workspaceId, req.body);
   workspaceRegistry.bind('projects', project.id, req.workspace!.workspaceId);
   res.status(201).json(project);
-});
+}));
 
 /**
  * Check a folder before it becomes a project's working copy.
@@ -193,7 +195,7 @@ dataRouter.post('/projects/check-workspace', (req: Request, res: Response) => {
   res.json(checkWorkspace(req.body?.path));
 });
 
-dataRouter.put('/projects/:id', (req: Request, res: Response) => {
+dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   if (!requireProjectWorkspace(req, res, req.params.id)) return;
   /**
@@ -214,15 +216,15 @@ dataRouter.put('/projects/:id', (req: Request, res: Response) => {
     if (!check.ok) return res.status(400).json({ error: check.detail });
   }
 
-  const updated = sqliteService.updateProject(req.params.id, req.body);
+  const updated = await projectStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Project not found' });
   res.json(updated);
-});
+}));
 
 dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   if (!requireProjectWorkspace(req, res, req.params.id)) return;
-  const deleted = sqliteService.deleteProject(req.params.id);
+  const deleted = await projectStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) await workspaceRegistry.unbind('projects', req.params.id);
   res.json({ success: deleted });
 }));
@@ -538,9 +540,10 @@ function statusTransitionError(issue: Issue, requestedStatus: unknown): string |
   return null;
 }
 
-dataRouter.get('/issues', (req: Request, res: Response) => {
+dataRouter.get('/issues', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.read')) return;
-  const allowedProjectIds = workspaceRegistry.projectIdsFor(req.workspace!, sqliteService.getProjects().map(project => project.id));
+  const projects = await projectStore().list(req.workspace!.workspaceId);
+  const allowedProjectIds = workspaceRegistry.projectIdsFor(req.workspace!, projects.map(project => project.id));
   res.json(workspaceRegistry.scopeProjectChildrenFromIds(
     'issues',
     sqliteService.getIssues(),
@@ -548,7 +551,7 @@ dataRouter.get('/issues', (req: Request, res: Response) => {
     allowedProjectIds,
     issue => issue.projectId
   ));
-});
+}));
 
 /**
  * Create an issue. The daemon owns the identifier and the author.
@@ -607,7 +610,7 @@ dataRouter.post('/issues', async (req: Request, res: Response) => {
    * number, and a card that does not know which GitHub issue it is cannot be
    * updated later. A project with no repository pushes nothing and is fine.
    */
-  const push = await pushIssue(saved);
+  const push = await pushIssue(saved, req.workspace!.workspaceId);
   if (push.patch) {
     sqliteService.updateIssue(saved.id, push.patch);
     saved = sqliteService.getIssues().find(i => i.id === saved.id) ?? saved;
@@ -642,7 +645,7 @@ dataRouter.put('/issues/:id', async (req: Request, res: Response) => {
    */
   if (!needsPush(before, updated)) return res.json(updated);
 
-  const push = await pushIssue(updated);
+  const push = await pushIssue(updated, req.workspace!.workspaceId);
   if (push.patch) sqliteService.updateIssue(updated.id, push.patch);
 
   const saved = sqliteService.getIssues().find(i => i.id === updated.id) ?? updated;
@@ -699,7 +702,7 @@ dataRouter.post('/issues/:id/complete', async (req: Request, res: Response) => {
 
   if (!needsPush(before, updated)) return res.json(updated);
 
-  const push = await pushIssue(updated);
+  const push = await pushIssue(updated, req.workspace!.workspaceId);
   if (push.patch) sqliteService.updateIssue(updated.id, push.patch);
 
   const saved = sqliteService.getIssues().find(i => i.id === updated.id) ?? updated;

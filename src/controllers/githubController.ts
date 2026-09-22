@@ -2,6 +2,7 @@ import { NextFunction, Request, Response, Router } from 'express';
 import { githubService } from '../services/githubService.js';
 import { createScaffoldedRepository } from '../services/repoScaffoldService.js';
 import { sqliteService } from '../services/sqliteService.js';
+import { projectStore } from '../store/stores.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
 import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -311,7 +312,7 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
   }
 
   if (!requireEntityWorkspace(req, res, 'projects', projectId)) return;
-  const project = sqliteService.getProjects().find(p => p.id === projectId);
+  const project = await projectStore().get(req.workspace!.workspaceId, projectId);
   if (!project) {
     return res.status(404).json({ error: `Project not found: ${projectId}` });
   }
@@ -339,7 +340,7 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
     // Remember the organization on first use so later repositories in this
     // project cannot silently land somewhere else.
     if (!project.githubOrg) {
-      sqliteService.updateProject(project.id, { githubOrg: effectiveOrg });
+      await projectStore().update(req.workspace!.workspaceId, project.id, { githubOrg: effectiveOrg });
     }
 
     return res.status(201).json(result);

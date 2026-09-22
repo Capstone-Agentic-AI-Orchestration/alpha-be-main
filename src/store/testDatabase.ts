@@ -2,7 +2,7 @@ import { PGlite } from '@electric-sql/pglite';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Sql } from './database.js';
+import { DatabaseError, type Sql } from './database.js';
 
 /**
  * A real Postgres for tests: PGlite, with every migration applied.
@@ -61,12 +61,23 @@ export async function createTestDatabase(): Promise<PGlite> {
   return db;
 }
 
-/** The test database, as the stores see a connection. */
+/**
+ * The test database, as the stores see a connection.
+ *
+ * Failures are wrapped exactly as the production pool wraps them. PGlite
+ * reports the same `code`, `detail` and `constraint` as `pg`, so a test can
+ * exercise what the API answers for a duplicate or an outage -- which it
+ * cannot if the harness throws a different shape than the real thing.
+ */
 export function sqlFor(db: PGlite): Sql {
   return {
     async query<T>(text: string, params: readonly unknown[] = []) {
-      const result = await db.query<T>(text, [...params]);
-      return { rows: result.rows };
+      try {
+        const result = await db.query<T>(text, [...params]);
+        return { rows: result.rows };
+      } catch (err) {
+        throw new DatabaseError(err);
+      }
     }
   };
 }
