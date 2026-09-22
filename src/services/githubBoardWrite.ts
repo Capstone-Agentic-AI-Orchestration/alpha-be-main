@@ -1,13 +1,10 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 import { projectStore } from '../store/stores.js';
+import { githubApi } from './githubApi.js';
 import { logInfo, logError } from './../utils/logger.js';
 import { Issue, IssueStatus, IssuePriority } from '../models/index.js';
 import { repoForProject } from './githubBoardSync.js';
 import { labelsForWrite, stateForStatus, statusLabel, priorityLabel } from './githubIssueMapping.js';
 
-const execFileAsync = promisify(execFile);
 
 /**
  * Push a board change up to GitHub.
@@ -62,12 +59,8 @@ export async function ensureLabels(ownerRepo: string): Promise<void> {
 
   let existing = new Set<string>();
   try {
-    const { stdout } = await execFileAsync(
-      'gh',
-      ['api', `repos/${ownerRepo}/labels?per_page=100`, '--paginate', '--jq', '.[].name'],
-      { timeout: 30_000 }
-    );
-    existing = new Set(stdout.trim().split('\n').filter(Boolean).map(n => n.toLowerCase()));
+    const labels = await githubApi().getAll<{ name: string }>(`/repos/${ownerRepo}/labels?per_page=100`);
+    existing = new Set(labels.map(label => label.name.toLowerCase()));
   } catch (err: any) {
     // A repository we cannot read labels on is one we cannot write to either;
     // let the write itself produce the error the caller reports.
@@ -78,12 +71,11 @@ export async function ensureLabels(ownerRepo: string): Promise<void> {
   for (const label of MANAGED_LABELS) {
     if (existing.has(label.name.toLowerCase())) continue;
     try {
-      await execFileAsync(
-        'gh',
-        ['api', `repos/${ownerRepo}/labels`, '-f', `name=${label.name}`,
-         '-f', `color=${label.color}`, '-f', `description=${label.description}`],
-        { timeout: 30_000 }
-      );
+      await githubApi().post(`/repos/${ownerRepo}/labels`, {
+        name: label.name,
+        color: label.color,
+        description: label.description
+      });
       logInfo(`Created label ${label.name} on ${ownerRepo}`);
     } catch (err: any) {
       // Someone else's concurrent sync may have just created it. Not fatal.
@@ -100,11 +92,6 @@ async function repoForIssue(issue: Issue, workspaceId: string): Promise<string |
   return project ? repoForProject(project) : null;
 }
 
-async function ghJson<T>(args: string[]): Promise<T> {
-  const { stdout } = await execFileAsync('gh', args, { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
-  return JSON.parse(stdout) as T;
-}
-
 /**
  * Create the GitHub issue for a card that does not have one.
  *
@@ -119,12 +106,11 @@ export async function pushNewIssue(issue: Issue, workspaceId: string): Promise<P
   await ensureLabels(ownerRepo);
 
   const labels = labelsForWrite(issue.status, issue.priority, issue.labels ?? []);
-  const created = await ghJson<{ number: number; html_url: string }>([
-    'api', `repos/${ownerRepo}/issues`,
-    '-f', `title=${issue.title}`,
-    '-f', `body=${issue.description ?? ''}`,
-    ...labels.flatMap(l => ['-f', `labels[]=${l}`])
-  ]);
+  const created = await githubApi().post<{ number: number; html_url: string }>(`/repos/${ownerRepo}/issues`, {
+    title: issue.title,
+    body: issue.description ?? '',
+    labels
+  });
 
   logInfo(`Pushed ${issue.identifier} to ${ownerRepo}#${created.number}`);
   return {
@@ -156,9 +142,9 @@ export async function pushIssueUpdate(issue: Issue): Promise<void> {
    */
   let current: string[] = [];
   try {
-    const remote = await ghJson<{ labels: Array<{ name: string } | string> }>([
-      'api', `repos/${issue.githubRepo}/issues/${issue.githubNumber}`
-    ]);
+    const remote = await githubApi().get<{ labels: Array<{ name: string } | string> }>(
+      `/repos/${issue.githubRepo}/issues/${issue.githubNumber}`
+    );
     current = (remote.labels ?? []).map(l => (typeof l === 'string' ? l : l.name));
   } catch {
     // Fall back to what the card knows; a stale label set is better than
@@ -169,15 +155,12 @@ export async function pushIssueUpdate(issue: Issue): Promise<void> {
   const labels = labelsForWrite(issue.status, issue.priority, current);
   const state = stateForStatus(issue.status);
 
-  const args = [
-    'api', '--method', 'PATCH', `repos/${issue.githubRepo}/issues/${issue.githubNumber}`,
-    '-f', `title=${issue.title}`,
-    '-f', `body=${issue.description ?? ''}`,
-    '-f', `state=${state}`,
-    ...labels.flatMap(l => ['-f', `labels[]=${l}`])
-  ];
-
-  await execFileAsync('gh', args, { timeout: 60_000 });
+  await githubApi().patch(`/repos/${issue.githubRepo}/issues/${issue.githubNumber}`, {
+    title: issue.title,
+    body: issue.description ?? '',
+    state,
+    labels
+  });
   logInfo(`Pushed ${issue.identifier} → ${issue.githubRepo}#${issue.githubNumber} (${issue.status})`);
 }
 

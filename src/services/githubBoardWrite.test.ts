@@ -16,51 +16,53 @@ import path from 'node:path';
  */
 let tmp: string;
 let opened: { close(): void }[] = [];
-/** Every `gh` invocation, so the arguments can be asserted. */
-let calls: string[][];
-let responder: (args: string[]) => string | Error;
+
+interface Call { method: 'GET' | 'POST' | 'PATCH'; path: string; body?: any }
+/** Every request made of GitHub, so what was sent can be asserted. */
+let calls: Call[];
+/** Answers for GitHub. An Error is thrown, as a failed request would be. */
+let responder: (call: Call) => unknown;
+
+function answer(call: Call): any {
+  calls.push(call);
+  const out = responder(call);
+  if (out instanceof Error) throw out;
+  return out;
+}
+
+const fakeGitHub = {
+  get: async (p: string) => answer({ method: 'GET', path: p }),
+  getAll: async (p: string) => answer({ method: 'GET', path: p }),
+  post: async (p: string, body: unknown) => answer({ method: 'POST', path: p, body }),
+  patch: async (p: string, body: unknown) => answer({ method: 'PATCH', path: p, body })
+};
 
 async function loadService() {
   process.env.ALPHA_HOME = tmp;
   vi.resetModules();
   calls = [];
 
-  vi.doMock('node:child_process', async () => {
-    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-    return {
-      ...actual,
-      execFile: (_cmd: string, args: string[], _o: unknown, cb: Function) => {
-        calls.push(args);
-        const out = responder(args);
-        if (out instanceof Error) return cb(out);
-        return cb(null, { stdout: out }, '');
-      }
-    };
-  });
-
   const sql = await import('./sqliteService.js');
   opened.push(sql.sqliteService);
+  // From the same module registry as the service under test, or the override
+  // would be set on a copy it never reads.
+  (await import('./githubApi.js')).useGitHubApi(fakeGitHub);
   const write = await import('./githubBoardWrite.js');
   write.resetLabelCache();
   return { svc: sql.sqliteService as any, write };
 }
 
+const MANAGED = ['alpha:todo', 'alpha:in-progress', 'alpha:review', 'alpha:backlog',
+  'alpha:agent-running', 'alpha:p-urgent', 'alpha:p-high', 'alpha:p-medium',
+  'alpha:p-low', 'alpha:p-none'];
+
 /** Default: labels already exist, issue reads back with a teammate label. */
-const defaultResponder = (args: string[]): string => {
-  const joined = args.join(' ');
-  if (joined.includes('/labels')) {
-    return ['alpha:todo', 'alpha:in-progress', 'alpha:review', 'alpha:backlog',
-            'alpha:agent-running', 'alpha:p-urgent', 'alpha:p-high', 'alpha:p-medium',
-            'alpha:p-low', 'alpha:p-none'].join('\n');
-  }
-  if (args.includes('--method') && args.includes('PATCH')) return '{}';
-  if (joined.match(/issues\/\d+$/)) {
-    return JSON.stringify({ labels: [{ name: 'bug' }, { name: 'alpha:todo' }] });
-  }
-  if (joined.includes('/issues')) {
-    return JSON.stringify({ number: 42, html_url: 'https://github.com/o/r/issues/42' });
-  }
-  return '';
+const defaultResponder = ({ method, path: p }: Call): unknown => {
+  if (p.includes('/labels')) return method === 'GET' ? MANAGED.map(name => ({ name })) : {};
+  if (method === 'PATCH') return {};
+  if (/issues\/\d+$/.test(p)) return { labels: [{ name: 'bug' }, { name: 'alpha:todo' }] };
+  if (p.endsWith('/issues')) return { number: 42, html_url: 'https://github.com/o/r/issues/42' };
+  return {};
 };
 
 function plant(svc: any, over: Record<string, unknown> = {}) {
@@ -81,15 +83,16 @@ beforeEach(() => {
   responder = defaultResponder;
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const svc of opened) { try { svc.close(); } catch { /* already closed */ } }
+  (await import('./githubApi.js')).useGitHubApi(null);
   delete process.env.ALPHA_HOME;
   fs.rmSync(tmp, { recursive: true, force: true });
   vi.restoreAllMocks();
-  vi.doUnmock('node:child_process');
 });
 
-const argsOf = (match: string) => calls.filter(c => c.join(' ').includes(match));
+const patchSent = () => calls.find(c => c.method === 'PATCH')!.body;
+const labelsCreated = () => calls.filter(c => c.method === 'POST' && c.path.endsWith('/labels'));
 
 describe('pushing a new issue', () => {
   it('creates it on GitHub and reports the number back', async () => {
@@ -110,10 +113,9 @@ describe('pushing a new issue', () => {
     const { svc, write } = await loadService();
     await write.pushIssue(plant(svc, { status: 'in_progress', priority: 'high' }), 'ws-default');
 
-    const create = argsOf('POST')[0] ?? calls.find(c => c.join(' ').includes('repos/o/r/issues'))!;
-    const sent = create.join(' ');
-    expect(sent).toContain('labels[]=alpha:in-progress');
-    expect(sent).toContain('labels[]=alpha:p-high');
+    const create = calls.find(c => c.method === 'POST' && c.path === '/repos/o/r/issues')!;
+    expect(create.body.labels).toEqual(expect.arrayContaining(['alpha:in-progress', 'alpha:p-high']));
+    expect(create.body).toMatchObject({ title: 'Add a thing', body: 'because' });
   });
 
   /** A local-only board is a valid way to use Alpha. */
@@ -137,25 +139,27 @@ describe('label bootstrapping', () => {
    * had been made by hand.
    */
   it('creates the missing labels before writing', async () => {
-    responder = (args) => {
-      const joined = args.join(' ');
-      if (joined.includes('/labels') && !args.includes('-f')) return '';   // none exist
-      if (joined.includes('/labels')) return '{}';                          // create
-      if (joined.includes('/issues')) return JSON.stringify({ number: 1, html_url: 'u' });
-      return '';
+    responder = (call) => {
+      if (call.path.includes('/labels')) return call.method === 'GET' ? [] : {};   // none exist
+      if (call.path.endsWith('/issues')) return { number: 1, html_url: 'u' };
+      return {};
     };
     const { svc, write } = await loadService();
     await write.pushIssue(plant(svc), 'ws-default');
 
-    const created = calls.filter(c => c.join(' ').includes('repos/o/r/labels') && c.includes('-f'));
+    const created = labelsCreated();
     expect(created.length).toBeGreaterThan(0);
-    expect(created.map(c => c.join(' ')).join(' ')).toContain('name=alpha:in-progress');
+    expect(created.map(c => c.body.name)).toContain('alpha:in-progress');
+    // Labels first: the issue's own create would fail without them.
+    const firstLabel = calls.indexOf(created[0]);
+    const issueCreate = calls.findIndex(c => c.method === 'POST' && c.path.endsWith('/issues'));
+    expect(firstLabel).toBeLessThan(issueCreate);
   });
 
   it('does not create a label that already exists', async () => {
     const { svc, write } = await loadService();
     await write.pushIssue(plant(svc), 'ws-default');
-    expect(calls.filter(c => c.join(' ').includes('/labels') && c.includes('-f'))).toHaveLength(0);
+    expect(labelsCreated()).toHaveLength(0);
   });
 
   it('checks a repository only once per process', async () => {
@@ -163,7 +167,7 @@ describe('label bootstrapping', () => {
     const issue = plant(svc);
     await write.pushIssue(issue, 'ws-default');
     await write.pushIssue(issue, 'ws-default');
-    expect(calls.filter(c => c.join(' ').includes('/labels?per_page'))).toHaveLength(1);
+    expect(calls.filter(c => c.method === 'GET' && c.path.includes('/labels?per_page'))).toHaveLength(1);
   });
 });
 
@@ -181,36 +185,34 @@ describe('pushing an update', () => {
 
     await write.pushIssue(issue, 'ws-default');
 
-    const patch = calls.find(c => c.includes('PATCH'))!.join(' ');
-    expect(patch).toContain('labels[]=bug');            // read back from GitHub
-    expect(patch).toContain('labels[]=alpha:review');
-    expect(patch).not.toContain('labels[]=alpha:todo'); // the old status is gone
+    const { labels } = patchSent();
+    expect(labels).toContain('bug');                // read back from GitHub
+    expect(labels).toContain('alpha:review');
+    expect(labels).not.toContain('alpha:todo');     // the old status is gone
   });
 
   it('closes the issue for done and writes no done label', async () => {
     const { svc, write } = await loadService();
     await write.pushIssue(plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'done' }), 'ws-default');
 
-    const patch = calls.find(c => c.includes('PATCH'))!.join(' ');
-    expect(patch).toContain('state=closed');
+    expect(patchSent().state).toBe('closed');
     // Done is expressed by closing; a label would be left behind on a reopen.
-    expect(patch).not.toContain('alpha:done');
+    expect(patchSent().labels).not.toContain('alpha:done');
   });
 
   it('reopens the issue for any other status', async () => {
     const { svc, write } = await loadService();
     await write.pushIssue(plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'in_progress' }), 'ws-default');
 
-    expect(calls.find(c => c.includes('PATCH'))!.join(' ')).toContain('state=open');
+    expect(patchSent().state).toBe('open');
   });
 
   it('falls back to the local labels when GitHub cannot be read', async () => {
     // A stale label set is better than refusing to record the status change.
-    responder = (args) => {
-      const joined = args.join(' ');
-      if (joined.includes('/labels?per_page')) return 'alpha:review\nalpha:p-medium';
-      if (joined.match(/issues\/7$/) && !args.includes('PATCH')) return new Error('502');
-      return '{}';
+    responder = (call) => {
+      if (call.path.includes('/labels?per_page')) return [{ name: 'alpha:review' }, { name: 'alpha:p-medium' }];
+      if (call.method === 'GET' && /issues\/7$/.test(call.path)) return new Error('GitHub 502');
+      return {};
     };
     const { svc, write } = await loadService();
     const issue = plant(svc, { githubRepo: 'o/r', githubNumber: 7, status: 'review', labels: ['bug'] });
@@ -218,7 +220,7 @@ describe('pushing an update', () => {
     const result = await write.pushIssue(issue, 'ws-default');
 
     expect(result.pushed).toBe(true);
-    expect(calls.find(c => c.includes('PATCH'))!.join(' ')).toContain('labels[]=bug');
+    expect(patchSent().labels).toContain('bug');
   });
 });
 
@@ -229,8 +231,8 @@ describe('failure reporting', () => {
    * sync silently reverts it.
    */
   it('reports a failure instead of throwing', async () => {
-    responder = (args) =>
-      args.join(' ').includes('/labels?per_page') ? '' : new Error('gh: 403 Forbidden');
+    responder = (call) =>
+      call.path.includes('/labels?per_page') ? [] : new Error('GitHub 403 on POST: Forbidden');
     const { svc, write } = await loadService();
 
     const result = await write.pushIssue(plant(svc), 'ws-default');

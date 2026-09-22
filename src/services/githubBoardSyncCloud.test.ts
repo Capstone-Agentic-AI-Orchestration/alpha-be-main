@@ -14,15 +14,15 @@ import { createTestDatabase } from '../store/testDatabase.js';
  * a hosted board has anything on it at all — and it wrote to SQLite on an
  * ephemeral disk, so everything it pulled was gone by the next deploy.
  *
- * Here it runs in cloud mode against a real Postgres, with `gh` answered by a
- * stub, and the assertions are about rows in the database rather than about
+ * Here it runs in cloud mode against a real Postgres, with GitHub answered by
+ * a stub, and the assertions are about rows in the database rather than about
  * what the function returned.
  */
 
 let pg: PGlite;
 let tmp: string;
 let opened: { close(): void }[] = [];
-let responder: (args: string[]) => string;
+let responder: (path: string) => unknown;
 
 const ISSUE = {
   number: 7,
@@ -36,16 +36,25 @@ const ISSUE = {
   updated_at: '2026-09-02T00:00:00Z'
 };
 
-/** `gh` answering for one repository with one issue and one comment. */
-const defaultResponder = (args: string[]): string => {
-  const joined = args.join(' ');
-  if (joined.includes('/comments')) {
-    return JSON.stringify([
-      { id: 555, body: 'Reproduced on staging.', user: { login: 'octocat' }, created_at: '2026-09-02T10:00:00Z' }
-    ]);
+/** GitHub answering for one repository with one issue and one comment. */
+const defaultResponder = (p: string): unknown => {
+  if (p.includes('/comments')) {
+    return [{ id: 555, body: 'Reproduced on staging.', user: { login: 'octocat' }, created_at: '2026-09-02T10:00:00Z' }];
   }
-  if (joined.includes('/issues')) return JSON.stringify([ISSUE]);
-  return '[]';
+  if (p.includes('/issues')) return [ISSUE];
+  return [];
+};
+
+/** Reads only: nothing on this board is unpublished, so the sync should write nothing. */
+const fakeGitHub = {
+  get: async (p: string) => responder(p) as any,
+  getAll: async (p: string) => responder(p) as any,
+  post: async (p: string) => {
+    throw new Error(`unexpected POST ${p}`);
+  },
+  patch: async (p: string) => {
+    throw new Error(`unexpected PATCH ${p}`);
+  }
 };
 
 beforeAll(async () => {
@@ -87,14 +96,7 @@ async function loadCloudSync() {
   process.env.ALPHA_HOME = tmp;
   vi.resetModules();
 
-  vi.doMock('node:child_process', async () => {
-    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-    return {
-      ...actual,
-      execFile: (_cmd: string, args: string[], _options: unknown, cb: Function) =>
-        cb(null, { stdout: responder(args) }, '')
-    };
-  });
+  (await import('./githubApi.js')).useGitHubApi(fakeGitHub);
 
   const { PostgresIssueStore } = await import('../store/postgresIssueStore.js');
   const { PostgresProjectStore } = await import('../store/postgresProjectStore.js');
@@ -163,7 +165,7 @@ describe('the board sync, in the cloud', () => {
   it('leaves the board alone when a repository cannot be read', async () => {
     const sync = await loadCloudSync();
     responder = () => {
-      throw new Error('gh: could not resolve repository');
+      throw new Error('GitHub 404 on GET /repos/acme/checkout/issues: Not Found');
     };
 
     const report = await sync('ws-default');
