@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
@@ -9,9 +10,10 @@ import {
   IS_PACKAGED_DESKTOP
 } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread } from '../models/index.js';
+import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread, Project } from '../models/index.js';
 import { commentRow, issueRow } from '../store/postgresIssueStore.js';
 import { agentRow, squadRow } from '../store/postgresAgentStore.js';
+import { projectRow } from '../store/postgresProjectStore.js';
 import { messageRow, threadRow } from '../store/postgresChatStore.js';
 import { supabaseBoardSource, type SharedBoardSource } from './sharedBoard.js';
 import { knownIdentity } from './identityService.js';
@@ -148,7 +150,19 @@ export class SupabaseService {
            */
           accessToken: async () => (await this.tokens.token()) ?? SUPABASE_ANON_KEY,
           realtime: {
-            params: { eventsPerSecond: 20 }
+            params: { eventsPerSecond: 20 },
+            /**
+             * A WebSocket to use, rather than one to go looking for.
+             *
+             * supabase-js expects a global WebSocket, which Node only has
+             * from 22. The installed app runs on Electron's Node, which is
+             * older, so creating the client threw -- caught below, logged to
+             * a console nobody sees -- and every installed desktop ran solo:
+             * no team board, no realtime, and a Sync that fell through to the
+             * project manager's GitHub sync and refused developers with a 403.
+             * `ws` is already a dependency, for the daemon's own socket.
+             */
+            transport: WebSocket as any
           }
         });
         logInfo('Supabase client initialized successfully (Team Mode)');
@@ -308,6 +322,49 @@ export class SupabaseService {
     } catch (err: any) {
       this.reportFailure(`clear conversation ${threadId}`, err);
     }
+  }
+
+  /**
+   * Put a project this desktop made or changed on the team's board.
+   *
+   * Projects stayed on the machine they were made on: a project manager who
+   * created one in the desktop app had it there and nowhere else, and every
+   * card filed under it was then refused by the cloud, which had no project
+   * for the card to belong to. Awaited on create, for the same reason
+   * `shareIssue` is awaited: an issue filed next must find its project there.
+   */
+  async shareProject(project: Project): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('projects').upsert(projectRow(currentWorkspaceId(), project));
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`share project ${project.key}`, err);
+    }
+  }
+
+  /** Take a project this desktop deleted off the team's board too. */
+  async unshareProject(projectId: string): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('projects').delete().eq('id', projectId);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`remove project ${projectId}`, err);
+    }
+  }
+
+  /**
+   * This desktop's database token, with its expiry, for the renderer.
+   *
+   * The renderer subscribes to the board's Realtime channel itself, and the
+   * channel is private: it admits a token for this workspace and nothing
+   * else. A desktop cannot mint one -- that stays in the cloud -- so it hands
+   * over the one it already exchanged its GitHub token for.
+   */
+  async databaseToken(): Promise<{ token: string; expiresAt: string } | null> {
+    if (!this.sharesBoard()) return null;
+    return this.tokens.tokenWithExpiry();
   }
 
   /** Take a card this desktop deleted off the team's board too. */

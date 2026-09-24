@@ -71,6 +71,14 @@ export class DatabaseTokenClient {
     return pending;
   }
 
+  /** The token and when it lapses, for a caller that has to say so too. */
+  async tokenWithExpiry(): Promise<{ token: string; expiresAt: string } | null> {
+    const token = await this.token();
+    const cached = this.cached;
+    if (!token || !cached || cached.token !== token) return null;
+    return { token, expiresAt: new Date(cached.expiresAt).toISOString() };
+  }
+
   private async exchange(workspaceId: string): Promise<string | null> {
     if (!this.opts.cloudApi) {
       this.opts.onFailure(

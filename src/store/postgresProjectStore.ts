@@ -286,6 +286,34 @@ function shareable(resources: ProjectResource[] = []): ProjectResource[] {
   return resources.filter(resource => !MACHINE_LOCAL.has(resource.type));
 }
 
+/**
+ * A project as a `projects` row, for a desktop putting it on the team's board.
+ *
+ * Machine-local resources stay behind for the same reason `create` drops them.
+ * `created_at` is left to the table's default when the project has none.
+ */
+export function projectRow(workspaceId: string, project: Project): Record<string, unknown> {
+  return {
+    id: project.id,
+    workspace_id: workspaceId,
+    name: project.name,
+    key: project.key,
+    description: project.description ?? null,
+    color: project.color ?? null,
+    icon: project.icon ?? null,
+    status: project.status ?? null,
+    priority: project.priority ?? null,
+    start_date: date(project.startDate),
+    target_date: date(project.targetDate),
+    lead_type: project.leadType ?? null,
+    lead_name: project.leadName ?? null,
+    lead_agent_id: project.leadAgentId ?? null,
+    resources: shareable(project.resources),
+    github_org: project.githubOrg ?? null,
+    ...(project.createdAt ? { created_at: project.createdAt } : {})
+  };
+}
+
 export function toProject(row: ProjectRow): Project {
   return {
     id: row.id,
