@@ -156,16 +156,34 @@ async function loadCloudSync(org?: string) {
 
   await projects.create('ws-default', {
     id: 'p1',
+    createdBy: 'PM1',
     name: 'Checkout',
     key: 'CHK',
     resources: [{ id: 'r1', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }]
   });
 
   const { syncBoardFromGitHub } = await import('./githubBoardSync.js');
-  return syncBoardFromGitHub;
+  return (workspaceId: string) =>
+    syncBoardFromGitHub(workspaceId, 'PM1', { importUntrackedRepositories: true });
+}
+
+/** The public route's behavior: update the catalogue, never discover repos implicitly. */
+async function loadDefaultCloudSync(org?: string) {
+  await loadCloudSync(org);
+  const { syncBoardFromGitHub } = await import('./githubBoardSync.js');
+  return (workspaceId: string) => syncBoardFromGitHub(workspaceId, 'PM1');
 }
 
 describe('the board sync, in the cloud', () => {
+  it('does not turn every organization repository into a project', async () => {
+    const sync = await loadDefaultCloudSync('acme');
+
+    const report = await sync('ws-default');
+
+    expect(report.projectsImported).toBe(0);
+    expect((await pg.query('select id from projects')).rows).toHaveLength(1);
+  });
+
   it('writes the pulled issues into Postgres', async () => {
     const sync = await loadCloudSync();
 

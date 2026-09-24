@@ -4,7 +4,8 @@ import { createScaffoldedRepository } from '../services/repoScaffoldService.js';
 import { projectStore } from '../store/stores.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
-import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
+import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
+import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { CORS_ORIGIN, ALPHA_ORG, GITHUB_CLIENT_ID } from '../config/env.js';
 import { fetchTeamsWithToken, roleForLogin } from '../services/identityService.js';
 import { sessionService } from '../services/sessionService.js';
@@ -13,6 +14,19 @@ import { logInfo, logError } from '../utils/logger.js';
 import { desktopOnly } from './desktopOnly.js';
 
 export const githubRouter = Router();
+
+/** Normalize the GitHub references stored on a project resource for matching. */
+function normalizedRepoRef(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const raw = value.trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    return url.pathname.replace(/^\/+/, '').replace(/\.git$/i, '').toLowerCase();
+  } catch {
+    return raw.replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').toLowerCase();
+  }
+}
 
 githubRouter.get('/github/auth', async (req: Request, res: Response) => {
   const auth = await githubService.checkAuth();
@@ -193,8 +207,23 @@ githubRouter.get('/github/orgs', async (req: Request, res: Response) => {
 
 githubRouter.get('/github/repos', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
-  const repos = await githubService.listRepositories();
-  res.json(repos);
+  const [repos, projects] = await Promise.all([
+    githubService.listRepositories(),
+    projectStore().list(req.workspace!.workspaceId)
+  ]);
+  const visibleProjects = workspaceRegistry.discoverableProjects(projects, req.workspace!);
+  const allowedRepos = new Set(
+    visibleProjects.flatMap(project =>
+      (project.resources ?? [])
+        .filter(resource => resource.type === 'github_repo')
+        .flatMap(resource => [normalizedRepoRef(resource.name), normalizedRepoRef(resource.pathOrUrl)])
+        .filter(Boolean)
+    )
+  );
+  // GitHub can return every repository the ambient credential can browse. The
+  // workspace catalogue is narrower: expose only repos attached to projects
+  // initiated by an active PM in this workspace.
+  res.json(repos.filter(repo => allowedRepos.has(normalizedRepoRef(repo.nameWithOwner ?? repo.name))));
 });
 
 githubRouter.get('/github/runs', desktopOnly, async (req: Request, res: Response) => {
@@ -328,7 +357,9 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
     return res.status(400).json({ error: 'visibility must be private or public.' });
   }
 
-  if (!requireEntityWorkspace(req, res, 'projects', projectId)) return;
+  // Repository provisioning is a project write. Keep the same PM-owned
+  // boundary as project editing instead of accepting any in-workspace id.
+  if (!requireProjectWorkspace(req, res, projectId)) return;
   const project = await projectStore().get(req.workspace!.workspaceId, projectId);
   if (!project) {
     return res.status(404).json({ error: `Project not found: ${projectId}` });

@@ -59,7 +59,12 @@ beforeAll(async () => {
   // Seeded as superuser, for whom RLS does not apply.
   await db.exec(`
     insert into workspaces (id,name,slug) values ('ws1','Alpha','alpha');
-    insert into projects (id,workspace_id,name,key) values ('p1','ws1','Checkout','EC');
+    insert into workspace_members (id,workspace_id,user_id,role,status)
+      values ('member-pm','ws1','LloydLim1','pm','active');
+    insert into projects (id,workspace_id,name,key,created_by)
+      values ('p1','ws1','Checkout','EC','LloydLim1');
+    insert into projects (id,workspace_id,name,key,created_by)
+      values ('p2','ws1','Admin draft','AD','Admin1');
     insert into issues (id,workspace_id,identifier,title,status,priority,project_id)
       values ('i1','ws1','EC-1','Fix cart','todo','high','p1');
 
@@ -161,9 +166,32 @@ describe('work product is visible to oversight', () => {
 });
 
 describe('the board is shared, clients are scoped out of it', () => {
-  /** Workspace-wide project read is the "All Projects" discovery tab. */
-  it('shows every workspace project to any developer', async () => {
+  /** PM-owned project read is the workspace discovery catalogue. */
+  it('shows a PM-owned project to a developer', async () => {
     expect(await as('ZaneZamoraC1Cs', 'dev', () => rows('select * from projects'))).toBe(1);
+  });
+
+  it('hides a project whose creator is not an active PM', async () => {
+    expect(await as('Admin1', 'admin', () => rows('select * from projects'))).toBe(1);
+    expect(await as('ZaneZamoraC1Cs', 'dev', () => rows("select * from projects where id='p2'"))).toBe(0);
+    await db.exec("delete from projects where id = 'p2'");
+  });
+
+  it('allows a PM to create a project and rejects an admin project write', async () => {
+    await as('LloydLim1', 'pm', () => db.exec(`
+      insert into projects (id,workspace_id,name,key,created_by)
+      values ('p3','ws1','PM project','PM','LloydLim1')
+    `));
+
+    await expect(
+      as('Admin1', 'admin', () => db.exec(`
+        insert into projects (id,workspace_id,name,key,created_by)
+        values ('p4','ws1','Admin project','ADM','Admin1')
+      `))
+    ).rejects.toThrow();
+
+    expect(await as('Admin1', 'admin', () => rows("select * from projects where id in ('p3','p4')"))).toBe(1);
+    await db.exec("delete from projects where id in ('p3','p4')");
   });
 
   it('keeps a client out of the issue tracker', async () => {

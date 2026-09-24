@@ -212,7 +212,14 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
   }
 
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
-  const report = await syncBoardFromGitHub(req.workspace!.workspaceId);
+  // Sync updates repositories already attached to PM-created projects. It
+  // deliberately does not import every repository in the organization.
+  const projectIds = new Set(
+    workspaceRegistry
+      .discoverableProjects(await projectStore().list(req.workspace!.workspaceId), req.workspace!)
+      .map(project => project.id)
+  );
+  const report = await syncBoardFromGitHub(req.workspace!.workspaceId, req.workspace!.userId, { projectIds });
   // 200 even with per-project errors: a workspace where one repository is
   // unreachable still synced the others, and the report says which failed.
   res.json(report);
@@ -222,11 +229,9 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
 /**
  * The workspace's projects, and which of them are this caller's work.
  *
- * Every project, not only the assigned ones: a developer could not see the
- * project they were about to be put on, nor bind it to a folder on their
- * machine before someone assigned them an issue in it. `assigned` says which
- * are theirs to work in, so the app can separate what they are on from what
- * the workspace has. Clients still see only what they are assigned to.
+ * PM-created projects are the workspace catalogue. `assigned` says which are
+ * the caller's work, so developers can discover a PM's repository before an
+ * issue is assigned while project operations remain assignment-scoped.
  */
 dataRouter.get('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
@@ -243,7 +248,13 @@ dataRouter.get('/projects', route(async (req: Request, res: Response) => {
 
 dataRouter.post('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.create')) return;
-  const project = await projectStore().create(req.workspace!.workspaceId, req.body);
+  // The creator is always the authenticated workspace member. A client-sent
+  // `createdBy` would let a PM or a stale desktop impersonate another owner.
+  const { createdBy: _ignored, ...input } = req.body ?? {};
+  const project = await projectStore().create(req.workspace!.workspaceId, {
+    ...input,
+    createdBy: req.workspace!.userId
+  });
   workspaceRegistry.bind('projects', project.id, req.workspace!.workspaceId);
   res.status(201).json(project);
 }));

@@ -287,7 +287,7 @@ workspaceRouter.get(
  * Assign someone to a project.
  *
  * What a developer or client can see at all: everything project-scoped reads
- * these rows, so managing them is `project.manage` -- a PM or an admin.
+ * these rows, so managing them is `project.manage` -- a project manager.
  */
 workspaceRouter.put(
   '/workspaces/:id/projects/:projectId/assignments/:userId',

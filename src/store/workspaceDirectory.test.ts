@@ -261,3 +261,50 @@ describe('a role the directory does not recognise (sqlite)', () => {
     ).rejects.toThrow(/violates check constraint/);
   });
 });
+
+describe('legacy SQLite project ownership', () => {
+  it('adds creator attribution without inventing a PM owner', async () => {
+    const db = new Database(path.join(tmp, 'legacy-projects.db'));
+    openSqlite.push(db);
+    db.exec(`
+      create table workspaces (
+        id text primary key,
+        name text not null,
+        slug text not null unique,
+        status text not null default 'active',
+        created_by text not null,
+        settings_json text not null default '{}',
+        created_at text not null,
+        updated_at text not null
+      );
+      create table workspace_members (
+        id text primary key,
+        workspace_id text not null,
+        user_id text not null,
+        role text not null,
+        status text not null default 'active',
+        created_at text not null,
+        updated_at text not null,
+        unique(workspace_id, user_id)
+      );
+      create table projects (
+        id text primary key,
+        workspace_id text not null,
+        name text not null,
+        key text not null,
+        created_at text not null
+      );
+      insert into workspaces (id, name, slug, created_by, created_at, updated_at)
+        values ('ws-default', 'Alpha', 'alpha-workspace', 'Admin1', datetime('now'), datetime('now'));
+      insert into workspace_members (id, workspace_id, user_id, role, status, created_at, updated_at)
+        values ('member-pm', 'ws-default', 'PM1', 'pm', 'active', datetime('now'), datetime('now'));
+      insert into projects (id, workspace_id, name, key, created_at)
+        values ('legacy-project', 'ws-default', 'Legacy', 'LEG', datetime('now'));
+    `);
+
+    const directory = new SqliteWorkspaceDirectory(db, DEFAULT_WS);
+    const context = await directory.resolve('PM1', DEFAULT_WS, 'pm');
+
+    expect(context?.access.projectCreators?.get('legacy-project')).toBeNull();
+  });
+});

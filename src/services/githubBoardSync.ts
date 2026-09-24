@@ -279,7 +279,18 @@ async function syncProject(project: Project, report: SyncReport, workspaceId: st
  * workspace with a dozen repositories would otherwise spend a dozen requests
  * at once of the budget the person's own browsing also draws on.
  */
-export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncReport> {
+export interface BoardSyncOptions {
+  /** Import untracked organization repositories as projects. Disabled for the API route. */
+  importUntrackedRepositories?: boolean;
+  /** Project ids already authorized by the caller's workspace context. */
+  projectIds?: ReadonlySet<string>;
+}
+
+export async function syncBoardFromGitHub(
+  workspaceId: string,
+  createdBy?: string,
+  options: BoardSyncOptions = {}
+): Promise<SyncReport> {
   const report: SyncReport = {
     projectsImported: 0,
     projects: 0,
@@ -292,11 +303,18 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
     errors: []
   };
 
-  // Repositories first, so a repository new since the last sync has its
-  // issues read in this one rather than the next.
-  await importOrgRepositories(workspaceId, report);
+  // A project is an explicit PM/client decision. The public sync route must
+  // never turn every organization repository into a visible Alpha project.
+  // The importer remains available to an explicitly authorized internal flow.
+  if (options.importUntrackedRepositories) {
+    await importOrgRepositories(workspaceId, report, createdBy);
+  }
 
-  for (const project of await projectStore().list(workspaceId)) {
+  // Unattributed legacy rows are intentionally hidden from the workspace
+  // catalogue, so they must not become visible again through a board sync.
+  for (const project of (await projectStore().list(workspaceId)).filter(project =>
+    Boolean(project.createdBy) && (!options.projectIds || options.projectIds.has(project.id))
+  )) {
     await syncProject(project, report, workspaceId);
   }
 

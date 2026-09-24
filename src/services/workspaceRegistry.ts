@@ -129,8 +129,6 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'workspace.manage_members',
     'workspace.manage_settings',
     'project.read',
-    'project.create',
-    'project.manage',
     'issue.read',
     'issue.manage',
     'agent.read',
@@ -319,15 +317,15 @@ class WorkspaceRegistry {
   /**
    * Whether this caller may know the project exists.
    *
-   * Everyone inside the workspace may, clients aside: a developer has to be
-   * able to find the project they are about to be put on, and to bind it to a
-   * folder before anyone assigns them an issue in it. Discovery is not access
-   * -- `canAccessProject` below still decides whose issues, runs and chats a
-   * person may reach, and it stays assignment-scoped.
+   * Internal workspace members may discover projects initiated by an active
+   * PM. Discovery is not access -- `canAccessProject` still decides whose
+   * issues, runs and chats a person may reach, and stays assignment-scoped for
+   * developers.
    */
   canDiscoverProject(context: WorkspaceContext, projectId: string): boolean {
     if (!this.inWorkspace(context, 'projects', projectId)) return false;
-    return context.role !== 'client' || this.canAccessProject(context, projectId);
+    if (context.role === 'client') return this.canAccessProject(context, projectId);
+    return this.isPmOwnedProject(context, projectId);
   }
 
   /** The workspace's projects, as this caller may discover them. */
@@ -336,14 +334,35 @@ class WorkspaceRegistry {
   }
 
   /**
-   * PMs and admins have workspace-wide project visibility. Clients and
-   * developers are assignment-scoped, and an empty assignment set is
-   * intentionally empty rather than a reason to fall back to all projects.
+   * PMs and admins can work with PM-owned projects. Developers remain
+   * assignment-scoped for issues, runs and chats, even though they can
+   * discover the PM-owned project catalogue before assignment.
    */
   canAccessProject(context: WorkspaceContext, projectId: string): boolean {
     if (!this.inWorkspace(context, 'projects', projectId)) return false;
-    if (context.role === 'pm' || context.role === 'admin') return true;
+    if (context.role === 'pm' || context.role === 'admin') return this.isPmOwnedProject(context, projectId);
     return context.access.assignedProjectIds.has(projectId);
+  }
+
+  /**
+   * Project visibility is based on the PM who created the project, not on the
+   * viewer's broad workspace role. The access map is loaded with the request
+   * context so this remains a synchronous check while filtering lists.
+   *
+   * Contexts created by older callers may not have the map yet. Keeping the
+   * legacy fallback makes those callers safe during the migration; all real
+   * workspace contexts populate it from the project table. An explicit null
+   * creator never passes this check.
+   */
+  private isPmOwnedProject(context: WorkspaceContext, projectId: string): boolean {
+    const creators = context.access.projectCreators;
+    if (!creators) return context.role !== 'client';
+
+    const creator = creators.get(projectId);
+    if (!creator) return false;
+
+    const managers = context.access.projectManagerIds;
+    return managers ? managers.has(creator) : true;
   }
 
   projectIdsFor(context: WorkspaceContext, projectIds: string[]): Set<string> {

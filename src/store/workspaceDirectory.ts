@@ -67,8 +67,12 @@ export interface WorkspaceSquadProjectAssignment {
  * request's workspace is resolved, and the checks read them from here.
  */
 export interface WorkspaceAccess {
-  /** Projects this caller is assigned to. Unused for PMs and admins, who see all. */
+  /** Projects this caller is assigned to for work-level access. */
   assignedProjectIds: ReadonlySet<string>;
+  /** Creator of each project in the workspace. Null means unattributed and hidden. */
+  projectCreators?: ReadonlyMap<string, string | null>;
+  /** Active PM memberships, used to validate creator ownership. */
+  projectManagerIds?: ReadonlySet<string>;
   /** Each squad's owner. */
   squadOwners: ReadonlyMap<string, string>;
   /** Which squads serve which projects. */

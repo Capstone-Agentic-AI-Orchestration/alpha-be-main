@@ -111,6 +111,7 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       "ALTER TABLE workspaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
       "ALTER TABLE workspaces ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'",
       "ALTER TABLE workspace_squad_projects ADD COLUMN relationship TEXT NOT NULL DEFAULT 'assigned'",
+      "ALTER TABLE projects ADD COLUMN created_by TEXT",
       // Joining by code is gone, so the column it read goes too. The index
       // first: SQLite refuses to drop a column an index still names. A desktop
       // that never had either simply fails both, which this loop ignores.
@@ -251,8 +252,26 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       )
       .all(workspaceId) as Array<{ squad_id: string; project_id: string }>;
 
+    const hasProjects = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'")
+      .get();
+    const projects = hasProjects
+      ? this.db
+          .prepare('SELECT id, created_by FROM projects WHERE workspace_id = ?')
+          .all(workspaceId) as Array<{ id: string; created_by: string | null }>
+      : [];
+
+    const projectManagers = this.db
+      .prepare(
+        `SELECT user_id FROM workspace_members
+         WHERE workspace_id = ? AND role = 'pm' AND status = 'active'`
+      )
+      .all(workspaceId) as Array<{ user_id: string }>;
+
     return {
       assignedProjectIds: new Set(assigned.map(row => row.project_id)),
+      projectCreators: new Map(projects.map(project => [project.id, project.created_by ?? null])),
+      projectManagerIds: new Set(projectManagers.map(row => row.user_id)),
       squadOwners: new Map(owners.map(row => [row.squad_id, row.user_id])),
       squadProjects: squadProjects.map(row => ({ squadId: row.squad_id, projectId: row.project_id }))
     };

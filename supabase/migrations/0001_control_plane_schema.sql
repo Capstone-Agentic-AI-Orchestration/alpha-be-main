@@ -131,6 +131,7 @@ create table if not exists projects (
   lead_agent_id text,
   resources     jsonb not null default '[]'::jsonb,
   github_org    text,
+  created_by    text,
   created_at    timestamptz not null default now()
 );
 

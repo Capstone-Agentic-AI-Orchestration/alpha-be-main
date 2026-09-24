@@ -10,11 +10,9 @@ import { logInfo, logError } from './../utils/logger.js';
 /**
  * The organisation's repositories are its projects.
  *
- * A project used to exist only once someone created it in Alpha and pasted a
- * repository URL into it, so a team arriving at the hosted board found it
- * empty even though every repository -- and every issue in it -- was already
- * on GitHub. This makes one project per repository, the first time a sync sees
- * it.
+ * This is an explicit importer for a PM-authorized workflow. The normal board
+ * sync only updates projects already created or attached in Alpha; it never
+ * turns every organization repository into a project implicitly.
  *
  * ## Only the organisation's workspace
  *
@@ -89,7 +87,19 @@ function reasonToSkip(repo: GitHubRepo): string | null {
 const isUniqueClash = (err: unknown): boolean => err instanceof DatabaseError && err.sqlState === '23505';
 
 /** Make a project for every organisation repository that does not have one. */
-export async function importOrgRepositories(workspaceId: string, report: DiscoveryReport): Promise<void> {
+export async function importOrgRepositories(
+  workspaceId: string,
+  report: DiscoveryReport,
+  createdBy?: string
+): Promise<void> {
+  if (!createdBy?.trim()) {
+    report.errors.push({
+      project: 'organization repositories',
+      detail: 'A PM creator is required before importing a repository as a project.'
+    });
+    return;
+  }
+
   if (!ALPHA_ORG || workspaceId !== DEFAULT_WORKSPACE_ID) return;
 
   let repos: GitHubRepo[];
@@ -144,7 +154,7 @@ export async function importOrgRepositories(workspaceId: string, report: Discove
       const key = keyForRepo(repo.name, taken);
       taken.add(key);
       try {
-        await projectStore().create(workspaceId, { ...project, key });
+        await projectStore().create(workspaceId, { ...project, key, createdBy });
         report.projectsImported += 1;
         logInfo(`Imported ${repo.full_name} as project ${key}`);
         break;

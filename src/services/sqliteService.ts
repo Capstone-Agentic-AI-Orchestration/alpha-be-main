@@ -208,6 +208,7 @@ export class SQLiteService {
         lead_agent_id TEXT,
         resources TEXT DEFAULT '[]',
         github_org TEXT,
+        created_by TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -525,6 +526,8 @@ export class SQLiteService {
       // scaffolding existed, which is why the create form asks when it is unset
       // rather than assuming one.
       ['projects', 'github_org TEXT'],
+      // PM ownership is the workspace visibility boundary for projects and repositories.
+      ['projects', 'created_by TEXT'],
       // Fingerprint of the persona in force when this CLI session started.
       //
       // Only Claude Code receives the persona on every turn (via
@@ -1176,6 +1179,7 @@ export class SQLiteService {
       leadAgentId: r.lead_agent_id,
       resources: JSON.parse(r.resources || '[]'),
       githubOrg: r.github_org || undefined,
+      createdBy: r.created_by || undefined,
       envVars: JSON.parse(r.env_vars || '[]'),
       createdAt: r.created_at
     }));
@@ -1211,8 +1215,8 @@ export class SQLiteService {
     } as Project;
 
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, env_vars, created_at)
-      VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @envVars, @createdAt)
+      INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, env_vars, created_at)
+      VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdBy, @envVars, @createdAt)
     `);
     stmt.run({
       ...complete,
@@ -1224,6 +1228,7 @@ export class SQLiteService {
       leadAgentId: complete.leadAgentId || null,
       resources: JSON.stringify(complete.resources || []),
       githubOrg: complete.githubOrg || null,
+      createdBy: complete.createdBy || null,
       envVars: JSON.stringify(complete.envVars || []),
       createdAt: complete.createdAt || now
     });

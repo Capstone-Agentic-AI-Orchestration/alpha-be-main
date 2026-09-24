@@ -138,8 +138,8 @@ export function requireEntityWorkspace(
 
 /**
  * A project is the authorization boundary for code, issues, runs and chat
- * context. PMs/admins see the whole workspace; clients and developers must
- * have an active project assignment.
+ * context. PMs/admins can work with PM-owned projects; clients and
+ * developers must have an active project assignment for project work.
  */
 export function requireProjectWorkspace(
   req: Request,

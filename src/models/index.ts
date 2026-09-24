@@ -198,6 +198,8 @@ export interface ProjectResource {
 
 export interface Project {
   id: string;
+  /** GitHub login of the project manager who created this project. */
+  createdBy?: string;
   name: string;
   key: string;
   description: string;
