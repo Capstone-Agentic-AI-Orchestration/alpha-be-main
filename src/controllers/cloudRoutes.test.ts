@@ -348,7 +348,9 @@ describe('a workspace other than the default', () => {
 describe('build steps', () => {
   const steps = (...labels: string[]) => labels.map((label, i) => ({ id: `step-${label}`, label, phase: 'implementation', position: i }));
 
+  /** Projects are started by project managers (fe #32). */
   async function projectAsAdmin() {
+    session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
     const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
     return { app, project };
@@ -400,15 +402,22 @@ describe('build steps', () => {
     expect(rows).toEqual([{ project_id: other.id }]);
   });
 
-  /** These routes checked nothing at all. */
-  it('are written only by the roles the database policy allows', async () => {
+  /**
+   * These routes checked nothing at all. Now: developers run a project's
+   * pipeline as they run its details (`project.update`), on any project in
+   * the catalogue; a client may not touch it.
+   */
+  it('are written by the team, and not by a client', async () => {
     const { project } = await projectAsAdmin();
 
     session = { login: 'Dev1', role: 'dev' };
     const dev = await startCloudApi();
-    expect((await call(dev, 'PUT', `/api/projects/${project.id}/build-steps`, { steps: steps('plan') })).status).toBe(403);
-    // Not assigned to it, so not told it exists.
-    expect((await call(dev, 'GET', `/api/projects/${project.id}/build-steps`)).status).toBe(404);
+    expect((await call(dev, 'PUT', `/api/projects/${project.id}/build-steps`, { steps: steps('plan') })).status).toBe(200);
+    expect((await call(dev, 'GET', `/api/projects/${project.id}/build-steps`)).body.map((s: any) => s.label)).toEqual(['plan']);
+
+    session = { login: 'Client1', role: 'client' };
+    const client = await startCloudApi();
+    expect((await call(client, 'PUT', `/api/projects/${project.id}/build-steps`, { steps: steps('ship') })).status).toBe(403);
   });
 });
 
@@ -419,6 +428,7 @@ describe('approving a run on the web', () => {
    * as the person approving.
    */
   it('merges the pull request through GitHub’s API', async () => {
+    session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
     const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
     const issue = (await call(app, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id })).body;

@@ -208,6 +208,7 @@ export class SQLiteService {
         lead_agent_id TEXT,
         resources TEXT DEFAULT '[]',
         github_org TEXT,
+        created_by TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -525,6 +526,8 @@ export class SQLiteService {
       // scaffolding existed, which is why the create form asks when it is unset
       // rather than assuming one.
       ['projects', 'github_org TEXT'],
+      // The PM who created it: what puts a project in the workspace's catalogue.
+      ['projects', 'created_by TEXT'],
       // Fingerprint of the persona in force when this CLI session started.
       //
       // Only Claude Code receives the persona on every turn (via
@@ -1266,6 +1269,7 @@ export class SQLiteService {
       leadAgentId: r.lead_agent_id,
       resources: JSON.parse(r.resources || '[]'),
       githubOrg: r.github_org || undefined,
+      createdBy: r.created_by || undefined,
       envVars: JSON.parse(r.env_vars || '[]'),
       createdAt: r.created_at
     }));
@@ -1301,8 +1305,8 @@ export class SQLiteService {
     } as Project;
 
     const stmt = this.db.prepare(`
-      INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, env_vars, created_at)
-      VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @envVars, @createdAt)
+      INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, env_vars, created_at)
+      VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdBy, @envVars, @createdAt)
     `);
     stmt.run({
       ...complete,
@@ -1314,6 +1318,7 @@ export class SQLiteService {
       leadAgentId: complete.leadAgentId || null,
       resources: JSON.stringify(complete.resources || []),
       githubOrg: complete.githubOrg || null,
+      createdBy: complete.createdBy || null,
       envVars: JSON.stringify(complete.envVars || []),
       createdAt: complete.createdAt || now
     });
@@ -1332,7 +1337,7 @@ export class SQLiteService {
         name = @name, key = @key, description = @description, color = @color, icon = @icon,
         status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
         lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
-        github_org = @githubOrg, env_vars = @envVars
+        github_org = @githubOrg, created_by = @createdBy, env_vars = @envVars
       WHERE id = @id AND workspace_id = @workspaceId
     `);
     stmt.run({
@@ -1340,6 +1345,7 @@ export class SQLiteService {
       workspaceId: this.workspaceId(),
       resources: JSON.stringify(merged.resources || []),
       githubOrg: merged.githubOrg || null,
+      createdBy: merged.createdBy || null,
       envVars: JSON.stringify(merged.envVars || [])
     });
     return merged;

@@ -260,6 +260,31 @@ describe('pulling the team board', () => {
     expect(workspaceRegistry.canDiscoverProject(home!, 'gh-repo-100')).toBe(false);
   });
 
+  /**
+   * On a team's desktop the catalogue is PM-owned projects, and the desktop
+   * cannot see who the PMs are -- it holds only its own membership. Every
+   * project it pulled passed the cloud's PM check already, so its creator is
+   * enough; one with no creator, made here, is not in the catalogue.
+   */
+  it('shows a developer on a team desktop what the team board sent, and not an unowned local project', async () => {
+    process.env.ALPHA_CLOUD_API = 'https://cloud.test/api';
+    try {
+      const { svc, board, inWorkspace } = await load();
+      const { workspaceRegistry } = await import('./workspaceRegistry.js');
+
+      await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }));
+      inWorkspace(() => svc.createProject({ id: 'proj-local', name: 'Local', key: 'LOC', resources: [] }));
+
+      const dev = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
+      expect(workspaceRegistry.canDiscoverProject(dev!, 'gh-repo-100')).toBe(true);
+      expect(workspaceRegistry.canDiscoverProject(dev!, 'proj-local')).toBe(false);
+      // The owner came down with it.
+      expect(inWorkspace(() => svc.getProjects()).find((p: Project) => p.id === 'gh-repo-100')?.createdBy).toBe('PM1');
+    } finally {
+      process.env.ALPHA_CLOUD_API = '';
+    }
+  });
+
   /** How the next sync knows a comment has already gone to GitHub. */
   it('learns that a comment was published', async () => {
     const { svc, board, inWorkspace } = await load();

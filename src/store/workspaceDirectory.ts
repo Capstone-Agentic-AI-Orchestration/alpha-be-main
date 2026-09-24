@@ -73,6 +73,17 @@ export interface WorkspaceAccess {
   squadOwners: ReadonlyMap<string, string>;
   /** Which squads serve which projects. */
   squadProjects: ReadonlyArray<{ squadId: string; projectId: string }>;
+  /** Each project in this workspace, and the login of the PM who created it. */
+  projectCreators?: ReadonlyMap<string, string | null>;
+  /**
+   * This workspace's active project managers, for `isPmOwnedProject`.
+   *
+   * Absent on a team's desktop: it holds only its own person's membership,
+   * so it cannot tell who the other PMs are -- and does not need to. Every
+   * project there came from the team board, which the cloud's policy only
+   * lets through when its creator is an active PM.
+   */
+  projectManagerIds?: ReadonlySet<string>;
   /**
    * The projects and squads that are in this workspace at all.
    *

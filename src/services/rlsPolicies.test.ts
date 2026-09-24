@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 
 import { createTestDatabase } from '../store/testDatabase.js';
@@ -59,7 +59,10 @@ beforeAll(async () => {
   // Seeded as superuser, for whom RLS does not apply.
   await db.exec(`
     insert into workspaces (id,name,slug) values ('ws1','Alpha','alpha');
-    insert into projects (id,workspace_id,name,key) values ('p1','ws1','Checkout','EC');
+    -- A project is in the catalogue when an active PM of its workspace made it.
+    insert into workspace_members (id,workspace_id,user_id,role,status)
+      values ('member-pm','ws1','PM1','pm','active');
+    insert into projects (id,workspace_id,name,key,created_by) values ('p1','ws1','Checkout','EC','PM1');
     insert into issues (id,workspace_id,identifier,title,status,priority,project_id)
       values ('i1','ws1','EC-1','Fix cart','todo','high','p1');
 
@@ -162,7 +165,7 @@ describe('work product is visible to oversight', () => {
 
 describe('the board is shared, clients are scoped out of it', () => {
   /** Workspace-wide project read is the "All Projects" discovery tab. */
-  it('shows every workspace project to any developer', async () => {
+  it('shows every PM-owned workspace project to any developer', async () => {
     expect(await as('ZaneZamoraC1Cs', 'dev', () => rows('select * from projects'))).toBe(1);
   });
 
@@ -320,7 +323,7 @@ describe('the board announces itself to its own workspace', () => {
     await db.exec(`insert into workspaces (id,name,slug) values ('ws-elsewhere','Elsewhere','elsewhere')`);
     // A write of each kind, from the owner, which is how the cloud writes.
     await db.exec(`
-      insert into projects (id,workspace_id,name,key) values ('p-live','ws1','Live','LIVE');
+      insert into projects (id,workspace_id,name,key,created_by) values ('p-live','ws1','Live','LIVE','PM1');
       insert into issues (id,workspace_id,identifier,title,status,priority,project_id)
         values ('i-live','ws1','LIVE-1','Watch me','todo','high','p-live');
       update issues set status = 'in_progress' where id = 'i-live';
@@ -503,5 +506,73 @@ describe("an agent's execution config is not shared", () => {
           and column_name in ('custom_cli_args', 'env_vars')`
     );
     expect(columns).toEqual([]);
+  });
+});
+
+/**
+ * Projects are started by project managers (fe #32), and run by the team.
+ *
+ * A desktop reads and writes `projects` directly with its own token, so these
+ * policies -- not the API -- are what hold for every developer's machine.
+ */
+describe('the project catalogue is what active PMs started', () => {
+  afterEach(async () => {
+    await db.exec("delete from projects where id in ('p-orphan','p-admin','p-new','p-dev')");
+    await db.exec("update projects set name = 'Checkout' where id = 'p1'");
+  });
+
+  it('hides a project with no PM behind it, from everyone', async () => {
+    await db.exec("insert into projects (id,workspace_id,name,key) values ('p-orphan','ws1','Imported repo','ORF')");
+    await db.exec("insert into projects (id,workspace_id,name,key,created_by) values ('p-admin','ws1','Admin draft','ADM','LloydLim1')");
+
+    for (const [who, role] of [['ZaneZamoraC1Cs', 'dev'], ['PM1', 'pm'], ['LloydLim1', 'admin']] as const) {
+      expect(await as(who, role, () => rows("select * from projects where id in ('p-orphan','p-admin')"))).toBe(0);
+    }
+  });
+
+  it('lets a project manager start one, as themselves', async () => {
+    await as('PM1', 'pm', () =>
+      db.exec("insert into projects (id,workspace_id,name,key,created_by) values ('p-new','ws1','New','NEW','PM1')")
+    );
+    expect(await as('ZaneZamoraC1Cs', 'dev', () => rows("select * from projects where id = 'p-new'"))).toBe(1);
+
+    // Not under someone else's name.
+    await expect(
+      as('PM1', 'pm', () =>
+        db.exec("insert into projects (id,workspace_id,name,key,created_by) values ('p-dev','ws1','Other','OTH','Somebody')")
+      )
+    ).rejects.toThrow();
+  });
+
+  it('does not let a developer or an admin start one', async () => {
+    await expect(
+      as('ZaneZamoraC1Cs', 'dev', () =>
+        db.exec("insert into projects (id,workspace_id,name,key,created_by) values ('p-dev','ws1','Mine','MIN','ZaneZamoraC1Cs')")
+      )
+    ).rejects.toThrow();
+    await expect(
+      as('LloydLim1', 'admin', () =>
+        db.exec("insert into projects (id,workspace_id,name,key,created_by) values ('p-admin','ws1','Adm','ADM','LloydLim1')")
+      )
+    ).rejects.toThrow();
+  });
+
+  /** Developers run projects: edit, yes; remove, no. */
+  it('lets a developer change a project but not remove it', async () => {
+    await as('ZaneZamoraC1Cs', 'dev', () => db.exec("update projects set name = 'Checkout v2' where id = 'p1'"));
+    const renamed = await db.query<{ name: string }>("select name from projects where id = 'p1'");
+    expect(renamed.rows[0].name).toBe('Checkout v2');
+
+    await as('ZaneZamoraC1Cs', 'dev', () => db.exec("delete from projects where id = 'p1'"));
+    expect(await rows("select * from projects where id = 'p1'")).toBe(1);
+  });
+
+  it('keeps who started a project fixed, whoever edits it', async () => {
+    await expect(
+      as('ZaneZamoraC1Cs', 'dev', () => db.exec("update projects set created_by = 'ZaneZamoraC1Cs' where id = 'p1'"))
+    ).rejects.toThrow(/creator cannot be changed/);
+    await expect(db.exec("update projects set created_by = 'Somebody' where id = 'p1'")).rejects.toThrow(
+      /creator cannot be changed/
+    );
   });
 });

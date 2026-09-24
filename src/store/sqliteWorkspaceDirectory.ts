@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
+import { ALPHA_CLOUD_API, IS_CLOUD } from '../config/env.js';
 
 import {
   iso,
@@ -251,8 +252,35 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       )
       .all(workspaceId) as Array<{ squad_id: string; project_id: string }>;
 
+    const hasProjects = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").get();
+    const projectColumns = hasProjects
+      ? (this.db.prepare('PRAGMA table_info(projects)').all() as Array<{ name: string }>).map(c => c.name)
+      : [];
+    const projects = projectColumns.includes('created_by')
+      ? (this.db.prepare('SELECT id, created_by FROM projects WHERE workspace_id = ?').all(workspaceId) as Array<{
+          id: string;
+          created_by: string | null;
+        }>)
+      : [];
+
+    /*
+     * PM ownership is the rule for a team's shared catalogue.
+     *
+     * On a team's desktop every project came from the team board, which the
+     * cloud's policy only lets through with an active PM behind it -- so a
+     * creator is required and the PM list, which this file does not hold, is
+     * left out (see `WorkspaceAccess.projectManagerIds`).
+     *
+     * A desktop working alone has no team and no PMs: the person at it owns
+     * everything on it, and a developer syncing their own repositories must
+     * see them. There the catalogue is not filtered at all.
+     */
+    const teamDesktop = !IS_CLOUD && Boolean(ALPHA_CLOUD_API);
+
     return {
       assignedProjectIds: new Set(assigned.map(row => row.project_id)),
+      projectCreators: teamDesktop ? new Map(projects.map(row => [row.id, row.created_by ?? null])) : undefined,
+      projectManagerIds: undefined,
       squadOwners: new Map(owners.map(row => [row.squad_id, row.user_id])),
       squadProjects: squadProjects.map(row => ({ squadId: row.squad_id, projectId: row.project_id }))
     };

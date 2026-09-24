@@ -157,7 +157,8 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
       assigned: string[] | null;
       owners: Array<{ squadId: string; userId: string }> | null;
       squad_projects: Array<{ squadId: string; projectId: string }> | null;
-      projects: string[] | null;
+      project_rows: Array<{ id: string; createdBy: string | null }> | null;
+      project_managers: string[] | null;
       squads: string[] | null;
     }>(
       `select
@@ -167,18 +168,24 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
           from workspace_squad_owners where workspace_id = $1 and status = 'active') as owners,
          (select json_agg(json_build_object('squadId', squad_id, 'projectId', project_id))
           from workspace_squad_projects where workspace_id = $1 and status = 'active') as squad_projects,
-         (select array_agg(id) from projects where workspace_id = $1) as projects,
+         (select coalesce(json_agg(json_build_object('id', id, 'createdBy', created_by)), '[]'::json)
+            from projects where workspace_id = $1) as project_rows,
+         (select array_agg(user_id) from workspace_members
+            where workspace_id = $1 and status = 'active' and role = 'pm') as project_managers,
          (select array_agg(id) from squads where workspace_id = $1) as squads`,
       [workspaceId, userId]
     );
 
     const row = rows[0];
+    const projectRows = row?.project_rows ?? [];
     return {
       assignedProjectIds: new Set(row?.assigned ?? []),
+      projectCreators: new Map(projectRows.map(project => [project.id, project.createdBy ?? null])),
+      projectManagerIds: new Set(row?.project_managers ?? []),
       squadOwners: new Map((row?.owners ?? []).map(owner => [owner.squadId, owner.userId])),
       squadProjects: row?.squad_projects ?? [],
       workspaceRows: {
-        projects: new Set(row?.projects ?? []),
+        projects: new Set(projectRows.map(project => project.id)),
         squads: new Set(row?.squads ?? [])
       }
     };

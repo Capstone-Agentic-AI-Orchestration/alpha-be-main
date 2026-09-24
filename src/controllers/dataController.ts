@@ -270,7 +270,16 @@ dataRouter.get('/projects', route(async (req: Request, res: Response) => {
 
 dataRouter.post('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.create')) return;
-  const project = await projectStore().create(req.workspace!.workspaceId, req.body);
+  /*
+   * The creator is the person signed in, never what the request says: a
+   * client-sent `createdBy` would let anyone put a project under a PM's name,
+   * and that name is what puts a project in the workspace's catalogue.
+   */
+  const { createdBy: _claimed, ...input } = req.body ?? {};
+  const project = await projectStore().create(req.workspace!.workspaceId, {
+    ...input,
+    createdBy: req.workspace!.userId
+  });
   workspaceRegistry.bind('projects', project.id, req.workspace!.workspaceId);
   // On a team's desktop, onto the team's board: nobody else sees it otherwise.
   await supabaseService.shareProject(project);
@@ -357,8 +366,10 @@ dataRouter.delete('/projects/:id/binding', desktopOnly, route(async (req: Reques
 }));
 
 dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
-  if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  // Developers run projects too; see `project.update`. Any project in the
+  // catalogue, not only an assigned one: this is the project, not its work.
+  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
   /**
    * A folder that cannot hold a branch is refused here.
    *
@@ -381,7 +392,9 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
     if (!check.ok) return res.status(400).json({ error: check.detail });
   }
 
-  const updated = await projectStore().update(req.workspace!.workspaceId, req.params.id, req.body);
+  // Who created it is not something an edit can change.
+  const { createdBy: _owner, ...changes } = req.body ?? {};
+  const updated = await projectStore().update(req.workspace!.workspaceId, req.params.id, changes);
   if (!updated) return res.status(404).json({ error: 'Project not found' });
   void supabaseService.shareProject(updated);
   res.json(updated);
@@ -410,15 +423,16 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
  */
 dataRouter.get('/projects/:id/build-steps', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
-  if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  // The pipeline is the project's, like its details: whoever may edit it may read it.
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
   const steps = await projectStore().getBuildSteps(req.workspace!.workspaceId, req.params.id);
   if (!steps) return res.status(404).json({ error: 'Project not found' });
   res.json(steps);
 }));
 
 dataRouter.put('/projects/:id/build-steps', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
-  if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
   try {
     const steps = await projectStore().saveBuildSteps(req.workspace!.workspaceId, req.params.id, req.body?.steps);
     if (!steps) return res.status(404).json({ error: 'Project not found' });
