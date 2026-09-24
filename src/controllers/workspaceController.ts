@@ -3,6 +3,7 @@ import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { ALPHA_ORG } from '../config/env.js';
 import { githubApi } from '../services/githubApi.js';
+import { roleFromTeams, type TeamMembership } from '../services/identityService.js';
 import { agentStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
@@ -89,6 +90,100 @@ async function coreSquad(workspaceId: string, id: string, name: string) {
 const ROLES: readonly WorkspaceRole[] = ['client', 'dev', 'pm', 'admin'];
 const STATUSES: readonly WorkspaceMemberStatus[] = ['invited', 'active', 'suspended', 'removed'];
 
+type GitHubOrganizationMember = {
+  login?: string;
+  avatar_url?: string | null;
+};
+
+type GitHubOrganizationTeam = {
+  slug?: string;
+};
+
+type GitHubTeamMember = {
+  login?: string;
+};
+
+type WorkspaceMemberCandidate = {
+  login: string;
+  avatarUrl: string | null;
+  /** The Alpha role implied by the person's GitHub organization teams. */
+  role: WorkspaceRole | null;
+  /** Team slugs are returned so the UI can show why a role was detected. */
+  teams: string[];
+  /** Unknown teams are different from a failed team lookup. */
+  roleSource: 'github_team' | 'unassigned' | 'unavailable';
+};
+
+/**
+ * Resolve organization members to Alpha roles from their GitHub teams.
+ *
+ * GitHub's organization member endpoint does not include team membership, so
+ * the directory is assembled from the organization teams and each team's
+ * members. A missing or restricted team endpoint must never turn into a
+ * silent developer default; those candidates remain available for an explicit
+ * role choice and are marked as unavailable to the UI.
+ */
+async function withOrganizationRoles(
+  organization: string,
+  people: GitHubOrganizationMember[]
+): Promise<WorkspaceMemberCandidate[]> {
+  const candidates = new Map<string, WorkspaceMemberCandidate>();
+  for (const person of people) {
+    const login = typeof person.login === 'string' ? person.login.trim() : '';
+    if (!login) continue;
+    candidates.set(login.toLowerCase(), {
+      login,
+      avatarUrl: typeof person.avatar_url === 'string' ? person.avatar_url : null,
+      role: null,
+      teams: [],
+      roleSource: 'unassigned'
+    });
+  }
+
+  let teamLookupFailed = false;
+  try {
+    const teams = await githubApi().getAll<GitHubOrganizationTeam>(
+      `/orgs/${encodeURIComponent(organization)}/teams?per_page=100`
+    );
+
+    // Keep the requests bounded to one per team and preserve all team slugs so
+    // an unrecognised team is still visible to a PM choosing a role manually.
+    await Promise.all(
+      teams.map(async team => {
+        const slug = typeof team.slug === 'string' ? team.slug.trim() : '';
+        if (!slug) return;
+        try {
+          const members = await githubApi().getAll<GitHubTeamMember>(
+            `/orgs/${encodeURIComponent(organization)}/teams/${encodeURIComponent(slug)}/members?per_page=100`
+          );
+          for (const member of members) {
+            const login = typeof member.login === 'string' ? member.login.trim() : '';
+            const candidate = candidates.get(login.toLowerCase());
+            if (!candidate) continue;
+            if (!candidate.teams.includes(slug)) candidate.teams.push(slug);
+          }
+        } catch {
+          // One private/restricted team should not hide every other org member.
+          teamLookupFailed = true;
+        }
+      })
+    );
+  } catch {
+    teamLookupFailed = true;
+  }
+
+  return Array.from(candidates.values()).map(candidate => {
+    candidate.teams.sort((a, b) => a.localeCompare(b));
+    const memberships: TeamMembership[] = candidate.teams.map(slug => ({ org: organization, slug }));
+    const role = roleFromTeams(memberships, organization) as WorkspaceRole | undefined;
+    return {
+      ...candidate,
+      role: role ?? null,
+      roleSource: role ? 'github_team' : teamLookupFailed ? 'unavailable' : 'unassigned'
+    };
+  });
+}
+
 /**
  * A member route may only touch the workspace this request is scoped to.
  *
@@ -114,17 +209,20 @@ workspaceRouter.get(
 );
 
 /**
- * Create a workspace, as its first admin.
+ * Create a workspace and staff it in the same action.
  *
- * Admins only. A workspace's creator becomes its administrator, and the
- * database token minted for them there carries that role -- so "anyone may
- * create one" is also "anyone may hold admin claims somewhere".
+ * Admins and project managers may start a workspace. The person who starts it
+ * is enrolled immediately, and selected organisation members are enrolled in
+ * the same request so the new workspace is ready to use when it opens.
+ * Project managers may staff a workspace, but only an admin may grant the
+ * admin role.
  */
 workspaceRouter.post(
   '/workspaces',
   route(async (req, res) => {
-    if (req.workspace!.role !== 'admin') {
-      res.status(403).json({ error: 'Only an admin can create a workspace.' });
+    const caller = req.workspace!;
+    if (caller.role !== 'admin' && caller.role !== 'pm') {
+      res.status(403).json({ error: 'Only an admin or project manager can create a workspace.' });
       return;
     }
 
@@ -134,10 +232,54 @@ workspaceRouter.post(
       return;
     }
 
-    const workspace = await workspaceRegistry.createWorkspace(req.workspace!.userId, {
+    if (req.body?.members !== undefined && !Array.isArray(req.body.members)) {
+      res.status(400).json({ error: 'members must be an array' });
+      return;
+    }
+
+    const selectedMembers: Array<{ userId: string; role: WorkspaceRole }> = [];
+    const seen = new Set([caller.userId.trim().toLowerCase()]);
+    for (const rawMember of (Array.isArray(req.body?.members) ? req.body.members : [])) {
+      if (!rawMember || typeof rawMember !== 'object') {
+        res.status(400).json({ error: 'Each member must include a userId and role' });
+        return;
+      }
+
+      const userId = typeof (rawMember as any).userId === 'string'
+        ? (rawMember as any).userId.trim()
+        : '';
+      const memberRole = (rawMember as any).role as WorkspaceRole;
+      if (!userId || !ROLES.includes(memberRole)) {
+        res.status(400).json({ error: `Each member role must be one of ${ROLES.join(', ')}` });
+        return;
+      }
+      if (memberRole === 'admin' && caller.role !== 'admin') {
+        res.status(403).json({ error: 'Only an admin can add an admin while creating a workspace.' });
+        return;
+      }
+
+      const key = userId.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      selectedMembers.push({ userId, role: memberRole });
+    }
+
+    const workspace = await workspaceRegistry.createWorkspace(caller.userId, {
       name,
       slug: typeof req.body?.slug === 'string' ? req.body.slug : undefined
     });
+
+    // The directory's default creator role is admin for backwards-compatible
+    // direct store callers. A PM-created workspace is deliberately narrowed to
+    // a PM membership before it is returned or switched to by the client.
+    if (caller.role === 'pm') {
+      await workspaceRegistry.addMember(workspace.id, caller.userId, 'pm');
+      workspace.role = 'pm';
+    }
+    for (const member of selectedMembers) {
+      await workspaceRegistry.addMember(workspace.id, member.userId, member.role);
+    }
+    workspace.memberCount = selectedMembers.length + 1;
     await seedRoster(workspace.id, workspace.name);
     res.status(201).json(workspace);
   })
@@ -216,9 +358,11 @@ workspaceRouter.get(
       return;
     }
 
-    let people: Array<{ login: string; avatar_url?: string }>;
+    let people: GitHubOrganizationMember[];
     try {
-      people = await githubApi().getAll(`/orgs/${ALPHA_ORG}/members?per_page=100`);
+      people = await githubApi().getAll<GitHubOrganizationMember>(
+        `/orgs/${encodeURIComponent(ALPHA_ORG)}/members?per_page=100`
+      );
     } catch (err: any) {
       res.status(502).json({ error: `Could not read the ${ALPHA_ORG} members: ${err?.message ?? err}` });
       return;
@@ -229,11 +373,8 @@ workspaceRouter.get(
         .filter(member => member.status === 'active')
         .map(member => member.userId.toLowerCase())
     );
-    res.json(
-      people
-        .filter(person => !taken.has(person.login.toLowerCase()))
-        .map(person => ({ login: person.login, avatarUrl: person.avatar_url ?? null }))
-    );
+    const candidates = await withOrganizationRoles(ALPHA_ORG, people);
+    res.json(candidates.filter(candidate => !taken.has(candidate.login.toLowerCase())));
   })
 );
 

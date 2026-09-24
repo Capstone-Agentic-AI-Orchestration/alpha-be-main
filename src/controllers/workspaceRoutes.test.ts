@@ -30,18 +30,22 @@ async function startApi({ cloud = false } = {}) {
 
   // The desktop resolves this from `gh`; a test must not depend on a
   // signed-in machine, and the role is what these assertions are about.
-  vi.doMock('../services/identityService.js', () => ({
-    currentIdentity: async () => ({
-      login: identity.login,
-      source: 'github',
-      role: identity.role,
-      access: 'granted',
-      github: 'ok',
-      teams: []
-    }),
-    warmIdentity: () => {},
-    knownIdentity: () => ({ login: identity.login, source: 'github' })
-  }));
+  vi.doMock('../services/identityService.js', async () => {
+    const actual = await vi.importActual<typeof import('../services/identityService.js')>('../services/identityService.js');
+    return {
+      ...actual,
+      currentIdentity: async () => ({
+        login: identity.login,
+        source: 'github',
+        role: identity.role,
+        access: 'granted',
+        github: 'ok',
+        teams: []
+      }),
+      warmIdentity: () => {},
+      knownIdentity: () => ({ login: identity.login, source: 'github' })
+    };
+  });
 
   const sql = await import('../services/sqliteService.js');
   const { workspaceRouter } = await import('./workspaceController.js');
@@ -156,7 +160,35 @@ describe('POST /workspaces', () => {
 
     const res = await call(app, 'POST', '/api/workspaces', { body: { name: 'Team Alpha' } });
     expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/admin/i);
+    expect(res.body.error).toMatch(/admin or project manager/i);
+  });
+
+  it('lets a project manager create and staff a workspace in one action', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app, registry } = await startApi();
+
+    const res = await call(app, 'POST', '/api/workspaces', {
+      body: {
+        name: 'Client Alpha',
+        members: [
+          { userId: 'Dev1', role: 'dev' },
+          { userId: 'PM2', role: 'pm' }
+        ]
+      }
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ name: 'Client Alpha', role: 'pm', memberCount: 3 });
+    expect((await registry.listMembers(res.body.id)).map((member: any) => [member.userId, member.role]).sort()).toEqual([
+      ['PM1', 'pm'],
+      ['Dev1', 'dev'],
+      ['PM2', 'pm']
+    ].sort());
+
+    const adminAttempt = await call(app, 'POST', '/api/workspaces', {
+      body: { name: 'Admin Attempt', members: [{ userId: 'Admin2', role: 'admin' }] }
+    });
+    expect(adminAttempt.status).toBe(403);
   });
 
   it('wants a name', async () => {
@@ -347,7 +379,25 @@ describe('staffing a workspace', () => {
     const { useGitHubApi } = await import('../services/githubApi.js');
     useGitHubApi({
       get: async () => ({}) as any,
-      getAll: async () => [{ login: 'Dev1', avatar_url: 'https://avatars/1' }, { login: 'PM1' }] as any,
+      getAll: async (path: string) => {
+        if (path.includes('/teams/developers/')) return [{ login: 'Dev1' }] as any;
+        if (path.includes('/teams/design/')) return [{ login: 'Designer' }] as any;
+        if (path.includes('/teams/project-managers/')) return [{ login: 'PM1' }, { login: 'PM2' }] as any;
+        if (path.includes('/teams/admins/')) return [{ login: 'Admin2' }] as any;
+        if (path.includes('/members?')) {
+          return [
+            { login: 'Dev1', avatar_url: 'https://avatars/1' },
+            { login: 'Designer', avatar_url: null },
+            { login: 'PM2' },
+            { login: 'Admin2' },
+            { login: 'PM1' }
+          ] as any;
+        }
+        if (path.includes('/teams?')) {
+          return [{ slug: 'developers' }, { slug: 'design' }, { slug: 'project-managers' }, { slug: 'admins' }] as any;
+        }
+        return [] as any;
+      },
       post: async () => ({}) as any,
       patch: async () => ({}) as any,
       put: async () => ({}) as any,
@@ -358,7 +408,36 @@ describe('staffing a workspace', () => {
     const res = await call(app, 'GET', '/api/workspaces/ws-default/members/candidates');
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ login: 'Dev1', avatarUrl: 'https://avatars/1' }]);
+    expect(res.body).toEqual([
+      {
+        login: 'Dev1',
+        avatarUrl: 'https://avatars/1',
+        role: 'dev',
+        teams: ['developers'],
+        roleSource: 'github_team'
+      },
+      {
+        login: 'Designer',
+        avatarUrl: null,
+        role: null,
+        teams: ['design'],
+        roleSource: 'unassigned'
+      },
+      {
+        login: 'PM2',
+        avatarUrl: null,
+        role: 'pm',
+        teams: ['project-managers'],
+        roleSource: 'github_team'
+      },
+      {
+        login: 'Admin2',
+        avatarUrl: null,
+        role: 'admin',
+        teams: ['admins'],
+        roleSource: 'github_team'
+      }
+    ]);
     useGitHubApi(null);
     delete process.env.ALPHA_ORG;
   });
@@ -366,8 +445,9 @@ describe('staffing a workspace', () => {
 
 describe('project assignments', () => {
   it('are managed by a PM, and decide what a developer sees', async () => {
+    identity = { login: 'PM1', role: 'pm' };
     const { app, registry, svc } = await startApi();
-    svc.createProject({ id: 'p1', name: 'Repo', key: 'ALF' });
+    svc.createProject({ id: 'p1', name: 'Repo', key: 'ALF', createdBy: 'PM1' });
     registry.bind('projects', 'p1', 'ws-default');
     await registry.listForUser('Dev1', 'dev');
 
