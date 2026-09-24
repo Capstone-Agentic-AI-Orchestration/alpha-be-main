@@ -441,6 +441,57 @@ describe('staffing a workspace', () => {
     useGitHubApi(null);
     delete process.env.ALPHA_ORG;
   });
+
+  it('returns GitHub role teams for workspace staffing', async () => {
+    process.env.ALPHA_ORG = 'acme';
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await startApi();
+    const { useGitHubApi } = await import('../services/githubApi.js');
+    const lists: Record<string, unknown[]> = {
+      '/orgs/acme/teams?per_page=100': [
+        { slug: 'developers', name: 'Developers' },
+        { slug: 'project-managers', name: 'Project Managers' },
+        { slug: 'book-club', name: 'Book Club' }
+      ],
+      '/orgs/acme/teams/developers/members?per_page=100': [{ login: 'Dev1', avatar_url: 'https://avatars/1' }],
+      '/orgs/acme/teams/project-managers/members?per_page=100': [{ login: 'PM1' }]
+    };
+    useGitHubApi({
+      get: async () => ({}) as any,
+      getAll: async (path: string) => {
+        if (!(path in lists)) throw new Error(`unexpected GitHub call ${path}`);
+        return lists[path] as any;
+      },
+      post: async () => ({}) as any,
+      patch: async () => ({}) as any,
+      put: async () => ({}) as any,
+      delete: async () => {}
+    });
+
+    const orgRoster = await call(app, 'GET', '/api/org/teams');
+    expect(orgRoster.status).toBe(200);
+    expect(orgRoster.body).toEqual([
+      {
+        slug: 'developers',
+        name: 'Developers',
+        role: 'dev',
+        members: [{ login: 'Dev1', avatarUrl: 'https://avatars/1' }]
+      },
+      {
+        slug: 'project-managers',
+        name: 'Project Managers',
+        role: 'pm',
+        members: [{ login: 'PM1', avatarUrl: null }]
+      }
+    ]);
+
+    const workspaceRoster = await call(app, 'GET', '/api/workspaces/ws-default/members/teams');
+    expect(workspaceRoster.status).toBe(200);
+    expect(workspaceRoster.body[1].members[0]).toMatchObject({ login: 'PM1', workspaceRole: 'pm' });
+
+    useGitHubApi(null);
+    delete process.env.ALPHA_ORG;
+  });
 });
 
 describe('project assignments', () => {

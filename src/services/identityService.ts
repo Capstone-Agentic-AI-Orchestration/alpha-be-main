@@ -111,10 +111,20 @@ export function roleFromTeams(teams: TeamMembership[], workspaceOrg?: string): A
 
   let best: AlphaRole | undefined;
   for (const team of scoped) {
-    const hit = TEAM_ROLES.find(r => r.match.test(team.slug));
-    if (hit && (!best || ROLE_RANK[hit.role] > ROLE_RANK[best])) best = hit.role;
+    const hit = roleForTeamSlug(team.slug);
+    if (hit && (!best || ROLE_RANK[hit] > ROLE_RANK[best])) best = hit;
   }
   return best;
+}
+
+/**
+ * The Alpha role one GitHub team grants, or undefined for an unrelated team.
+ *
+ * Team roster surfaces use the same mapping as sign-in so the UI cannot show
+ * one role while the access gate grants another.
+ */
+export function roleForTeamSlug(slug: string): AlphaRole | undefined {
+  return TEAM_ROLES.find(r => r.match.test(slug))?.role;
 }
 
 /**

@@ -191,7 +191,11 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
     };
   }
 
-  async createWorkspace(userId: string, input: { name: string; slug?: string }): Promise<WorkspaceSummary> {
+  async createWorkspace(
+    userId: string,
+    input: { name: string; slug?: string },
+    creatorRole: WorkspaceRole = 'admin'
+  ): Promise<WorkspaceSummary> {
     await this.ensureDefaultWorkspace();
     const name = input.name.trim();
     if (!name) throw new WorkspaceRequestError('Workspace name is required.', 400);
@@ -217,11 +221,11 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
      */
     await this.sql.query(
       `insert into workspace_members (id, workspace_id, user_id, role, status)
-       values ($1, $2, $3, 'admin', 'active')`,
-      [`member-${randomUUID()}`, id, userId]
+       values ($1, $2, $3, $4, 'active')`,
+      [`member-${randomUUID()}`, id, userId, creatorRole]
     );
 
-    return this.summary(await this.workspaceRow(id), 'admin');
+    return this.summary(await this.workspaceRow(id), creatorRole);
   }
 
   async updateWorkspace(

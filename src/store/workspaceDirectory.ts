@@ -124,7 +124,11 @@ export interface WorkspaceDirectory {
   /** The requested workspace, or their first, with what they may reach in it. */
   resolve(userId: string, requestedWorkspaceId?: string, teamRole?: WorkspaceRole): Promise<WorkspaceContext | null>;
 
-  createWorkspace(userId: string, input: { name: string; slug?: string }): Promise<WorkspaceSummary>;
+  createWorkspace(
+    userId: string,
+    input: { name: string; slug?: string },
+    creatorRole?: WorkspaceRole
+  ): Promise<WorkspaceSummary>;
   /** Join by invite code. Never by slug or id: both are visible to anyone who can see the workspace. */
   updateWorkspace(workspaceId: string, input: { name?: string; slug?: string }, callerRole: WorkspaceRole): Promise<WorkspaceSummary | null>;
 
