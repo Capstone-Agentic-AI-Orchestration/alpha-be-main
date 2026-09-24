@@ -201,10 +201,39 @@ app.use('/api', workspaceRouter);
 app.use(jsonErrorHandler);
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'healthy', version: '2.0.0', time: new Date().toISOString() });
+  res.json({
+    status: 'healthy',
+    version: '2.0.0',
+    time: new Date().toISOString(),
+    /**
+     * Which process this is, for the desktop to recognise its own.
+     *
+     * The installed app waits for "a 200 on its port" before opening its
+     * window, and a daemon run from source answers that just as well. A
+     * developer with `npm run dev` going had the app open onto their source
+     * daemon -- signed in as the terminal's `gh`, reading their own `.env`
+     * with no team board -- and nothing said so. Set by the desktop's main
+     * process; absent anywhere else.
+     */
+    instance: process.env.ALPHA_INSTANCE || null
+  });
 });
 
 const server = http.createServer(app);
+
+/**
+ * A port someone else holds is the whole story of a failed start, so say it.
+ *
+ * Unhandled, this surfaced as nothing at all inside the desktop: the process
+ * that did hold the port kept answering, and the app used it.
+ */
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    logError(`Cannot listen on ${HOST}:${PORT}: another program is already using it.`);
+  } else {
+    logError(`Server error: ${err.message}`);
+  }
+});
 
 const clients = new Set<WebSocket>();
 

@@ -71,7 +71,7 @@ function builtinGithubServer(): McpServerSpec {
      *
      * The desktop shell runs this daemon inside the Electron main process, so
      * spawning execPath plainly would launch a second copy of the whole
-     * application (which would then try to bind port 3001, fail, and show an
+     * application (which would then try to bind the daemon's port, fail, and show an
      * error dialog) instead of running a stdio MCP server.
      *
      * ELECTRON_RUN_AS_NODE is Electron's own switch for exactly this: it makes
