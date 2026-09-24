@@ -237,6 +237,29 @@ describe('pulling the team board', () => {
     expect(issue).toMatchObject({ status: 'agent_running', branchName: 'alpha/fix-cart', title: 'Renamed on the web' });
   });
 
+  /**
+   * A project a manager made in a second workspace reached the developer's
+   * desktop and was hidden there: the desktop asked a side table, which only
+   * the API's create routes wrote to, instead of the row's own workspace_id.
+   */
+  it('shows what it pulls into a second workspace in that workspace, and not in the default', async () => {
+    const { board } = await load();
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+    const second = await workspaceRegistry.createWorkspace('PM1', { name: 'Capstone Test' }, 'pm');
+    await workspaceRegistry.addMember(second.id, 'Dev1', 'dev');
+
+    await board.pullSharedBoard(second.id, source({
+      assignments: [{ project_id: 'gh-repo-100', user_id: 'Dev1', status: 'active' }]
+    }));
+
+    const there = await workspaceRegistry.resolve('Dev1', second.id, 'dev');
+    expect(workspaceRegistry.canDiscoverProject(there!, 'gh-repo-100')).toBe(true);
+    expect(workspaceRegistry.canAccessProject(there!, 'gh-repo-100')).toBe(true);
+
+    const home = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
+    expect(workspaceRegistry.canDiscoverProject(home!, 'gh-repo-100')).toBe(false);
+  });
+
   /** How the next sync knows a comment has already gone to GitHub. */
   it('learns that a comment was published', async () => {
     const { svc, board, inWorkspace } = await load();

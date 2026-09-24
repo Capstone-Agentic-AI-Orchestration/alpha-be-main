@@ -467,7 +467,8 @@ class WorkspaceRegistry {
    * from another workspace is not found by the read that follows the check --
    * that read is the check, and this one does not repeat it.
    *
-   * On a desktop, the bindings table.
+   * On a desktop, the row's own `workspace_id`, like the cloud; see
+   * `entityWorkspace`.
    */
   inWorkspace(context: WorkspaceContext, entityType: EntityType, entityId: string): boolean {
     const rows = context.access.workspaceRows;
@@ -477,11 +478,32 @@ class WorkspaceRegistry {
     return true;
   }
 
+  /**
+   * Which workspace an entity is in: what its own row says.
+   *
+   * This used to be the bindings side table alone, which only the API's
+   * create routes wrote to. Every other way a row arrives -- the team board
+   * pull, adopting a project, seeding, a run the runner starts -- left it
+   * unbound, and an unbound row counts as the default workspace's. So a
+   * project a manager made in a second workspace reached a developer's
+   * desktop, sat in its database under the right workspace, and was hidden
+   * from that workspace anyway.
+   *
+   * Every one of these tables carries `workspace_id`, written with the row by
+   * the store, and every store reads by it. It is the answer; there is no
+   * second record to keep in step. The side table remains only for a row this
+   * file does not hold.
+   */
   entityWorkspace(entityType: EntityType, entityId: string): string | null {
-    const row = this.handle()
+    const own = this.handle()
+      .prepare(`SELECT workspace_id FROM ${entityType} WHERE id = ?`)
+      .get(entityId) as { workspace_id: string | null } | undefined;
+    if (own?.workspace_id) return own.workspace_id;
+
+    const bound = this.handle()
       .prepare('SELECT workspace_id FROM workspace_entity_bindings WHERE entity_type = ? AND entity_id = ?')
       .get(entityType, entityId) as { workspace_id: string } | undefined;
-    return row?.workspace_id ?? null;
+    return bound?.workspace_id ?? null;
   }
 
   bind(entityType: EntityType, entityId: string, workspaceId: string): void {
@@ -515,7 +537,8 @@ class WorkspaceRegistry {
    * The rows of this workspace.
    *
    * In the cloud, every one: they were read from a store that selected by
-   * workspace_id, which is the only place cloud rows come from.
+   * workspace_id, which is the only place cloud rows come from. On a desktop,
+   * the ones whose own row says so.
    */
   scope<T extends { id: string }>(entityType: EntityType, rows: T[], workspaceId: string): T[] {
     if (IS_CLOUD) return rows;
