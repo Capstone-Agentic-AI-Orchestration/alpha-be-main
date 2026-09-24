@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ALPHA_CLOUD_API, ALPHA_DIR, GITHUB_CLIENT_ID, GITHUB_SCOPE } from '../config/env.js';
+import { ALPHA_CLOUD_API, ALPHA_DIR, GITHUB_CLIENT_ID, GITHUB_SCOPE, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { logError, logInfo } from '../utils/logger.js';
 
 /**
@@ -52,16 +52,92 @@ export class DeviceFlowError extends Error {
 
 interface StoredCredential {
   token: string;
+  userId?: string;
   login?: string;
+  name?: string;
+  avatarUrl?: string;
   obtainedAt: string;
 }
 
 const TOKEN_FILE = path.join(ALPHA_DIR, 'github-credential.json');
+const PROFILE_FILE = path.join(ALPHA_DIR, 'github-profiles.json');
+
+/** Public metadata shown by the desktop profile picker. It never contains a token. */
+export interface ProfileSummary {
+  id: string;
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+  lastUsedAt: string;
+  active: boolean;
+}
+
+interface ProfileRecord {
+  id: string;
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+  lastUsedAt: string;
+}
+
+interface ProfileRegistry {
+  activeProfileId?: string;
+  profiles: ProfileRecord[];
+}
 
 const DEVICE_CODE_URL = 'https://github.com/login/device/code';
 const ACCESS_TOKEN_URL = 'https://github.com/login/oauth/access_token';
 
 let cached: StoredCredential | null | undefined;
+let cachedRegistry: ProfileRegistry | undefined;
+/**
+ * A profile being remembered is not the same as this process being signed in.
+ * Packaged desktop builds intentionally start with a fresh session so an old
+ * token on disk cannot silently choose an account for the next person at the
+ * keyboard. The token remains available for the updater, but application API
+ * calls are gated until the device flow completes in this process.
+ */
+let sessionAuthenticated = false;
+
+export function isSessionAuthenticated(): boolean {
+  return sessionAuthenticated;
+}
+
+/** Begin (or restart) a device sign-in without deleting remembered metadata. */
+export function beginSessionAuthentication(): void {
+  sessionAuthenticated = false;
+}
+
+function readRegistry(): ProfileRegistry {
+  if (cachedRegistry) return cachedRegistry;
+  try {
+    const raw = JSON.parse(fs.readFileSync(PROFILE_FILE, 'utf8')) as Partial<ProfileRegistry>;
+    const profiles = Array.isArray(raw.profiles)
+      ? raw.profiles.filter(profile =>
+          profile && typeof profile.id === 'string' && typeof profile.login === 'string'
+        ) as ProfileRecord[]
+      : [];
+    cachedRegistry = { activeProfileId: typeof raw.activeProfileId === 'string' ? raw.activeProfileId : undefined, profiles };
+  } catch {
+    cachedRegistry = { profiles: [] };
+  }
+  return cachedRegistry;
+}
+
+function writeRegistry(registry: ProfileRegistry): void {
+  fs.mkdirSync(ALPHA_DIR, { recursive: true });
+  const temporary = `${PROFILE_FILE}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(registry, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(temporary, PROFILE_FILE);
+  cachedRegistry = registry;
+}
+
+function profileIdFor(credential: Pick<StoredCredential, 'userId' | 'login'>): string | undefined {
+  const userId = credential.userId?.trim();
+  if (userId) return userId;
+  const login = credential.login?.trim().toLowerCase();
+  return login || undefined;
+}
 
 /** The stored credential, or null. Read once and kept, since it rarely changes. */
 export function storedCredential(): StoredCredential | null {
@@ -79,6 +155,35 @@ export function storedCredential(): StoredCredential | null {
 
 export const storedToken = (): string | null => storedCredential()?.token ?? null;
 
+/** Profiles Alpha has seen on this Windows user account. Tokens stay private. */
+export function profileSummaries(): ProfileSummary[] {
+  const registry = readRegistry();
+  const credential = storedCredential();
+  const activeCredentialId = credential ? profileIdFor(credential) : undefined;
+  if (credential?.login && activeCredentialId && !registry.profiles.some(profile => profile.id === activeCredentialId)) {
+    registry.profiles.push({
+      id: activeCredentialId,
+      login: credential.login,
+      ...(credential.name ? { name: credential.name } : {}),
+      ...(credential.avatarUrl ? { avatarUrl: credential.avatarUrl } : {}),
+      lastUsedAt: credential.obtainedAt
+    });
+    registry.activeProfileId = activeCredentialId;
+    writeRegistry(registry);
+  }
+  const activeId = registry.activeProfileId;
+  return [...registry.profiles]
+    .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt))
+    .map(profile => ({
+      ...profile,
+      active: profile.id === activeId && Boolean(storedToken()) && (!IS_PACKAGED_DESKTOP || sessionAuthenticated)
+    }));
+}
+
+export function activeProfile(): ProfileSummary | null {
+  return profileSummaries().find(profile => profile.active) ?? null;
+}
+
 /**
  * An environment that runs `gh` as Alpha rather than as the machine.
  *
@@ -92,7 +197,7 @@ export const storedToken = (): string | null => storedCredential()?.token ?? nul
  * working while they are setting up.
  */
 export function ghEnvironment(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const token = storedToken();
+  const token = !IS_PACKAGED_DESKTOP || sessionAuthenticated ? storedToken() : null;
   const base = { ...process.env, ...extra };
   return token ? { ...base, GH_TOKEN: token } : base;
 }
@@ -104,6 +209,24 @@ export function saveCredential(credential: StoredCredential): void {
   // directory is the protection instead.
   fs.writeFileSync(TOKEN_FILE, JSON.stringify(credential, null, 2) + '\n', { mode: 0o600 });
   cached = credential;
+  sessionAuthenticated = true;
+
+  const id = profileIdFor(credential);
+  if (id && credential.login) {
+    const registry = readRegistry();
+    const now = new Date().toISOString();
+    const existing = registry.profiles.find(profile => profile.id === id);
+    const record: ProfileRecord = {
+      id,
+      login: credential.login,
+      ...(credential.name ? { name: credential.name } : existing?.name ? { name: existing.name } : {}),
+      ...(credential.avatarUrl ? { avatarUrl: credential.avatarUrl } : existing?.avatarUrl ? { avatarUrl: existing.avatarUrl } : {}),
+      lastUsedAt: now
+    };
+    registry.profiles = [record, ...registry.profiles.filter(profile => profile.id !== id)];
+    registry.activeProfileId = id;
+    writeRegistry(registry);
+  }
 }
 
 /**
@@ -117,6 +240,27 @@ export function clearCredential(): void {
     logError('Could not remove the stored GitHub credential:', err);
   }
   cached = null;
+  sessionAuthenticated = false;
+  const registry = readRegistry();
+  registry.activeProfileId = undefined;
+  writeRegistry(registry);
+}
+
+/** Remove a remembered profile and its active credential, if selected. */
+export function removeProfile(profileId: string): void {
+  const registry = readRegistry();
+  registry.profiles = registry.profiles.filter(profile => profile.id !== profileId);
+  if (registry.activeProfileId === profileId) {
+    try {
+      fs.rmSync(TOKEN_FILE, { force: true });
+    } catch (err) {
+      logError('Could not remove the profile credential:', err);
+    }
+    cached = null;
+    sessionAuthenticated = false;
+    registry.activeProfileId = undefined;
+  }
+  writeRegistry(registry);
 }
 
 /**
@@ -229,17 +373,35 @@ export async function pollOnce(deviceCode: string, fetchImpl: typeof fetch = fet
   }
 }
 
-/** Who a token belongs to, asked of GitHub rather than assumed. */
-export async function loginFor(token: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+/** Public GitHub account metadata, asked of GitHub rather than assumed. */
+export interface GitHubUser {
+  id?: string;
+  login?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+export async function userFor(token: string, fetchImpl: typeof fetch = fetch): Promise<GitHubUser | undefined> {
   try {
     const res = await fetchImpl('https://api.github.com/user', {
       headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' }
     });
     if (!res.ok) return undefined;
-    return ((await res.json()) as { login?: string }).login;
+    const user = (await res.json()) as { id?: number; login?: string; name?: string; avatar_url?: string };
+    return {
+      id: user.id === undefined ? undefined : String(user.id),
+      login: user.login,
+      name: user.name || undefined,
+      avatarUrl: user.avatar_url || undefined
+    };
   } catch {
     return undefined;
   }
+}
+
+/** Backwards-compatible login lookup for existing GitHub service callers. */
+export async function loginFor(token: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+  return (await userFor(token, fetchImpl))?.login;
 }
 
 /**
@@ -264,9 +426,13 @@ export async function awaitAuthorization(
     const result = await pollOnce(code.deviceCode, fetchImpl);
 
     if (result.status === 'granted') {
+      const user = await userFor(result.token, fetchImpl);
       const credential: StoredCredential = {
         token: result.token,
-        login: await loginFor(result.token, fetchImpl),
+        userId: user?.id,
+        login: user?.login,
+        name: user?.name,
+        avatarUrl: user?.avatarUrl,
         obtainedAt: new Date().toISOString()
       };
       saveCredential(credential);

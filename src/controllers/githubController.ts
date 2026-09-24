@@ -12,8 +12,24 @@ import { sessionService } from '../services/sessionService.js';
 import { SESSION_COOKIE, clearedSessionCookie, readCookie, sessionCookie } from './sessionContext.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { desktopOnly } from './desktopOnly.js';
+import { profileSummaries, removeProfile } from '../services/alphaGitHubToken.js';
 
 export const githubRouter = Router();
+
+/**
+ * Remembered desktop profiles. Only public account metadata is returned;
+ * Alpha's active credential never crosses the local API boundary.
+ */
+githubRouter.get('/github/profiles', desktopOnly, (_req: Request, res: Response) => {
+  res.json({ profiles: profileSummaries() });
+});
+
+githubRouter.post('/github/profiles/remove', desktopOnly, (req: Request, res: Response) => {
+  const id = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+  if (!id) return res.status(400).json({ error: 'A profile id is required.' });
+  removeProfile(id);
+  return res.json({ success: true });
+});
 
 githubRouter.get('/github/auth', async (req: Request, res: Response) => {
   const auth = await githubService.checkAuth();

@@ -7,7 +7,7 @@ import { logInfo, logError } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
-import { ghEnvironment, storedToken } from './alphaGitHubToken.js';
+import { activeProfile, ghEnvironment, isSessionAuthenticated, storedToken } from './alphaGitHubToken.js';
 
 /**
  * Who is using this copy of Alpha.
@@ -259,8 +259,12 @@ export function roleForLogin(login: string, teams: TeamMembership[]): AlphaRole 
 export interface Identity {
   /** GitHub login, or the OS username when GitHub is unavailable. */
   login: string;
+  /** Stable GitHub profile id when Alpha has a remembered desktop profile. */
+  profileId?: string;
   /** Display name when GitHub supplies one. */
   name?: string;
+  /** GitHub avatar for the desktop profile switcher and account menu. */
+  avatarUrl?: string;
   source: IdentitySource;
   /** Every team this account belongs to, across organisations. */
   teams: TeamMembership[];
@@ -339,7 +343,7 @@ async function resolve(): Promise<Identity> {
    * never got a chance to be asked for. `signed_out` is what puts the sign-in
    * screen in front of the person instead.
    */
-  if (IS_PACKAGED_DESKTOP && !storedToken()) {
+  if (IS_PACKAGED_DESKTOP && (!storedToken() || !isSessionAuthenticated())) {
     githubState = 'signed_out';
     return localIdentity();
   }
@@ -409,7 +413,19 @@ async function resolve(): Promise<Identity> {
       }
 
       githubState = 'ok';
-      return { login, name: name || undefined, source: 'github', teams, role, workspaceOrg, access, github: 'ok' };
+      const profile = activeProfile();
+      return {
+        login,
+        profileId: profile?.id,
+        name: name || profile?.name || undefined,
+        avatarUrl: profile?.avatarUrl,
+        source: 'github',
+        teams,
+        role,
+        workspaceOrg,
+        access,
+        github: 'ok'
+      };
     }
   } catch (err: any) {
     /**

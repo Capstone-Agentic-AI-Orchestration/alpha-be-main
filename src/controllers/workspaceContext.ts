@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
-import { IS_CLOUD } from '../config/env.js';
+import { IS_CLOUD, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { currentIdentity } from '../services/identityService.js';
+import { isSessionAuthenticated } from '../services/alphaGitHubToken.js';
 import { workspaceRegistry, WorkspaceRole } from '../services/workspaceRegistry.js';
 
 /**
@@ -18,6 +19,8 @@ const PUBLIC_EXACT = [
   '/github/auth',
   '/github/auth/login',
   '/github/auth/logout',
+  '/github/profiles',
+  '/github/profiles/remove',
   '/github/oauth/url',
   '/github/oauth/callback',
   // Reads req.session directly and answers 401 itself. Running the workspace
@@ -61,6 +64,10 @@ async function callerFor(
       return { login: '', refused: 'Sign in with GitHub to use Alpha.' };
     }
     return { login: req.session.login, role: req.session.role as WorkspaceRole };
+  }
+
+  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
+    return { login: '', refused: 'Sign in with GitHub to use Alpha.' };
   }
 
   const identity = await currentIdentity();
