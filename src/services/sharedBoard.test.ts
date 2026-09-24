@@ -366,29 +366,57 @@ describe('the team’s roster', () => {
 
 describe('cards this machine made before it joined the team', () => {
   /**
-   * Same repository, another id. Merging would mean rewriting every run and
-   * comment that points at the local one, so the pull says so instead.
+   * Every installed desktop up to 2.0.6 ran off the team board, and made its
+   * own projects for the organisation's repositories. Each pull then clashed
+   * with the team's copy, warned, and left the team's cards out. The team's
+   * project is adopted instead, and this machine's history comes with it.
    */
-  it('reports a project that is already here under another id', async () => {
+  it('adopts the team’s project for a repository it already has, history included', async () => {
     const { svc, board, inWorkspace } = await load();
-    inWorkspace(() =>
+    inWorkspace(() => {
       svc.createProject({
         id: 'proj-mine', name: 'My checkout', key: 'MINE',
-        resources: [{ id: 'r', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }]
-      })
-    );
+        resources: [
+          { id: 'r', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' },
+          { id: 'l', type: 'local_path', name: 'checkout', pathOrUrl: 'C:/code/checkout' }
+        ]
+      });
+      // The same GitHub issue the team has, and a card only this machine has.
+      svc.createIssue({ id: 'issue-mine', identifier: 'MINE-1', projectId: 'proj-mine', title: 'Cart', githubRepo: 'acme/checkout', githubNumber: 7 });
+      svc.createIssue({ id: 'issue-local', identifier: 'MINE-2', projectId: 'proj-mine', title: 'Only here' });
+      svc.addIssueComment({ id: 'comm-local', issueId: 'issue-mine', authorType: 'user', authorName: 'Dev1', content: 'Tried a fix.', createdAt: now });
+      svc.savePrototypeRun({
+        id: 'run-old', issueId: 'issue-mine', projectId: 'proj-mine', agentId: 'agent-architect',
+        status: 'completed', scenario: 'success', plan: [], currentStageIndex: 0, stages: [], activities: [],
+        createdAt: now, updatedAt: now
+      });
+    });
 
     const report = await board.pullSharedBoard('ws-default', source());
 
-    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'MINE' })]);
-    expect(report.conflicts[0].detail).toMatch(/Remove MINE/);
-    // Neither the team's project nor its cards were added beside the local one.
-    const ids = inWorkspace(() => svc.getProjects()).map((p: Project) => p.id);
-    expect(ids).not.toContain('gh-repo-100');
-    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id)).not.toContain('gh-issue-9001');
+    expect(report.conflicts).toEqual([]);
+    expect(report).toMatchObject({ projectsAdopted: 1, issuesAdopted: 1 });
+
+    const projects = inWorkspace(() => svc.getProjects());
+    expect(projects.map((p: Project) => p.id)).toEqual(['gh-repo-100']);
+    expect(projects[0].key).toBe('CHK');
+    // The folder is this machine's, and stays.
+    expect(projects[0].resources.map((r: any) => r.type)).toContain('local_path');
+
+    const issues = inWorkspace(() => svc.getIssues());
+    const adopted = issues.find((i: Issue) => i.id === 'gh-issue-9001');
+    expect(adopted).toMatchObject({ identifier: 'CHK-7', projectId: 'gh-repo-100' });
+    expect(adopted.comments.map((c: IssueComment) => c.content)).toContain('Tried a fix.');
+    expect(issues.find((i: Issue) => i.id === 'issue-local')).toMatchObject({ projectId: 'gh-repo-100' });
+
+    const run = inWorkspace(() => svc.getPrototypeRuns()).find((r: any) => r.id === 'run-old');
+    expect(run).toMatchObject({ issueId: 'gh-issue-9001', projectId: 'gh-repo-100' });
+
+    // And the next pull is an ordinary one.
+    expect((await board.pullSharedBoard('ws-default', source())).conflicts).toEqual([]);
   });
 
-  it('reports an issue that is already here under another id', async () => {
+  it('adopts a card that is the same GitHub issue as one of the team’s', async () => {
     const { svc, board, inWorkspace } = await load();
     await board.pullSharedBoard('ws-default', source({ issues: [], comments: [] }));
     inWorkspace(() =>
@@ -397,8 +425,27 @@ describe('cards this machine made before it joined the team', () => {
 
     const report = await board.pullSharedBoard('ws-default', source());
 
-    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'CHK-900' })]);
-    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id)).toEqual(['issue-mine']);
+    expect(report.conflicts).toEqual([]);
+    expect(report.issuesAdopted).toBe(1);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => [i.id, i.identifier])).toEqual([['gh-issue-9001', 'CHK-7']]);
+  });
+
+  /** Adopting would take a key another project here uses, so it asks instead. */
+  it('reports a same-repository project whose team key is taken here by another', async () => {
+    const { svc, board, inWorkspace } = await load();
+    inWorkspace(() => {
+      svc.createProject({
+        id: 'proj-mine', name: 'My checkout', key: 'MINE',
+        resources: [{ id: 'r', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }]
+      });
+      svc.createProject({ id: 'proj-other', name: 'Other', key: 'CHK', resources: [] });
+    });
+
+    const report = await board.pullSharedBoard('ws-default', source());
+
+    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'MINE' })]);
+    expect(report.conflicts[0].detail).toMatch(/taken here by Other/);
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id).sort()).toEqual(['proj-mine', 'proj-other']);
   });
 
   it('reports a key this machine already uses', async () => {
@@ -417,7 +464,7 @@ describe('asSyncReport', () => {
 
     const shaped = board.asSyncReport({
       projectsAdded: 2, projectsUpdated: 1, issuesAdded: 5, issuesUpdated: 3, unchanged: 4, comments: 6,
-      agentsAdded: 0, agentsUpdated: 0, squadsAdded: 0, squadsUpdated: 0,
+      agentsAdded: 0, agentsUpdated: 0, squadsAdded: 0, squadsUpdated: 0, projectsAdopted: 0, issuesAdopted: 0,
       unpublished: { agents: [], squads: [] },
       conflicts: [{ project: 'MINE', detail: 'clash' }]
     });

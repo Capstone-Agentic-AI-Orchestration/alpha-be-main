@@ -92,6 +92,9 @@ export interface PullReport {
   agentsUpdated: number;
   squadsAdded: number;
   squadsUpdated: number;
+  /** This machine's own projects and cards moved onto the team's ids; see `rekeyProject`. */
+  projectsAdopted: number;
+  issuesAdopted: number;
   /**
    * This machine's own agents and squads that the team does not have, for the
    * caller to publish. Read here, sent from `dataController`, which is where
@@ -111,11 +114,12 @@ export interface PullReport {
 export function asSyncReport(pull: PullReport): SyncReport {
   return {
     projectsImported: pull.projectsAdded,
-    projects: pull.projectsAdded + pull.projectsUpdated,
+    // Adopted projects count as changed, so the app re-reads its project list.
+    projects: pull.projectsAdded + pull.projectsUpdated + pull.projectsAdopted,
     // Cards, which is what the app reports as new and updated. Agents and
     // squads move too, and are in the log rather than in a count of issues.
     created: pull.issuesAdded,
-    updated: pull.issuesUpdated + pull.projectsUpdated,
+    updated: pull.issuesUpdated + pull.projectsUpdated + pull.issuesAdopted + pull.projectsAdopted,
     unchanged: pull.unchanged,
     commentsPulled: pull.comments,
     commentsPushed: 0,
@@ -284,6 +288,8 @@ export async function pullSharedBoard(workspaceId: string, source: SharedBoardSo
     agentsUpdated: 0,
     squadsAdded: 0,
     squadsUpdated: 0,
+    projectsAdopted: 0,
+    issuesAdopted: 0,
     unpublished: { agents: [], squads: [] },
     conflicts: []
   };
@@ -301,7 +307,8 @@ export async function pullSharedBoard(workspaceId: string, source: SharedBoardSo
 
   logInfo(
     `Team board: ${report.agentsAdded} agent(s) added, ${report.squadsAdded} squad(s) added; ` +
-      `${report.projectsAdded} project(s) added, ${report.projectsUpdated} updated; ` +
+      `${report.projectsAdded} project(s) added, ${report.projectsUpdated} updated, ${report.projectsAdopted} adopted; ` +
+      `${report.issuesAdopted} card(s) adopted; ` +
       `${report.issuesAdded} issue(s) added, ${report.issuesUpdated} updated; ${report.comments} comment(s)` +
       (report.conflicts.length ? `; ${report.conflicts.length} clash(es) with cards made on this machine` : '')
   );
@@ -483,11 +490,26 @@ function applyProjects(projects: Project[], report: PullReport): void {
     const repo = repoForProject(cloud)?.toLowerCase();
     const twin = repo ? byRepo.get(repo) : undefined;
     if (twin) {
+      /*
+       * The same repository, made here while this desktop was off the team
+       * board -- which every installed copy was until 2.0.7. It becomes the
+       * team's project, history and folder included; see `rekeyProject`.
+       * Only a key held by a *different* project here stops that.
+       */
+      const holder = keys.get(cloud.key.toUpperCase());
+      if ((!holder || holder.id === twin.id) && sqliteService.rekeyProject(twin.id, cloud.id, cloud.key)) {
+        sqliteService.updateProject(cloud.id, sharedProjectFields(cloud, { ...twin, id: cloud.id }));
+        byId.set(cloud.id, { ...twin, id: cloud.id, key: cloud.key });
+        report.projectsAdopted += 1;
+        continue;
+      }
       report.conflicts.push({
         project: twin.key,
         detail:
           `This machine has its own project for ${repo} (${twin.key}), made before it joined the team, whose ` +
-          `project is ${cloud.key}. Runs on ${twin.key} stay on this machine. Remove ${twin.key} to use the team's.`
+          `project is ${cloud.key}` +
+          (holder && holder.id !== twin.id ? `, and the key ${cloud.key} is taken here by ${holder.name}` : '') +
+          `. Rename or remove ${holder && holder.id !== twin.id ? holder.key : twin.key} to use the team's.`
       });
       continue;
     }
@@ -537,6 +559,17 @@ function applyIssues(issues: Issue[], report: PullReport): void {
     const twin = cloud.githubRepo && cloud.githubNumber
       ? byGitHub.get(`${cloud.githubRepo.toLowerCase()}#${cloud.githubNumber}`)
       : undefined;
+    /*
+     * The same GitHub issue, carded here under an id of this machine's. It
+     * takes the team's id and identifier, comments and runs included, and is
+     * then updated like any card the team already shared with this machine.
+     */
+    if (twin && sqliteService.rekeyIssue(twin.id, cloud.id, cloud.identifier)) {
+      sqliteService.updateIssue(cloud.id, sharedIssueFields(cloud, running.has(twin.id)));
+      identifiers.delete(twin.identifier);
+      report.issuesAdopted += 1;
+      continue;
+    }
     const holder = twin ?? identifiers.get(cloud.identifier);
     if (holder) {
       report.conflicts.push({
