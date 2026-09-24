@@ -369,6 +369,11 @@ export class SupabaseService {
     }
   }
 
+  /** Drop what was exchanged for the account that just signed out. */
+  forgetCredentials(): void {
+    this.tokens.forget();
+  }
+
   /**
    * This desktop's database token, with its expiry, for the renderer.
    *

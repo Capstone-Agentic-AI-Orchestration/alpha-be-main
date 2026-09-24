@@ -71,6 +71,12 @@ export class DatabaseTokenClient {
     return pending;
   }
 
+  /** Forget the cached token, for after the account behind it signs out. */
+  forget(): void {
+    this.cached = null;
+    this.inFlight.clear();
+  }
+
   /** The token and when it lapses, for a caller that has to say so too. */
   async tokenWithExpiry(): Promise<{ token: string; expiresAt: string } | null> {
     const token = await this.token();

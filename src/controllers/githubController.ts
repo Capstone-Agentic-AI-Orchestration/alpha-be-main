@@ -6,7 +6,8 @@ import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
 import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 import { CORS_ORIGIN, ALPHA_ORG, GITHUB_CLIENT_ID } from '../config/env.js';
-import { fetchTeamsWithToken, roleForLogin } from '../services/identityService.js';
+import { fetchTeamsWithToken, refreshIdentity, roleForLogin } from '../services/identityService.js';
+import { supabaseService } from '../services/supabaseService.js';
 import { sessionService } from '../services/sessionService.js';
 import { SESSION_COOKIE, clearedSessionCookie, readCookie, sessionCookie } from './sessionContext.js';
 import { logInfo, logError } from '../utils/logger.js';
@@ -51,6 +52,18 @@ githubRouter.get('/github/app/client', (_req: Request, res: Response) => {
 githubRouter.post('/github/auth/logout', async (req: Request, res: Response) => {
   try {
     await githubService.logout();
+    /**
+     * Forget who this was, not only the credential.
+     *
+     * The identity is resolved once and cached, so deleting the credential
+     * changed nothing a request could see: the window reloaded onto the same
+     * signed-in account, and every request went on being served as it, until
+     * the app was restarted. Sign-out could not be done from the app at all.
+     * Re-resolving now answers signed-out for an installed copy, and the
+     * database token exchanged for the old account goes with it.
+     */
+    await refreshIdentity();
+    supabaseService.forgetCredentials();
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Could not sign out of GitHub' });
