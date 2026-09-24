@@ -184,7 +184,11 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
     };
   }
 
-  async createWorkspace(userId: string, input: { name: string; slug?: string }): Promise<WorkspaceSummary> {
+  async createWorkspace(
+    userId: string,
+    input: { name: string; slug?: string },
+    creatorRole: WorkspaceRole = 'admin'
+  ): Promise<WorkspaceSummary> {
     await this.ensureDefaultWorkspace();
     const name = input.name.trim();
     if (!name) throw new WorkspaceRequestError('Workspace name is required.', 400);
@@ -204,17 +208,17 @@ export class PostgresWorkspaceDirectory implements WorkspaceDirectory {
     );
     /*
      * Not one transaction, deliberately: `Sql` is a single statement at a
-     * time. A workspace with no members is recoverable -- its creator is an
-     * org admin who can create another -- and the alternative is a
-     * transaction abstraction that only this call would use.
+     * time. A workspace with no members is recoverable -- its creator may
+     * create another -- and the alternative is a transaction abstraction
+     * that only this call would use.
      */
     await this.sql.query(
       `insert into workspace_members (id, workspace_id, user_id, role, status)
-       values ($1, $2, $3, 'admin', 'active')`,
-      [`member-${randomUUID()}`, id, userId]
+       values ($1, $2, $3, $4, 'active')`,
+      [`member-${randomUUID()}`, id, userId, creatorRole]
     );
 
-    return this.summary(await this.workspaceRow(id), 'admin');
+    return this.summary(await this.workspaceRow(id), creatorRole);
   }
 
   async updateWorkspace(

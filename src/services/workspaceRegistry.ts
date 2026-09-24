@@ -242,8 +242,12 @@ class WorkspaceRegistry {
     return this.directory().listForUser(userId, teamRole);
   }
 
-  createWorkspace(userId: string, input: { name: string; slug?: string }): Promise<WorkspaceSummary> {
-    return this.directory().createWorkspace(userId, input);
+  createWorkspace(
+    userId: string,
+    input: { name: string; slug?: string },
+    creatorRole?: WorkspaceRole
+  ): Promise<WorkspaceSummary> {
+    return this.directory().createWorkspace(userId, input, creatorRole);
   }
 
   updateWorkspace(

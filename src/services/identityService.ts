@@ -111,10 +111,20 @@ export function roleFromTeams(teams: TeamMembership[], workspaceOrg?: string): A
 
   let best: AlphaRole | undefined;
   for (const team of scoped) {
-    const hit = TEAM_ROLES.find(r => r.match.test(team.slug));
-    if (hit && (!best || ROLE_RANK[hit.role] > ROLE_RANK[best])) best = hit.role;
+    const hit = roleForTeamSlug(team.slug);
+    if (hit && (!best || ROLE_RANK[hit] > ROLE_RANK[best])) best = hit;
   }
   return best;
+}
+
+/**
+ * The role one team grants, or undefined for a team that grants none.
+ *
+ * The same table the sign-in reads, so a roster that says "this team makes
+ * developers" cannot disagree with what those people get when they arrive.
+ */
+export function roleForTeamSlug(slug: string): AlphaRole | undefined {
+  return TEAM_ROLES.find(r => r.match.test(slug))?.role;
 }
 
 /**

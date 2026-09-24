@@ -30,7 +30,9 @@ async function startApi({ cloud = false } = {}) {
 
   // The desktop resolves this from `gh`; a test must not depend on a
   // signed-in machine, and the role is what these assertions are about.
-  vi.doMock('../services/identityService.js', () => ({
+  vi.doMock('../services/identityService.js', async () => ({
+    // The team-to-role table stays real: the roster below is asserted against it.
+    ...(await vi.importActual<object>('../services/identityService.js')),
     currentIdentity: async () => ({
       login: identity.login,
       source: 'github',
@@ -156,7 +158,38 @@ describe('POST /workspaces', () => {
 
     const res = await call(app, 'POST', '/api/workspaces', { body: { name: 'Team Alpha' } });
     expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/admin/i);
+    expect(res.body.error).toMatch(/project manager/i);
+  });
+
+  /** A project manager runs their own workspaces, and is not made admin of them for creating one. */
+  it('creates one for a project manager, who joins it as a project manager', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app, registry } = await startApi();
+
+    const res = await call(app, 'POST', '/api/workspaces', { body: { name: 'Client Portal' } });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ name: 'Client Portal', role: 'pm', memberCount: 1 });
+
+    const context = await registry.resolve('PM1', res.body.id, 'pm');
+    expect(context?.role).toBe('pm');
+    // And can staff it straight away, which is the next thing they will do.
+    expect(registry.can(context!.role, 'workspace.manage_members')).toBe(true);
+  });
+
+  /**
+   * The GitHub team decides, not a workspace role. A project manager may make
+   * a developer a `pm` inside their workspace; that must not let the developer
+   * create workspaces of their own.
+   */
+  it('refuses a developer who was made a project manager inside a workspace', async () => {
+    const { registry } = await startApi();
+    await registry.listForUser('Dev1', 'dev');
+    const member = (await registry.listMembers('ws-default')).find((m: any) => m.userId === 'Dev1')!;
+    await registry.updateMember('ws-default', member.id, { role: 'pm' });
+
+    identity = { login: 'Dev1', role: 'dev' };
+    const { app } = await startApi();
+    expect((await call(app, 'POST', '/api/workspaces', { body: { name: 'Mine now' } })).status).toBe(403);
   });
 
   it('wants a name', async () => {
@@ -360,6 +393,65 @@ describe('staffing a workspace', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual([{ login: 'Dev1', avatarUrl: 'https://avatars/1' }]);
     useGitHubApi(null);
+    delete process.env.ALPHA_ORG;
+  });
+
+  /** Staffing by team: "the developers", with who is already here marked. */
+  it('lists the organisation’s role-granting teams and their people', async () => {
+    process.env.ALPHA_ORG = 'acme';
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await startApi();
+    const { useGitHubApi } = await import('../services/githubApi.js');
+    const lists: Record<string, unknown[]> = {
+      '/orgs/acme/teams?per_page=100': [
+        { slug: 'developers', name: 'Developers' },
+        { slug: 'project-managers', name: 'Project Managers' },
+        // Grants no role, so its people could never open the workspace.
+        { slug: 'book-club', name: 'Book Club' }
+      ],
+      '/orgs/acme/teams/developers/members?per_page=100': [{ login: 'Dev1', avatar_url: 'https://avatars/1' }],
+      '/orgs/acme/teams/project-managers/members?per_page=100': [{ login: 'PM1' }]
+    };
+    useGitHubApi({
+      get: async () => ({}) as any,
+      getAll: async (path: string) => {
+        if (!(path in lists)) throw new Error(`unexpected GitHub call ${path}`);
+        return lists[path] as any;
+      },
+      post: async () => ({}) as any,
+      patch: async () => ({}) as any,
+      put: async () => ({}) as any,
+      delete: async () => {}
+    });
+    await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'PM1', role: 'pm' } });
+
+    const res = await call(app, 'GET', '/api/workspaces/ws-default/members/teams');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      {
+        slug: 'developers',
+        name: 'Developers',
+        role: 'dev',
+        members: [{ login: 'Dev1', avatarUrl: 'https://avatars/1', workspaceRole: null }]
+      },
+      {
+        slug: 'project-managers',
+        name: 'Project Managers',
+        role: 'pm',
+        members: [{ login: 'PM1', avatarUrl: null, workspaceRole: 'pm' }]
+      }
+    ]);
+    useGitHubApi(null);
+    delete process.env.ALPHA_ORG;
+  });
+
+  it('keeps the team roster from developers', async () => {
+    process.env.ALPHA_ORG = 'acme';
+    identity = { login: 'Dev1', role: 'dev' };
+    const { app } = await startApi();
+
+    expect((await call(app, 'GET', '/api/workspaces/ws-default/members/teams')).status).toBe(403);
     delete process.env.ALPHA_ORG;
   });
 });
