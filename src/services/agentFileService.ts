@@ -510,7 +510,7 @@ export function agentFromFileContent(
     avatar: overlay?.avatar ?? '',
     color: overlay?.color ?? '#6366f1',
     description: overlay?.description ?? '',
-    owner: 'You',
+    owner: 'Unassigned',
     isMine: true,
     modelProvider: overlay?.modelProvider ?? 'Anthropic',
     /**

@@ -765,6 +765,25 @@ export class SQLiteService {
       this.db.prepare(`UPDATE ${table} SET workspace_id = ? WHERE workspace_id IS NULL OR workspace_id = ''`)
         .run(DEFAULT_WORKSPACE_ID);
     }
+
+    /**
+     * A retired desktop seed claimed this untouched starter squad had completed
+     * twelve runs. Correct only that signature, and only when no squad-run
+     * history exists, so an actual historical counter is never overwritten.
+     */
+    this.db.prepare(`
+      UPDATE squads
+      SET completed_runs_count = 0
+      WHERE id = 'squad-core'
+        AND name = 'Alpha Core Execution Squad'
+        AND completed_runs_count = 12
+        AND NOT EXISTS (
+          SELECT 1
+          FROM squad_runs
+          WHERE squad_runs.squad_id = squads.id
+            AND squad_runs.workspace_id = squads.workspace_id
+        )
+    `).run();
   }
 
   private ensureDefaultWorkspace(): void {
@@ -1003,8 +1022,6 @@ export class SQLiteService {
   private seedDefaultsIfEmpty() {
     if (this.hasSeeded()) return;
 
-    const now = new Date().toISOString();
-
     /**
      * Allowlist the managed workspace root, and only that.
      *
@@ -1035,114 +1052,8 @@ export class SQLiteService {
       command_example: s.commandExample || ''
     }));
 
-    // Default Agents
-    /**
-     * Named for what they do, not for who they are.
-     *
-     * These shipped as invented people — Ada Lovelace, Kaelen Vance, Vesper Lin,
-     * Orion Cross — which read as a cast rather than a toolkit. On someone
-     * else's install it is worse than decorative: a new collaborator opens the
-     * roster and has to learn five names before knowing which one reviews code.
-     *
-     * A single word also makes the mention usable. `resolveMentions` matches the
-     * first word of a name, so "Ada Lovelace" answered to `@ada` — a token that
-     * says nothing about what it does. `@reviewer` and `@tester` need no
-     * explaining, and read the same way in a chat as on a kanban card.
-     */
-    const defaultAgents: Agent[] = [
-      {
-        id: 'agent-architect',
-        name: 'Architect',
-        role: 'Architect',
-        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=128&fit=crop&q=80',
-        color: '#6366f1',
-        description: 'Designs system structure: interfaces, module boundaries, and state machines.',
-        owner: 'You',
-        isMine: true,
-        modelProvider: 'Anthropic',
-        modelName: '',
-        systemPrompt: 'You are the Architect. Focus on clean interfaces, modular decomposition, and strict type definitions. Propose structure before code.',
-        autonomyLevel: 'Semi-Autonomous (Requires Approval)',
-        skills: ['sk-fs', 'sk-git', 'sk-browser'],
-        mcpServers: ['alpha-github'],
-        createdAt: now
-      },
-      {
-        id: 'agent-developer',
-        name: 'Developer',
-        role: 'Coder',
-        avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=128&fit=crop&q=80',
-        color: '#10b981',
-        description: 'Implements features across the stack in TypeScript, React, and Node.',
-        owner: 'You',
-        isMine: true,
-        modelProvider: 'Anthropic',
-        modelName: '',
-        systemPrompt: 'You are the Developer. Write robust, concise TypeScript. Match the surrounding code and add no extraneous comments.',
-        autonomyLevel: 'Semi-Autonomous (Requires Approval)',
-        skills: ['sk-fs', 'sk-bash', 'sk-git'],
-        mcpServers: ['alpha-github'],
-        createdAt: now
-      },
-      {
-        id: 'agent-reviewer',
-        name: 'Reviewer',
-        role: 'Reviewer',
-        avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=128&fit=crop&q=80',
-        color: '#f59e0b',
-        description: 'Audits diffs for correctness, security, and edge cases before they merge.',
-        owner: 'You',
-        isMine: true,
-        modelProvider: 'OpenAI',
-        modelName: '',
-        systemPrompt: 'You are the Reviewer. Inspect diffs for correctness, performance, and security anti-patterns. Report findings; do not rewrite the change yourself.',
-        autonomyLevel: 'Supervised',
-        skills: ['sk-fs', 'sk-git'],
-        mcpServers: ['alpha-github'],
-        createdAt: now
-      },
-      {
-        id: 'agent-tester',
-        name: 'Tester',
-        role: 'QA Tester',
-        avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=128&fit=crop&q=80',
-        color: '#ec4899',
-        description: 'Writes unit, regression, and end-to-end tests, and reports coverage gaps.',
-        owner: 'You',
-        isMine: true,
-        modelProvider: 'Anthropic',
-        modelName: '',
-        systemPrompt: 'You are the Tester. Write thorough unit and regression tests with high assertion density. Name the cases you did not cover.',
-        autonomyLevel: 'Semi-Autonomous (Requires Approval)',
-        skills: ['sk-fs', 'sk-bash'],
-        mcpServers: ['alpha-github'],
-        createdAt: now
-      },
-      {
-        id: 'agent-operator',
-        name: 'Operator',
-        role: 'DevOps',
-        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=128&fit=crop&q=80',
-        color: '#8b5cf6',
-        description: 'Runs CI/CD: diagnoses failing workflows and patches broken builds.',
-        owner: 'You',
-        isMine: true,
-        modelProvider: 'Anthropic',
-        modelName: '',
-        systemPrompt: 'You are the Operator. Inspect CI workflows, diagnose failed run logs, and patch builds. Explain the failure before fixing it.',
-        autonomyLevel: 'Semi-Autonomous (Requires Approval)',
-        skills: ['sk-fs', 'sk-bash', 'sk-git'],
-        // Was ['filesystem', 'github'] — neither exists in the catalog, so this
-        // agent was granted nothing and the runner logged two unknown servers
-        // on every run.
-        mcpServers: ['alpha-github'],
-        createdAt: now
-      }
-    ];
-
-    // The pre-template seed stays here only as migration reference for old
-    // databases. New installs receive OFFICIAL_AGENT_TEMPLATES below.
-    void defaultAgents;
+    // Official agent templates are seeded by ensureOfficialAgents() after the
+    // first-time storage setup completes.
 
     /**
      * No project, and no issues.
@@ -1172,7 +1083,7 @@ export class SQLiteService {
       memberAgentIds: ['agent-research', 'agent-architect', 'agent-manager', 'agent-backend', 'agent-frontend', 'agent-reviewer', 'agent-tester'],
       mission: 'Research, plan, build, review, and validate approved project work.',
       activeRunsCount: 0,
-      completedRunsCount: 12
+      completedRunsCount: 0
     };
 
     this.createSquad(defaultSquad);
@@ -1538,16 +1449,14 @@ export class SQLiteService {
       /**
        * Archiving is a real state, not a UI flourish.
        *
-       * These three were hardcoded, so an archived agent came back reporting
+       * This state used to be hardcoded, so an archived agent came back reporting
        * 'online' and 'idle' like any other. The client set 'offline' locally on
        * archive and a reload silently undid it — which also meant the roster
        * could not be trusted about what was actually retired.
        *
-       * Still synthesised rather than stored: liveness is a property of the
-       * machine and the run queue, not a column. Only the archived case is
-       * knowable from the row.
+       * Physical liveness is added by the data controller from a runtime scan,
+       * so this persistence mapper deliberately does not claim it.
        */
-      machineStatus: r.is_archived ? 'offline' : 'online',
       workStatus: 'idle',
       status: r.is_archived ? 'offline' : 'idle',
       createdAt: r.created_at
@@ -1567,7 +1476,7 @@ export class SQLiteService {
       avatar: a.avatar ?? '',
       color: a.color ?? '',
       description: a.description ?? '',
-      owner: a.owner ?? 'You',
+      owner: a.owner ?? 'Unassigned',
       systemPrompt: a.systemPrompt ?? '',
       isMine: a.isMine ? 1 : 0,
       isArchived: a.isArchived ? 1 : 0,

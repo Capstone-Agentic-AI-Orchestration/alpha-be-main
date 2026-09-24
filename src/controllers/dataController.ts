@@ -430,7 +430,20 @@ function withFileOverlay(agent: Agent, runtimes = machineRuntimes()) {
    * because the roster is where someone looks before sending a message, rather
    * than after one has already failed.
    */
-  return { ...merged, readiness: agentReadiness(merged, runtimes) };
+  const readiness = agentReadiness(merged, runtimes);
+  const machineStatus = merged.isArchived
+    ? 'offline'
+    : readiness.status === 'ready'
+      ? 'online'
+      : readiness.status === 'unknown'
+        ? 'unstable'
+        : 'offline';
+
+  // The SQLite row cannot know whether this machine has the provider CLI or a
+  // valid session. Derive the roster indicator from the same runtime scan that
+  // produces the actionable readiness notice instead of returning "online"
+  // for every non-archived agent.
+  return { ...merged, machineStatus, readiness };
 }
 
 dataRouter.get('/agents', route(async (req: Request, res: Response) => {
@@ -593,6 +606,9 @@ dataRouter.post('/agents/import', route(async (req: Request, res: Response) => {
   try {
     const existingIds = (await agentStore().list(req.workspace!.workspaceId)).map(a => a.id);
     const { agent, warnings } = agentFromFileContent(content, existingIds);
+    // A persona file describes an agent, not the person importing it. Record
+    // the authenticated workspace member rather than persisting a placeholder.
+    agent.owner = req.workspace!.userId;
 
     // createAgent writes the persona file too, so the body arrives on disk
     // without a second round trip.
