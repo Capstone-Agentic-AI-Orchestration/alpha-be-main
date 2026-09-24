@@ -58,6 +58,13 @@ export interface SquadProjectRow {
   status: string;
 }
 
+/** Which person is on which project. */
+export interface ProjectAssignmentRow {
+  project_id: string;
+  user_id: string;
+  status: string;
+}
+
 /** Where the team's board is read from. */
 export interface SharedBoardSource {
   projects(workspaceId: string): Promise<Project[]>;
@@ -70,6 +77,8 @@ export interface SharedBoardSource {
   squads(workspaceId: string): Promise<Squad[]>;
   squadOwners(workspaceId: string): Promise<SquadOwnerRow[]>;
   squadProjects(workspaceId: string): Promise<SquadProjectRow[]>;
+  /** Who is on which project: what a developer's issues, runs and chats are scoped by. */
+  projectAssignments(workspaceId: string): Promise<ProjectAssignmentRow[]>;
 }
 
 export interface PullReport {
@@ -172,6 +181,16 @@ export function supabaseBoardSource(client: SupabaseClient): SharedBoardSource {
       return everyRow<SquadProjectRow>((from, to) =>
         client.from('workspace_squad_projects').select('*').eq('workspace_id', workspaceId).order('squad_id').range(from, to)
       );
+    },
+    async projectAssignments(workspaceId) {
+      return everyRow<ProjectAssignmentRow>((from, to) =>
+        client
+          .from('workspace_project_assignments')
+          .select('project_id,user_id,status')
+          .eq('workspace_id', workspaceId)
+          .order('project_id')
+          .range(from, to)
+      );
     }
   };
 }
@@ -243,14 +262,15 @@ function differs<T extends object>(mine: T, next: Partial<T>): boolean {
 export async function pullSharedBoard(workspaceId: string, source: SharedBoardSource): Promise<PullReport> {
   // Read everything before writing anything, so a failure part-way through
   // the network leaves the local board as it was.
-  const [projects, issues, comments, agents, squads, owners, links] = await Promise.all([
+  const [projects, issues, comments, agents, squads, owners, links, assignments] = await Promise.all([
     source.projects(workspaceId),
     source.issues(workspaceId),
     source.comments(),
     source.agents(workspaceId),
     source.squads(workspaceId),
     source.squadOwners(workspaceId),
-    source.squadProjects(workspaceId)
+    source.squadProjects(workspaceId),
+    source.projectAssignments(workspaceId)
   ]);
 
   const report: PullReport = {
@@ -277,6 +297,7 @@ export async function pullSharedBoard(workspaceId: string, source: SharedBoardSo
   });
 
   await applySquadBindings(workspaceId, owners, links);
+  await applyProjectAssignments(workspaceId, assignments);
 
   logInfo(
     `Team board: ${report.agentsAdded} agent(s) added, ${report.squadsAdded} squad(s) added; ` +
@@ -403,6 +424,31 @@ async function applySquadBindings(
       );
     } else {
       await workspaceRegistry.removeSquadProject(workspaceId, link.squad_id, link.project_id);
+    }
+  }
+}
+
+/**
+ * Who is on which project, as the team has it.
+ *
+ * A developer sees a project's issues, runs and chats only with an active
+ * assignment, and this machine answers that from its own copy. Without this a
+ * project manager could assign someone on the web and the project stayed
+ * empty on their desktop: listed, since every developer may discover a
+ * project, but with none of its tasks.
+ *
+ * Mirrored both ways, so an assignment the team removed is removed here too.
+ */
+async function applyProjectAssignments(workspaceId: string, rows: ProjectAssignmentRow[]): Promise<void> {
+  const cloud = new Map(rows.map(row => [JSON.stringify([row.project_id, row.user_id]), row]));
+  for (const row of rows) {
+    if (row.status === 'active') await workspaceRegistry.assignProject(workspaceId, row.project_id, row.user_id);
+  }
+  for (const local of await workspaceRegistry.listProjectAssignments(workspaceId)) {
+    if (local.status !== 'active') continue;
+    const match = cloud.get(JSON.stringify([local.projectId, local.userId]));
+    if (!match || match.status !== 'active') {
+      await workspaceRegistry.removeProjectAssignment(workspaceId, local.projectId, local.userId);
     }
   }
 }

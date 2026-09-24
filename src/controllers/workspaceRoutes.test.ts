@@ -196,6 +196,260 @@ describe('POST /workspaces', () => {
     const { app } = await startApi();
     expect((await call(app, 'POST', '/api/workspaces', { body: {} })).status).toBe(400);
   });
+
+  /** Staffed as it is named: the people are in it at once, with nothing to accept. */
+  it('puts the chosen people in it as it is created', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app, registry } = await startApi();
+
+    const res = await call(app, 'POST', '/api/workspaces', {
+      body: {
+        name: 'Client Portal',
+        members: [
+          { userId: 'Dev1', role: 'dev' },
+          { userId: 'PM2', role: 'pm' },
+          // The creator, again: already in it at their team role.
+          { userId: 'pm1', role: 'dev' }
+        ]
+      }
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.memberCount).toBe(3);
+    const members = await registry.listMembers(res.body.id);
+    expect(members.map((m: any) => [m.userId, m.role, m.status]).sort()).toEqual([
+      ['Dev1', 'dev', 'active'],
+      ['PM1', 'pm', 'active'],
+      ['PM2', 'pm', 'active']
+    ]);
+    // And the developer finds it waiting, without doing anything.
+    expect((await registry.listForUser('Dev1', 'dev')).map((w: any) => w.name)).toContain('Client Portal');
+  });
+
+  it('refuses the whole request, and makes nothing, for one bad entry', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app, registry } = await startApi();
+
+    const badRole = await call(app, 'POST', '/api/workspaces', {
+      body: { name: 'Half staffed', members: [{ userId: 'Dev1', role: 'dev' }, { userId: 'Dev2', role: 'root' }] }
+    });
+    const madeAdmin = await call(app, 'POST', '/api/workspaces', {
+      body: { name: 'Half staffed', members: [{ userId: 'Dev1', role: 'admin' }] }
+    });
+
+    expect(badRole.status).toBe(400);
+    expect(madeAdmin.status).toBe(403);
+    expect((await registry.listForUser('PM1', 'pm')).map((w: any) => w.name)).not.toContain('Half staffed');
+  });
+});
+
+describe('GET /org/teams', () => {
+  function teamsApi(lists: Record<string, unknown[]>) {
+    return {
+      get: async () => ({}) as any,
+      getAll: async (path: string) => {
+        if (!(path in lists)) throw new Error(`unexpected GitHub call ${path}`);
+        return lists[path] as any;
+      },
+      post: async () => ({}) as any,
+      patch: async () => ({}) as any,
+      put: async () => ({}) as any,
+      delete: async () => {}
+    };
+  }
+
+  /** The create form's people, before there is a workspace to add them to. */
+  it('lists the role-granting teams for a project manager', async () => {
+    process.env.ALPHA_ORG = 'acme';
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await startApi();
+    const { useGitHubApi } = await import('../services/githubApi.js');
+    useGitHubApi(teamsApi({
+      '/orgs/acme/teams?per_page=100': [{ slug: 'developers', name: 'Developers' }, { slug: 'book-club', name: 'Book Club' }],
+      '/orgs/acme/teams/developers/members?per_page=100': [{ login: 'Dev1', avatar_url: 'https://avatars/1' }]
+    }));
+
+    const res = await call(app, 'GET', '/api/org/teams');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      { slug: 'developers', name: 'Developers', role: 'dev', members: [{ login: 'Dev1', avatarUrl: 'https://avatars/1' }] }
+    ]);
+    useGitHubApi(null);
+    delete process.env.ALPHA_ORG;
+  });
+
+  it('is not a developer’s to read', async () => {
+    identity = { login: 'Dev1', role: 'dev' };
+    const { app } = await startApi();
+    expect((await call(app, 'GET', '/api/org/teams')).status).toBe(403);
+  });
+});
+
+/**
+ * A team's desktop, where the cloud decides who is in which workspace.
+ *
+ * Each desktop kept workspaces in its own SQLite file, which the cloud never
+ * wrote to. A workspace made on the web never reached a developer's desktop,
+ * and one made on a project manager's desktop lived on that one machine.
+ */
+describe('on a team desktop', () => {
+  const CLOUD = 'https://cloud.test/api';
+  let cloudCalls: Array<{ method: string; url: string; auth: string | null; workspace: string | null; body: any }>;
+  let cloudAnswers: Record<string, (body: any) => { status: number; body: unknown }>;
+
+  function summary(id: string, name: string, role: string) {
+    return { id, name, slug: name.toLowerCase().replace(/\s+/g, '-'), status: 'active', role, memberCount: 2,
+      createdAt: '2026-09-24T00:00:00.000Z', updatedAt: '2026-09-24T00:00:00.000Z' };
+  }
+
+  async function desktop() {
+    process.env.ALPHA_CLOUD_API = CLOUD;
+    vi.doMock('../services/githubApi.js', async () => ({
+      ...(await vi.importActual<object>('../services/githubApi.js')),
+      tokenForThisRequest: async () => 'desktop-gh-token'
+    }));
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: any, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.startsWith(CLOUD)) return realFetch(input, init);
+      const headers = new Headers(init?.headers);
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      cloudCalls.push({ method, url, auth: headers.get('Authorization'), workspace: headers.get('X-Workspace-Id'), body });
+      const answer = cloudAnswers[`${method} ${url.slice(CLOUD.length)}`];
+      if (!answer) throw new Error(`cloud unreachable for ${method} ${url}`);
+      const { status, body: out } = answer(body);
+      return new Response(JSON.stringify(out), { status, headers: { 'Content-Type': 'application/json' } });
+    });
+    return startApi();
+  }
+
+  beforeEach(() => {
+    cloudCalls = [];
+    cloudAnswers = {};
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.doUnmock('../services/githubApi.js');
+    // Empty, not deleted: deleted, dotenv refills it from the developer's .env.
+    process.env.ALPHA_CLOUD_API = '';
+  });
+
+  it('shows a developer the workspace a project manager put them in, and opens it', async () => {
+    identity = { login: 'Dev1', role: 'dev' };
+    cloudAnswers['GET /workspaces'] = () => ({
+      status: 200,
+      body: [summary('ws-default', 'Alpha Workspace', 'dev'), summary('workspace-portal', 'Client Portal', 'dev')]
+    });
+    cloudAnswers['GET /workspaces/workspace-portal/members'] = () => ({
+      status: 200,
+      body: [{ id: 'm1', userId: 'PM1', role: 'pm', status: 'active' }, { id: 'm2', userId: 'Dev1', role: 'dev', status: 'active' }]
+    });
+    const { app } = await desktop();
+
+    const listed = await call(app, 'GET', '/api/workspaces');
+    expect(listed.status).toBe(200);
+    expect(listed.body.map((w: any) => [w.name, w.role])).toEqual([
+      ['Alpha Workspace', 'dev'],
+      ['Client Portal', 'dev']
+    ]);
+    // Signed in to the cloud as this desktop's GitHub account.
+    expect(cloudCalls[0].auth).toBe('Bearer desktop-gh-token');
+
+    // Openable here, and its roster is the cloud's.
+    const members = await call(app, 'GET', '/api/workspaces/workspace-portal/members', { workspaceId: 'workspace-portal' });
+    expect(members.status).toBe(200);
+    expect(members.body.map((m: any) => m.userId)).toEqual(['PM1', 'Dev1']);
+    expect(cloudCalls.at(-1)!.workspace).toBe('workspace-portal');
+  });
+
+  it('lists even when the app asks with a workspace it has not seen yet', async () => {
+    identity = { login: 'Dev1', role: 'dev' };
+    cloudAnswers['GET /workspaces'] = () => ({ status: 200, body: [summary('workspace-portal', 'Client Portal', 'dev')] });
+    const { app } = await desktop();
+
+    const listed = await call(app, 'GET', '/api/workspaces', { workspaceId: 'workspace-portal' });
+    expect(listed.status).toBe(200);
+    expect(listed.body.map((w: any) => w.id)).toContain('workspace-portal');
+  });
+
+  it('takes a workspace away when the cloud says they are no longer in it', async () => {
+    identity = { login: 'Dev1', role: 'dev' };
+    cloudAnswers['GET /workspaces'] = () => ({
+      status: 200,
+      body: [summary('ws-default', 'Alpha Workspace', 'dev'), summary('workspace-portal', 'Client Portal', 'dev')]
+    });
+    const { app } = await desktop();
+    await call(app, 'GET', '/api/workspaces');
+
+    cloudAnswers['GET /workspaces'] = () => ({ status: 200, body: [summary('ws-default', 'Alpha Workspace', 'dev')] });
+    const listed = await call(app, 'GET', '/api/workspaces');
+    expect(listed.body.map((w: any) => w.id)).toEqual(['ws-default']);
+  });
+
+  it('keeps the last copy when the cloud does not answer', async () => {
+    identity = { login: 'Dev1', role: 'dev' };
+    cloudAnswers['GET /workspaces'] = () => ({
+      status: 200,
+      body: [summary('ws-default', 'Alpha Workspace', 'dev'), summary('workspace-portal', 'Client Portal', 'dev')]
+    });
+    const { app } = await desktop();
+    await call(app, 'GET', '/api/workspaces');
+
+    delete cloudAnswers['GET /workspaces'];
+    const listed = await call(app, 'GET', '/api/workspaces');
+    expect(listed.status).toBe(200);
+    expect(listed.body.map((w: any) => w.id)).toEqual(['ws-default', 'workspace-portal']);
+  });
+
+  /** Made where the team can see it, not in this one machine's file. */
+  it('creates a project manager’s workspace in the cloud, with its people, and opens it here', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    cloudAnswers['POST /workspaces'] = () => ({ status: 201, body: summary('workspace-portal', 'Client Portal', 'pm') });
+    cloudAnswers['GET /workspaces'] = () => ({
+      status: 200,
+      body: [summary('ws-default', 'Alpha Workspace', 'pm'), summary('workspace-portal', 'Client Portal', 'pm')]
+    });
+    const { app, registry } = await desktop();
+
+    const res = await call(app, 'POST', '/api/workspaces', {
+      body: { name: 'Client Portal', members: [{ userId: 'Dev1', role: 'dev' }] }
+    });
+
+    expect(res.status).toBe(201);
+    const create = cloudCalls.find(c => c.method === 'POST')!;
+    expect(create.body).toEqual({ name: 'Client Portal', members: [{ userId: 'Dev1', role: 'dev' }] });
+    expect((await registry.resolve('PM1', 'workspace-portal', 'pm'))?.role).toBe('pm');
+    // Not a second, local-only copy under an id nobody else has.
+    expect((await registry.listForUser('PM1', 'pm')).map((w: any) => w.name)).toEqual(['Alpha Workspace', 'Client Portal']);
+  });
+
+  it('adds a member through the cloud, and relays its refusal unchanged', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    cloudAnswers['POST /workspaces/ws-default/members'] = body =>
+      body.userId === 'Stranger'
+        ? { status: 400, body: { error: 'Not in the organisation.' } }
+        : { status: 201, body: { id: 'm9', userId: body.userId, role: body.role, status: 'active' } };
+    const { app } = await desktop();
+
+    const added = await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'Dev1', role: 'dev' } });
+    const refused = await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'Stranger', role: 'dev' } });
+
+    expect(added.status).toBe(201);
+    expect(added.body).toMatchObject({ userId: 'Dev1', status: 'active' });
+    expect(refused).toEqual({ status: 400, body: { error: 'Not in the organisation.' } });
+  });
+
+  it('says so when the cloud cannot be reached for something a person asked for', async () => {
+    identity = { login: 'PM1', role: 'pm' };
+    const { app } = await desktop();
+
+    const res = await call(app, 'POST', '/api/workspaces/ws-default/members', { body: { userId: 'Dev1', role: 'dev' } });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/Alpha cloud/);
+  });
 });
 
 /**

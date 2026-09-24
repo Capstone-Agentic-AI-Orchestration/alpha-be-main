@@ -45,7 +45,8 @@ const teamBoard = {
   ],
   squads: async () => [],
   squadOwners: async () => [],
-  squadProjects: async () => []
+  squadProjects: async () => [],
+  projectAssignments: async () => []
 };
 
 async function startApi() {

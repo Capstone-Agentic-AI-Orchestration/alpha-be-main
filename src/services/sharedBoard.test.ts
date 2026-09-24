@@ -114,6 +114,7 @@ interface Board {
   squads?: Squad[];
   owners?: Array<{ squad_id: string; user_id: string; status: string }>;
   links?: Array<{ squad_id: string; project_id: string; relationship: string; status: string }>;
+  assignments?: Array<{ project_id: string; user_id: string; status: string }>;
 }
 
 /** The team's board as the pull will read it. */
@@ -125,7 +126,8 @@ function source(board: Board = {}) {
     agents: async () => board.agents ?? [],
     squads: async () => board.squads ?? [],
     squadOwners: async () => board.owners ?? [],
-    squadProjects: async () => board.links ?? []
+    squadProjects: async () => board.links ?? [],
+    projectAssignments: async () => board.assignments ?? []
   };
 }
 
@@ -316,6 +318,49 @@ describe('the team’s roster', () => {
     expect(links.map(l => [l.squadId, l.status])).toEqual([['squad-web', 'active']]);
     const context = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
     expect(context?.access.squadOwners.get('squad-web')).toBe('Dev1');
+  });
+
+  /**
+   * A developer sees a project's tasks only with an assignment, and this
+   * machine answers from its own copy. A project manager assigning them on
+   * the web left the project empty on their desktop until this was mirrored.
+   */
+  it('mirrors who is on which project, so a developer sees its tasks', async () => {
+    const { board } = await load();
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+
+    await board.pullSharedBoard(
+      'ws-default',
+      source({ assignments: [{ project_id: 'gh-repo-100', user_id: 'Dev1', status: 'active' }] })
+    );
+
+    const context = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
+    expect(workspaceRegistry.canAccessProject(context!, 'gh-repo-100')).toBe(true);
+  });
+
+  it('takes an assignment away when the team removed it', async () => {
+    const { board } = await load();
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+    await board.pullSharedBoard(
+      'ws-default',
+      source({ assignments: [{ project_id: 'gh-repo-100', user_id: 'Dev1', status: 'active' }] })
+    );
+
+    await board.pullSharedBoard(
+      'ws-default',
+      source({ assignments: [{ project_id: 'gh-repo-100', user_id: 'Dev1', status: 'removed' }] })
+    );
+    const afterRemoved = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
+    expect(workspaceRegistry.canAccessProject(afterRemoved!, 'gh-repo-100')).toBe(false);
+
+    // And the same when the row is gone from the team's copy altogether.
+    await board.pullSharedBoard(
+      'ws-default',
+      source({ assignments: [{ project_id: 'gh-repo-100', user_id: 'Dev1', status: 'active' }] })
+    );
+    await board.pullSharedBoard('ws-default', source({ assignments: [] }));
+    const afterGone = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
+    expect(workspaceRegistry.canAccessProject(afterGone!, 'gh-repo-100')).toBe(false);
   });
 });
 

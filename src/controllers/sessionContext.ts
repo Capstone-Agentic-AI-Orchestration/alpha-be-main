@@ -1,7 +1,8 @@
 import { NextFunction, Request, Response } from 'express';
 
 import { IS_CLOUD, SESSION_TTL_MS } from '../config/env.js';
-import { sessionService } from '../services/sessionService.js';
+import { sessionService, type Session } from '../services/sessionService.js';
+import { verifyGitHubToken } from '../services/databaseTokenExchange.js';
 import { withGitHubIdentity } from '../services/githubRequestContext.js';
 
 /**
@@ -87,15 +88,42 @@ export function clearedSessionCookie(): string {
  * Express 4 does not catch a rejected promise itself, hence the explicit
  * `next(err)`.
  */
+/**
+ * A desktop's way in: its GitHub token, where a browser has a cookie.
+ *
+ * The desktop keeps no session with the cloud, and until now reached it only
+ * for a database token. Workspaces and their members live here, though, so a
+ * developer's desktop could not see a workspace a project manager made on the
+ * web -- it listed the ones in its own SQLite file, which is to say the
+ * default one. The same verification the token exchange uses: login from
+ * GitHub, role from teams, cached by the token's hash. Nothing is stored.
+ */
+async function bearerSession(req: Request): Promise<Session | null> {
+  const githubToken = /^Bearer\s+(\S+)\s*$/i.exec(req.header('Authorization') ?? '')?.[1];
+  if (!githubToken) return null;
+  const identity = await verifyGitHubToken(githubToken);
+  if (!identity.ok) return null;
+  return {
+    login: identity.login,
+    role: identity.role,
+    githubToken,
+    // Lives as long as the request: the next one is verified again (from cache).
+    expiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+}
+
 export function sessionContext(req: Request, res: Response, next: NextFunction): void {
   if (!IS_CLOUD) return next();
 
-  sessionService.resolve(readCookie(req, SESSION_COOKIE)).then(
-    session => {
-      if (!session) return next();
-      req.session = session;
-      withGitHubIdentity({ token: session.githubToken, login: session.login }, () => next());
-    },
-    err => next(err)
-  );
+  sessionService
+    .resolve(readCookie(req, SESSION_COOKIE))
+    .then(session => session ?? bearerSession(req))
+    .then(
+      session => {
+        if (!session) return next();
+        req.session = session;
+        withGitHubIdentity({ token: session.githubToken, login: session.login }, () => next());
+      },
+      err => next(err)
+    );
 }
