@@ -22,7 +22,8 @@ import { createTestDatabase, sqlFor } from '../store/testDatabase.js';
 let db: PGlite;
 let tmp: string;
 let opened: { close(): void }[] = [];
-let session = { login: 'Admin1', role: 'admin' };
+// A project manager: projects are started by one (fe #32), and every suite here starts with one.
+let session = { login: 'PM1', role: 'pm' };
 
 beforeAll(async () => {
   db = await createTestDatabase();
@@ -103,7 +104,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
 beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-projectroutes-'));
   opened = [];
-  session = { login: 'Admin1', role: 'admin' };
+  session = { login: 'PM1', role: 'pm' };
   await db.exec('truncate issues, issue_comments, projects, agents, squads, workspaces, workspace_members cascade');
 });
 
@@ -213,6 +214,55 @@ describe('the cloud project routes', () => {
     expect((await call(dev, 'GET', '/api/issues')).body).toEqual([]);
   });
 
+  /** Projects are started by project managers; an admin's would have no PM behind it. */
+  it('refuse an admin creating one', async () => {
+    session = { login: 'Admin1', role: 'admin' };
+    const app = await startCloudApi();
+
+    const res = await call(app, 'POST', '/api/projects', { name: 'Mine', key: 'MINE' });
+    expect(res.status).toBe(403);
+    expect((await db.query('select id from projects')).rows).toHaveLength(0);
+  });
+
+  /** The creator is the person signed in, never what the request claims. */
+  it('record the PM who created it, whatever the request says', async () => {
+    const app = await startCloudApi();
+    const created = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK', createdBy: 'Someone-else' })).body;
+    expect(created.createdBy).toBe('PM1');
+
+    // And an edit cannot re-home it.
+    await call(app, 'PUT', `/api/projects/${created.id}`, { createdBy: 'Someone-else', name: 'Checkout v2' });
+    const { rows } = await db.query<{ created_by: string; name: string }>('select created_by, name from projects');
+    expect(rows[0]).toEqual({ created_by: 'PM1', name: 'Checkout v2' });
+  });
+
+  /** A repository the org sync imported has no PM behind it, and is nobody's catalogue entry. */
+  it('leave a project with no PM behind it out of the catalogue', async () => {
+    const app = await startCloudApi();
+    await call(app, 'GET', '/api/projects'); // the default workspace exists once someone has asked
+    await db.exec("insert into projects (id, workspace_id, name, key) values ('p-import', 'ws-default', 'Imported', 'IMP')");
+
+    session = { login: 'Dev1', role: 'dev' };
+    const dev = await startCloudApi();
+    expect((await call(dev, 'GET', '/api/projects')).body).toEqual([]);
+    void app;
+  });
+
+  /** Developers run projects: they edit one, they do not start or remove one. */
+  it('let a developer edit a project, but not delete it', async () => {
+    const pm = await startCloudApi();
+    const project = (await call(pm, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+
+    session = { login: 'Dev1', role: 'dev' };
+    const dev = await startCloudApi();
+    const edited = await call(dev, 'PUT', `/api/projects/${project.id}`, { status: 'completed' });
+    expect(edited.status).toBe(200);
+    expect(edited.body.status).toBe('completed');
+
+    expect((await call(dev, 'DELETE', `/api/projects/${project.id}`)).status).toBe(403);
+    expect((await db.query('select id from projects')).rows).toHaveLength(1);
+  });
+
   it('refuse a developer creating one', async () => {
     session = { login: 'Dev1', role: 'dev' };
     const app = await startCloudApi();
@@ -312,6 +362,7 @@ describe('the cloud roster routes', () => {
   });
 
   it('create, edit and archive an agent', async () => {
+    session = { login: 'Admin1', role: 'admin' }; // `agent.manage` is an admin's
     const app = await startCloudApi();
 
     const created = await call(app, 'POST', '/api/agents', {

@@ -222,7 +222,7 @@ describe('the roster on a team’s desktop', () => {
    * saw it, and every card filed under it was refused by the cloud.
    */
   it('shares a project it makes, changes and removes', async () => {
-    role = 'admin';
+    role = 'pm'; // projects are started by a project manager
     const { app } = await startApi();
     shared = [];
 
@@ -315,7 +315,7 @@ describe('a conversation on a team’s desktop', () => {
 
 describe('a card made on a team’s desktop', () => {
   async function withProject(app: express.Express) {
-    role = 'admin';
+    role = 'pm'; // projects are started by a project manager
     return (await call(app, 'POST', '/api/projects', { id: 'gh-repo-100', name: 'checkout', key: 'CHK', resources: REPO })).body;
   }
 

@@ -52,6 +52,7 @@ export function withProjectDefaults(input: Partial<Project>, now = new Date().to
     leadType: input.leadType || 'agent',
     leadName: input.leadName || '',
     resources: input.resources || [],
+    createdBy: input.createdBy,
     createdAt: input.createdAt || now
   } as Project;
 }

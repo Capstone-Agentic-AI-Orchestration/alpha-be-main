@@ -198,6 +198,12 @@ export interface ProjectResource {
 
 export interface Project {
   id: string;
+  /**
+   * GitHub login of the project manager who created it. A project with no
+   * active PM behind it is not in the workspace's catalogue; see
+   * `workspaceRegistry.isPmOwnedProject`.
+   */
+  createdBy?: string;
   name: string;
   key: string;
   description: string;

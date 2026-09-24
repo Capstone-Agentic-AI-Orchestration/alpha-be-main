@@ -46,6 +46,7 @@ export type WorkspaceCapability =
   | 'workspace.bind_local'
   | 'project.read'
   | 'project.create'
+  | 'project.update'
   | 'project.manage'
   | 'issue.read'
   | 'issue.manage'
@@ -80,6 +81,13 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
      */
     'workspace.read_members',
     'project.read',
+    /*
+     * Developers run projects day to day -- status, details, resources, the
+     * build pipeline -- but a project is started by a project manager, and
+     * who is assigned to it is a PM's call: `project.create` and
+     * `project.manage` stay with them.
+     */
+    'project.update',
     'issue.read',
     'issue.manage',
     'agent.read',
@@ -110,6 +118,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'workspace.manage_members',
     'project.read',
     'project.create',
+    'project.update',
     'project.manage',
     'issue.read',
     'issue.manage',
@@ -129,7 +138,9 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'workspace.manage_members',
     'workspace.manage_settings',
     'project.read',
-    'project.create',
+    // No `project.create`: a project is started by a project manager, and one
+    // an admin made would have no PM behind it and sit outside the catalogue.
+    'project.update',
     'project.manage',
     'issue.read',
     'issue.manage',
@@ -340,7 +351,8 @@ class WorkspaceRegistry {
    */
   canDiscoverProject(context: WorkspaceContext, projectId: string): boolean {
     if (!this.inWorkspace(context, 'projects', projectId)) return false;
-    return context.role !== 'client' || this.canAccessProject(context, projectId);
+    if (context.role === 'client') return this.canAccessProject(context, projectId);
+    return this.isPmOwnedProject(context, projectId);
   }
 
   /** The workspace's projects, as this caller may discover them. */
@@ -355,8 +367,30 @@ class WorkspaceRegistry {
    */
   canAccessProject(context: WorkspaceContext, projectId: string): boolean {
     if (!this.inWorkspace(context, 'projects', projectId)) return false;
-    if (context.role === 'pm' || context.role === 'admin') return true;
+    if (context.role === 'pm' || context.role === 'admin') return this.isPmOwnedProject(context, projectId);
     return context.access.assignedProjectIds.has(projectId);
+  }
+
+  /**
+   * Whether an active project manager of this workspace created the project.
+   *
+   * That is what puts a project in the workspace's catalogue (fe #32): the
+   * organisation's repositories are not all projects, and one with no PM
+   * behind it is nobody's to run. Answered from the snapshot loaded with the
+   * request, so list filters stay synchronous.
+   *
+   * No PM list -- a team's desktop, see `WorkspaceAccess.projectManagerIds`
+   * -- means the cloud already vetted every creator, so any creator counts.
+   * No creator never counts. A context from an older caller with no creator
+   * map at all keeps the previous behaviour rather than hiding everything.
+   */
+  private isPmOwnedProject(context: WorkspaceContext, projectId: string): boolean {
+    const creators = context.access.projectCreators;
+    if (!creators) return context.role !== 'client';
+    const creator = creators.get(projectId);
+    if (!creator) return false;
+    const managers = context.access.projectManagerIds;
+    return managers ? managers.has(creator) : true;
   }
 
   projectIdsFor(context: WorkspaceContext, projectIds: string[]): Set<string> {

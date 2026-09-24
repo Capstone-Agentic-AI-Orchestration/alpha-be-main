@@ -48,8 +48,8 @@ export class PostgresProjectStore implements ProjectStore {
     const { rows } = await this.sql.query<ProjectRow>(
       `insert into projects
          (id, workspace_id, name, key, description, color, icon, status, priority,
-          start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        returning *`,
       [
         project.id,
@@ -68,6 +68,7 @@ export class PostgresProjectStore implements ProjectStore {
         project.leadAgentId ?? null,
         JSON.stringify(shareable(project.resources)),
         project.githubOrg ?? null,
+        project.createdBy ?? null,
         date(project.createdAt)
       ]
     );
@@ -266,6 +267,7 @@ export interface ProjectRow {
   lead_agent_id: string | null;
   resources: ProjectResource[] | null;
   github_org: string | null;
+  created_by: string | null;
   created_at: Timestamp;
 }
 
@@ -310,6 +312,7 @@ export function projectRow(workspaceId: string, project: Project): Record<string
     lead_agent_id: project.leadAgentId ?? null,
     resources: shareable(project.resources),
     github_org: project.githubOrg ?? null,
+    created_by: project.createdBy ?? null,
     ...(project.createdAt ? { created_at: project.createdAt } : {})
   };
 }
@@ -332,6 +335,7 @@ export function toProject(row: ProjectRow): Project {
     // `jsonb` arrives parsed from `pg` and from PGlite alike.
     resources: row.resources ?? [],
     githubOrg: row.github_org ?? undefined,
+    createdBy: row.created_by ?? undefined,
     createdAt: iso(row.created_at),
     // Machine-local, and never stored here; see the class comment.
     envVars: []
