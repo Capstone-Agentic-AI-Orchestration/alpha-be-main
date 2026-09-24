@@ -66,6 +66,8 @@ async function startApi() {
       boardSource: () => teamBoard,
       shareIssue: async (issue: any) => void shared.push(`issue ${issue.id}`),
       unshareIssue: async (id: string) => void shared.push(`delete ${id}`),
+      shareProject: async (project: any) => void shared.push(`project ${project.id}`),
+      unshareProject: async (id: string) => void shared.push(`delete project ${id}`),
       shareComment: async (comment: any) => void shared.push(`comment ${comment.id}`),
       shareAgent: async (agent: any) => void shared.push(`agent ${agent.id}`),
       unshareAgent: async (id: string) => void shared.push(`delete agent ${id}`),
@@ -196,6 +198,26 @@ describe('the roster on a team’s desktop', () => {
     expect(shared).not.toContain('agent agent-teammate');
   });
 
+  /**
+   * A project made in the desktop app stayed there: nobody else on the team
+   * saw it, and every card filed under it was refused by the cloud.
+   */
+  it('shares a project it makes, changes and removes', async () => {
+    role = 'admin';
+    const { app } = await startApi();
+    shared = [];
+
+    const project = (await call(app, 'POST', '/api/projects', { name: 'Payments', key: 'PAY' })).body;
+    expect(shared).toEqual([`project ${project.id}`]);
+
+    await call(app, 'PUT', `/api/projects/${project.id}`, { name: 'Payments v2' });
+    await call(app, 'DELETE', `/api/projects/${project.id}`);
+    // The update's share is not awaited by the route; let it land.
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    expect(shared).toEqual([`project ${project.id}`, `project ${project.id}`, `delete project ${project.id}`]);
+  });
+
   it('shares an agent it makes, changes and removes', async () => {
     role = 'admin';
     const { app } = await startApi();
@@ -289,14 +311,17 @@ describe('a card made on a team’s desktop', () => {
     expect(res.body).toMatchObject({ id: 'gh-issue-777', githubNumber: 42, githubRepo: 'acme/checkout' });
   });
 
-  /** The database refuses a comment on an issue it does not have. */
-  it('is shared before its opening comment', async () => {
+  /**
+   * The database refuses a comment on an issue it does not have, and an issue
+   * in a project it does not have: project, then card, then comment.
+   */
+  it('is shared before its opening comment, after its project', async () => {
     const { app } = await startApi();
     const project = await withProject(app);
 
     await call(app, 'POST', '/api/issues', { title: 'Add a thing', projectId: project.id });
 
-    expect(shared).toEqual(['issue gh-issue-777', 'comment comm-gh-issue-777-created']);
+    expect(shared).toEqual([`project ${project.id}`, 'issue gh-issue-777', 'comment comm-gh-issue-777-created']);
   });
 
   it('is still made, and says why, when GitHub refuses it', async () => {

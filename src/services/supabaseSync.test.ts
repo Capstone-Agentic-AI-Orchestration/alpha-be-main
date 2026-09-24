@@ -3,7 +3,8 @@ import type { PGlite } from '@electric-sql/pglite';
 
 import { createTestDatabase } from '../store/testDatabase.js';
 import { runToCloudRow } from './supabaseService.js';
-import type { PrototypeRun } from '../models/index.js';
+import { projectRow } from '../store/postgresProjectStore.js';
+import type { Project, PrototypeRun } from '../models/index.js';
 
 /**
  * Whether what the desktop sends is what the cloud table accepts.
@@ -54,7 +55,7 @@ beforeAll(async () => {
 afterAll(async () => { await db?.close(); });
 
 /** Insert the mapper's output the way PostgREST would. */
-async function insertRow(row: Record<string, unknown>) {
+async function insertRow(row: Record<string, unknown>, table = 'prototype_runs') {
   const cols = Object.keys(row);
   const params = cols.map((_, i) => `$${i + 1}`);
   const values = cols.map(c => {
@@ -62,7 +63,7 @@ async function insertRow(row: Record<string, unknown>) {
     return v !== null && typeof v === 'object' ? JSON.stringify(v) : v;
   });
   return db.query(
-    `insert into prototype_runs (${cols.join(',')}) values (${params.join(',')})`,
+    `insert into ${table} (${cols.join(',')}) values (${params.join(',')})`,
     values
   );
 }
@@ -120,5 +121,40 @@ describe('the run sync payload', () => {
     );
     expect(stored.rows[0].plan).toEqual(['step one']);
     expect(stored.rows[0].stages).toEqual([{ name: 'build' }]);
+  });
+});
+
+/**
+ * A project made on a desktop, as it goes to the team's board.
+ *
+ * Projects never left the machine they were made on, so every card filed
+ * under one was refused by the cloud for naming a project it did not have.
+ */
+describe('the project sync payload', () => {
+  const project = {
+    id: 'p-desktop', name: 'Payments', key: 'PAY', description: '', color: '#6366f1', icon: '💳',
+    status: 'in_progress', priority: 'medium', startDate: '', targetDate: '', leadType: 'agent', leadName: '',
+    resources: [
+      { id: 'r1', type: 'github_repo', name: 'payments', pathOrUrl: 'https://github.com/acme/payments' },
+      { id: 'r2', type: 'local_path', name: 'checkout', pathOrUrl: 'C:/code/payments' }
+    ],
+    createdAt: ''
+  } as unknown as Project;
+
+  it('inserts into the real projects table, and an issue can then be filed under it', async () => {
+    await expect(insertRow(projectRow('ws1', project), 'projects')).resolves.toBeTruthy();
+    await expect(
+      db.query(
+        `insert into issues (id,workspace_id,identifier,title,status,priority,project_id)
+         values ('i-pay','ws1','PAY-1','Refunds','todo','high','p-desktop')`
+      )
+    ).resolves.toBeTruthy();
+  });
+
+  it('leaves this machine’s folders behind', async () => {
+    const stored = await db.query<{ resources: Array<{ type: string }> }>(
+      `select resources from projects where id='p-desktop'`
+    );
+    expect(stored.rows[0].resources.map(r => r.type)).toEqual(['github_repo']);
   });
 });

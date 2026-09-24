@@ -130,8 +130,23 @@ dataRouter.get('/me', async (req: Request, res: Response) => {
  * claims cannot be chosen by the caller. Asking for a token for a workspace
  * you are not a member of fails earlier, in `workspaceContext`.
  */
-dataRouter.get('/database/token', (req: Request, res: Response) => {
+dataRouter.get('/database/token', async (req: Request, res: Response) => {
   if (!req.workspace) return res.status(401).json({ error: 'Sign in to use Alpha.' });
+
+  /**
+   * A desktop hands over the token it got from the cloud.
+   *
+   * Minting needs the JWT secret, which only the cloud holds, so this used to
+   * answer 503 on every desktop -- the renderer fell back to the anon key, the
+   * private board channel refused it, and a desktop never heard of a write.
+   */
+  if (!IS_CLOUD) {
+    const exchanged = await supabaseService.databaseToken();
+    if (!exchanged) {
+      return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+    }
+    return res.json(exchanged);
+  }
 
   try {
     const { token, expiresAt } = mintSupabaseToken({
@@ -245,6 +260,8 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.create')) return;
   const project = await projectStore().create(req.workspace!.workspaceId, req.body);
   workspaceRegistry.bind('projects', project.id, req.workspace!.workspaceId);
+  // On a team's desktop, onto the team's board: nobody else sees it otherwise.
+  await supabaseService.shareProject(project);
   res.status(201).json(project);
 }));
 
@@ -354,6 +371,7 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
 
   const updated = await projectStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Project not found' });
+  void supabaseService.shareProject(updated);
   res.json(updated);
 }));
 
@@ -361,7 +379,10 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   if (!requireProjectWorkspace(req, res, req.params.id)) return;
   const deleted = await projectStore().remove(req.workspace!.workspaceId, req.params.id);
-  if (deleted) await workspaceRegistry.unbind('projects', req.params.id);
+  if (deleted) {
+    await workspaceRegistry.unbind('projects', req.params.id);
+    void supabaseService.unshareProject(req.params.id);
+  }
   res.json({ success: deleted });
 }));
 
