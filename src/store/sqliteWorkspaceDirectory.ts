@@ -258,7 +258,11 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     };
   }
 
-  async createWorkspace(userId: string, input: { name: string; slug?: string }): Promise<WorkspaceSummary> {
+  async createWorkspace(
+    userId: string,
+    input: { name: string; slug?: string },
+    creatorRole: WorkspaceRole = 'admin'
+  ): Promise<WorkspaceSummary> {
     const name = input.name.trim();
     if (!name) throw new WorkspaceRequestError('Workspace name is required.', 400);
 
@@ -282,13 +286,13 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       this.db
         .prepare(
           `INSERT INTO workspace_members (id, workspace_id, user_id, role, status, created_at, updated_at)
-           VALUES (?, ?, ?, 'admin', 'active', ?, ?)`
+           VALUES (?, ?, ?, ?, 'active', ?, ?)`
         )
-        .run(`member-${randomUUID()}`, id, userId, now, now);
+        .run(`member-${randomUUID()}`, id, userId, creatorRole, now, now);
     })();
 
     const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as any;
-    return this.summary(row, 'admin');
+    return this.summary(row, creatorRole);
   }
 
   async updateWorkspace(

@@ -3,6 +3,7 @@ import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { ALPHA_ORG } from '../config/env.js';
 import { githubApi } from '../services/githubApi.js';
+import { roleForTeamSlug } from '../services/identityService.js';
 import { agentStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
@@ -114,17 +115,25 @@ workspaceRouter.get(
 );
 
 /**
- * Create a workspace, as its first admin.
+ * Create a workspace: project managers and admins.
  *
- * Admins only. A workspace's creator becomes its administrator, and the
- * database token minted for them there carries that role -- so "anyone may
- * create one" is also "anyone may hold admin claims somewhere".
+ * Decided by the caller's GitHub team, not by their role in the workspace
+ * they happen to have open. A project manager may promote someone to `pm`
+ * inside their own workspace, so a workspace role is something a PM can hand
+ * out -- and "may create workspaces" must not be. The `project-managers` and
+ * `admins` teams are the organisation's decision.
+ *
+ * The creator joins at their team role, never above it. Making every creator
+ * the new workspace's admin would let any project manager mint themselves
+ * admin database claims by creating a workspace, which is exactly what the
+ * `admins` team exists to decide.
  */
 workspaceRouter.post(
   '/workspaces',
   route(async (req, res) => {
-    if (req.workspace!.role !== 'admin') {
-      res.status(403).json({ error: 'Only an admin can create a workspace.' });
+    const { teamRole } = req.workspace!;
+    if (teamRole !== 'pm' && teamRole !== 'admin') {
+      res.status(403).json({ error: 'Only a project manager or an admin can create a workspace.' });
       return;
     }
 
@@ -134,10 +143,11 @@ workspaceRouter.post(
       return;
     }
 
-    const workspace = await workspaceRegistry.createWorkspace(req.workspace!.userId, {
-      name,
-      slug: typeof req.body?.slug === 'string' ? req.body.slug : undefined
-    });
+    const workspace = await workspaceRegistry.createWorkspace(
+      req.workspace!.userId,
+      { name, slug: typeof req.body?.slug === 'string' ? req.body.slug : undefined },
+      teamRole
+    );
     await seedRoster(workspace.id, workspace.name);
     res.status(201).json(workspace);
   })
@@ -233,6 +243,71 @@ workspaceRouter.get(
       people
         .filter(person => !taken.has(person.login.toLowerCase()))
         .map(person => ({ login: person.login, avatarUrl: person.avatar_url ?? null }))
+    );
+  })
+);
+
+/**
+ * The organisation's teams that grant an Alpha role, with their people.
+ *
+ * What a project manager staffing a workspace actually thinks in: "the
+ * developers", not a flat list of logins. Only teams that map to a role are
+ * listed -- someone in no such team is refused at sign-in, so adding them to a
+ * workspace would put a name on it that can never open it.
+ *
+ * Read as the caller, so a secret team they cannot see on GitHub is not shown
+ * to them here either. Each person says whether they are already in this
+ * workspace and as what, so the list doubles as a view of who is missing.
+ */
+workspaceRouter.get(
+  '/workspaces/:id/members/teams',
+  route(async (req, res) => {
+    if (!sameWorkspace(req, res)) return;
+    if (!requireWorkspaceCapability(req, res, 'workspace.manage_members')) return;
+    if (!ALPHA_ORG) {
+      res.status(503).json({ error: 'No GitHub organisation is configured for this deployment.' });
+      return;
+    }
+
+    type GitHubPerson = { login: string; avatar_url?: string };
+    let teams: Array<{ slug: string; name: string; role: WorkspaceRole; people: GitHubPerson[] }>;
+    try {
+      const all = await githubApi().getAll<{ slug: string; name: string }>(`/orgs/${ALPHA_ORG}/teams?per_page=100`);
+      const roleTeams = all.flatMap(team => {
+        const role = roleForTeamSlug(team.slug);
+        return role ? [{ ...team, role }] : [];
+      });
+      teams = await Promise.all(
+        roleTeams.map(async team => ({
+          slug: team.slug,
+          name: team.name,
+          role: team.role,
+          people: await githubApi().getAll<GitHubPerson>(
+            `/orgs/${ALPHA_ORG}/teams/${encodeURIComponent(team.slug)}/members?per_page=100`
+          )
+        }))
+      );
+    } catch (err: any) {
+      res.status(502).json({ error: `Could not read the ${ALPHA_ORG} teams: ${err?.message ?? err}` });
+      return;
+    }
+
+    const here = new Map(
+      (await workspaceRegistry.listMembers(req.params.id))
+        .filter(member => member.status === 'active')
+        .map(member => [member.userId.toLowerCase(), member.role])
+    );
+    res.json(
+      teams.map(team => ({
+        slug: team.slug,
+        name: team.name,
+        role: team.role,
+        members: team.people.map(person => ({
+          login: person.login,
+          avatarUrl: person.avatar_url ?? null,
+          workspaceRole: here.get(person.login.toLowerCase()) ?? null
+        }))
+      }))
     );
   })
 );
