@@ -12,14 +12,18 @@ import {
   GITHUB_APP_ID,
   GITHUB_APP_PRIVATE_KEY,
   GITHUB_APP_WEBHOOK_SECRET,
-  GITHUB_APP_SLUG
+  GITHUB_APP_SLUG,
+  IS_PACKAGED_DESKTOP
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
 import {
   DeviceFlowError,
+  activeProfile,
   awaitAuthorization,
+  beginSessionAuthentication,
   clearCredential,
-  loginFor,
+  isSessionAuthenticated,
+  userFor,
   requestDeviceCode,
   ghEnvironment,
   storedCredential
@@ -33,8 +37,15 @@ type ExecOptions = {
   maxBuffer?: number;
 };
 
-const execGh = (args: string[], options: ExecOptions = {}) =>
-  execFileAsync('gh', args, { ...options, env: ghEnvironment(options.env) });
+const execGh = (args: string[], options: ExecOptions = {}) => {
+  // Do not let a packaged build fall through to a developer's machine-level
+  // `gh` credential while the profile picker is waiting for a fresh sign-in.
+  // The version probe is safe and remains available for the status copy.
+  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated() && !args.includes('--version')) {
+    return Promise.reject(new Error('Alpha is not signed in to GitHub.'));
+  }
+  return execFileAsync('gh', args, { ...options, env: ghEnvironment(options.env) });
+};
 
 /**
  * Whether the CLI is here at all, asked once.
@@ -116,7 +127,10 @@ const execFileAsync = promisify(execFile);
 
 export interface GitHubAuthInfo {
   authenticated: boolean;
+  profileId?: string;
   username?: string;
+  name?: string;
+  avatarUrl?: string;
   protocol?: string;
   scopes?: string[];
   tokenSource?: 'keyring' | 'env' | 'oauth' | 'github_app';
@@ -315,6 +329,12 @@ export class GhCliGitHubService implements IGitHubService {
    * it no longer holds is worse than one that asks you to sign in again.
    */
   async checkAuth(): Promise<GitHubAuthInfo> {
+    // Remembered credentials are deliberately not enough to open a packaged
+    // desktop session. The profile picker must complete a fresh GitHub device
+    // flow after every launch or account switch.
+    if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
+      return { authenticated: false, mode: 'cli', tokenSource: 'oauth', cliMissing: !(await ghInstalled()) };
+    }
     const credential = storedCredential();
     // `gh` is still what does the work, so a missing CLI is worth reporting
     // even when the sign-in itself is perfectly good.
@@ -322,12 +342,16 @@ export class GhCliGitHubService implements IGitHubService {
 
     if (!credential) return { authenticated: false, mode: 'cli', cliMissing };
 
-    const login = await loginFor(credential.token);
-    if (!login) return { authenticated: false, mode: 'cli', tokenSource: 'oauth', cliMissing };
+    const user = await userFor(credential.token);
+    if (!user?.login) return { authenticated: false, mode: 'cli', tokenSource: 'oauth', cliMissing };
+    const remembered = activeProfile();
 
     return {
       authenticated: true,
-      username: login,
+      profileId: user.id ?? credential.userId ?? remembered?.id,
+      username: user.login,
+      name: user.name ?? credential.name,
+      avatarUrl: user.avatarUrl ?? credential.avatarUrl,
       protocol: 'https',
       scopes: GITHUB_SCOPE.split(',').map(scope => scope.trim()).filter(Boolean),
       tokenSource: 'oauth',
@@ -349,6 +373,7 @@ export class GhCliGitHubService implements IGitHubService {
    * while the UI polls `checkAuth` -- exactly as it did when `gh` drove this.
    */
   async startDeviceLogin(): Promise<{ code: string; verificationUrl: string }> {
+    beginSessionAuthentication();
     const code = await requestDeviceCode();
 
     void awaitAuthorization(code).catch(err => {
@@ -1427,6 +1452,7 @@ export class GitHubService implements IGitHubService {
   async checkAuth(): Promise<GitHubAuthInfo> {
     const cliAuth = await this.cliService.checkAuth();
     if (cliAuth.authenticated) return cliAuth;
+    if (IS_PACKAGED_DESKTOP) return cliAuth;
 
     const restAuth = await this.restService.checkAuth();
     if (restAuth.authenticated) return restAuth;

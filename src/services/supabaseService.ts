@@ -23,7 +23,7 @@ import { RunPublishGate } from './runPublishGate.js';
 
 const execFileAsync = promisify(execFile);
 
-import { storedToken } from './alphaGitHubToken.js';
+import { isSessionAuthenticated, storedToken } from './alphaGitHubToken.js';
 
 /**
  * The GitHub token the desktop presents as its identity.
@@ -37,6 +37,7 @@ import { storedToken } from './alphaGitHubToken.js';
  * its own to do.
  */
 async function githubCliToken(): Promise<string | null> {
+  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) return null;
   const own = storedToken();
   if (own) return own;
   // An installed copy has its own sign-in; borrowing the machine's would write

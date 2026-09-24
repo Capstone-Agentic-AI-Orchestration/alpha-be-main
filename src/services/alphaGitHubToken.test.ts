@@ -14,8 +14,9 @@ const tmp = path.join(os.tmpdir(), `alpha-gh-token-${Date.now()}`);
 
 type Module = typeof import('./alphaGitHubToken.js');
 
-async function load(clientId = 'Iv1.testclientid'): Promise<Module> {
+async function load(clientId = 'Iv1.testclientid', packaged = false): Promise<Module> {
   process.env.ALPHA_HOME = tmp;
+  process.env.ALPHA_PACKAGED = packaged ? '1' : '0';
   // Emptied rather than deleted: dotenv refills a key that is absent.
   process.env.GITHUB_CLIENT_ID = clientId;
   process.env.GITHUB_SCOPE = 'repo,workflow,read:org';
@@ -48,6 +49,7 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
+  delete process.env.ALPHA_PACKAGED;
 });
 
 describe('asking GitHub for a device code', () => {
@@ -154,6 +156,44 @@ describe('the stored credential', () => {
 
     expect(mod.storedToken()).toBeNull();
     expect((await load()).storedToken()).toBeNull();
+  });
+
+  it('remembers account metadata without exposing a token to the profile list', async () => {
+    const mod = await load();
+    mod.saveCredential({
+      token: 'gho_thetoken',
+      userId: '42',
+      login: 'Dev1',
+      name: 'Dev One',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/42',
+      obtainedAt: new Date().toISOString()
+    });
+
+    expect(mod.profileSummaries()).toMatchObject([
+      { id: '42', login: 'Dev1', name: 'Dev One', active: true }
+    ]);
+    expect(JSON.stringify(mod.profileSummaries())).not.toContain('gho_thetoken');
+
+    mod.clearCredential();
+    expect(mod.profileSummaries()).toMatchObject([
+      { id: '42', login: 'Dev1', active: false }
+    ]);
+
+    mod.removeProfile('42');
+    expect(mod.profileSummaries()).toEqual([]);
+  });
+
+  it('does not treat a remembered token as an active packaged session', async () => {
+    const mod = await load('Iv1.testclientid', true);
+    mod.saveCredential({ token: 'gho_thetoken', userId: '42', login: 'Dev1', obtainedAt: new Date().toISOString() });
+
+    expect(mod.isSessionAuthenticated()).toBe(true);
+    expect(mod.profileSummaries()).toMatchObject([{ id: '42', active: true }]);
+
+    mod.beginSessionAuthentication();
+
+    expect(mod.isSessionAuthenticated()).toBe(false);
+    expect(mod.profileSummaries()).toMatchObject([{ id: '42', active: false }]);
   });
 });
 
