@@ -117,6 +117,7 @@ const TERMINAL_RUN_EVENTS = new Set(['run_completed', 'run_failed', 'run_cancell
 
 export class SupabaseService {
   private client: SupabaseClient | null = null;
+  private initError: string | null = null;
   private lastFailureLoggedAt = 0;
   private readonly publishGate = new RunPublishGate();
   private readonly runChannels = new Map<string, RealtimeChannel>();
@@ -167,11 +168,25 @@ export class SupabaseService {
         });
         logInfo('Supabase client initialized successfully (Team Mode)');
       } catch (err: any) {
+        this.initError = String(err?.message || err);
         logError('Failed to initialize Supabase client:', err?.message || err);
       }
     } else {
       logInfo('Supabase credentials not set — running in Solo SQLite mode');
     }
+  }
+
+  /**
+   * Why this desktop is off the team board when it was meant to be on it.
+   *
+   * Null when it is on the board, and when it was never meant to be (no
+   * Supabase settings: a checkout run solo). A failure here used to be one
+   * log line in a console an installed app never shows, and the only visible
+   * symptom was a Sync refused with a project manager's permission error.
+   */
+  connectionProblem(): string | null {
+    if (IS_CLOUD || this.isConfigured() || !(SUPABASE_URL && SUPABASE_ANON_KEY)) return null;
+    return this.initError ?? 'The team board client did not start.';
   }
 
   isConfigured(): boolean {

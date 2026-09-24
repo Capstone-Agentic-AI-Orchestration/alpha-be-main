@@ -226,6 +226,18 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
     return;
   }
 
+  /**
+   * Meant to be on the team board and not: say so, and why.
+   *
+   * Falling through to the GitHub sync below refused every developer with
+   * "Your workspace role cannot project manage" -- true, and no help at all,
+   * when the real problem was a client that never started.
+   */
+  const problem = supabaseService.connectionProblem();
+  if (problem) {
+    return res.status(503).json({ error: `This desktop is not connected to the team board: ${problem}` });
+  }
+
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const report = await syncBoardFromGitHub(req.workspace!.workspaceId);
   // 200 even with per-project errors: a workspace where one repository is

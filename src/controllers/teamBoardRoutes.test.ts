@@ -19,6 +19,8 @@ let tmp: string;
 let opened: { close(): void }[] = [];
 let role = 'dev';
 let sharing = true;
+/** Why a desktop meant to be on the team board is not; null when it is, or never meant to be. */
+let connectionProblem: string | null = null;
 let shared: string[];
 let githubFails = false;
 
@@ -62,6 +64,7 @@ async function startApi() {
   vi.doMock('../services/supabaseService.js', () => ({
     supabaseService: {
       sharesBoard: () => sharing,
+      connectionProblem: () => connectionProblem,
       isConfigured: () => sharing,
       boardSource: () => teamBoard,
       shareIssue: async (issue: any) => void shared.push(`issue ${issue.id}`),
@@ -135,6 +138,7 @@ beforeEach(() => {
   role = 'dev';
   sharing = true;
   shared = [];
+  connectionProblem = null;
   githubFails = false;
 });
 
@@ -178,6 +182,21 @@ describe('syncing a desktop on a team', () => {
     const { app } = await startApi();
 
     expect((await call(app, 'POST', '/api/board/sync')).status).toBe(403);
+  });
+
+  /**
+   * Meant to be on the team board, and its client did not start: every
+   * installed desktop up to 2.0.6. It used to answer the 403 above, which
+   * told a developer nothing about what was actually wrong.
+   */
+  it('says why, rather than refusing a developer, when it is meant to be on the team board and is not', async () => {
+    sharing = false;
+    connectionProblem = 'Node.js detected but native WebSocket not found.';
+    const { app } = await startApi();
+
+    const res = await call(app, 'POST', '/api/board/sync');
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/not connected to the team board: Node\.js detected/);
   });
 });
 
