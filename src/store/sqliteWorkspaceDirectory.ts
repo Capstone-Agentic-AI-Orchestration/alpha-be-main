@@ -258,6 +258,72 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     };
   }
 
+  /**
+   * Make this file's memberships for `userId` match the cloud's.
+   *
+   * On a team's desktop the cloud decides who is in which workspace: a project
+   * manager staffs one on the web, and the developer is in it without doing
+   * anything. This file keeps a copy so a request can still be resolved
+   * without a round trip to a service that may be asleep.
+   *
+   * Every workspace the cloud lists is upserted under the cloud's id, with the
+   * caller's role there. A local membership the cloud does not list is marked
+   * removed: the cloud is the authority, and a workspace it does not know
+   * could never share a card or a run anyway. Rows are never deleted, so a
+   * membership the cloud lists again comes back as it was.
+   *
+   * Only call this with a list the cloud actually answered with. An empty
+   * list from a failed request would sign the person out of everything.
+   */
+  mirrorMemberships(
+    userId: string,
+    workspaces: Array<{ id: string; name: string; slug: string; role: WorkspaceRole }>
+  ): void {
+    const now = new Date().toISOString();
+    const listed = new Set(workspaces.map(workspace => workspace.id));
+
+    this.db.transaction(() => {
+      for (const workspace of workspaces) {
+        // A local workspace may already hold the cloud's slug under another id.
+        const clash = this.db
+          .prepare('SELECT 1 FROM workspaces WHERE slug = ? AND id <> ?')
+          .get(workspace.slug, workspace.id);
+        const slug = clash ? `${workspace.slug}-${workspace.id.slice(-6)}` : workspace.slug;
+
+        this.db
+          .prepare(
+            `INSERT INTO workspaces (id, name, slug, status, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, 'active', ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug,
+               status = 'active', updated_at = excluded.updated_at`
+          )
+          .run(workspace.id, workspace.name, slug, userId, now, now);
+
+        this.db
+          .prepare(
+            `INSERT INTO workspace_members (id, workspace_id, user_id, role, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'active', ?, ?)
+             ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role,
+               status = 'active', updated_at = excluded.updated_at`
+          )
+          .run(`member-${randomUUID()}`, workspace.id, userId, workspace.role, now, now);
+      }
+
+      const held = this.db
+        .prepare(`SELECT workspace_id FROM workspace_members WHERE user_id = ? AND status = 'active'`)
+        .all(userId) as Array<{ workspace_id: string }>;
+      for (const { workspace_id } of held) {
+        if (listed.has(workspace_id)) continue;
+        this.db
+          .prepare(
+            `UPDATE workspace_members SET status = 'removed', updated_at = ?
+             WHERE workspace_id = ? AND user_id = ?`
+          )
+          .run(now, workspace_id, userId);
+      }
+    })();
+  }
+
   async createWorkspace(
     userId: string,
     input: { name: string; slug?: string },

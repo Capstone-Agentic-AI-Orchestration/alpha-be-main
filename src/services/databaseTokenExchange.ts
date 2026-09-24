@@ -81,15 +81,18 @@ async function githubLogin(githubToken: string): Promise<{ login?: string; statu
   return { login: user.login, status: res.status };
 }
 
-export async function exchangeGitHubToken(
-  githubToken: string | undefined,
-  requestedWorkspaceId: string | undefined,
-  resolveWorkspace: ResolveWorkspace
-): Promise<ExchangeResult> {
-  if (!githubToken) {
-    return { ok: false, status: 401, error: 'Send the GitHub token as "Authorization: Bearer <token>".' };
-  }
+export type VerifiedGitHubToken =
+  | { ok: true; login: string; role: AlphaRole }
+  | { ok: false; status: 401 | 403 | 502; error: string };
 
+/**
+ * Who a GitHub token belongs to, and the role their teams grant.
+ *
+ * Shared by the database-token exchange and by the cloud API's bearer sign-in
+ * (`sessionContext`), so the desktop is one identity to both: the same login,
+ * the same role, from the same two GitHub reads, cached the same way.
+ */
+export async function verifyGitHubToken(githubToken: string): Promise<VerifiedGitHubToken> {
   const key = keyFor(githubToken);
   let identity = identities.get(key);
   if (!identity || identity.until <= Date.now()) {
@@ -125,6 +128,21 @@ export async function exchangeGitHubToken(
     identity = { login, role, until: Date.now() + IDENTITY_TTL_MS };
     identities.set(key, identity);
   }
+
+  return { ok: true, login: identity.login, role: identity.role };
+}
+
+export async function exchangeGitHubToken(
+  githubToken: string | undefined,
+  requestedWorkspaceId: string | undefined,
+  resolveWorkspace: ResolveWorkspace
+): Promise<ExchangeResult> {
+  if (!githubToken) {
+    return { ok: false, status: 401, error: 'Send the GitHub token as "Authorization: Bearer <token>".' };
+  }
+
+  const identity = await verifyGitHubToken(githubToken);
+  if (!identity.ok) return identity;
 
   const context = await resolveWorkspace(identity.login, requestedWorkspaceId, identity.role);
   if (!context) {

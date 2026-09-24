@@ -94,9 +94,16 @@ export async function workspaceContext(
       return;
     }
 
+    /**
+     * The listing is not scoped to a workspace, and must not be refused for
+     * one: on a desktop it is what fetches a workspace this machine has not
+     * seen yet, so asking for it by id first would be asking for the answer
+     * before the question.
+     */
+    const listing = req.method === 'GET' && req.path === '/workspaces';
     const context = await workspaceRegistry.resolve(
       caller.login,
-      req.header('X-Workspace-Id') || undefined,
+      listing ? undefined : req.header('X-Workspace-Id') || undefined,
       caller.role
     );
     if (!context) {

@@ -4,6 +4,7 @@ import { route } from './asyncRoute.js';
 import { ALPHA_ORG } from '../config/env.js';
 import { githubApi } from '../services/githubApi.js';
 import { roleForTeamSlug } from '../services/identityService.js';
+import { cloudRequest, refreshMemberships, usesCloudDirectory } from '../services/cloudWorkspaces.js';
 import { agentStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
@@ -105,12 +106,113 @@ function sameWorkspace(req: Request, res: Response): boolean {
   return true;
 }
 
-/** The workspaces this caller belongs to. Not every workspace there is. */
+/**
+ * On a team's desktop, answer with the cloud's answer.
+ *
+ * Returns false when this is not a team desktop, and the route carries on
+ * with its local answer. Otherwise the request goes to the same route in the
+ * cloud, signed in as this desktop's GitHub account, and the cloud's status
+ * and body come back unchanged -- so its permission checks are the ones that
+ * count. `mirror` runs after a success, for the routes whose result this
+ * machine keeps a copy of.
+ */
+async function relayToCloud(
+  req: Request,
+  res: Response,
+  mirror?: (body: any) => unknown
+): Promise<boolean> {
+  if (!usesCloudDirectory()) return false;
+  try {
+    const answer = await cloudRequest(req.originalUrl.replace(/^\/api(?=\/)/, ''), {
+      method: req.method,
+      body: req.method === 'GET' || req.method === 'DELETE' ? undefined : req.body,
+      workspaceId: req.workspace?.workspaceId
+    });
+    if (answer.status < 300 && mirror) await mirror(answer.body);
+    res.status(answer.status).json(answer.body);
+  } catch (err: any) {
+    res.status(502).json({ error: `Could not reach the Alpha cloud: ${err?.message ?? err}` });
+  }
+  return true;
+}
+
+/**
+ * The workspaces this caller belongs to. Not every workspace there is.
+ *
+ * On a team desktop, refreshed from the cloud first, so a workspace someone
+ * put this developer in shows up without them doing anything. A cloud that
+ * does not answer in time leaves the last copy in place.
+ */
 workspaceRouter.get(
   '/workspaces',
   route(async (req, res) => {
     const { userId, teamRole } = req.workspace!;
+    if (usesCloudDirectory()) await refreshMemberships(userId);
     res.json(await workspaceRegistry.listForUser(userId, teamRole));
+  })
+);
+
+type GitHubPerson = { login: string; avatar_url?: string };
+
+/**
+ * The organisation's teams that grant an Alpha role, with their people.
+ *
+ * Only role-granting teams: someone in no such team is refused at sign-in, so
+ * putting them in a workspace gives it a member who can never open it. Read
+ * as the caller, so a secret team they cannot see on GitHub stays hidden.
+ */
+async function readTeamRoster(): Promise<Array<{ slug: string; name: string; role: WorkspaceRole; people: GitHubPerson[] }>> {
+  const all = await githubApi().getAll<{ slug: string; name: string }>(`/orgs/${ALPHA_ORG}/teams?per_page=100`);
+  const roleTeams = all.flatMap(team => {
+    const role = roleForTeamSlug(team.slug);
+    return role ? [{ ...team, role }] : [];
+  });
+  return Promise.all(
+    roleTeams.map(async team => ({
+      slug: team.slug,
+      name: team.name,
+      role: team.role,
+      people: await githubApi().getAll<GitHubPerson>(
+        `/orgs/${ALPHA_ORG}/teams/${encodeURIComponent(team.slug)}/members?per_page=100`
+      )
+    }))
+  );
+}
+
+/**
+ * The teams, before there is a workspace to add them to.
+ *
+ * For the create form: a project manager picks the people as they name the
+ * workspace, so it opens already staffed. Whoever may create a workspace may
+ * read this; nobody else needs it.
+ */
+workspaceRouter.get(
+  '/org/teams',
+  route(async (req, res) => {
+    const { teamRole } = req.workspace!;
+    if (teamRole !== 'pm' && teamRole !== 'admin') {
+      res.status(403).json({ error: 'Only a project manager or an admin can read the team roster.' });
+      return;
+    }
+    if (await relayToCloud(req, res)) return;
+    if (!ALPHA_ORG) {
+      res.status(503).json({ error: 'No GitHub organisation is configured for this deployment.' });
+      return;
+    }
+
+    try {
+      const teams = await readTeamRoster();
+      res.json(
+        teams.map(team => ({
+          slug: team.slug,
+          name: team.name,
+          role: team.role,
+          members: team.people.map(person => ({ login: person.login, avatarUrl: person.avatar_url ?? null }))
+        }))
+      );
+    } catch (err: any) {
+      res.status(502).json({ error: `Could not read the ${ALPHA_ORG} teams: ${err?.message ?? err}` });
+    }
   })
 );
 
@@ -127,11 +229,20 @@ workspaceRouter.get(
  * the new workspace's admin would let any project manager mint themselves
  * admin database claims by creating a workspace, which is exactly what the
  * `admins` team exists to decide.
+ *
+ * `members` staffs it in the same step: each person is in the workspace at
+ * once, as with any add -- nothing to send them, nothing for them to accept.
+ * Checked in full before anything is written, so a bad entry refuses the
+ * whole request rather than leaving a half-staffed workspace behind.
+ *
+ * On a team desktop the workspace is made in the cloud, where the rest of the
+ * team can see it, and this machine's copy is refreshed so it can be opened
+ * straight away.
  */
 workspaceRouter.post(
   '/workspaces',
   route(async (req, res) => {
-    const { teamRole } = req.workspace!;
+    const { teamRole, userId } = req.workspace!;
     if (teamRole !== 'pm' && teamRole !== 'admin') {
       res.status(403).json({ error: 'Only a project manager or an admin can create a workspace.' });
       return;
@@ -143,13 +254,35 @@ workspaceRouter.post(
       return;
     }
 
+    const requested: unknown[] = Array.isArray(req.body?.members) ? req.body.members : [];
+    const members = new Map<string, { userId: string; role: WorkspaceRole }>();
+    for (const entry of requested) {
+      const login = typeof (entry as any)?.userId === 'string' ? (entry as any).userId.trim() : '';
+      const role = (entry as any)?.role;
+      if (!login || !ROLES.includes(role)) {
+        res.status(400).json({ error: `Each member needs a userId and a role of ${ROLES.join(', ')}.` });
+        return;
+      }
+      if (role === 'admin' && teamRole !== 'admin') {
+        res.status(403).json({ error: 'Only an admin can make someone an admin of this workspace.' });
+        return;
+      }
+      // The creator is already in it, at their team role.
+      if (login.toLowerCase() !== userId.toLowerCase()) members.set(login.toLowerCase(), { userId: login, role });
+    }
+
+    if (await relayToCloud(req, res, () => refreshMemberships(userId, 30_000))) return;
+
     const workspace = await workspaceRegistry.createWorkspace(
-      req.workspace!.userId,
+      userId,
       { name, slug: typeof req.body?.slug === 'string' ? req.body.slug : undefined },
       teamRole
     );
     await seedRoster(workspace.id, workspace.name);
-    res.status(201).json(workspace);
+    for (const member of members.values()) {
+      await workspaceRegistry.addMember(workspace.id, member.userId, member.role);
+    }
+    res.status(201).json({ ...workspace, memberCount: workspace.memberCount + members.size });
   })
 );
 
@@ -158,6 +291,7 @@ workspaceRouter.put(
   route(async (req, res) => {
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'workspace.manage_settings')) return;
+    if (await relayToCloud(req, res, () => refreshMemberships(req.workspace!.userId, 30_000))) return;
 
     const updated = await workspaceRegistry.updateWorkspace(
       req.params.id,
@@ -205,6 +339,7 @@ workspaceRouter.post(
       res.status(403).json({ error: 'Only an admin can make someone an admin of this workspace.' });
       return;
     }
+    if (await relayToCloud(req, res)) return;
 
     res.status(201).json(await workspaceRegistry.addMember(req.params.id, userId, role));
   })
@@ -221,6 +356,7 @@ workspaceRouter.get(
   route(async (req, res) => {
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'workspace.manage_members')) return;
+    if (await relayToCloud(req, res)) return;
     if (!ALPHA_ORG) {
       res.status(503).json({ error: 'No GitHub organisation is configured for this deployment.' });
       return;
@@ -264,29 +400,15 @@ workspaceRouter.get(
   route(async (req, res) => {
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'workspace.manage_members')) return;
+    if (await relayToCloud(req, res)) return;
     if (!ALPHA_ORG) {
       res.status(503).json({ error: 'No GitHub organisation is configured for this deployment.' });
       return;
     }
 
-    type GitHubPerson = { login: string; avatar_url?: string };
-    let teams: Array<{ slug: string; name: string; role: WorkspaceRole; people: GitHubPerson[] }>;
+    let teams: Awaited<ReturnType<typeof readTeamRoster>>;
     try {
-      const all = await githubApi().getAll<{ slug: string; name: string }>(`/orgs/${ALPHA_ORG}/teams?per_page=100`);
-      const roleTeams = all.flatMap(team => {
-        const role = roleForTeamSlug(team.slug);
-        return role ? [{ ...team, role }] : [];
-      });
-      teams = await Promise.all(
-        roleTeams.map(async team => ({
-          slug: team.slug,
-          name: team.name,
-          role: team.role,
-          people: await githubApi().getAll<GitHubPerson>(
-            `/orgs/${ALPHA_ORG}/teams/${encodeURIComponent(team.slug)}/members?per_page=100`
-          )
-        }))
-      );
+      teams = await readTeamRoster();
     } catch (err: any) {
       res.status(502).json({ error: `Could not read the ${ALPHA_ORG} teams: ${err?.message ?? err}` });
       return;
@@ -317,6 +439,7 @@ workspaceRouter.get(
   route(async (req, res) => {
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'workspace.read_members')) return;
+    if (await relayToCloud(req, res)) return;
     res.json(await workspaceRegistry.listMembers(req.params.id));
   })
 );
@@ -338,6 +461,7 @@ workspaceRouter.patch(
       res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
       return;
     }
+    if (await relayToCloud(req, res)) return;
 
     const updated = await workspaceRegistry.updateMember(req.params.id, req.params.memberId, { role, status });
     if (!updated) {
@@ -354,6 +478,7 @@ workspaceRouter.get(
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'workspace.read_members')) return;
     if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
+    if (await relayToCloud(req, res)) return;
     res.json(await workspaceRegistry.listProjectAssignments(req.params.id, req.params.projectId));
   })
 );
@@ -370,6 +495,9 @@ workspaceRouter.put(
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
     if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
+    // Kept here as well: this machine's own checks read the local copy.
+    const { id, projectId, userId } = req.params;
+    if (await relayToCloud(req, res, () => workspaceRegistry.assignProject(id, projectId, userId))) return;
     res
       .status(201)
       .json(await workspaceRegistry.assignProject(req.params.id, req.params.projectId, req.params.userId));
@@ -382,6 +510,8 @@ workspaceRouter.delete(
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
     if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
+    const { id, projectId, userId } = req.params;
+    if (await relayToCloud(req, res, () => workspaceRegistry.removeProjectAssignment(id, projectId, userId))) return;
 
     const removed = await workspaceRegistry.removeProjectAssignment(
       req.params.id,

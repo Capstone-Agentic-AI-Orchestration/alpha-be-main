@@ -258,6 +258,15 @@ class WorkspaceRegistry {
     return this.directory().updateWorkspace(workspaceId, input, callerRole);
   }
 
+  /** A desktop's copy of the cloud's memberships; see `SqliteWorkspaceDirectory.mirrorMemberships`. */
+  mirrorMemberships(
+    userId: string,
+    workspaces: Array<{ id: string; name: string; slug: string; role: WorkspaceRole }>
+  ): void {
+    const directory = this.directory();
+    if (directory instanceof SqliteWorkspaceDirectory) directory.mirrorMemberships(userId, workspaces);
+  }
+
   listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
     return this.directory().listMembers(workspaceId);
   }
