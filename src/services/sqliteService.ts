@@ -1165,6 +1165,96 @@ export class SQLiteService {
   }
 
   // --- Projects ---
+  /**
+   * Point every reference to one id at another, in the tables that have the
+   * column. Tables and columns are checked rather than assumed: some are
+   * created by other modules on first use, or added by a later migration.
+   */
+  private repoint(refs: ReadonlyArray<readonly [string, string, string?]>, from: string, to: string): void {
+    for (const [table, column, where] of refs) {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some(c => c.name === column)) continue;
+      this.db.prepare(`UPDATE ${table} SET ${column} = ? WHERE ${column} = ?${where ? ` AND ${where}` : ''}`).run(to, from);
+    }
+  }
+
+  /**
+   * Move a project this machine made onto the team's id and key.
+   *
+   * Every installed desktop up to 2.0.6 ran without its team board -- the
+   * Supabase client never started under Electron's Node -- so each one made
+   * its own projects for the organisation's repositories, under ids nobody
+   * else has. The team's copy then clashed with them on every pull, and the
+   * team's cards for those repositories never arrived. Adopting the team's id
+   * keeps this machine's history -- runs, chats, calls, build steps, its
+   * folder -- attached to the same project, which is what it always was.
+   *
+   * One transaction, foreign keys checked at commit, so a failure changes
+   * nothing. Returns false when the team's id or key is already taken here.
+   */
+  rekeyProject(from: string, to: string, toKey: string): boolean {
+    if (from === to) return true;
+    const exists = (sql: string, ...args: unknown[]) => Boolean(this.db.prepare(sql).get(...args));
+    if (!exists('SELECT 1 FROM projects WHERE id = ?', from)) return false;
+    if (exists('SELECT 1 FROM projects WHERE id = ?', to)) return false;
+    if (exists('SELECT 1 FROM projects WHERE key = ? AND id <> ?', toKey, from)) return false;
+
+    this.db.transaction(() => {
+      this.db.pragma('defer_foreign_keys = ON');
+      this.db.prepare('UPDATE projects SET id = ?, key = ? WHERE id = ?').run(to, toKey, from);
+      this.repoint(
+        [
+          ['issues', 'project_id'],
+          ['prototype_runs', 'project_id'],
+          ['squad_runs', 'project_id'],
+          ['chat_threads', 'project_id'],
+          ['agent_calls', 'project_id'],
+          ['agent_call_artifacts', 'project_id'],
+          ['local_project_bindings', 'project_id'],
+          ['project_build_steps', 'project_id'],
+          ['workspace_project_assignments', 'project_id'],
+          ['workspace_squad_projects', 'project_id'],
+          ['workspace_entity_bindings', 'entity_id', "entity_type = 'projects'"]
+        ],
+        from,
+        to
+      );
+    })();
+    return true;
+  }
+
+  /**
+   * Move a card this machine made onto the team's id and identifier: the same
+   * GitHub issue, which the team holds under another id. Its comments, runs
+   * and audit trail move with it. False when the team's id or identifier is
+   * already another card's here.
+   */
+  rekeyIssue(from: string, to: string, toIdentifier: string): boolean {
+    if (from === to) return true;
+    const exists = (sql: string, ...args: unknown[]) => Boolean(this.db.prepare(sql).get(...args));
+    if (!exists('SELECT 1 FROM issues WHERE id = ?', from)) return false;
+    if (exists('SELECT 1 FROM issues WHERE id = ?', to)) return false;
+    if (exists('SELECT 1 FROM issues WHERE identifier = ? AND id <> ?', toIdentifier, from)) return false;
+
+    this.db.transaction(() => {
+      this.db.pragma('defer_foreign_keys = ON');
+      this.db.prepare('UPDATE issues SET id = ?, identifier = ? WHERE id = ?').run(to, toIdentifier, from);
+      this.repoint(
+        [
+          ['issue_comments', 'issue_id'],
+          ['prototype_runs', 'issue_id'],
+          ['squad_runs', 'issue_id'],
+          ['remote_actions', 'issue_id'],
+          ['chat_threads', 'issue_id'],
+          ['workspace_entity_bindings', 'entity_id', "entity_type = 'issues'"]
+        ],
+        from,
+        to
+      );
+    })();
+    return true;
+  }
+
   getProjects(): Project[] {
     const rows = this.db.prepare('SELECT * FROM projects WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
     return rows.map(r => ({
