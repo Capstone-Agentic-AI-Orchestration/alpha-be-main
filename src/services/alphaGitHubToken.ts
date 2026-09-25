@@ -361,14 +361,23 @@ export async function requestHostedOAuth(
       ...(profileLogin ? { login: profileLogin } : {})
     })
   });
-  const body = (await res.json().catch(() => ({}))) as Partial<HostedOAuthStart> & { error?: string };
-  if (!res.ok || !body.state || !body.authorizationUrl) {
+  // The hosted backend's desktop-start route currently names this field `url`;
+  // accept `authorizationUrl` as well so the local daemon remains compatible
+  // with deployments that already use the more descriptive response name.
+  const body = (await res.json().catch(() => ({}))) as {
+    state?: string;
+    url?: string;
+    authorizationUrl?: string;
+    error?: string;
+  };
+  const authorizationUrl = body.authorizationUrl ?? body.url;
+  if (!res.ok || !body.state || !authorizationUrl) {
     throw new DeviceFlowError(
       body.error || `Alpha could not start account-specific GitHub sign-in (${res.status}).`
     );
   }
 
-  return { state: body.state, handoffToken, authorizationUrl: body.authorizationUrl };
+  return { state: body.state, handoffToken, authorizationUrl };
 }
 
 /** Wait for the hosted callback, then store the credential locally. */

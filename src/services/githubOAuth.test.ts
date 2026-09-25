@@ -28,7 +28,10 @@ describe('desktop GitHub OAuth routing', () => {
   });
 
   it('does not fall back to an unscoped device flow for a selected profile', async () => {
-    delete process.env.ALPHA_CLOUD_API;
+    // config/env.ts loads the local .env file. Keep the variable explicitly
+    // empty so this test exercises the no-cloud fallback without making a
+    // real request to whichever hosted API the developer has configured.
+    process.env.ALPHA_CLOUD_API = '';
     vi.resetModules();
 
     const { GhCliGitHubService } = await import('./githubService.js');

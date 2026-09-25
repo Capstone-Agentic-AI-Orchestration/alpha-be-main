@@ -220,20 +220,27 @@ describe('hosted account-specific desktop sign-in', () => {
     process.env.ALPHA_CLOUD_API = 'https://alpha.example.com/api';
     const mod = await load('');
     const { impl: start, calls } = stubFetch([
-      { body: { state: 'desktop-state', authorizationUrl: 'https://github.com/login/oauth/authorize?...' } }
+      {
+        body: {
+          state: 'desktop-state',
+          url: 'https://github.com/login/oauth/authorize?login=francisandrei-KingBob&prompt=select_account'
+        }
+      }
     ]);
 
-    const flow = await mod.requestHostedOAuth('pineapple-2005', start);
+    const flow = await mod.requestHostedOAuth('francisandrei-KingBob', start);
     expect(calls[0].url).toBe('https://alpha.example.com/api/github/oauth/desktop/start');
-    expect(calls[0].body.login).toBe('pineapple-2005');
+    expect(calls[0].body.login).toBe('francisandrei-KingBob');
     expect(calls[0].body.handoffToken).toMatch(/^[a-f0-9]{64}$/);
-    expect(flow.authorizationUrl).toContain('github.com/login/oauth/authorize');
+    const authorization = new URL(flow.authorizationUrl);
+    expect(authorization.searchParams.get('login')).toBe('francisandrei-KingBob');
+    expect(authorization.searchParams.get('prompt')).toBe('select_account');
 
     const { impl: result } = stubFetch([
-      { body: { token: 'gho_hosted', username: 'pineapple-2005', profileId: '2005' } }
+      { body: { token: 'gho_hosted', username: 'francisandrei-KingBob', profileId: '2005' } }
     ]);
     const credential = await mod.awaitHostedOAuth(flow, { fetchImpl: result });
-    expect(credential).toMatchObject({ username: 'pineapple-2005', profileId: '2005' });
+    expect(credential).toMatchObject({ username: 'francisandrei-KingBob', profileId: '2005' });
     expect(mod.storedToken()).toBe('gho_hosted');
     process.env.ALPHA_CLOUD_API = '';
   });
