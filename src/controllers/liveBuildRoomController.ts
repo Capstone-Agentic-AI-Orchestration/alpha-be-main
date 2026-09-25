@@ -3,6 +3,7 @@ import { route } from './asyncRoute.js';
 import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import type { Agent, ProjectBuildStep, PrototypeRun, Squad, SquadRun } from '../models/index.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { sqliteService } from '../services/sqliteService.js';
 import {
   requireProjectWorkspace,
   requireWorkspaceCapability
@@ -92,6 +93,23 @@ function stepDescription(
       ? squadsById.get(step.squadId)?.name ?? step.squadId
       : 'No execution owner assigned';
   return step.approvalGate ? `${owner} - approval required` : owner;
+}
+
+function safePullRequestTarget(value: string): { id: string; label: string } | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.search || url.hash) return undefined;
+    const github = url.hostname.toLowerCase() === 'github.com'
+      ? url.pathname.match(/^\/[^/]+\/[^/]+\/pull\/(\d+)\/?$/)
+      : null;
+    const gitlab = url.hostname.toLowerCase() === 'gitlab.com'
+      ? url.pathname.match(/^\/(?:[^/]+\/)+-\/merge_requests\/(\d+)\/?$/)
+      : null;
+    const number = github?.[1] ?? gitlab?.[1];
+    return number ? { id: url.toString(), label: `Pull request #${number}` } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function phaseRows(
@@ -189,6 +207,11 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     projectStore().getBuildSteps(workspaceId, project.id)
   ]);
   const projectSquadIds = new Set(workspaceRegistry.listProjectSquadIds(req.workspace!, project.id));
+  const ownerThreads = new Map(
+    sqliteService.getChatThreads(req.workspace!.userId)
+      .filter(thread => thread.projectId === project.id)
+      .map(thread => [thread.id, thread] as const)
+  );
   const squads = workspaceRegistry
     .scopeSquads(await squadStore().list(workspaceId), req.workspace!)
     .filter(squad => projectSquadIds.has(squad.id))
@@ -215,6 +238,64 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))
     : [];
   const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
+  const chatCalls = (await Promise.all(
+    sqliteService.getAgentCalls({ workspaceId, projectId: project.id })
+      .filter(call => projectSquadIds.has(call.squadId))
+      .map(async call => {
+        const allowed = await workspaceRegistry.canAccessProjectAgent(
+          req.workspace!, call.projectId, call.squadId, call.agentId
+        );
+        if (!allowed) return null;
+        const agent = membersById.get(call.agentId);
+        const ownedThread = ownerThreads.get(call.threadId);
+        const issueTarget = call.revisionTarget?.type === 'issue'
+          ? issues.find(issue => issue.id === call.revisionTarget!.id && issue.projectId === project.id)
+          : undefined;
+        const pullRequest = call.revisionTarget?.type === 'pull_request'
+          ? safePullRequestTarget(call.revisionTarget.id)
+          : undefined;
+        const target = call.revisionTarget ? {
+          type: call.revisionTarget.type,
+          id: issueTarget?.id ?? (call.revisionTarget.type === 'file' ? call.revisionTarget.id : pullRequest?.id ?? ''),
+          label: issueTarget
+            ? `${issueTarget.identifier} · ${issueTarget.title}`
+            : call.revisionTarget.type === 'file'
+              ? call.revisionTarget.id
+              : pullRequest?.label
+        } : undefined;
+        return {
+          id: call.id,
+          threadId: ownedThread ? call.threadId : undefined,
+          messageId: ownedThread ? call.messageId : undefined,
+          canOpenChat: Boolean(ownedThread),
+          chatLabel: ownedThread?.title || 'Project chat',
+          agentId: call.agentId,
+          agentName: agent?.name ?? 'Project agent',
+          agentRole: agent?.role ?? 'Agent',
+          operationMode: call.operationMode,
+          origin: call.origin ?? 'agent_call',
+          status: call.status,
+          target,
+          workingCopyId: call.workingCopyId,
+          workingBranch: call.workingBranch,
+          createdAt: call.createdAt,
+          startedAt: call.startedAt,
+          completedAt: call.completedAt,
+          activities: (call.activities ?? []).slice(-60).map(activity => ({
+            ...activity,
+            detail: activity.detail?.slice(0, 180),
+            paths: activity.paths?.slice(0, 30).map(value => value.slice(0, 180))
+          })),
+          artifacts: call.artifacts
+            .filter(artifact => artifact.artifactType !== 'patch')
+            .map(artifact => ({ id: artifact.id, artifactType: artifact.artifactType, createdAt: artifact.createdAt })),
+          hasPatch: call.artifacts.some(artifact => artifact.artifactType === 'patch'),
+          patchApplied: (call.activities ?? []).some(activity => activity.kind === 'file_change' && activity.message === 'Proposed patch applied to the project working copy')
+        };
+      })
+  )).filter((call): call is NonNullable<typeof call> => Boolean(call))
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, 100);
   const squadsById = new Map(squads.map(squad => [squad.id, squad]));
   const memberRunByAgent = new Map(memberRuns.map(run => [run.agentId, run]));
 
@@ -279,6 +360,9 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const completed = agentCards.filter(card => card.status === 'completed').length;
   const running = agentCards.filter(card => card.status === 'running').length;
   const waiting = agentCards.filter(card => card.status === 'waiting' || card.status === 'idle').length;
+  const latestChatActivity = chatCalls
+    .flatMap(call => call.activities.slice(-1).map(activity => activity.createdAt))
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
   res.json({
     project: {
       id: project.id,
@@ -331,6 +415,9 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       next: agentName(nextAgentId)
     },
     artifacts,
-    lastUpdated: selectedRun?.updatedAt ?? project.createdAt
+    chatCalls,
+    lastUpdated: [selectedRun?.updatedAt, latestChatActivity, chatCalls[0]?.createdAt, project.createdAt]
+      .filter((value): value is string => Boolean(value))
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0]
   });
 }));

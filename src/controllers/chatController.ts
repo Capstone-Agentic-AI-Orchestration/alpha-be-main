@@ -242,7 +242,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       content,
       senderName,
       targetAgentId,
-      targetSquadId
+      targetSquadId,
+      workspaceId: req.workspace!.workspaceId,
+      userId: req.workspace!.userId
     });
     res.status(201).json(result);
   } catch (err: any) {

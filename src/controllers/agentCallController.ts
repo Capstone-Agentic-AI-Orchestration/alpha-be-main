@@ -83,6 +83,10 @@ function getCallForCaller(req: Request, res: Response, id: string) {
     res.status(404).json({ error: 'Agent call not found in the active workspace.' });
     return null;
   }
+  if (call.origin === 'chat_turn' && call.requestedBy !== req.workspace.userId) {
+    res.status(404).json({ error: 'Agent call not found in the active workspace.' });
+    return null;
+  }
   if (!requireProjectWorkspace(req, res, call.projectId)) return null;
   return call;
 }
@@ -293,6 +297,20 @@ agentCallRouter.get('/agent-calls/:id', desktopOnly, (req: Request, res: Respons
   res.json({ call, agentMessage: responseForCall(call) });
 });
 
+agentCallRouter.get('/agent-calls/:id/patch', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  const call = getCallForCaller(req, res, req.params.id);
+  if (!call) return;
+  // A room may show another teammate's operational activity, but proposed
+  // patch contents stay with the chat owner, matching the private chat view.
+  if (call.requestedBy !== req.workspace!.userId) {
+    return res.status(404).json({ error: 'Patch not found for this caller.' });
+  }
+  const patch = call.artifacts.find(artifact => artifact.artifactType === 'patch')?.content;
+  if (!patch) return res.status(404).json({ error: 'This call has no proposed patch.' });
+  res.json({ patch });
+});
+
 agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   const project = await getProject(req, res, req.params.projectId);
@@ -306,7 +324,7 @@ agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', d
     workspaceId: req.workspace!.workspaceId,
     projectId: project.id,
     threadId: thread.id
-  });
+  }).filter(call => call.origin !== 'chat_turn');
   res.json({ calls });
 }));
 

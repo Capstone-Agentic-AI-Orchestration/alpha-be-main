@@ -9,6 +9,8 @@ import { RUNS_DIR } from '../config/env.js';
 import {
   Agent,
   AgentCall,
+  AgentCallActivity,
+  AgentCallActivityKind,
   AgentCallMode,
   AgentCallTarget,
   ChatMessage,
@@ -39,10 +41,101 @@ export interface CreateAgentCallInput {
   instruction: string;
 }
 
+export interface StartChatTurnActivityInput {
+  workspaceId: string;
+  project: Project;
+  threadId: string;
+  messageId: string;
+  squadId: string;
+  agent: Agent;
+  requestedBy: string;
+  instruction: string;
+}
+
 export interface AgentCallWorkspaceInfo {
   dir: string;
   managed: boolean;
   temporary: boolean;
+}
+
+const MAX_AGENT_CALL_ACTIVITIES = 500;
+
+function patchPaths(patch: string): string[] {
+  return [...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)]
+    .map(match => match[1].trim())
+    .filter(value => value && !value.startsWith('/') && !value.includes('\\') && !value.split('/').some(part => part === '..'))
+    .slice(0, 100);
+}
+
+function safeToolPaths(input: unknown, cwd: string): string[] {
+  const candidates: string[] = [];
+  const visit = (value: unknown, key = '', depth = 0) => {
+    if (depth > 4 || candidates.length >= 20) return;
+    if (typeof value === 'string' && /(?:^|_)(?:file)?path$|file.?name/i.test(key)) {
+      candidates.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.slice(0, 20).forEach(item => visit(item, key, depth + 1));
+      return;
+    }
+    if (value && typeof value === 'object') {
+      Object.entries(value as Record<string, unknown>).forEach(([childKey, child]) => visit(child, childKey, depth + 1));
+    }
+  };
+  visit(input);
+
+  const root = path.resolve(cwd);
+  const paths = new Set<string>();
+  for (const value of candidates) {
+    const candidate = value.trim();
+    if (!candidate || candidate.length > 300 || candidate.includes('\0')) continue;
+    const absolute = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(root, candidate);
+    const relative = path.relative(root, absolute);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+    const normalized = relative.split(path.sep).join('/');
+    if (normalized.split('/').some(part => part === '..') || /^[A-Za-z]:/.test(normalized)) continue;
+    paths.add(normalized);
+  }
+  return [...paths].slice(0, 8);
+}
+
+function safeCommandSummary(input: unknown, cwd: string): string | undefined {
+  let command: string | undefined;
+  const visit = (value: unknown, key = '', depth = 0) => {
+    if (command || depth > 4) return;
+    if (typeof value === 'string' && /^(?:command|cmd|script)$/i.test(key)) {
+      command = value;
+      return;
+    }
+    if (value && typeof value === 'object') {
+      Object.entries(value as Record<string, unknown>).forEach(([childKey, child]) => visit(child, childKey, depth + 1));
+    }
+  };
+  visit(input);
+  if (!command) return undefined;
+  const escapedCwd = cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return command
+    .replace(new RegExp(escapedCwd, 'gi'), '.')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s,"';}]+/gi, '$1[redacted]')
+    .replace(/(--?(?:api[_-]?key|token|secret|password|auth)(?:=|\s+))\S+/gi, '$1[redacted]')
+    .replace(/([A-Za-z]:\\[^\s"']+|\\\\[^\s"']+)/g, '[local path]')
+    .replace(/(^|[\s="'(])\/(?!\/)[^\s"'`]+/g, '$1[local path]')
+    .replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/gi, '$1[redacted]@')
+    .replace(/([?&](?:access[_-]?token|api[_-]?key|token|key|secret|password|authorization)=)[^&\s]+/gi, '$1[redacted]')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 180);
+}
+
+function safeErrorDetail(value: string): string {
+  return value
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s,"';}]+/gi, '$1[redacted]')
+    .replace(/([A-Za-z]:\\[^\s"']+|\\\\[^\s"']+)/g, '[local path]')
+    .replace(/\/(?:[^\s"']+\/)*[^\s"']+/g, '[local path]')
+    .slice(0, 240);
 }
 
 /**
@@ -56,9 +149,71 @@ export interface AgentCallWorkspaceInfo {
  * action.
  */
 export class AgentCallService extends EventEmitter {
+  async startChatTurn(input: StartChatTurnActivityInput): Promise<AgentCall> {
+    const now = new Date().toISOString();
+    const workspace = resolveProjectWorkspace(input.project);
+    const hasWorkspace = Boolean(workspace && fs.existsSync(workspace.dir));
+    const call: AgentCall = {
+      id: `chat-turn-${randomUUID()}`,
+      workspaceId: input.workspaceId,
+      projectId: input.project.id,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      squadId: input.squadId,
+      agentId: input.agent.id,
+      requestedBy: input.requestedBy,
+      operationMode: 'ask',
+      origin: 'chat_turn',
+      status: 'running',
+      instruction: input.instruction,
+      workingCopyId: hasWorkspace ? `${input.project.id}:${workspace!.managed ? 'managed' : 'attached'}` : undefined,
+      workingBranch: hasWorkspace ? await this.currentBranch(workspace!.dir) : undefined,
+      createdAt: now,
+      startedAt: now,
+      artifacts: [],
+      activities: []
+    };
+    sqliteService.saveAgentCall(call);
+    this.recordActivity(call.id, 'status', 'Agent started a turn from project chat');
+    this.emit('agent_call.created', sqliteService.getAgentCall(call.id));
+    this.emit('agent_call.started', sqliteService.getAgentCall(call.id));
+    return sqliteService.getAgentCall(call.id)!;
+  }
+
+  recordChatTurnCliEvent(id: string, event: import('./streamParser.js').ParsedEvent, cwd: string): void {
+    this.recordCliActivity(id, event, cwd);
+  }
+
+  recordChatTurnHandoff(id: string, fromAgentName: string): void {
+    this.recordActivity(id, 'handoff', `Received project chat context from ${fromAgentName.slice(0, 80)}`);
+  }
+
+  completeChatTurn(id: string, resultMessageId: string): void {
+    const updated = sqliteService.updateAgentCall(id, {
+      status: 'completed',
+      resultMessageId,
+      completedAt: new Date().toISOString()
+    });
+    if (!updated) return;
+    this.recordActivity(id, 'summary', 'Project chat agent turn completed');
+    this.emit('agent_call.completed', sqliteService.getAgentCall(id));
+  }
+
+  failChatTurn(id: string, message: string): void {
+    const updated = sqliteService.updateAgentCall(id, {
+      status: 'failed',
+      error: safeErrorDetail(message),
+      completedAt: new Date().toISOString()
+    });
+    if (!updated) return;
+    this.recordActivity(id, 'error', 'Project chat agent turn failed', { detail: safeErrorDetail(message) });
+    this.emit('agent_call.failed', sqliteService.getAgentCall(id));
+  }
+
   async create(input: CreateAgentCallInput): Promise<AgentCall> {
     const now = new Date().toISOString();
     const workspace = this.resolveExecutionWorkspace(input.project, input.operationMode, input.revisionTarget);
+    const workingBranch = workspace ? await this.currentBranch(workspace.dir) : undefined;
     const call: AgentCall = {
       id: input.id || `agent-call-${randomUUID()}`,
       workspaceId: input.workspaceId,
@@ -69,6 +224,7 @@ export class AgentCallService extends EventEmitter {
       agentId: input.agent.id,
       requestedBy: input.requestedBy,
       operationMode: input.operationMode,
+      origin: 'agent_call',
       status: input.operationMode === 'implement' ? 'awaiting_confirmation' : 'queued',
       revisionTarget: input.revisionTarget,
       instruction: input.instruction,
@@ -77,11 +233,14 @@ export class AgentCallService extends EventEmitter {
       workingCopyId: workspace
         ? `${input.project.id}:${workspace.managed ? 'managed' : 'attached'}`
         : undefined,
+      workingBranch,
       createdAt: now,
-      artifacts: []
+      artifacts: [],
+      activities: []
     };
 
     sqliteService.saveAgentCall(call);
+    this.recordActivity(call.id, 'status', call.status === 'awaiting_confirmation' ? 'Waiting for implementation approval' : 'Agent call queued');
     this.emit('agent_call.created', sqliteService.getAgentCall(call.id));
 
     if (call.status === 'awaiting_confirmation') {
@@ -104,6 +263,7 @@ export class AgentCallService extends EventEmitter {
     if (!project || !agent) throw new Error('The project or agent for this call is no longer available.');
 
     sqliteService.updateAgentCall(id, { status: 'queued', error: undefined });
+    this.recordActivity(id, 'status', 'Implementation approved and queued');
     this.emit('agent_call.queued', sqliteService.getAgentCall(id));
     this.scheduleExecution(id, project, agent);
     return sqliteService.getAgentCall(id)!;
@@ -126,8 +286,10 @@ export class AgentCallService extends EventEmitter {
       error: undefined,
       resultMessageId: undefined,
       startedAt: undefined,
-      completedAt: undefined
+      completedAt: undefined,
+      activities: []
     });
+    this.recordActivity(id, 'status', call.operationMode === 'implement' ? 'Waiting for implementation approval' : 'Retry queued');
     this.emit('agent_call.queued', sqliteService.getAgentCall(id));
     if (call.operationMode === 'implement') return sqliteService.getAgentCall(id)!;
     this.scheduleExecution(id, project, agent);
@@ -170,6 +332,7 @@ export class AgentCallService extends EventEmitter {
       status: 'cancelled',
       completedAt: new Date().toISOString()
     })!;
+    this.recordActivity(id, 'status', 'Agent call cancelled before execution');
     this.emit('agent_call.cancelled', updated);
     return updated;
   }
@@ -207,6 +370,10 @@ export class AgentCallService extends EventEmitter {
     if (!sqliteService.isPathAllowed(workspace.dir)) {
       throw new Error('The project working copy is not an approved Alpha workspace.');
     }
+    const currentBranch = await this.currentBranch(workspace.dir);
+    if (call.workingBranch && call.workingBranch !== currentBranch) {
+      throw new Error(`The project working copy is now on ${currentBranch ? `branch "${currentBranch}"` : 'no Git branch'}; this patch was prepared for "${call.workingBranch}".`);
+    }
 
     const patchFile = path.join(RUNS_DIR, `${call.id}-apply.patch`);
     fs.mkdirSync(RUNS_DIR, { recursive: true });
@@ -243,6 +410,9 @@ export class AgentCallService extends EventEmitter {
       timestamp: new Date().toISOString()
     };
     saveChatMessageAndShare(message);
+    this.recordActivity(id, 'file_change', 'Proposed patch applied to the project working copy', {
+      paths: patchPaths(patch)
+    });
     this.emit('agent_call.patch_applied', { call, message });
     return { call: sqliteService.getAgentCall(id)!, message };
   }
@@ -254,11 +424,17 @@ export class AgentCallService extends EventEmitter {
 
     const startedAt = new Date().toISOString();
     sqliteService.updateAgentCall(id, { status: 'running', startedAt, error: undefined });
+    this.recordActivity(id, 'status', 'Agent started work in the project chat');
     this.emit('agent_call.started', sqliteService.getAgentCall(id));
 
     let workspace: AgentCallWorkspaceInfo | undefined;
     try {
       workspace = this.resolveExecutionWorkspace(project, current.operationMode, current.revisionTarget);
+      const workingBranch = await this.currentBranch(workspace.dir);
+      if (current.workingBranch !== workingBranch) {
+        sqliteService.updateAgentCall(id, { workingBranch });
+        this.recordActivity(id, 'status', workingBranch ? `Target branch: ${workingBranch}` : 'No Git branch detected for the working copy');
+      }
       const readiness = agentReadiness(agent, sqliteService.getRuntimes());
       if (readiness.status !== 'ready') {
         throw new Error(readiness.detail);
@@ -287,7 +463,8 @@ export class AgentCallService extends EventEmitter {
         mcpServers: [],
         mcpEnv: {},
         env: {},
-        autonomyLevel: 'Supervised'
+        autonomyLevel: 'Supervised',
+        onEvent: event => this.recordCliActivity(id, event, workspace!.dir)
       });
 
       if (turn.failureKind || !turn.content.trim()) {
@@ -304,6 +481,8 @@ export class AgentCallService extends EventEmitter {
           content: patch,
           createdAt: new Date().toISOString()
         });
+        const paths = patchPaths(patch);
+        this.recordActivity(id, 'file_change', `Prepared a reviewable patch for ${paths.length || 'one or more'} file${paths.length === 1 ? '' : 's'}`, { paths });
       }
 
       const resultMessage: ChatMessage = {
@@ -332,11 +511,13 @@ export class AgentCallService extends EventEmitter {
         completedAt: new Date().toISOString(),
         error: undefined
       })!;
+      this.recordActivity(id, 'summary', 'Agent finished; review the chat response and any proposed patch');
       this.emit('agent_call.completed', completed);
       return completed;
     } catch (error: any) {
       const detail = error instanceof Error ? error.message : String(error);
       logInfo(`Agent call ${id} failed: ${detail}`);
+      this.recordActivity(id, 'error', 'Agent call failed', { detail: safeErrorDetail(detail) });
       const failureMessage: ChatMessage = {
         id: `msg-${randomUUID()}`,
         threadId: current.threadId,
@@ -365,6 +546,79 @@ export class AgentCallService extends EventEmitter {
         try { fs.rmSync(workspace.dir, { recursive: true, force: true }); } catch { /* temp only */ }
       }
     }
+  }
+
+  private recordCliActivity(id: string, event: import('./streamParser.js').ParsedEvent, cwd: string): void {
+    if (event.type === 'stage_transition') {
+      const stage = String(event.stage || 'analysis').replace(/[_-]+/g, ' ');
+      this.recordActivity(id, 'stage', `${stage.charAt(0).toUpperCase()}${stage.slice(1)}`);
+      return;
+    }
+    if (event.type === 'tool_call') {
+      const rawTool = String(event.toolName || 'tool').replace(/[^A-Za-z0-9 _.-]/g, '').slice(0, 40) || 'Tool';
+      const knownLabels: Record<string, string> = {
+        Read: 'Reading project files',
+        Glob: 'Finding project files',
+        Grep: 'Searching project files',
+        LS: 'Listing project files',
+        Bash: 'Command requested',
+        Edit: 'File edit requested',
+        Write: 'File write requested'
+      };
+      const paths = safeToolPaths(event.toolInput, cwd);
+      const isFileWrite = ['Edit', 'Write', 'NotebookEdit'].includes(rawTool) ||
+        /(?:edit|write|patch).*(?:file|document|content)|(?:file|document|content).*(?:edit|write|patch)/i.test(rawTool);
+      const command = rawTool === 'Bash' ? safeCommandSummary(event.toolInput, cwd) : undefined;
+      this.recordActivity(
+        id,
+        isFileWrite ? 'file_change' : 'tool',
+        isFileWrite ? 'Agent is editing project files' : knownLabels[rawTool] || `${rawTool} activity`,
+        { detail: command, paths: paths.length ? paths : undefined }
+      );
+      return;
+    }
+    if (event.type === 'tool_result') {
+      this.recordActivity(id, 'tool_result', 'Tool finished');
+      return;
+    }
+    if (event.type === 'error') {
+      this.recordActivity(id, 'error', 'Agent reported an execution error', {
+        detail: event.message ? safeErrorDetail(event.message) : undefined
+      });
+    }
+  }
+
+  private async currentBranch(cwd: string): Promise<string | undefined> {
+    try {
+      const result = await execFileAsync('git', ['branch', '--show-current'], { cwd, maxBuffer: 64 * 1024 });
+      const branch = String(result.stdout || '').trim();
+      return branch ? branch.slice(0, 200) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private recordActivity(
+    id: string,
+    kind: AgentCallActivityKind,
+    message: string,
+    extra: Pick<AgentCallActivity, 'detail' | 'paths'> = {}
+  ): AgentCallActivity | undefined {
+    const current = sqliteService.getAgentCall(id);
+    if (!current) return undefined;
+    const activity: AgentCallActivity = {
+      id: `activity-${randomUUID()}`,
+      sequence: (current.activities?.at(-1)?.sequence ?? 0) + 1,
+      kind,
+      message: message.slice(0, 160),
+      detail: extra.detail ? extra.detail.slice(0, 300) : undefined,
+      paths: extra.paths?.slice(0, 100).map(value => value.slice(0, 300)),
+      createdAt: new Date().toISOString()
+    };
+    const activities = [...(current.activities ?? []), activity].slice(-MAX_AGENT_CALL_ACTIVITIES);
+    const updated = sqliteService.updateAgentCall(id, { activities });
+    if (updated) this.emit('agent_call.activity', { id, status: updated.status, activity });
+    return activity;
   }
 
   private resolveExecutionWorkspace(

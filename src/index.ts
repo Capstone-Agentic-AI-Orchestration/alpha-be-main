@@ -290,6 +290,7 @@ function safeAgentCallEvent(data: unknown) {
     startedAt?: string;
     completedAt?: string;
     resultMessageId?: string;
+    activity?: { sequence?: number };
   };
   // The local WebSocket is intentionally not an authorization boundary. Do
   // not broadcast instructions, patch contents, errors, project paths, or
@@ -299,7 +300,8 @@ function safeAgentCallEvent(data: unknown) {
     status: call.status,
     startedAt: call.startedAt,
     completedAt: call.completedAt,
-    resultMessageId: call.resultMessageId
+    resultMessageId: call.resultMessageId,
+    activitySequence: call.activity?.sequence
   };
 }
 
@@ -322,6 +324,7 @@ agentCallService.on('agent_call.started', (data) => broadcast({ type: 'agent_cal
 agentCallService.on('agent_call.completed', (data) => broadcast({ type: 'agent_call.completed', payload: safeAgentCallEvent(data) }));
 agentCallService.on('agent_call.failed', (data) => broadcast({ type: 'agent_call.failed', payload: safeAgentCallEvent(data) }));
 agentCallService.on('agent_call.cancelled', (data) => broadcast({ type: 'agent_call.cancelled', payload: safeAgentCallEvent(data) }));
+agentCallService.on('agent_call.activity', (data) => broadcast({ type: 'agent_call.activity', payload: safeAgentCallEvent(data) }));
 
 /**
  * Squad events, which were emitted and never forwarded.

@@ -1,6 +1,6 @@
 import { processManager } from './processManager.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
-import { StreamParser, StreamFamily } from './streamParser.js';
+import { StreamParser, StreamFamily, ParsedEvent } from './streamParser.js';
 import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
 import { parseCustomCliArgs } from './customCliArgs.js';
 import { chatToolsFor } from './toolPolicy.js';
@@ -126,6 +126,8 @@ export interface CliTurnOptions {
    * says whether the agent is trusted to write to it.
    */
   autonomyLevel?: AutonomyLevel;
+  /** Receives only parsed operational events; callers decide what is safe to persist. */
+  onEvent?: (event: ParsedEvent) => void;
 }
 
 export interface CliTurnResult {
@@ -718,7 +720,12 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
 
       if (child.stdout) {
         createLineBuffer(child.stdout, (line) => {
-          for (const ev of parser.parseLine(line)) turn.accept(ev);
+          for (const ev of parser.parseLine(line)) {
+            turn.accept(ev);
+            if (options.onEvent && ['tool_call', 'tool_result', 'stage_transition', 'error', 'status'].includes(ev.type)) {
+              try { options.onEvent(ev); } catch { /* activity reporting must never stop an agent turn */ }
+            }
+          }
         });
       }
 

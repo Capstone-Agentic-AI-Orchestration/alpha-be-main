@@ -428,17 +428,20 @@ export class SQLiteService {
         agent_id TEXT NOT NULL,
         requested_by TEXT NOT NULL,
         operation_mode TEXT NOT NULL,
+        origin TEXT NOT NULL DEFAULT 'agent_call',
         status TEXT NOT NULL,
         revision_target_type TEXT,
         revision_target_id TEXT,
         revision_target_label TEXT,
         instruction TEXT NOT NULL,
         working_copy_id TEXT,
+        working_branch TEXT,
         result_message_id TEXT,
         error TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
-        completed_at TEXT
+        completed_at TEXT,
+        activities TEXT NOT NULL DEFAULT '[]'
       );
 
       CREATE TABLE IF NOT EXISTS agent_call_artifacts (
@@ -720,6 +723,9 @@ export class SQLiteService {
       ,['chat_messages', 'operation_mode TEXT']
       ,['chat_messages', 'agent_call_status TEXT']
       ,['chat_messages', 'revision_target TEXT']
+      ,['agent_calls', "activities TEXT NOT NULL DEFAULT '[]'"]
+      ,['agent_calls', 'working_branch TEXT']
+      ,['agent_calls', "origin TEXT NOT NULL DEFAULT 'agent_call'"]
     ];
 
 
@@ -2607,16 +2613,19 @@ export class SQLiteService {
       agentId: row.agent_id,
       requestedBy: row.requested_by,
       operationMode: row.operation_mode,
+      origin: row.origin ?? 'agent_call',
       status: row.status,
       revisionTarget: agentCallTargetFromRow(row),
       instruction: row.instruction,
       workingCopyId: row.working_copy_id ?? undefined,
+      workingBranch: row.working_branch ?? undefined,
       resultMessageId: row.result_message_id ?? undefined,
       error: row.error ?? undefined,
       createdAt: row.created_at,
       startedAt: row.started_at ?? undefined,
       completedAt: row.completed_at ?? undefined,
-      artifacts: this.getAgentCallArtifacts(row.id)
+      artifacts: this.getAgentCallArtifacts(row.id),
+      activities: parseJson(row.activities, [])
     };
   }
 
@@ -2641,14 +2650,14 @@ export class SQLiteService {
     this.db.prepare(`
       INSERT INTO agent_calls (
         id, workspace_id, project_id, thread_id, message_id, squad_id, agent_id,
-        requested_by, operation_mode, status, revision_target_type,
+        requested_by, operation_mode, origin, status, revision_target_type,
         revision_target_id, revision_target_label, instruction, working_copy_id,
-        result_message_id, error, created_at, started_at, completed_at
+        working_branch, result_message_id, error, created_at, started_at, completed_at, activities
       ) VALUES (
         @id, @workspaceId, @projectId, @threadId, @messageId, @squadId, @agentId,
-        @requestedBy, @operationMode, @status, @revisionTargetType,
+        @requestedBy, @operationMode, @origin, @status, @revisionTargetType,
         @revisionTargetId, @revisionTargetLabel, @instruction, @workingCopyId,
-        @resultMessageId, @error, @createdAt, @startedAt, @completedAt
+        @workingBranch, @resultMessageId, @error, @createdAt, @startedAt, @completedAt, @activities
       )
     `).run({
       id: call.id,
@@ -2660,17 +2669,20 @@ export class SQLiteService {
       agentId: call.agentId,
       requestedBy: call.requestedBy,
       operationMode: call.operationMode,
+      origin: call.origin ?? 'agent_call',
       status: call.status,
       revisionTargetType: target?.type ?? null,
       revisionTargetId: target?.id ?? null,
       revisionTargetLabel: target?.label ?? null,
       instruction: call.instruction,
       workingCopyId: call.workingCopyId ?? null,
+      workingBranch: call.workingBranch ?? null,
       resultMessageId: call.resultMessageId ?? null,
       error: call.error ?? null,
       createdAt: call.createdAt,
       startedAt: call.startedAt ?? null,
-      completedAt: call.completedAt ?? null
+      completedAt: call.completedAt ?? null,
+      activities: JSON.stringify(call.activities ?? [])
     });
     return this.getAgentCall(call.id)!;
   }
@@ -2684,11 +2696,14 @@ export class SQLiteService {
       UPDATE agent_calls SET
         message_id = @messageId, squad_id = @squadId, agent_id = @agentId,
         requested_by = @requestedBy, operation_mode = @operationMode,
+        origin = @origin,
         status = @status, revision_target_type = @revisionTargetType,
         revision_target_id = @revisionTargetId, revision_target_label = @revisionTargetLabel,
         instruction = @instruction, working_copy_id = @workingCopyId,
+        working_branch = @workingBranch,
         result_message_id = @resultMessageId, error = @error,
-        started_at = @startedAt, completed_at = @completedAt
+        started_at = @startedAt, completed_at = @completedAt,
+        activities = @activities
       WHERE id = @id
     `).run({
       id,
@@ -2697,16 +2712,19 @@ export class SQLiteService {
       agentId: merged.agentId,
       requestedBy: merged.requestedBy,
       operationMode: merged.operationMode,
+      origin: merged.origin ?? 'agent_call',
       status: merged.status,
       revisionTargetType: target?.type ?? null,
       revisionTargetId: target?.id ?? null,
       revisionTargetLabel: target?.label ?? null,
       instruction: merged.instruction,
       workingCopyId: merged.workingCopyId ?? null,
+      workingBranch: merged.workingBranch ?? null,
       resultMessageId: merged.resultMessageId ?? null,
       error: merged.error ?? null,
       startedAt: merged.startedAt ?? null,
-      completedAt: merged.completedAt ?? null
+      completedAt: merged.completedAt ?? null,
+      activities: JSON.stringify(merged.activities ?? [])
     });
     return this.getAgentCall(id);
   }

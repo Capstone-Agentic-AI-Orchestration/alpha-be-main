@@ -492,6 +492,29 @@ export interface AgentCallArtifact {
   createdAt: string;
 }
 
+export type AgentCallActivityKind =
+  | 'status'
+  | 'stage'
+  | 'tool'
+  | 'tool_result'
+  | 'file_change'
+  | 'handoff'
+  | 'error'
+  | 'summary';
+
+export type AgentCallOrigin = 'agent_call' | 'chat_turn';
+
+/** A safe operational event for the project chat Live Build Room. */
+export interface AgentCallActivity {
+  id: string;
+  sequence: number;
+  kind: AgentCallActivityKind;
+  message: string;
+  detail?: string;
+  paths?: string[];
+  createdAt: string;
+}
+
 export interface AgentCall {
   id: string;
   workspaceId: string;
@@ -502,16 +525,19 @@ export interface AgentCall {
   agentId: string;
   requestedBy: string;
   operationMode: AgentCallMode;
+  origin?: AgentCallOrigin;
   status: AgentCallStatus;
   revisionTarget?: AgentCallTarget;
   instruction: string;
   workingCopyId?: string;
+  workingBranch?: string;
   resultMessageId?: string;
   error?: string;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
   artifacts: AgentCallArtifact[];
+  activities: AgentCallActivity[];
 }
 
 export interface ProjectChatAgent {

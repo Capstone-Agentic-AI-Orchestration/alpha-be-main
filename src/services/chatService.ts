@@ -22,6 +22,7 @@ import { logInfo } from '../utils/logger.js';
 import { workspaceRegistry, WorkspaceRole } from './workspaceRegistry.js';
 import { RUNS_DIR } from '../config/env.js';
 import { saveChatMessageAndShare, createThreadAndShare } from './chatWriteThrough.js';
+import { agentCallService } from './agentCallService.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -36,6 +37,8 @@ export interface SendMessageParams {
    * When supplied, the thread is bound to that workspace.
    */
   workspaceId?: string;
+  /** Authenticated owner, supplied by the chat route for room activity links. */
+  userId?: string;
   /** Caller's role in that workspace, for role-gated chat behaviour. */
   workspaceRole?: WorkspaceRole;
 }
@@ -226,6 +229,7 @@ export class ChatService extends EventEmitter {
     if (!thread) {
       thread = createThreadAndShare({
         id: threadId,
+        ownerId: params.userId,
         title: content.slice(0, 40) || 'New Conversation',
         lastMessageSnippet: content.slice(0, 100),
         lastMessageAt: now,
@@ -308,10 +312,60 @@ export class ChatService extends EventEmitter {
     }
 
     const agentMessages: ChatMessage[] = [];
+    const project = thread.projectId
+      ? sqliteService.getProjects().find(item => item.id === thread!.projectId)
+      : undefined;
+    let activeSquadAssignments: Array<{ squadId: string; status: string }> = [];
+    if (project && workspaceId) {
+      try {
+        activeSquadAssignments = (await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id))
+          .filter(assignment => assignment.status === 'active');
+      } catch {
+        // Chat still works if the room directory is temporarily unavailable.
+      }
+    }
 
     for (const [index, agent] of addressed.entries()) {
       const priorTurn = agentMessages.length ? describePriorReplies(agentMessages) : undefined;
-      const reply = await this.generateAgentReply(agent, content, threadId, priorTurn);
+      const squadId = activeSquadAssignments.find(assignment =>
+        sqliteService.getSquads().some(squad => squad.id === assignment.squadId && squad.memberAgentIds.includes(agent.id))
+      )?.squadId;
+      let activityCallId: string | undefined;
+      if (project && workspaceId && params.userId && squadId) {
+        try {
+          const call = await agentCallService.startChatTurn({
+            workspaceId,
+            project,
+            threadId,
+            messageId: userMessage.id,
+            squadId,
+            agent,
+            requestedBy: params.userId,
+            instruction: content
+          });
+          activityCallId = call.id;
+        } catch (error) {
+          logInfo(`Chat activity session could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (index > 0 && agentMessages[index - 1]) {
+          try {
+            if (activityCallId) agentCallService.recordChatTurnHandoff(activityCallId, agentMessages[index - 1].senderName);
+          } catch {
+            // A missing room event never blocks the next agent's chat turn.
+          }
+        }
+      }
+      let reply: Awaited<ReturnType<ChatService['generateAgentReply']>>;
+      try {
+        reply = await this.generateAgentReply(agent, content, threadId, priorTurn, activityCallId);
+      } catch (error) {
+        try {
+          if (activityCallId) agentCallService.failChatTurn(activityCallId, error instanceof Error ? error.message : String(error));
+        } catch {
+          // Preserve the original chat failure if activity persistence also failed.
+        }
+        throw error;
+      }
 
       const message: ChatMessage = {
         id: `msg-${Date.now()}-${index}-${agent.id}`,
@@ -328,6 +382,14 @@ export class ChatService extends EventEmitter {
       saveChatMessageAndShare(message);
       this.emit('chat_message', message);
       agentMessages.push(message);
+      if (activityCallId) {
+        try {
+          if (reply.failed) agentCallService.failChatTurn(activityCallId, 'The agent runtime could not complete this project chat turn.');
+          else agentCallService.completeChatTurn(activityCallId, message.id);
+        } catch (error) {
+          logInfo(`Chat activity session could not be finalized: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     }
 
     return { userMessage, agentMessage: agentMessages[0], agentMessages };
@@ -431,8 +493,9 @@ export class ChatService extends EventEmitter {
     agent: any,
     prompt: string,
     threadId: string,
-    priorTurn?: string
-  ): Promise<{ content: string; thinking?: string; tools: any[] }> {
+    priorTurn?: string,
+    activityCallId?: string
+  ): Promise<{ content: string; thinking?: string; tools: any[]; activityCallId?: string; failed?: boolean }> {
     /**
      * Resume the CLI's own session so the agent remembers this thread.
      *
@@ -502,7 +565,9 @@ export class ChatService extends EventEmitter {
       logInfo(`Refusing turn for ${agent.id}: ${readiness.detail}`);
       return {
         content: `${readiness.detail}\n\n${readiness.command ?? ''}`.trim(),
-        tools: []
+        tools: [],
+        activityCallId,
+        failed: true
       };
     }
 
@@ -511,9 +576,10 @@ export class ChatService extends EventEmitter {
     // asking an agent about ALF in chat reaches the same Supabase its runs do.
     const { env: projectEnv } = buildEnv(threadProject(threadId)?.envVars);
 
+    const cwd = chatWorkspace(threadId);
     const turn = await runCliTurn({
-      runId: `chat-${Date.now()}`,
-      cwd: chatWorkspace(threadId),
+      runId: activityCallId || `chat-${Date.now()}`,
+      cwd,
       provider: persona.modelProvider,
       modelName: persona.modelName,
       reasoningEffort: persona.reasoningEffort,
@@ -537,7 +603,10 @@ ${priorTurn}` : prompt,
       skills: persona.skills,
       autonomyLevel: persona.autonomyLevel,
       env,
-      customCliArgs: agent.customCliArgs
+      customCliArgs: agent.customCliArgs,
+      onEvent: activityCallId
+        ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd)
+        : undefined
     });
 
     // Store the session so the next message in this thread continues it.
@@ -563,7 +632,9 @@ ${priorTurn}` : prompt,
     return {
       content: content.trim(),
       thinking: turn.thinking,
-      tools: turn.tools
+      tools: turn.tools,
+      activityCallId,
+      failed: Boolean(turn.failureKind)
     };
   }
 }
