@@ -300,11 +300,13 @@ githubRouter.post('/github/merge', desktopOnly, async (req: Request, res: Respon
 
 /**
  * POST /api/github/repos
- * Create a GitHub repository.
+ * Create a GitHub repository. The workspace capability is PM-only: admins can
+ * maintain projects, but repository provisioning belongs to the PM who
+ * initiated the client work.
  * Body: { name, visibility?, description?, org?, sourceDir?, initReadme? }
  */
 githubRouter.post('/github/repos', async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
   const { name, visibility, description, org, sourceDir, initReadme } = req.body ?? {};
 
   if (!name || typeof name !== 'string') {
@@ -335,11 +337,11 @@ githubRouter.post('/github/repos', async (req: Request, res: Response) => {
  * The organization is resolved from the project, not from the caller: the first
  * repository may set it, every later one inherits it. `org` is required at this
  * layer rather than only in the UI — the daemon listens on localhost and any
- * process on the machine can post here, so a policy enforced in the form alone
- * is not enforced at all.
+ * process on the machine can post here, so the PM-only policy must be enforced
+ * at the route as well as in the form.
  */
 githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
   const { projectId, repoName, stack, org, visibility, shape, includeDocker } = req.body ?? {};
 
   if (!projectId || typeof projectId !== 'string') {
@@ -428,7 +430,7 @@ githubRouter.post('/github/repos/clone', desktopOnly, async (req: Request, res: 
  * Body: { repo: "owner/name", cloneInto? }
  */
 githubRouter.post('/github/repos/fork', async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
   const { repo, cloneInto } = req.body ?? {};
   if (!repo) return res.status(400).json({ error: '"repo" is required.' });
 

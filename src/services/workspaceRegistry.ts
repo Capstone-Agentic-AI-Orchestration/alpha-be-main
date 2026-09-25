@@ -48,6 +48,8 @@ export type WorkspaceCapability =
   | 'project.create'
   | 'project.update'
   | 'project.manage'
+  /** Provision a new remote repository; project managers own this action. */
+  | 'project.provision_repository'
   | 'issue.read'
   | 'issue.manage'
   | 'agent.read'
@@ -122,6 +124,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'project.manage',
     'issue.read',
     'issue.manage',
+    'project.provision_repository',
     'agent.read',
     'squad.read',
     'chat.read',
