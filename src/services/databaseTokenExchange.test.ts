@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  * what a caller cannot make it say.
  */
 
-const ORG = 'Capstone-Agentic-AI-Orchestration';
+const ORG = 'alpha-test-org';
 
 /** Who each fake GitHub token belongs to, and their teams in the org. */
 let accounts: Record<string, { login: string; teams: string[] }>;

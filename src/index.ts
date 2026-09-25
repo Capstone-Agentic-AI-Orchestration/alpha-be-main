@@ -219,7 +219,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-const server = http.createServer(app);
+export const server = http.createServer(app);
 
 /**
  * A port someone else holds is the whole story of a failed start, so say it.
@@ -360,8 +360,10 @@ databaseReady.then(
 );
 
 function onListening(): void {
-  logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${PORT}`);
-  if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${PORT}`);
+  const address = server.address();
+  const boundPort = address && typeof address !== 'string' ? address.port : PORT;
+  logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${boundPort}`);
+  if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${boundPort}`);
 
   /**
    * The database password on a developer's machine is the thing the whole

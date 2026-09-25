@@ -182,7 +182,7 @@ default.
 | `CORS_ORIGIN` | `http://localhost:3000,http://localhost:5173` | — |
 | `SUPABASE_URL` | same as Render | For the board uplink |
 | `SUPABASE_ANON_KEY` | same as Render | — |
-| `ALPHA_CLOUD_API` | `https://<render>.onrender.com/api` | Where the desktop gets its database token and account-specific GitHub OAuth handoff — the Render service, note the `/api`. Not the Vercel origin: Vercel serves only the static web app and answers `/api/...` with `index.html`. Without it, cloud writes carry no identity and the picker cannot target a selected profile |
+| `ALPHA_CLOUD_API` | `https://alpha-fe-main.vercel.app/api` | Where the desktop gets its database token and account-specific GitHub OAuth handoff. Vercel's middleware forwards `/api/*` to Render using `API_ORIGIN`, so desktop clients can use the same reachable proxy as the browser app. Keep the `/api` suffix |
 | `ALPHA_LOCAL_TOKEN` | optional | Set it if anything else on the machine could reach port 3001 |
 
 **Never on a developer machine:** `SUPABASE_JWT_SECRET`, `GITHUB_CLIENT_SECRET`,

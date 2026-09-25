@@ -4,6 +4,12 @@ export default defineConfig({
   test: {
     env: {
       /**
+       * Keep role-resolution tests independent of a developer's local `.env`.
+       * `databaseTokenExchange.test.ts` supplies mocked memberships for this
+       * fixture organisation; production still requires its own ALPHA_ORG.
+       */
+      ALPHA_ORG: 'alpha-test-org',
+      /**
        * Never the real cloud from a test.
        *
        * `env.ts` loads the developer's own `.env`, which on a team machine
