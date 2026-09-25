@@ -214,3 +214,27 @@ describe('which app to sign in to', () => {
     await expect(mod.clientId()).rejects.toThrow(/cannot sign in/);
   });
 });
+
+describe('hosted account-specific desktop sign-in', () => {
+  it('starts an OAuth handoff with the selected login and stores its result locally', async () => {
+    process.env.ALPHA_CLOUD_API = 'https://alpha.example.com/api';
+    const mod = await load('');
+    const { impl: start, calls } = stubFetch([
+      { body: { state: 'desktop-state', authorizationUrl: 'https://github.com/login/oauth/authorize?...' } }
+    ]);
+
+    const flow = await mod.requestHostedOAuth('pineapple-2005', start);
+    expect(calls[0].url).toBe('https://alpha.example.com/api/github/oauth/desktop/start');
+    expect(calls[0].body.login).toBe('pineapple-2005');
+    expect(calls[0].body.handoffToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(flow.authorizationUrl).toContain('github.com/login/oauth/authorize');
+
+    const { impl: result } = stubFetch([
+      { body: { token: 'gho_hosted', username: 'pineapple-2005', profileId: '2005' } }
+    ]);
+    const credential = await mod.awaitHostedOAuth(flow, { fetchImpl: result });
+    expect(credential).toMatchObject({ username: 'pineapple-2005', profileId: '2005' });
+    expect(mod.storedToken()).toBe('gho_hosted');
+    process.env.ALPHA_CLOUD_API = '';
+  });
+});

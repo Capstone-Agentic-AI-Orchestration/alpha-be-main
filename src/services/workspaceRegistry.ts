@@ -93,6 +93,8 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'issue.read',
     'issue.manage',
     'agent.read',
+    // Developers can maintain the local personas they are responsible for.
+    'agent.manage',
     'agent.run',
     'squad.read',
     'squad.run',
@@ -122,10 +124,12 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'project.create',
     'project.update',
     'project.manage',
+    'project.provision_repository',
     'issue.read',
     'issue.manage',
-    'project.provision_repository',
     'agent.read',
+    // A PM staffs the agents used by the projects they initiate.
+    'agent.manage',
     'squad.read',
     'chat.read',
     'chat.write',

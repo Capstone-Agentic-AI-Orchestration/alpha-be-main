@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 import { ALPHA_CLOUD_API, ALPHA_DIR, GITHUB_CLIENT_ID, GITHUB_SCOPE, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { logError, logInfo } from '../utils/logger.js';
@@ -22,14 +23,16 @@ import { logError, logInfo } from '../utils/logger.js';
  * over anything stored on the machine. So the account is Alpha's, and the
  * machine's own `gh` login is left exactly as the developer set it.
  *
- * ## Why the device flow
+ * ## How GitHub sign-in works
  *
  * A desktop app cannot keep a client secret: whatever ships inside an installer
- * is readable by anyone who has the installer. The device flow exists for this
- * case -- the app shows a short code, the person authorises it in a browser
- * where GitHub can see who they are, and the app receives a token without ever
- * holding a secret. It also means the sign-in works on a machine where the app
- * cannot open a loopback port or register a URL scheme.
+ * is readable by anyone who has the installer. Installed builds therefore use
+ * the hosted OAuth handoff when `ALPHA_CLOUD_API` is available: the cloud keeps
+ * the secret, includes the requested GitHub login in the authorize URL, and
+ * returns the one-time credential to the local daemon. A device flow remains
+ * available for standalone/source runs, where no hosted handoff is configured.
+ * It also means sign-in works on a machine where the app cannot register a URL
+ * scheme.
  *
  * ## Where the token lives
  *
@@ -95,17 +98,38 @@ let cachedRegistry: ProfileRegistry | undefined;
  * Packaged desktop builds intentionally start with a fresh session so an old
  * token on disk cannot silently choose an account for the next person at the
  * keyboard. The token remains available for the updater, but application API
- * calls are gated until the device flow completes in this process.
+ * calls are gated until a fresh GitHub authorization completes in this process.
  */
 let sessionAuthenticated = false;
+let sessionAuthenticationError: string | undefined;
 
 export function isSessionAuthenticated(): boolean {
   return sessionAuthenticated;
 }
 
+export function getSessionAuthenticationError(): string | undefined {
+  return sessionAuthenticationError;
+}
+
+/** Keep an async sign-in failure available to the local profile picker. */
+export function setSessionAuthenticationError(message: string | undefined): void {
+  if (!message) {
+    sessionAuthenticationError = undefined;
+    return;
+  }
+  sessionAuthenticationError = message
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s,"';}]+/gi, '$1[redacted]')
+    .replace(/([A-Za-z]:\\[^\s"']+|\\\\[^\s"']+)/g, '[local path]')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 240) || 'GitHub sign-in could not be completed. Please try again.';
+}
+
 /** Begin (or restart) a device sign-in without deleting remembered metadata. */
 export function beginSessionAuthentication(): void {
   sessionAuthenticated = false;
+  sessionAuthenticationError = undefined;
 }
 
 function readRegistry(): ProfileRegistry {
@@ -210,6 +234,7 @@ export function saveCredential(credential: StoredCredential): void {
   fs.writeFileSync(TOKEN_FILE, JSON.stringify(credential, null, 2) + '\n', { mode: 0o600 });
   cached = credential;
   sessionAuthenticated = true;
+  sessionAuthenticationError = undefined;
 
   const id = profileIdFor(credential);
   if (id && credential.login) {
@@ -241,6 +266,7 @@ export function clearCredential(): void {
   }
   cached = null;
   sessionAuthenticated = false;
+  sessionAuthenticationError = undefined;
   const registry = readRegistry();
   registry.activeProfileId = undefined;
   writeRegistry(registry);
@@ -291,6 +317,108 @@ export async function clientId(fetchImpl: typeof fetch = fetch): Promise<string>
       `Could not ask ${ALPHA_CLOUD_API} which GitHub app to sign in to: ${(err as Error).message}`
     );
   }
+}
+
+/**
+ * A hosted OAuth handoff for an installed desktop.
+ *
+ * The browser flow is the only GitHub flow that can target a remembered
+ * account (`login`) and force the account chooser (`prompt=select_account`).
+ * The desktop cannot exchange that callback itself because its client secret
+ * must stay on the hosted service, so the cloud keeps the result briefly and
+ * the local daemon retrieves it with this one-time bearer value.
+ */
+export interface HostedOAuthStart {
+  state: string;
+  handoffToken: string;
+  authorizationUrl: string;
+}
+
+export interface HostedOAuthCredential {
+  token: string;
+  username: string;
+  profileId?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+export async function requestHostedOAuth(
+  profileLogin?: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<HostedOAuthStart> {
+  if (!ALPHA_CLOUD_API) {
+    throw new DeviceFlowError(
+      'This desktop has no hosted Alpha API configured for account-specific GitHub sign-in.'
+    );
+  }
+
+  const handoffToken = crypto.randomBytes(32).toString('hex');
+  const res = await fetchImpl(`${ALPHA_CLOUD_API}/github/oauth/desktop/start`, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      handoffToken,
+      ...(profileLogin ? { login: profileLogin } : {})
+    })
+  });
+  const body = (await res.json().catch(() => ({}))) as Partial<HostedOAuthStart> & { error?: string };
+  if (!res.ok || !body.state || !body.authorizationUrl) {
+    throw new DeviceFlowError(
+      body.error || `Alpha could not start account-specific GitHub sign-in (${res.status}).`
+    );
+  }
+
+  return { state: body.state, handoffToken, authorizationUrl: body.authorizationUrl };
+}
+
+/** Wait for the hosted callback, then store the credential locally. */
+export async function awaitHostedOAuth(
+  flow: HostedOAuthStart,
+  options: {
+    fetchImpl?: typeof fetch;
+    sleep?: (ms: number) => Promise<void>;
+    timeoutMs?: number;
+  } = {}
+): Promise<HostedOAuthCredential> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  const deadline = Date.now() + (options.timeoutMs ?? 15 * 60 * 1000);
+  const resultUrl = `${ALPHA_CLOUD_API}/github/oauth/desktop/result?state=${encodeURIComponent(flow.state)}&handoff=${encodeURIComponent(flow.handoffToken)}`;
+
+  while (Date.now() < deadline) {
+    const res = await fetchImpl(resultUrl, { headers: { accept: 'application/json' } });
+    const body = (await res.json().catch(() => ({}))) as Partial<HostedOAuthCredential> & {
+      status?: string;
+      error?: string;
+    };
+
+    if (res.status === 202 && body.status === 'pending') {
+      await sleep(2500);
+      continue;
+    }
+    if (!res.ok || !body.token || !body.username) {
+      throw new DeviceFlowError(body.error || 'Hosted GitHub authorization did not complete.');
+    }
+
+    const credential: HostedOAuthCredential = {
+      token: body.token,
+      username: body.username,
+      ...(body.profileId ? { profileId: body.profileId } : {}),
+      ...(body.name ? { name: body.name } : {}),
+      ...(body.avatarUrl ? { avatarUrl: body.avatarUrl } : {})
+    };
+    saveCredential({
+      token: credential.token,
+      login: credential.username,
+      ...(credential.profileId ? { userId: credential.profileId } : {}),
+      ...(credential.name ? { name: credential.name } : {}),
+      ...(credential.avatarUrl ? { avatarUrl: credential.avatarUrl } : {}),
+      obtainedAt: new Date().toISOString()
+    });
+    return credential;
+  }
+
+  throw new DeviceFlowError('That GitHub authorization expired before Alpha received it. Start sign-in again.');
 }
 
 export interface DeviceCode {

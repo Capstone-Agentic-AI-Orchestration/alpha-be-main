@@ -13,7 +13,9 @@ import {
   GITHUB_APP_PRIVATE_KEY,
   GITHUB_APP_WEBHOOK_SECRET,
   GITHUB_APP_SLUG,
-  IS_PACKAGED_DESKTOP
+  IS_PACKAGED_DESKTOP,
+  ALPHA_CLOUD_API,
+  IS_DESKTOP
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
 import {
@@ -22,9 +24,13 @@ import {
   awaitAuthorization,
   beginSessionAuthentication,
   clearCredential,
+  getSessionAuthenticationError,
   isSessionAuthenticated,
+  setSessionAuthenticationError,
   userFor,
   requestDeviceCode,
+  requestHostedOAuth,
+  awaitHostedOAuth,
   ghEnvironment,
   storedCredential
 } from './alphaGitHubToken.js';
@@ -67,6 +73,12 @@ function ghInstalled(): Promise<boolean> {
 /** How long an issued OAuth state stays valid. Long enough to sign in, short
  *  enough that a leaked URL is not reusable later. */
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function safeEqualSecret(expected: string, actual: string): boolean {
+  const left = Buffer.from(expected);
+  const right = Buffer.from(actual);
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
 
 /**
  * Reject anything that is not a plain git branch name. Shared by every helper
@@ -139,7 +151,30 @@ export interface GitHubAuthInfo {
   mode?: 'cli' | 'rest' | 'github_app';
   appInstalled?: boolean;
   installations?: Array<{ id: number; account: string; type: string }>;
+  error?: string;
 }
+
+export interface GitHubLoginStart {
+  /** Device-flow code; absent for the hosted browser flow. */
+  code?: string;
+  verificationUrl: string;
+  flow: 'device' | 'oauth';
+  targetLogin?: string;
+}
+
+export interface DesktopOAuthCredential {
+  token: string;
+  username: string;
+  profileId?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+export type DesktopOAuthPoll =
+  | { status: 'pending' }
+  | { status: 'complete'; credential: DesktopOAuthCredential }
+  | { status: 'failed'; message: string }
+  | { status: 'expired'; message: string };
 
 export interface GitHubRepo {
   name: string;
@@ -280,7 +315,7 @@ export interface RepoInspection {
 
 export interface IGitHubService {
   checkAuth(): Promise<GitHubAuthInfo>;
-  startDeviceLogin(): Promise<{ code: string; verificationUrl: string }>;
+  startDeviceLogin(profileLogin?: string): Promise<GitHubLoginStart>;
   listOrganizations(): Promise<Array<{ login: string; role: string }>>;
   logout(): Promise<void>;
   listRepositories(limit?: number): Promise<GitHubRepo[]>;
@@ -306,7 +341,18 @@ export interface IGitHubService {
   mergePullRequest(cwd: string, prUrlOrNumber: string, method?: 'squash' | 'merge' | 'rebase'): Promise<string>;
   reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string>;
   getOAuthLoginUrl(state?: string): { url: string; state: string };
-  handleOAuthCallback(code: string, state?: string): Promise<{ success: boolean; username: string; token: string }>;
+  handleOAuthCallback(code: string, state?: string): Promise<{
+    success: boolean;
+    username: string;
+    token: string;
+    profileId?: string;
+    name?: string;
+    avatarUrl?: string;
+  }>;
+  startDesktopOAuth(handoffToken: string, profileLogin?: string): { url: string; state: string };
+  isDesktopOAuthState(state?: string): boolean;
+  takeDesktopOAuthResult(state: string, handoffToken: string): DesktopOAuthPoll;
+  failDesktopOAuth(state: string, message: string): void;
   /** Null when GITHUB_APP_SLUG is unset -- there is no App to link to. */
   getGitHubAppInstallUrl(): string | null;
   handleGitHubAppWebhook(event: string, payload: any, signature?: string, rawBody?: Buffer): Promise<any>;
@@ -333,7 +379,13 @@ export class GhCliGitHubService implements IGitHubService {
     // desktop session. The profile picker must complete a fresh GitHub device
     // flow after every launch or account switch.
     if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
-      return { authenticated: false, mode: 'cli', tokenSource: 'oauth', cliMissing: !(await ghInstalled()) };
+      return {
+        authenticated: false,
+        mode: 'cli',
+        tokenSource: 'oauth',
+        cliMissing: !(await ghInstalled()),
+        ...(getSessionAuthenticationError() ? { error: getSessionAuthenticationError() } : {})
+      };
     }
     const credential = storedCredential();
     // `gh` is still what does the work, so a missing CLI is worth reporting
@@ -372,18 +424,56 @@ export class GhCliGitHubService implements IGitHubService {
    * browser, on the person's own time, so waiting for it runs in the background
    * while the UI polls `checkAuth` -- exactly as it did when `gh` drove this.
    */
-  async startDeviceLogin(): Promise<{ code: string; verificationUrl: string }> {
+  async startDeviceLogin(profileLogin?: string): Promise<GitHubLoginStart> {
     beginSessionAuthentication();
+
+    /**
+     * A packaged desktop can reach the hosted deployment without carrying its
+     * OAuth secret. Use that deployment's browser flow when available: unlike
+     * device activation, it accepts `login` and `prompt=select_account`, so a
+     * remembered profile actually determines the account GitHub presents.
+     */
+    if (IS_DESKTOP && ALPHA_CLOUD_API) {
+      const hosted = await requestHostedOAuth(profileLogin);
+      void awaitHostedOAuth(hosted).catch(err => {
+        const message = err instanceof Error ? err.message : 'Hosted GitHub sign-in did not complete.';
+        setSessionAuthenticationError(message);
+        logError('Hosted GitHub sign-in did not complete:', message);
+      });
+      return {
+        verificationUrl: hosted.authorizationUrl,
+        flow: 'oauth',
+        ...(profileLogin ? { targetLogin: profileLogin } : {})
+      };
+    }
+
+    // A device flow cannot carry a selected login. Never let a remembered
+    // profile silently become whichever GitHub account the browser already
+    // has open; that is exactly the ambiguity the picker is meant to remove.
+    if (profileLogin) {
+      throw new DeviceFlowError(
+        'This desktop build cannot target a remembered GitHub profile because ALPHA_CLOUD_API is not configured. ' +
+          'Use a build connected to the hosted Alpha API, or choose Add another account.'
+      );
+    }
+
     const code = await requestDeviceCode();
 
     void awaitAuthorization(code).catch(err => {
       // Nothing awaits this: the UI learns the sign-in worked by seeing
       // `authenticated` turn true, and learns it did not by the code it is
       // showing expiring. Logged so the reason is not lost either way.
-      logError('GitHub sign-in did not complete:', err instanceof Error ? err.message : err);
+      const message = err instanceof Error ? err.message : 'GitHub sign-in did not complete.';
+      setSessionAuthenticationError(message);
+      logError('GitHub sign-in did not complete:', message);
     });
 
-    return { code: code.userCode, verificationUrl: code.verificationUrl };
+    return {
+      code: code.userCode,
+      verificationUrl: code.verificationUrl,
+      flow: 'device',
+      ...(profileLogin ? { targetLogin: profileLogin } : {})
+    };
   }
 
   async listOrganizations(): Promise<Array<{ login: string; role: string }>> {
@@ -811,8 +901,31 @@ export class GhCliGitHubService implements IGitHubService {
     return { url: '', state: '' };
   }
 
-  async handleOAuthCallback(): Promise<{ success: boolean; username: string; token: string }> {
+  async handleOAuthCallback(): Promise<{
+    success: boolean;
+    username: string;
+    token: string;
+    profileId?: string;
+    name?: string;
+    avatarUrl?: string;
+  }> {
     throw new Error('OAuth Web Flow is only used in hosted REST mode.');
+  }
+
+  startDesktopOAuth(): { url: string; state: string } {
+    throw new Error('Desktop OAuth handoff is only available through the hosted service.');
+  }
+
+  isDesktopOAuthState(): boolean {
+    return false;
+  }
+
+  takeDesktopOAuthResult(): DesktopOAuthPoll {
+    return { status: 'expired', message: 'Hosted GitHub authorization is unavailable.' };
+  }
+
+  failDesktopOAuth(): void {
+    // There is no hosted handoff state in the local CLI implementation.
   }
 
   getGitHubAppInstallUrl(): string | null {
@@ -841,7 +954,19 @@ export class RestGitHubService implements IGitHubService {
   private tokenExpiresAt: number = 0;
 
   /** Issued OAuth `state` values awaiting their callback. */
-  private readonly pendingStates = new Map<string, number>();
+  private readonly pendingStates = new Map<string, {
+    expiresAt: number;
+    desktopHandoffToken?: string;
+    expectedLogin?: string;
+  }>();
+
+  /** One-time desktop credentials waiting for the local daemon to collect them. */
+  private readonly desktopResults = new Map<string, {
+    expiresAt: number;
+    handoffToken: string;
+    result?: DesktopOAuthCredential;
+    error?: string;
+  }>();
 
   constructor() {
     if (this.envToken) {
@@ -986,6 +1111,34 @@ export class RestGitHubService implements IGitHubService {
   }
 
   getOAuthLoginUrl(state = crypto.randomBytes(32).toString('hex')): { url: string; state: string } {
+    return this.issueOAuthUrl(state);
+  }
+
+  /** Start the hosted browser flow used by an installed desktop profile picker. */
+  startDesktopOAuth(handoffToken: string, profileLogin?: string): { url: string; state: string } {
+    if (!/^[a-f0-9]{64}$/i.test(handoffToken)) {
+      throw new Error('The desktop OAuth handoff token is invalid.');
+    }
+    if (profileLogin !== undefined && !/^[A-Za-z0-9-]{1,39}$/.test(profileLogin)) {
+      throw new Error('The requested GitHub login is invalid.');
+    }
+
+    const state = crypto.randomBytes(32).toString('hex');
+    this.sweepExpiredStates();
+    this.pendingStates.set(state, {
+      expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+      desktopHandoffToken: handoffToken,
+      ...(profileLogin ? { expectedLogin: profileLogin } : {})
+    });
+    this.desktopResults.delete(state);
+
+    return {
+      ...this.buildOAuthUrl(state, profileLogin),
+      state
+    };
+  }
+
+  private issueOAuthUrl(state: string): { url: string; state: string } {
     if (!GITHUB_CLIENT_ID) {
       throw new Error('GITHUB_CLIENT_ID is not configured in backend environment.');
     }
@@ -1000,25 +1153,51 @@ export class RestGitHubService implements IGitHubService {
     // any code, which is how OAuth CSRF works: an attacker begins a flow and
     // gets their GitHub account bound to the victim's session.
     this.sweepExpiredStates();
-    this.pendingStates.set(state, Date.now() + OAUTH_STATE_TTL_MS);
+    this.pendingStates.set(state, { expiresAt: Date.now() + OAUTH_STATE_TTL_MS });
 
+    return {
+      ...this.buildOAuthUrl(state),
+      state
+    };
+  }
+
+  private buildOAuthUrl(state: string, profileLogin?: string): { url: string } {
+    if (!GITHUB_CLIENT_ID) {
+      throw new Error('GITHUB_CLIENT_ID is not configured in backend environment.');
+    }
+    if (!GITHUB_CALLBACK_URL) {
+      throw new Error('GITHUB_CALLBACK_URL is not configured in backend environment.');
+    }
     const params = new URLSearchParams({
       client_id: GITHUB_CLIENT_ID,
       redirect_uri: GITHUB_CALLBACK_URL,
       scope: GITHUB_SCOPE,
-      state
+      state,
+      // GitHub's browser flow supports both a suggested login and an explicit
+      // account chooser. This is what prevents a remembered Alpha card from
+      // silently following whichever GitHub account the browser last used.
+      prompt: 'select_account'
     });
+    if (profileLogin) params.set('login', profileLogin);
     return {
-      url: `https://github.com/login/oauth/authorize?${params.toString()}`,
-      state
+      url: `https://github.com/login/oauth/authorize?${params.toString()}`
     };
   }
 
   private sweepExpiredStates(): void {
     const now = Date.now();
-    for (const [value, expiry] of this.pendingStates) {
-      if (expiry <= now) this.pendingStates.delete(value);
+    for (const [value, entry] of this.pendingStates) {
+      if (entry.expiresAt <= now) this.pendingStates.delete(value);
     }
+    for (const [value, entry] of this.desktopResults) {
+      if (entry.expiresAt <= now) this.desktopResults.delete(value);
+    }
+  }
+
+  isDesktopOAuthState(state?: string): boolean {
+    if (!state) return false;
+    this.sweepExpiredStates();
+    return Boolean(this.pendingStates.get(state)?.desktopHandoffToken);
   }
 
   /**
@@ -1029,55 +1208,133 @@ export class RestGitHubService implements IGitHubService {
    * noted rather than pre-built, since the failure is a confusing login error
    * rather than a security hole.
    */
-  private consumeState(state: string | undefined): void {
+  private consumeState(state: string | undefined): { desktopHandoffToken?: string; expectedLogin?: string } {
     if (!state) throw new Error('OAuth callback is missing the state parameter.');
     this.sweepExpiredStates();
-    if (!this.pendingStates.delete(state)) {
+    const entry = this.pendingStates.get(state);
+    if (!entry) {
       throw new Error('OAuth state is unrecognized or expired. Start the sign-in again.');
     }
+    this.pendingStates.delete(state);
+    return { desktopHandoffToken: entry.desktopHandoffToken, expectedLogin: entry.expectedLogin };
   }
 
   async handleOAuthCallback(
     code: string,
     state?: string
-  ): Promise<{ success: boolean; username: string; token: string }> {
+  ): Promise<{
+    success: boolean;
+    username: string;
+    token: string;
+    profileId?: string;
+    name?: string;
+    avatarUrl?: string;
+  }> {
     if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
       throw new Error('GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET is missing');
     }
 
-    this.consumeState(state);
+    const pending = this.consumeState(state);
 
-    const res = await fetch('https://github.com/login/oauth/access_token', {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-        redirect_uri: GITHUB_CALLBACK_URL
-      })
-    });
+    try {
+      const res = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          client_secret: GITHUB_CLIENT_SECRET,
+          code,
+          redirect_uri: GITHUB_CALLBACK_URL
+        })
+      });
 
-    const data: any = await res.json();
-    if (data.error || !data.access_token) {
-      throw new Error(`GitHub OAuth failed: ${data.error_description || data.error}`);
+      const data: any = await res.json();
+      if (data.error || !data.access_token) {
+        throw new Error(`GitHub OAuth failed: ${data.error_description || data.error}`);
+      }
+
+      // Deliberately NOT stored on this instance — see the note on `envToken`.
+      // The caller persists it against the signed-in session and replays it per
+      // request through withGitHubIdentity().
+      const user = await withGitHubIdentity({ token: data.access_token }, () =>
+        this.request('/user')
+      );
+      const authenticatedLogin = typeof user?.login === 'string' ? user.login : '';
+      if (!authenticatedLogin) throw new Error('GitHub did not return the authorized account name.');
+      if (pending.expectedLogin && authenticatedLogin.toLowerCase() !== pending.expectedLogin.toLowerCase()) {
+        throw new Error(
+          `GitHub authorized @${authenticatedLogin}, but this sign-in was started for @${pending.expectedLogin}. ` +
+          'Choose the selected account and try again.'
+        );
+      }
+
+      const result = {
+        success: true,
+        username: authenticatedLogin,
+        token: data.access_token,
+        ...(user.id === undefined ? {} : { profileId: String(user.id) }),
+        ...(user.name ? { name: user.name } : {}),
+        ...(user.avatar_url ? { avatarUrl: user.avatar_url } : {})
+      };
+
+      if (pending.desktopHandoffToken && state) {
+        this.desktopResults.set(state, {
+          expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+          handoffToken: pending.desktopHandoffToken,
+          result: {
+            token: result.token,
+            username: result.username,
+            ...(result.profileId ? { profileId: result.profileId } : {}),
+            ...(result.name ? { name: result.name } : {}),
+            ...(result.avatarUrl ? { avatarUrl: result.avatarUrl } : {})
+          }
+        });
+      }
+
+      return result;
+    } catch (err) {
+      // `consumeState` removes the CSRF state before the exchange. Preserve a
+      // desktop failure long enough for the local daemon to show the actual
+      // GitHub error instead of waiting until the handoff simply expires.
+      if (pending.desktopHandoffToken && state) {
+        this.desktopResults.set(state, {
+          expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+          handoffToken: pending.desktopHandoffToken,
+          error: err instanceof Error ? err.message : 'GitHub OAuth failed.'
+        });
+      }
+      throw err;
+    }
+  }
+
+  takeDesktopOAuthResult(state: string, handoffToken: string): DesktopOAuthPoll {
+    this.sweepExpiredStates();
+    const result = this.desktopResults.get(state);
+    if (result) {
+      if (!safeEqualSecret(result.handoffToken, handoffToken)) {
+        return { status: 'failed', message: 'The desktop OAuth handoff token is invalid.' };
+      }
+      this.desktopResults.delete(state);
+      if (result.error) return { status: 'failed', message: result.error };
+      if (result.result) return { status: 'complete', credential: result.result };
     }
 
-    // Deliberately NOT stored on this instance — see the note on `envToken`.
-    // The caller persists it against the signed-in session and replays it per
-    // request through withGitHubIdentity().
-    const user = await withGitHubIdentity({ token: data.access_token }, () =>
-      this.request('/user')
-    );
+    if (this.pendingStates.has(state)) return { status: 'pending' };
+    return { status: 'expired', message: 'The desktop GitHub authorization expired. Start sign-in again.' };
+  }
 
-    return {
-      success: true,
-      username: user.login,
-      token: data.access_token
-    };
+  failDesktopOAuth(state: string, message: string): void {
+    const pending = this.pendingStates.get(state);
+    if (!pending?.desktopHandoffToken) return;
+    this.pendingStates.delete(state);
+    this.desktopResults.set(state, {
+      expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+      handoffToken: pending.desktopHandoffToken,
+      error: message
+    });
   }
 
   getGitHubAppInstallUrl(): string | null {
@@ -1422,9 +1679,9 @@ export class RestGitHubService implements IGitHubService {
     return cli.reviewPullRequest(cwd, prUrlOrNumber, body);
   }
 
-  startDeviceLogin(): Promise<{ code: string; verificationUrl: string }> {
+  startDeviceLogin(profileLogin?: string): Promise<GitHubLoginStart> {
     const cli = new GhCliGitHubService();
-    return cli.startDeviceLogin();
+    return cli.startDeviceLogin(profileLogin);
   }
 }
 
@@ -1460,8 +1717,8 @@ export class GitHubService implements IGitHubService {
     return cliAuth;
   }
 
-  async startDeviceLogin(): Promise<{ code: string; verificationUrl: string }> {
-    return this.cliService.startDeviceLogin();
+  async startDeviceLogin(profileLogin?: string): Promise<GitHubLoginStart> {
+    return this.cliService.startDeviceLogin(profileLogin);
   }
 
   async listOrganizations(): Promise<Array<{ login: string; role: string }>> {
@@ -1596,8 +1853,31 @@ export class GitHubService implements IGitHubService {
   async handleOAuthCallback(
     code: string,
     state?: string
-  ): Promise<{ success: boolean; username: string; token: string }> {
+  ): Promise<{
+    success: boolean;
+    username: string;
+    token: string;
+    profileId?: string;
+    name?: string;
+    avatarUrl?: string;
+  }> {
     return this.restService.handleOAuthCallback(code, state);
+  }
+
+  startDesktopOAuth(handoffToken: string, profileLogin?: string): { url: string; state: string } {
+    return this.restService.startDesktopOAuth(handoffToken, profileLogin);
+  }
+
+  isDesktopOAuthState(state?: string): boolean {
+    return this.restService.isDesktopOAuthState(state);
+  }
+
+  takeDesktopOAuthResult(state: string, handoffToken: string): DesktopOAuthPoll {
+    return this.restService.takeDesktopOAuthResult(state, handoffToken);
+  }
+
+  failDesktopOAuth(state: string, message: string): void {
+    this.restService.failDesktopOAuth(state, message);
   }
 
   getGitHubAppInstallUrl(): string | null {

@@ -182,7 +182,7 @@ default.
 | `CORS_ORIGIN` | `http://localhost:3000,http://localhost:5173` | — |
 | `SUPABASE_URL` | same as Render | For the board uplink |
 | `SUPABASE_ANON_KEY` | same as Render | — |
-| `ALPHA_CLOUD_API` | `https://<render>.onrender.com/api` | Where the desktop gets its database token — the Render service, note the `/api`. Not the Vercel origin: Vercel serves only the static web app and answers `/api/...` with `index.html`. Without it, cloud writes carry no identity and RLS rejects them |
+| `ALPHA_CLOUD_API` | `https://<render>.onrender.com/api` | Where the desktop gets its database token and account-specific GitHub OAuth handoff — the Render service, note the `/api`. Not the Vercel origin: Vercel serves only the static web app and answers `/api/...` with `index.html`. Without it, cloud writes carry no identity and the picker cannot target a selected profile |
 | `ALPHA_LOCAL_TOKEN` | optional | Set it if anything else on the machine could reach port 3001 |
 
 **Never on a developer machine:** `SUPABASE_JWT_SECRET`, `GITHUB_CLIENT_SECRET`,
@@ -199,10 +199,13 @@ presents its `gh` login to `ALPHA_CLOUD_API` at `/database/token/exchange`, and
 the cloud decides the login and role from GitHub. Minting refuses to run outside
 cloud mode, so a secret left in an old `.env` does nothing.
 
-Identity on the desktop is **Alpha’s own**, not the machine’s. Signing in from
-Connected Accounts runs GitHub’s device flow: the app shows a short code, you
-authorise it in a browser as whichever account you choose, and Alpha keeps the
-token it is given in `~/.alpha/github-credential.json` (written `0600`).
+Identity on the desktop is **Alpha’s own**, not the machine’s. With
+`ALPHA_CLOUD_API` configured, choosing a remembered profile opens GitHub’s
+browser OAuth flow with that login preselected and the account chooser forced;
+the cloud exchanges the code and the local daemon stores the resulting token in
+`~/.alpha/github-credential.json` (written `0600`). A source build without a
+cloud API uses GitHub’s device flow as a fallback, which cannot target a
+specific remembered login.
 
 `gh` still does the work — cloning, pushing, pull requests — but it is handed
 that token through `GH_TOKEN`, which it prefers over anything stored on the

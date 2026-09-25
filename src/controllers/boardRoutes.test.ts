@@ -362,7 +362,7 @@ describe('the cloud roster routes', () => {
   });
 
   it('create, edit and archive an agent', async () => {
-    session = { login: 'Admin1', role: 'admin' }; // `agent.manage` is an admin's
+    session = { login: 'Admin1', role: 'admin' };
     const app = await startCloudApi();
 
     const created = await call(app, 'POST', '/api/agents', {
@@ -391,6 +391,32 @@ describe('the cloud roster routes', () => {
       "select name, workspace_id from agents where id = 'agent-mine'"
     );
     expect(rows[0]).toMatchObject({ name: 'Senior Reviewer', workspace_id: 'ws-default' });
+  });
+
+  it('lets a project manager staff an agent for the workspace', async () => {
+    session = { login: 'PM1', role: 'pm' };
+    const app = await startCloudApi();
+
+    const created = await call(app, 'POST', '/api/agents', {
+      id: 'agent-pm-created',
+      name: 'Project Reviewer',
+      role: 'Review Agent',
+      avatar: '◆',
+      color: '#111111',
+      description: 'Reviews a PM-owned project',
+      owner: 'PM1',
+      isMine: true,
+      modelProvider: 'OpenAI',
+      modelName: 'gpt-5',
+      systemPrompt: 'Review carefully.',
+      autonomyLevel: 'Supervised',
+      skills: [],
+      mcpServers: [],
+      createdAt: new Date().toISOString()
+    });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ name: 'Project Reviewer', owner: 'PM1' });
   });
 
   /**

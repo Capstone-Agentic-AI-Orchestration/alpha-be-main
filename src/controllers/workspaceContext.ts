@@ -21,6 +21,8 @@ const PUBLIC_EXACT = [
   '/github/auth/logout',
   '/github/profiles',
   '/github/profiles/remove',
+  '/github/oauth/desktop/start',
+  '/github/oauth/desktop/result',
   '/github/oauth/url',
   '/github/oauth/callback',
   // Reads req.session directly and answers 401 itself. Running the workspace

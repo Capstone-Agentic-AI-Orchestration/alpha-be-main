@@ -174,8 +174,8 @@ installed desktop until the next release.
 | Where | Setting | Purpose |
 | :--- | :--- | :--- |
 | Render | `ALPHA_DESKTOP_REPO` | which repository holds the releases; without it the Download button reports that this deployment offers no desktop app |
-| GitHub App | **Enable Device Flow** | without it, desktop sign-in cannot start |
-| Build machine | `ALPHA_CLOUD_API`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `ALPHA_ORG` in `alpha-be-main/.env` | baked into the installer; missing ones produce a local-only app with no cloud sync |
+| GitHub App | **Enable Device Flow** and configure the OAuth callback | device flow is the standalone fallback; hosted OAuth is required for targeting a remembered profile |
+| Build machine | `ALPHA_CLOUD_API`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `ALPHA_ORG` in `alpha-be-main/.env` | baked into the installer; `ALPHA_CLOUD_API` is required for account-specific profile sign-in |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
 
