@@ -198,6 +198,26 @@ describe('syncing a desktop on a team', () => {
     expect(res.status).toBe(503);
     expect(res.body.error).toMatch(/not connected to the team board: Node\.js detected/);
   });
+
+  /**
+   * v2.0.11 shipped an anon key Supabase refused. Every Sync answered the bare
+   * "Invalid API key", and people signed in again, which cannot help.
+   */
+  it('says the build carries a rejected key when Supabase refuses it', async () => {
+    const projects = teamBoard.projects;
+    teamBoard.projects = async () => {
+      throw new Error('Invalid API key');
+    };
+    try {
+      const { app } = await startApi();
+
+      const res = await call(app, 'POST', '/api/board/sync');
+      expect(res.status).toBe(502);
+      expect(res.body.error).toMatch(/rejected the API key this desktop build carries/);
+    } finally {
+      teamBoard.projects = projects;
+    }
+  });
 });
 
 describe('the roster on a team’s desktop', () => {

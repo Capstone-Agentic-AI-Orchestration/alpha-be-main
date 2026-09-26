@@ -221,6 +221,19 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
       }
       res.json(asSyncReport(pulled));
     } catch (err: any) {
+      /**
+       * Supabase checks the `apikey` header before anything else, and that
+       * header is the anon key baked into this build. When it is refused no
+       * retry or re-sign-in can help -- only an installer built with the
+       * project's current key -- so say that instead of the bare message.
+       */
+      if (/invalid api key/i.test(String(err?.message ?? ''))) {
+        return res.status(502).json({
+          error:
+            'Could not read the team board: Supabase rejected the API key this desktop build carries. ' +
+            'Signing in again will not fix it; install a build made with the current key.'
+        });
+      }
       res.status(502).json({ error: `Could not read the team board: ${err?.message ?? err}` });
     }
     return;
