@@ -165,6 +165,31 @@ async function loadCloudSync(org?: string) {
   return syncBoardFromGitHub;
 }
 
+/**
+ * The organisation importer run explicitly, then a sync -- what turning the
+ * organisation's repositories into projects takes now that a sync alone
+ * leaves the catalogue to the PMs. One report, as the old combined sync gave.
+ */
+async function loadImportThenSync(org?: string) {
+  const sync = await loadCloudSync(org);
+  const { importOrgRepositories } = await import('./githubRepoDiscovery.js');
+  return async (workspaceId: string) => {
+    const imported = { projectsImported: 0, skipped: [], errors: [] } as {
+      projectsImported: number;
+      skipped: Array<{ project: string; reason: string }>;
+      errors: Array<{ project: string; detail: string }>;
+    };
+    await importOrgRepositories(workspaceId, imported);
+    const report = await sync(workspaceId);
+    return {
+      ...report,
+      projectsImported: imported.projectsImported,
+      skipped: [...imported.skipped, ...report.skipped],
+      errors: [...imported.errors, ...report.errors]
+    };
+  };
+}
+
 describe('the board sync, in the cloud', () => {
   it('writes the pulled issues into Postgres', async () => {
     const sync = await loadCloudSync();
@@ -219,9 +244,23 @@ describe('the board sync, in the cloud', () => {
     expect(report.errors).toHaveLength(1);
     expect((await pg.query('select id from issues')).rows).toEqual([]);
   });
+
+  /**
+   * A workspace's catalogue is what its PMs started. A sync that turned every
+   * organisation repository into a project is how Alpha Workspace came to list
+   * the whole organisation.
+   */
+  it('does not turn the organisation’s repositories into projects', async () => {
+    const sync = await loadCloudSync('acme');
+
+    const report = await sync('ws-default');
+
+    expect(report.projectsImported).toBe(0);
+    expect((await pg.query<{ id: string }>('select id from projects order by id')).rows.map(r => r.id)).toEqual(['p1']);
+  });
 });
 
-describe('the organisation’s repositories are its projects', () => {
+describe('importing the organisation’s repositories, explicitly', () => {
   const projectRows = async () =>
     (
       await pg.query<{ id: string; key: string; name: string; workspace_id: string; github_org: string; resources: any }>(
@@ -233,7 +272,7 @@ describe('the organisation’s repositories are its projects', () => {
     typeof row.resources === 'string' ? JSON.parse(row.resources) : row.resources;
 
   it('makes a project for each repository, under GitHub’s id', async () => {
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
 
     const report = await sync('ws-default');
 
@@ -245,7 +284,7 @@ describe('the organisation’s repositories are its projects', () => {
 
   /** A repository new since the last sync should not wait for the next one. */
   it('reads the new project’s issues in the same sync', async () => {
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
     await sync('ws-default');
 
     const { rows } = await pg.query<{ id: string; identifier: string; project_id: string }>(
@@ -256,7 +295,7 @@ describe('the organisation’s repositories are its projects', () => {
 
   /** A second project for checkout would split its issues across two cards. */
   it('keeps the project someone attached by hand', async () => {
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
     await sync('ws-default');
 
     const checkout = (await projectRows()).filter(p => JSON.stringify(resourcesOf(p)).includes('acme/checkout'));
@@ -264,7 +303,7 @@ describe('the organisation’s repositories are its projects', () => {
   });
 
   it('says why a repository was left out', async () => {
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
 
     const report = await sync('ws-default');
 
@@ -278,7 +317,7 @@ describe('the organisation’s repositories are its projects', () => {
   });
 
   it('imports each repository once', async () => {
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
     await sync('ws-default');
 
     const second = await sync('ws-default');
@@ -293,7 +332,7 @@ describe('the organisation’s repositories are its projects', () => {
    */
   it('leaves every other workspace alone', async () => {
     await pg.exec(`insert into workspaces (id, name, slug) values ('ws-side', 'Side', 'side')`);
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
 
     const report = await sync('ws-side');
 
@@ -305,7 +344,7 @@ describe('the organisation’s repositories are its projects', () => {
   it('takes the next key when another workspace holds it', async () => {
     await pg.exec(`insert into workspaces (id, name, slug) values ('ws-side', 'Side', 'side')`);
     await pg.exec(`insert into projects (id, workspace_id, name, key) values ('side-1', 'ws-side', 'Mine', 'PAYM')`);
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
 
     await sync('ws-default');
 
@@ -313,7 +352,7 @@ describe('the organisation’s repositories are its projects', () => {
   });
 
   it('still syncs the existing projects when the organisation cannot be listed', async () => {
-    const sync = await loadCloudSync('acme');
+    const sync = await loadImportThenSync('acme');
     responder = p => {
       if (p.startsWith('/orgs/')) throw new Error('GitHub 403 on GET /orgs/acme/repos: Forbidden');
       return defaultResponder(p);
