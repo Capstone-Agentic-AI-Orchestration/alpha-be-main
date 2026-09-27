@@ -9,7 +9,7 @@ import {
   repoForProject,
   MappedIssue
 } from './githubIssueMapping.js';
-import { importOrgRepositories, issueIdFor } from './githubRepoDiscovery.js';
+import { issueIdFor } from './githubRepoDiscovery.js';
 
 /**
  * Pull the shared board down from GitHub.
@@ -292,10 +292,18 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
     errors: []
   };
 
-  // Repositories first, so a repository new since the last sync has its
-  // issues read in this one rather than the next.
-  await importOrgRepositories(workspaceId, report);
-
+  /**
+   * The projects that exist, and no others.
+   *
+   * This used to start by making a project for every repository in the
+   * organisation. Since 0015 a workspace's catalogue is what its PMs started
+   * -- the organisation's repositories are not all projects -- so that import
+   * only ever added rows nobody could see, each holding a project key. On the
+   * way in it also left the whole organisation looking PM-owned: 0015's
+   * backfill gave everything imported on 2026-09-22 to the longest-standing
+   * PM. Turning a repository into a project is a PM's decision, made by
+   * creating one; `importOrgRepositories` stays for an explicit importer.
+   */
   for (const project of await projectStore().list(workspaceId)) {
     await syncProject(project, report, workspaceId);
   }
