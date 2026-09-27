@@ -163,7 +163,22 @@ export function requireProjectWorkspace(
   projectId: string
 ): boolean {
   if (!req.workspace || !workspaceRegistry.canAccessProject(req.workspace, projectId)) {
-    // Do not reveal whether a project exists outside the caller's assignment.
+    /**
+     * A project the caller can already see is no secret, so say what is
+     * actually wrong. Developers discover every PM-owned project, and
+     * answering "not found" for one on their screen sent them looking for a
+     * missing project instead of a missing assignment.
+     *
+     * Anything they cannot discover still reads as absent: whether a project
+     * exists outside the caller's view is not revealed.
+     */
+    if (req.workspace && workspaceRegistry.canDiscoverProject(req.workspace, projectId)) {
+      res.status(403).json({
+        error: 'You are not assigned to this project. Ask its project manager to add you.',
+        code: 'project_not_assigned'
+      });
+      return false;
+    }
     res.status(404).json({ error: 'Project not found in the active workspace.' });
     return false;
   }
