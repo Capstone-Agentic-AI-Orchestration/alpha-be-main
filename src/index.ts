@@ -25,6 +25,7 @@ import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
 import { currentIdentity, warmIdentity } from './services/identityService.js';
+import { resumeRememberedSession } from './services/alphaGitHubToken.js';
 import { jsonErrorHandler } from './controllers/errorHandler.js';
 import { sqliteService } from './services/sqliteService.js';
 import { ensureAgentFiles } from './services/agentFileService.js';
@@ -413,6 +414,10 @@ function onListening(): void {
    * it is the first thing a returning user sees.
    */
   reconcileOnStartup();
+
+  // Sign back in as the last account used, if it was used within the idle
+  // limit; identity and the workspace gate wait for this.
+  if (IS_DESKTOP) void resumeRememberedSession();
 
   // Resolve who is using this copy, so the first issue anyone creates does not
   // pay for a `gh` subprocess.

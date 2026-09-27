@@ -34,15 +34,17 @@ import { logError, logInfo } from '../utils/logger.js';
  * It also means sign-in works on a machine where the app cannot register a URL
  * scheme.
  *
- * ## Where the token lives
+ * ## Where the tokens live
  *
- * A file in `ALPHA_DIR`, written `0600` -- readable by this user and nobody
- * else on the machine. That is weaker than the OS keyring, and deliberately so
- * for now: the daemon is a plain Node process that also runs from source, with
- * no Electron to reach `safeStorage` through. The threat it does close is
- * another account on a shared machine reading the file; the one it does not is
- * a process already running as this user, which could equally read the keyring
- * by asking the OS nicely.
+ * One per remembered account, in `github-vault.json` in `ALPHA_DIR`, so
+ * switching between accounts does not go back to GitHub. The installed app
+ * seals each with Electron's `safeStorage` (Windows DPAPI: only this Windows
+ * user can open them); a daemon run from source has no Electron and writes
+ * them readable only by this user (`0600`), as the single credential file
+ * always was. Neither stops a process already running as this user.
+ *
+ * An account unused for `PROFILE_IDLE_LIMIT_MS` (a week) is not resumed or
+ * switched to; it authorizes on GitHub again.
  */
 
 /** A GitHub sign-in that could not be completed, with something to do about it. */
@@ -55,6 +57,14 @@ export class DeviceFlowError extends Error {
 
 interface StoredCredential {
   token: string;
+  /**
+   * GitHub App user tokens expire (8 hours by default) and come with a
+   * refresh token (6 months). Kept so a remembered account can be renewed
+   * through the cloud instead of sending the person back to GitHub.
+   */
+  refreshToken?: string;
+  tokenExpiresAt?: string;
+  refreshExpiresAt?: string;
   userId?: string;
   login?: string;
   name?: string;
@@ -62,8 +72,20 @@ interface StoredCredential {
   obtainedAt: string;
 }
 
+/** Where the single active credential lived before accounts were remembered; migrated on first read. */
 const TOKEN_FILE = path.join(ALPHA_DIR, 'github-credential.json');
 const PROFILE_FILE = path.join(ALPHA_DIR, 'github-profiles.json');
+/** Every remembered account's credential, sealed where the OS can seal it. */
+const VAULT_FILE = path.join(ALPHA_DIR, 'github-vault.json');
+
+/**
+ * How long a remembered account stays signed in without being used.
+ *
+ * Switching between remembered accounts does not go back to GitHub, so this
+ * is what bounds a forgotten one: an account nobody has opened for a week has
+ * to be authorized again.
+ */
+export const PROFILE_IDLE_LIMIT_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Public metadata shown by the desktop profile picker. It never contains a token. */
 export interface ProfileSummary {
@@ -73,6 +95,90 @@ export interface ProfileSummary {
   avatarUrl?: string;
   lastUsedAt: string;
   active: boolean;
+  /** Can be switched to without GitHub: a stored credential, used within the idle limit. */
+  remembered: boolean;
+}
+
+/**
+ * Encryption for secrets at rest, supplied by the desktop shell.
+ *
+ * The packaged app sets this from Electron's `safeStorage` (Windows DPAPI:
+ * readable only by this Windows user) before it loads the daemon. A daemon run
+ * from source has no Electron, so it falls back to a file readable only by
+ * this user -- the protection the single credential file always had.
+ */
+interface SecretSealer {
+  available(): boolean;
+  seal(plain: string): string;
+  open(sealed: string): string;
+}
+
+function sealer(): SecretSealer | null {
+  const candidate = (globalThis as { __alphaSecretSealer?: SecretSealer }).__alphaSecretSealer;
+  try {
+    return candidate?.available() ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+interface VaultEntry {
+  sealing: 'os' | 'none';
+  data: string;
+}
+
+interface Vault {
+  entries: Record<string, VaultEntry>;
+}
+
+function readVault(): Vault {
+  try {
+    const raw = JSON.parse(fs.readFileSync(VAULT_FILE, 'utf8')) as Partial<Vault>;
+    return { entries: raw.entries && typeof raw.entries === 'object' ? raw.entries : {} };
+  } catch {
+    return { entries: {} };
+  }
+}
+
+function writeVault(vault: Vault): void {
+  fs.mkdirSync(ALPHA_DIR, { recursive: true });
+  const temporary = `${VAULT_FILE}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(vault, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(temporary, VAULT_FILE);
+}
+
+function rememberCredential(profileId: string, credential: StoredCredential): void {
+  const plain = JSON.stringify(credential);
+  const os = sealer();
+  const vault = readVault();
+  vault.entries[profileId] = os ? { sealing: 'os', data: os.seal(plain) } : { sealing: 'none', data: plain };
+  writeVault(vault);
+}
+
+function rememberedCredential(profileId: string): StoredCredential | null {
+  const entry = readVault().entries[profileId];
+  if (!entry) return null;
+  try {
+    const plain = entry.sealing === 'os' ? sealer()?.open(entry.data) : entry.data;
+    if (!plain) return null;
+    const credential = JSON.parse(plain) as StoredCredential;
+    return credential?.token ? credential : null;
+  } catch {
+    // Sealed by another Windows user, or on another machine: unreadable here.
+    return null;
+  }
+}
+
+function forgetCredential(profileId: string): void {
+  const vault = readVault();
+  if (!(profileId in vault.entries)) return;
+  delete vault.entries[profileId];
+  writeVault(vault);
+}
+
+function withinIdleLimit(profile: Pick<ProfileRecord, 'lastUsedAt'>, now = Date.now()): boolean {
+  const lastUsed = Date.parse(profile.lastUsedAt);
+  return Number.isFinite(lastUsed) && now - lastUsed <= PROFILE_IDLE_LIMIT_MS;
 }
 
 interface ProfileRecord {
@@ -94,13 +200,16 @@ const ACCESS_TOKEN_URL = 'https://github.com/login/oauth/access_token';
 let cached: StoredCredential | null | undefined;
 let cachedRegistry: ProfileRegistry | undefined;
 /**
- * A profile being remembered is not the same as this process being signed in.
- * Packaged desktop builds intentionally start with a fresh session so an old
- * token on disk cannot silently choose an account for the next person at the
- * keyboard. The token remains available for the updater, but application API
- * calls are gated until a fresh GitHub authorization completes in this process.
+ * Whether this process is signed in, as opposed to merely remembering accounts.
+ *
+ * A packaged desktop starts signed out and signs in by resuming the last
+ * account it used (`resumeRememberedSession`) or by a GitHub authorization.
+ * Resuming is only allowed within `PROFILE_IDLE_LIMIT_MS` of that account's
+ * last use; past it the account must authorize on GitHub again. Application
+ * API calls are gated on this until then.
  */
 let sessionAuthenticated = false;
+let sessionResume: Promise<void> = Promise.resolve();
 let sessionAuthenticationError: string | undefined;
 
 export function isSessionAuthenticated(): boolean {
@@ -163,17 +272,37 @@ function profileIdFor(credential: Pick<StoredCredential, 'userId' | 'login'>): s
   return login || undefined;
 }
 
-/** The stored credential, or null. Read once and kept, since it rarely changes. */
+/**
+ * Move the pre-vault single credential into the vault, once.
+ *
+ * Before accounts were remembered, the active account's token sat alone in
+ * `github-credential.json`. It becomes that account's vault entry -- sealed,
+ * where the OS can -- and the plain file goes.
+ */
+function migrateLegacyCredential(): void {
+  let legacy: StoredCredential | null = null;
+  try {
+    legacy = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as StoredCredential;
+  } catch {
+    return; // Nothing to migrate.
+  }
+  const id = legacy?.token ? profileIdFor(legacy) : undefined;
+  if (legacy && id && !readVault().entries[id]) rememberCredential(id, legacy);
+  try {
+    fs.rmSync(TOKEN_FILE, { force: true });
+  } catch (err) {
+    logError('Could not remove the pre-vault GitHub credential:', err);
+  }
+}
+
+/** The active account's stored credential, or null. Read once and kept, since it rarely changes. */
 export function storedCredential(): StoredCredential | null {
   if (cached !== undefined) return cached;
-  try {
-    cached = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as StoredCredential;
-    if (!cached?.token) cached = null;
-  } catch {
-    // No file, unreadable, or not JSON. All mean "not signed in", which is a
-    // state the caller handles rather than an error worth logging every time.
-    cached = null;
-  }
+  migrateLegacyCredential();
+  const activeId = readRegistry().activeProfileId;
+  // No active account, unreadable, or not JSON. All mean "not signed in",
+  // which is a state the caller handles rather than an error worth logging.
+  cached = activeId ? rememberedCredential(activeId) : null;
   return cached;
 }
 
@@ -196,11 +325,13 @@ export function profileSummaries(): ProfileSummary[] {
     writeRegistry(registry);
   }
   const activeId = registry.activeProfileId;
+  const vault = readVault();
   return [...registry.profiles]
     .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt))
     .map(profile => ({
       ...profile,
-      active: profile.id === activeId && Boolean(storedToken()) && (!IS_PACKAGED_DESKTOP || sessionAuthenticated)
+      active: profile.id === activeId && Boolean(storedToken()) && (!IS_PACKAGED_DESKTOP || sessionAuthenticated),
+      remembered: Boolean(vault.entries[profile.id]) && withinIdleLimit(profile)
     }));
 }
 
@@ -227,16 +358,15 @@ export function ghEnvironment(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 export function saveCredential(credential: StoredCredential): void {
-  fs.mkdirSync(ALPHA_DIR, { recursive: true });
-  // Written 0600 at creation rather than chmod-ed after, so it is never briefly
-  // world-readable. `mode` is ignored on Windows, where the user profile
-  // directory is the protection instead.
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify(credential, null, 2) + '\n', { mode: 0o600 });
   cached = credential;
   sessionAuthenticated = true;
   sessionAuthenticationError = undefined;
 
   const id = profileIdFor(credential);
+  // Kept against the account it belongs to, so switching back to it later does
+  // not need GitHub. With no account to key it by (GitHub did not say who it
+  // was), it serves this session only.
+  if (id) rememberCredential(id, credential);
   if (id && credential.login) {
     const registry = readRegistry();
     const now = new Date().toISOString();
@@ -259,33 +389,171 @@ export function saveCredential(credential: StoredCredential): void {
  * particular, the developer's own `gh` login is none of Alpha's business.
  */
 export function clearCredential(): void {
-  try {
-    fs.rmSync(TOKEN_FILE, { force: true });
-  } catch (err) {
-    logError('Could not remove the stored GitHub credential:', err);
-  }
+  const registry = readRegistry();
+  // Signing out forgets this account's credential; the others stay remembered.
+  if (registry.activeProfileId) forgetCredential(registry.activeProfileId);
   cached = null;
   sessionAuthenticated = false;
   sessionAuthenticationError = undefined;
-  const registry = readRegistry();
   registry.activeProfileId = undefined;
   writeRegistry(registry);
 }
 
-/** Remove a remembered profile and its active credential, if selected. */
+/** Remove a remembered profile and its credential, signing out if it was the active one. */
 export function removeProfile(profileId: string): void {
   const registry = readRegistry();
   registry.profiles = registry.profiles.filter(profile => profile.id !== profileId);
+  forgetCredential(profileId);
   if (registry.activeProfileId === profileId) {
-    try {
-      fs.rmSync(TOKEN_FILE, { force: true });
-    } catch (err) {
-      logError('Could not remove the profile credential:', err);
-    }
     cached = null;
     sessionAuthenticated = false;
     registry.activeProfileId = undefined;
   }
+  writeRegistry(registry);
+}
+
+/** Why a remembered account could not be switched to without GitHub. */
+export type SwitchRefusal = 'unknown_profile' | 'idle' | 'no_credential' | 'expired' | 'unverified';
+
+export type SwitchResult = { ok: true; login: string } | { ok: false; reason: SwitchRefusal; login?: string };
+
+/** Refresh this long before a token's expiry, so a switch never lands on one about to lapse. */
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * A credential whose access token can be used now, renewing it if it has
+ * lapsed; null if it cannot be.
+ *
+ * Renewal needs the app's client secret, which only the cloud holds, so the
+ * refresh token is exchanged through `ALPHA_CLOUD_API`.
+ */
+export async function usableCredential(
+  credential: StoredCredential,
+  fetchImpl: typeof fetch = fetch,
+  now = Date.now()
+): Promise<StoredCredential | null> {
+  const expiresAt = credential.tokenExpiresAt ? Date.parse(credential.tokenExpiresAt) : NaN;
+  if (!Number.isFinite(expiresAt) || expiresAt - now > TOKEN_REFRESH_MARGIN_MS) return credential;
+
+  const refreshExpiresAt = credential.refreshExpiresAt ? Date.parse(credential.refreshExpiresAt) : NaN;
+  if (!credential.refreshToken || !ALPHA_CLOUD_API) return null;
+  if (Number.isFinite(refreshExpiresAt) && refreshExpiresAt <= now) return null;
+
+  try {
+    const res = await fetchImpl(`${ALPHA_CLOUD_API}/github/oauth/desktop/refresh`, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: credential.refreshToken })
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as Partial<HostedOAuthTokens>;
+    if (!body.token) return null;
+    return {
+      ...credential,
+      token: body.token,
+      refreshToken: body.refreshToken ?? credential.refreshToken,
+      tokenExpiresAt: body.tokenExpiresAt,
+      refreshExpiresAt: body.refreshExpiresAt ?? credential.refreshExpiresAt,
+      obtainedAt: new Date(now).toISOString()
+    };
+  } catch (err) {
+    logError('Could not renew a remembered GitHub sign-in:', (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Switch to a remembered account without going to GitHub.
+ *
+ * Allowed while the account was used within `PROFILE_IDLE_LIMIT_MS` and its
+ * credential still works: GitHub is asked who the token belongs to, and it has
+ * to be this account. Anything else answers why, and the picker falls back to
+ * authorizing on GitHub. An idle, lapsed or mismatched credential is forgotten;
+ * one that merely could not be checked (offline) is kept for the next try.
+ */
+export async function switchToProfile(
+  profileId: string,
+  options: { fetchImpl?: typeof fetch; now?: number } = {}
+): Promise<SwitchResult> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const now = options.now ?? Date.now();
+  const registry = readRegistry();
+  const profile = registry.profiles.find(candidate => candidate.id === profileId);
+  if (!profile) return { ok: false, reason: 'unknown_profile' };
+
+  if (!withinIdleLimit(profile, now)) {
+    forgetCredential(profileId);
+    return { ok: false, reason: 'idle', login: profile.login };
+  }
+
+  const stored = rememberedCredential(profileId);
+  if (!stored) return { ok: false, reason: 'no_credential', login: profile.login };
+
+  const credential = await usableCredential(stored, fetchImpl, now);
+  if (!credential) {
+    forgetCredential(profileId);
+    return { ok: false, reason: 'expired', login: profile.login };
+  }
+
+  const user = await userFor(credential.token, fetchImpl);
+  if (!user?.login) return { ok: false, reason: 'unverified', login: profile.login };
+  if (user.login.toLowerCase() !== profile.login.toLowerCase()) {
+    forgetCredential(profileId);
+    return { ok: false, reason: 'expired', login: profile.login };
+  }
+
+  saveCredential({
+    ...credential,
+    userId: user.id ?? credential.userId,
+    login: user.login,
+    name: user.name ?? credential.name,
+    avatarUrl: user.avatarUrl ?? credential.avatarUrl
+  });
+  return { ok: true, login: user.login };
+}
+
+/**
+ * On launch, sign back in as the last account used, if it is still allowed to.
+ *
+ * Started once by the daemon at boot. Anything that decides whether the
+ * process is signed in waits on `sessionReady()` first, so the first request
+ * from the window does not see the brief signed-out state before this lands.
+ */
+export function resumeRememberedSession(options: { fetchImpl?: typeof fetch; now?: number } = {}): Promise<void> {
+  sessionResume = (async () => {
+    storedCredential(); // Migrates a pre-vault credential first, so it can be resumed.
+    const activeId = readRegistry().activeProfileId;
+    if (!activeId || sessionAuthenticated) return;
+    const result = await switchToProfile(activeId, options);
+    if (result.ok) logInfo(`Resumed the remembered GitHub account ${result.login}`);
+  })().catch(err => {
+    logError('Could not resume the remembered GitHub account:', (err as Error).message);
+  });
+  return sessionResume;
+}
+
+/** Resolves once any launch-time resume has settled. */
+export function sessionReady(): Promise<void> {
+  return sessionResume;
+}
+
+/** How often an account in use has its last use recorded; see `touchActiveProfile`. */
+const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Record that the signed-in account is still in use.
+ *
+ * The idle limit counts from last use, and an app left open for days is in
+ * use. At most once an hour, so a status poll does not rewrite the file.
+ */
+export function touchActiveProfile(now = Date.now()): void {
+  if (!sessionAuthenticated && IS_PACKAGED_DESKTOP) return;
+  const registry = readRegistry();
+  const profile = registry.profiles.find(candidate => candidate.id === registry.activeProfileId);
+  if (!profile) return;
+  const lastUsed = Date.parse(profile.lastUsedAt);
+  if (Number.isFinite(lastUsed) && now - lastUsed < TOUCH_INTERVAL_MS) return;
+  profile.lastUsedAt = new Date(now).toISOString();
   writeRegistry(registry);
 }
 
@@ -334,8 +602,15 @@ export interface HostedOAuthStart {
   authorizationUrl: string;
 }
 
-export interface HostedOAuthCredential {
+/** An access token and what renews it, as the cloud hands them over. */
+export interface HostedOAuthTokens {
   token: string;
+  refreshToken?: string;
+  tokenExpiresAt?: string;
+  refreshExpiresAt?: string;
+}
+
+export interface HostedOAuthCredential extends HostedOAuthTokens {
   username: string;
   profileId?: string;
   name?: string;
@@ -412,12 +687,18 @@ export async function awaitHostedOAuth(
     const credential: HostedOAuthCredential = {
       token: body.token,
       username: body.username,
+      ...(body.refreshToken ? { refreshToken: body.refreshToken } : {}),
+      ...(body.tokenExpiresAt ? { tokenExpiresAt: body.tokenExpiresAt } : {}),
+      ...(body.refreshExpiresAt ? { refreshExpiresAt: body.refreshExpiresAt } : {}),
       ...(body.profileId ? { profileId: body.profileId } : {}),
       ...(body.name ? { name: body.name } : {}),
       ...(body.avatarUrl ? { avatarUrl: body.avatarUrl } : {})
     };
     saveCredential({
       token: credential.token,
+      ...(credential.refreshToken ? { refreshToken: credential.refreshToken } : {}),
+      ...(credential.tokenExpiresAt ? { tokenExpiresAt: credential.tokenExpiresAt } : {}),
+      ...(credential.refreshExpiresAt ? { refreshExpiresAt: credential.refreshExpiresAt } : {}),
       login: credential.username,
       ...(credential.profileId ? { userId: credential.profileId } : {}),
       ...(credential.name ? { name: credential.name } : {}),
@@ -470,9 +751,33 @@ export async function requestDeviceCode(fetchImpl: typeof fetch = fetch): Promis
   };
 }
 
+/**
+ * GitHub's token response, in the shape Alpha stores; null if it holds no token.
+ *
+ * `expires_in` and `refresh_token_expires_in` are seconds from now, and are
+ * absent for a token that does not expire (an OAuth app, or a GitHub App with
+ * expiring tokens turned off).
+ */
+export function tokensFromGitHub(body: Record<string, unknown>, now = Date.now()): HostedOAuthTokens | null {
+  const token = typeof body.access_token === 'string' ? body.access_token : '';
+  if (!token) return null;
+  const seconds = (value: unknown) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  const expiresIn = seconds(body.expires_in);
+  const refreshIn = seconds(body.refresh_token_expires_in);
+  return {
+    token,
+    ...(typeof body.refresh_token === 'string' && body.refresh_token ? { refreshToken: body.refresh_token } : {}),
+    ...(expiresIn ? { tokenExpiresAt: new Date(now + expiresIn * 1000).toISOString() } : {}),
+    ...(refreshIn ? { refreshExpiresAt: new Date(now + refreshIn * 1000).toISOString() } : {})
+  };
+}
+
 /** One exchange attempt: the token, or why it is not ready. */
 type PollResult =
-  | { status: 'granted'; token: string }
+  | { status: 'granted'; token: string; tokens: HostedOAuthTokens }
   | { status: 'pending'; slowDown: boolean }
   | { status: 'failed'; message: string };
 
@@ -489,7 +794,8 @@ export async function pollOnce(deviceCode: string, fetchImpl: typeof fetch = fet
   });
 
   const body = (await res.json().catch(() => ({}))) as Record<string, string>;
-  if (body.access_token) return { status: 'granted', token: body.access_token };
+  const tokens = tokensFromGitHub(body);
+  if (tokens) return { status: 'granted', token: tokens.token, tokens };
 
   switch (body.error) {
     // The person has not finished in the browser yet. Expected, repeatedly.
@@ -565,7 +871,7 @@ export async function awaitAuthorization(
     if (result.status === 'granted') {
       const user = await userFor(result.token, fetchImpl);
       const credential: StoredCredential = {
-        token: result.token,
+        ...result.tokens,
         userId: user?.id,
         login: user?.login,
         name: user?.name,

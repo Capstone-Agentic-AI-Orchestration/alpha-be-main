@@ -74,4 +74,44 @@ describe('desktop GitHub OAuth routing', () => {
       message: expect.stringMatching(/authorized @someone-else.*started for @pineapple-2005/i)
     });
   });
+
+  /**
+   * A remembered desktop account outlives its 8-hour GitHub token by renewing
+   * it here, where the client secret is, rather than going back to GitHub.
+   */
+  it('renews a desktop token with the client secret, and hands back the new pair', async () => {
+    process.env.GITHUB_CLIENT_ID = 'Iv1.test-client';
+    process.env.GITHUB_CLIENT_SECRET = 'test-secret';
+    vi.resetModules();
+    const sent: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(
+        JSON.stringify({ access_token: 'ghu_new', refresh_token: 'ghr_new', expires_in: 28800, refresh_token_expires_in: 15897600 }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }));
+
+    const { RestGitHubService } = await import('./githubService.js');
+    const tokens = await new RestGitHubService().refreshDesktopToken('ghr_old');
+
+    expect(sent[0]).toEqual({ client_id: 'Iv1.test-client', client_secret: 'test-secret', grant_type: 'refresh_token', refresh_token: 'ghr_old' });
+    expect(tokens).toMatchObject({ token: 'ghu_new', refreshToken: 'ghr_new' });
+    expect(tokens.tokenExpiresAt).toBeTruthy();
+  });
+
+  it('says so when GitHub will not renew it', async () => {
+    process.env.GITHUB_CLIENT_ID = 'Iv1.test-client';
+    process.env.GITHUB_CLIENT_SECRET = 'test-secret';
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ error: 'bad_refresh_token', error_description: 'The refresh token passed is incorrect or expired.' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    ));
+
+    const { RestGitHubService } = await import('./githubService.js');
+    await expect(new RestGitHubService().refreshDesktopToken('ghr_old')).rejects.toThrow(/incorrect or expired/);
+  });
 });

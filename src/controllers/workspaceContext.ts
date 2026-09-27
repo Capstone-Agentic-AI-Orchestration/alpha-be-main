@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { IS_CLOUD, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { currentIdentity } from '../services/identityService.js';
-import { isSessionAuthenticated } from '../services/alphaGitHubToken.js';
+import { isSessionAuthenticated, sessionReady } from '../services/alphaGitHubToken.js';
 import { workspaceRegistry, WorkspaceRole } from '../services/workspaceRegistry.js';
 
 /**
@@ -21,8 +21,12 @@ const PUBLIC_EXACT = [
   '/github/auth/logout',
   '/github/profiles',
   '/github/profiles/remove',
+  // Switching is how a signed-out window signs in as a remembered account.
+  '/github/profiles/switch',
   '/github/oauth/desktop/start',
   '/github/oauth/desktop/result',
+  // Authenticated by the refresh token it carries; a desktop has no session.
+  '/github/oauth/desktop/refresh',
   '/github/oauth/url',
   '/github/oauth/callback',
   // Reads req.session directly and answers 401 itself. Running the workspace
@@ -68,6 +72,8 @@ async function callerFor(
     return { login: req.session.login, role: req.session.role as WorkspaceRole };
   }
 
+  // A remembered account may still be resuming at launch.
+  if (IS_PACKAGED_DESKTOP) await sessionReady();
   if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
     return { login: '', refused: 'Sign in with GitHub to use Alpha.' };
   }

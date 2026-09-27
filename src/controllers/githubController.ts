@@ -12,7 +12,7 @@ import { sessionService } from '../services/sessionService.js';
 import { SESSION_COOKIE, clearedSessionCookie, readCookie, sessionCookie } from './sessionContext.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { desktopOnly } from './desktopOnly.js';
-import { profileSummaries, removeProfile } from '../services/alphaGitHubToken.js';
+import { profileSummaries, removeProfile, switchToProfile } from '../services/alphaGitHubToken.js';
 
 export const githubRouter = Router();
 
@@ -29,6 +29,46 @@ githubRouter.post('/github/profiles/remove', desktopOnly, (req: Request, res: Re
   if (!id) return res.status(400).json({ error: 'A profile id is required.' });
   removeProfile(id);
   return res.json({ success: true });
+});
+
+/**
+ * Switch to a remembered account without going to GitHub.
+ *
+ * Always 200 once the request is well formed: `switched: false` with a
+ * `reason` is the answer, not an error -- the account was idle for a week, its
+ * sign-in lapsed, or it could not be checked -- and the picker then asks GitHub
+ * to authorize it instead. On a switch, the identity and the database token
+ * held for the previous account are dropped, as sign-out drops them.
+ */
+githubRouter.post('/github/profiles/switch', desktopOnly, async (req: Request, res: Response) => {
+  const id = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+  if (!id) return res.status(400).json({ error: 'A profile id is required.' });
+
+  const result = await switchToProfile(id);
+  if (!result.ok) {
+    return res.json({ switched: false, reason: result.reason, ...(result.login ? { login: result.login } : {}) });
+  }
+  await refreshIdentity();
+  supabaseService.forgetCredentials();
+  return res.json({ switched: true, login: result.login });
+});
+
+/**
+ * Renew a desktop's expiring GitHub token (cloud only).
+ *
+ * The desktop cannot hold the client secret GitHub requires for a refresh, so
+ * it sends its refresh token here. Public: the refresh token is the proof, and
+ * the desktop has no session to present.
+ */
+githubRouter.post('/github/oauth/desktop/refresh', async (req: Request, res: Response) => {
+  const refreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken.trim() : '';
+  if (!refreshToken) return res.status(400).json({ error: 'A refresh token is required.' });
+  try {
+    return res.json(await githubService.refreshDesktopToken(refreshToken));
+  } catch (err: any) {
+    // Refused or expired: the desktop falls back to authorizing on GitHub.
+    return res.status(401).json({ error: err?.message ?? 'GitHub would not renew the sign-in.' });
+  }
 });
 
 githubRouter.get('/github/auth', async (req: Request, res: Response) => {
