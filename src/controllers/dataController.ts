@@ -209,7 +209,8 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
     const source = supabaseService.boardSource();
     if (!source) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
     try {
-      const pulled = await pullSharedBoard(req.workspace!.workspaceId, source);
+      // Who is pulling, so a project the team dropped leaves this machine too.
+      const pulled = await pullSharedBoard(req.workspace!.workspaceId, source, req.workspace!.userId);
       /**
        * Then this machine's own agents and squads, which the team does not
        * have. An issue assigned to one of them names a row the cloud has to

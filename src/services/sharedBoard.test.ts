@@ -506,6 +506,85 @@ describe('cards this machine made before it joined the team', () => {
   });
 });
 
+/**
+ * The cloud decides the catalogue. A project it hid or deleted used to stay on
+ * every desktop -- the whole GitHub organisation, in Alpha Workspace's case --
+ * because a pull never removed anything.
+ */
+describe('a project the team no longer lists', () => {
+  const payments = (over: Partial<Project> = {}) =>
+    cloudProject({
+      id: 'gh-repo-200',
+      name: 'payments',
+      key: 'PAY',
+      resources: [{ id: 'gh-repo-200-repo', type: 'github_repo', name: 'acme/payments', pathOrUrl: 'https://github.com/acme/payments' }],
+      createdBy: 'PM1',
+      ...over
+    });
+  const paymentsIssue = cloudIssue({ id: 'gh-issue-9100', identifier: 'PAY-1', projectId: 'gh-repo-200' });
+  const ids = (svc: any, inWorkspace: <T>(fn: () => T) => T) =>
+    inWorkspace(() => svc.getProjects()).map((p: Project) => p.id).sort();
+
+  it('leaves this machine, cards and all, and its cards are not written back', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard(
+      'ws-default',
+      source({ projects: [cloudProject({ createdBy: 'PM1' }), payments()], issues: [cloudIssue(), paymentsIssue] }),
+      'Dev1'
+    );
+
+    // The cloud hides payments; its card is still readable there, as RLS allows.
+    const report = await board.pullSharedBoard(
+      'ws-default',
+      source({ projects: [cloudProject({ createdBy: 'PM1' })], issues: [cloudIssue(), paymentsIssue] }),
+      'Dev1'
+    );
+
+    expect(report.projectsRemoved).toBe(1);
+    expect(ids(svc, inWorkspace)).toEqual(['gh-repo-100']);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id)).toEqual(['gh-issue-9001']);
+  });
+
+  it('keeps a project the person syncing made, which may not have reached the cloud yet', async () => {
+    const { svc, board, inWorkspace } = await load();
+    inWorkspace(() => svc.createProject({ id: 'proj-mine', name: 'Mine', key: 'MINE', resources: [], createdBy: 'dev1' }));
+
+    const report = await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }), 'Dev1');
+
+    expect(report.projectsRemoved).toBe(0);
+    expect(ids(svc, inWorkspace)).toContain('proj-mine');
+  });
+
+  it('keeps a project with no creator, which predates the team board', async () => {
+    const { svc, board, inWorkspace } = await load();
+    inWorkspace(() => svc.createProject({ id: 'proj-old', name: 'Old', key: 'OLD', resources: [] }));
+
+    await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }), 'Dev1');
+
+    expect(ids(svc, inWorkspace)).toContain('proj-old');
+  });
+
+  /** An unauthenticated read sees no rows; acting on it would empty the catalogue. */
+  it('removes nothing when the cloud lists no projects at all', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source({ projects: [payments()], issues: [paymentsIssue] }), 'Dev1');
+
+    const report = await board.pullSharedBoard('ws-default', source({ projects: [], issues: [] }), 'Dev1');
+
+    expect(report.projectsRemoved).toBe(0);
+    expect(ids(svc, inWorkspace)).toEqual(['gh-repo-200']);
+  });
+
+  it('removes nothing when the caller does not say who is syncing', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' }), payments()] }));
+
+    await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }));
+
+    expect(ids(svc, inWorkspace)).toEqual(['gh-repo-100', 'gh-repo-200']);
+  });
+});
+
 describe('asSyncReport', () => {
   it('puts clashes where the app shows them one by one', async () => {
     const { board } = await load();
@@ -513,6 +592,7 @@ describe('asSyncReport', () => {
     const shaped = board.asSyncReport({
       projectsAdded: 2, projectsUpdated: 1, issuesAdded: 5, issuesUpdated: 3, unchanged: 4, comments: 6,
       agentsAdded: 0, agentsUpdated: 0, squadsAdded: 0, squadsUpdated: 0, projectsAdopted: 0, issuesAdopted: 0,
+      projectsRemoved: 0,
       unpublished: { agents: [], squads: [] },
       conflicts: [{ project: 'MINE', detail: 'clash' }]
     });

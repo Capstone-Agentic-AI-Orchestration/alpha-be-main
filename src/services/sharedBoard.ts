@@ -95,6 +95,8 @@ export interface PullReport {
   /** This machine's own projects and cards moved onto the team's ids; see `rekeyProject`. */
   projectsAdopted: number;
   issuesAdopted: number;
+  /** Projects the team no longer lists, taken off this machine; see `removeDroppedProjects`. */
+  projectsRemoved: number;
   /**
    * This machine's own agents and squads that the team does not have, for the
    * caller to publish. Read here, sent from `dataController`, which is where
@@ -114,8 +116,8 @@ export interface PullReport {
 export function asSyncReport(pull: PullReport): SyncReport {
   return {
     projectsImported: pull.projectsAdded,
-    // Adopted projects count as changed, so the app re-reads its project list.
-    projects: pull.projectsAdded + pull.projectsUpdated + pull.projectsAdopted,
+    // Adopted and removed projects count as changed, so the app re-reads its project list.
+    projects: pull.projectsAdded + pull.projectsUpdated + pull.projectsAdopted + pull.projectsRemoved,
     // Cards, which is what the app reports as new and updated. Agents and
     // squads move too, and are in the log rather than in a count of issues.
     created: pull.issuesAdded,
@@ -263,8 +265,17 @@ function differs<T extends object>(mine: T, next: Partial<T>): boolean {
   return (Object.keys(next) as Array<keyof T>).some(key => same(mine[key]) !== same(next[key]));
 }
 
-/** Write the team's board into this machine's store. */
-export async function pullSharedBoard(workspaceId: string, source: SharedBoardSource): Promise<PullReport> {
+/**
+ * Write the team's board into this machine's store.
+ *
+ * `syncingLogin` is who is pulling. Given it, a project the team no longer
+ * lists is taken off this machine as well; see `removeDroppedProjects`.
+ */
+export async function pullSharedBoard(
+  workspaceId: string,
+  source: SharedBoardSource,
+  syncingLogin?: string
+): Promise<PullReport> {
   // Read everything before writing anything, so a failure part-way through
   // the network leaves the local board as it was.
   const [projects, issues, comments, agents, squads, owners, links, assignments] = await Promise.all([
@@ -291,6 +302,7 @@ export async function pullSharedBoard(workspaceId: string, source: SharedBoardSo
     squadsUpdated: 0,
     projectsAdopted: 0,
     issuesAdopted: 0,
+    projectsRemoved: 0,
     unpublished: { agents: [], squads: [] },
     conflicts: []
   };
@@ -299,6 +311,9 @@ export async function pullSharedBoard(workspaceId: string, source: SharedBoardSo
     // The roster first: an issue names an agent, and a squad names its members.
     applyRoster(agents, squads, report);
     applyProjects(projects, report);
+    // Before the issues, so a dropped project's cards are not written back
+    // under it -- `applyIssues` skips a card whose project is not here.
+    if (syncingLogin) removeDroppedProjects(projects, syncingLogin, report);
     applyIssues(issues, report);
     applyComments(comments, report);
   });
@@ -525,6 +540,46 @@ function applyProjects(projects: Project[], report: PullReport): void {
 
     sqliteService.createProject({ ...cloud, ...sharedProjectFields(cloud) });
     report.projectsAdded += 1;
+  }
+}
+
+/**
+ * Take off this machine the projects the team no longer lists.
+ *
+ * The rest of the pull never removes anything, so a project the cloud hid or
+ * deleted -- a repository no PM started, say -- stayed on every desktop, with
+ * whoever last owned it as its creator, and went on appearing in the
+ * catalogue and the chat. The cloud decides the catalogue; this follows it.
+ *
+ * Only what can have come from the team: a project someone else created
+ * reached this machine through a pull, so the team not listing it any more is
+ * the answer. A project the syncing person made themselves may simply not have
+ * reached the cloud yet (made offline, a failed share), and one with no
+ * creator predates the team board; both stay.
+ *
+ * An empty listing removes nothing. That is what an unauthenticated read
+ * returns -- the database token failed and the anon key saw no rows -- and
+ * acting on it would clear the whole catalogue from the machine.
+ *
+ * Removing a project takes its cards and runs here with it (the tables
+ * cascade). The cloud keeps its own copy of the cards.
+ */
+function removeDroppedProjects(cloudProjects: Project[], syncingLogin: string, report: PullReport): void {
+  if (cloudProjects.length === 0) return;
+
+  const listed = new Set(cloudProjects.map(project => project.id));
+  const me = syncingLogin.trim().toLowerCase();
+
+  for (const local of sqliteService.getProjects()) {
+    if (listed.has(local.id)) continue;
+    const creator = local.createdBy?.trim().toLowerCase();
+    if (!creator || creator === me) continue;
+
+    try {
+      if (sqliteService.deleteProject(local.id)) report.projectsRemoved += 1;
+    } catch (err) {
+      report.conflicts.push({ project: local.key, detail: `Could not remove: ${(err as Error).message}` });
+    }
   }
 }
 
