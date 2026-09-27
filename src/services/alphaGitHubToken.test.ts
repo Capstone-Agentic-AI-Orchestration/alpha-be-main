@@ -245,3 +245,157 @@ describe('hosted account-specific desktop sign-in', () => {
     process.env.ALPHA_CLOUD_API = '';
   });
 });
+
+/**
+ * Remembered accounts: switching between them does not go back to GitHub, and
+ * a week without use is the limit.
+ */
+describe('remembered accounts', () => {
+  const WEEK_AND_A_DAY = 8 * 24 * 60 * 60 * 1000;
+  const alice = { token: 'gho_alice', userId: '1', login: 'alice', obtainedAt: '2026-09-20T00:00:00.000Z' };
+  const bob = { token: 'gho_bob', userId: '2', login: 'bob', obtainedAt: '2026-09-20T00:00:00.000Z' };
+  const githubUser = (login: string, id: number) => ({ body: { login, id } });
+
+  afterEach(() => {
+    process.env.ALPHA_CLOUD_API = '';
+    delete (globalThis as any).__alphaSecretSealer;
+  });
+
+  it('switches to a remembered account without asking GitHub to authorize it', async () => {
+    const mod = await load();
+    mod.saveCredential(alice);
+    mod.saveCredential(bob);
+    const { impl, calls } = stubFetch([githubUser('alice', 1)]);
+
+    const result = await mod.switchToProfile('1', { fetchImpl: impl });
+
+    expect(result).toEqual({ ok: true, login: 'alice' });
+    expect(mod.storedToken()).toBe('gho_alice');
+    // Only "who is this token", never an authorization.
+    expect(calls.map(call => call.url)).toEqual(['https://api.github.com/user']);
+    expect(mod.profileSummaries().find(p => p.id === '1')).toMatchObject({ active: true, remembered: true });
+  });
+
+  it('sends an account unused for a week back to GitHub, and forgets its token', async () => {
+    const mod = await load();
+    mod.saveCredential(alice);
+    mod.saveCredential(bob);
+    const { impl, calls } = stubFetch([]);
+
+    const result = await mod.switchToProfile('1', { fetchImpl: impl, now: Date.now() + WEEK_AND_A_DAY });
+
+    expect(result).toEqual({ ok: false, reason: 'idle', login: 'alice' });
+    expect(calls).toEqual([]);
+    expect(mod.storedToken()).toBe('gho_bob');
+    expect(mod.profileSummaries().find(p => p.id === '1')?.remembered).toBe(false);
+  });
+
+  it('renews a lapsed token through the cloud rather than asking GitHub', async () => {
+    process.env.ALPHA_CLOUD_API = 'https://cloud.test/api';
+    const mod = await load();
+    mod.saveCredential({ ...alice, tokenExpiresAt: '2026-09-20T08:00:00.000Z', refreshToken: 'ghr_alice' });
+    mod.saveCredential(bob);
+    const { impl, calls } = stubFetch([
+      { body: { token: 'gho_alice_2', refreshToken: 'ghr_alice_2', tokenExpiresAt: '2099-01-01T00:00:00.000Z' } },
+      githubUser('alice', 1)
+    ]);
+
+    const result = await mod.switchToProfile('1', { fetchImpl: impl });
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toMatchObject({ url: 'https://cloud.test/api/github/oauth/desktop/refresh', body: { refreshToken: 'ghr_alice' } });
+    expect(mod.storedToken()).toBe('gho_alice_2');
+  });
+
+  it('asks GitHub again when the token now belongs to someone else', async () => {
+    const mod = await load();
+    mod.saveCredential(alice);
+    mod.saveCredential(bob);
+    const { impl } = stubFetch([githubUser('mallory', 9)]);
+
+    expect(await mod.switchToProfile('1', { fetchImpl: impl })).toEqual({ ok: false, reason: 'expired', login: 'alice' });
+    expect(mod.profileSummaries().find(p => p.id === '1')?.remembered).toBe(false);
+  });
+
+  it('keeps the token when GitHub simply cannot be reached', async () => {
+    const mod = await load();
+    mod.saveCredential(alice);
+    mod.saveCredential(bob);
+    const { impl } = stubFetch([{ ok: false, status: 503, body: {} }]);
+
+    expect(await mod.switchToProfile('1', { fetchImpl: impl })).toEqual({ ok: false, reason: 'unverified', login: 'alice' });
+    expect(mod.profileSummaries().find(p => p.id === '1')?.remembered).toBe(true);
+  });
+
+  it('signs a packaged app back in as the last account on launch', async () => {
+    (await load('Iv1.testclientid', true)).saveCredential(alice);
+    const relaunched = await load('Iv1.testclientid', true);
+    expect(relaunched.isSessionAuthenticated()).toBe(false);
+    const { impl } = stubFetch([githubUser('alice', 1)]);
+
+    await relaunched.resumeRememberedSession({ fetchImpl: impl });
+
+    expect(relaunched.isSessionAuthenticated()).toBe(true);
+    expect(relaunched.storedToken()).toBe('gho_alice');
+  });
+
+  it('does not resume an account nobody has used for a week', async () => {
+    (await load('Iv1.testclientid', true)).saveCredential(alice);
+    const relaunched = await load('Iv1.testclientid', true);
+    const { impl } = stubFetch([]);
+
+    await relaunched.resumeRememberedSession({ fetchImpl: impl, now: Date.now() + WEEK_AND_A_DAY });
+
+    expect(relaunched.isSessionAuthenticated()).toBe(false);
+  });
+
+  it('moves the single pre-vault credential into the vault, and removes the plain file', async () => {
+    fs.mkdirSync(tmp, { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'github-credential.json'), JSON.stringify(alice));
+    fs.writeFileSync(
+      path.join(tmp, 'github-profiles.json'),
+      JSON.stringify({ activeProfileId: '1', profiles: [{ id: '1', login: 'alice', lastUsedAt: new Date().toISOString() }] })
+    );
+    const mod = await load();
+
+    expect(mod.storedToken()).toBe('gho_alice');
+    expect(fs.existsSync(path.join(tmp, 'github-credential.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'github-vault.json'))).toBe(true);
+  });
+
+  it('seals every token with the OS where the desktop shell provides it', async () => {
+    (globalThis as any).__alphaSecretSealer = {
+      available: () => true,
+      seal: (plain: string) => `sealed:${Buffer.from(plain).toString('base64')}`,
+      open: (sealed: string) => Buffer.from(sealed.slice('sealed:'.length), 'base64').toString()
+    };
+    const mod = await load();
+    mod.saveCredential(alice);
+    mod.saveCredential(bob);
+
+    const onDisk = fs.readFileSync(path.join(tmp, 'github-vault.json'), 'utf8');
+    expect(onDisk).not.toContain('gho_alice');
+    expect(onDisk).not.toContain('gho_bob');
+    const { impl } = stubFetch([githubUser('alice', 1)]);
+    expect((await mod.switchToProfile('1', { fetchImpl: impl })).ok).toBe(true);
+    expect(mod.storedToken()).toBe('gho_alice');
+  });
+});
+
+describe('what GitHub hands back when it signs someone in', () => {
+  it('keeps the refresh token and turns lifetimes into dates', async () => {
+    const mod = await load();
+    const now = Date.parse('2026-09-28T00:00:00.000Z');
+
+    expect(
+      mod.tokensFromGitHub({ access_token: 'ghu_x', refresh_token: 'ghr_x', expires_in: 28800, refresh_token_expires_in: 15897600 }, now)
+    ).toEqual({
+      token: 'ghu_x',
+      refreshToken: 'ghr_x',
+      tokenExpiresAt: '2026-09-28T08:00:00.000Z',
+      refreshExpiresAt: '2027-03-31T00:00:00.000Z'
+    });
+    expect(mod.tokensFromGitHub({ access_token: 'gho_y' }, now)).toEqual({ token: 'gho_y' });
+    expect(mod.tokensFromGitHub({ error: 'bad_verification_code' }, now)).toBeNull();
+  });
+});

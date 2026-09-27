@@ -32,7 +32,11 @@ import {
   requestHostedOAuth,
   awaitHostedOAuth,
   ghEnvironment,
-  storedCredential
+  sessionReady,
+  storedCredential,
+  tokensFromGitHub,
+  touchActiveProfile,
+  type HostedOAuthTokens
 } from './alphaGitHubToken.js';
 
 type ExecOptions = {
@@ -164,6 +168,10 @@ export interface GitHubLoginStart {
 
 export interface DesktopOAuthCredential {
   token: string;
+  /** Renewal, when GitHub issues expiring tokens; see `tokensFromGitHub`. */
+  refreshToken?: string;
+  tokenExpiresAt?: string;
+  refreshExpiresAt?: string;
   username: string;
   profileId?: string;
   name?: string;
@@ -353,6 +361,8 @@ export interface IGitHubService {
   isDesktopOAuthState(state?: string): boolean;
   takeDesktopOAuthResult(state: string, handoffToken: string): DesktopOAuthPoll;
   failDesktopOAuth(state: string, message: string): void;
+  /** Renew a desktop's expiring GitHub token; the client secret stays in the cloud. */
+  refreshDesktopToken(refreshToken: string): Promise<HostedOAuthTokens>;
   /** Null when GITHUB_APP_SLUG is unset -- there is no App to link to. */
   getGitHubAppInstallUrl(): string | null;
   handleGitHubAppWebhook(event: string, payload: any, signature?: string, rawBody?: Buffer): Promise<any>;
@@ -375,9 +385,10 @@ export class GhCliGitHubService implements IGitHubService {
    * it no longer holds is worse than one that asks you to sign in again.
    */
   async checkAuth(): Promise<GitHubAuthInfo> {
-    // Remembered credentials are deliberately not enough to open a packaged
-    // desktop session. The profile picker must complete a fresh GitHub device
-    // flow after every launch or account switch.
+    // A packaged desktop opens signed in only by resuming a remembered account
+    // used within the idle limit, or by a GitHub authorization in this process.
+    // Wait for the launch-time resume, so the window's first check sees it.
+    if (IS_PACKAGED_DESKTOP) await sessionReady();
     if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
       return {
         authenticated: false,
@@ -396,6 +407,8 @@ export class GhCliGitHubService implements IGitHubService {
 
     const user = await userFor(credential.token);
     if (!user?.login) return { authenticated: false, mode: 'cli', tokenSource: 'oauth', cliMissing };
+    // Still in use, for the idle limit.
+    touchActiveProfile();
     const remembered = activeProfile();
 
     return {
@@ -928,6 +941,10 @@ export class GhCliGitHubService implements IGitHubService {
     // There is no hosted handoff state in the local CLI implementation.
   }
 
+  async refreshDesktopToken(): Promise<HostedOAuthTokens> {
+    throw new Error('Renewing a desktop sign-in is only available through the hosted service.');
+  }
+
   getGitHubAppInstallUrl(): string | null {
     return GITHUB_APP_SLUG ? `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new` : null;
   }
@@ -1285,7 +1302,9 @@ export class RestGitHubService implements IGitHubService {
           expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
           handoffToken: pending.desktopHandoffToken,
           result: {
-            token: result.token,
+            // Renewal too, so the desktop can keep this account signed in
+            // past the token's own expiry without coming back to GitHub.
+            ...(tokensFromGitHub(data) ?? { token: result.token }),
             username: result.username,
             ...(result.profileId ? { profileId: result.profileId } : {}),
             ...(result.name ? { name: result.name } : {}),
@@ -1335,6 +1354,36 @@ export class RestGitHubService implements IGitHubService {
       handoffToken: pending.desktopHandoffToken,
       error: message
     });
+  }
+
+  /**
+   * Renew a desktop's expiring GitHub token.
+   *
+   * GitHub requires the client secret to refresh a GitHub App user token, and
+   * an installer cannot carry one, so the desktop sends its refresh token here.
+   * The refresh token is itself the proof: it was issued to that account, is
+   * single-use (GitHub rotates it), and is never stored in the cloud.
+   */
+  async refreshDesktopToken(refreshToken: string): Promise<HostedOAuthTokens> {
+    if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+      throw new Error('GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET is missing');
+    }
+    const res = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken
+      })
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const tokens = tokensFromGitHub(data);
+    if (!tokens) {
+      throw new Error(`GitHub would not renew the sign-in: ${data.error_description || data.error || res.status}`);
+    }
+    return tokens;
   }
 
   getGitHubAppInstallUrl(): string | null {
@@ -1878,6 +1927,10 @@ export class GitHubService implements IGitHubService {
 
   failDesktopOAuth(state: string, message: string): void {
     this.restService.failDesktopOAuth(state, message);
+  }
+
+  refreshDesktopToken(refreshToken: string): Promise<HostedOAuthTokens> {
+    return this.restService.refreshDesktopToken(refreshToken);
   }
 
   getGitHubAppInstallUrl(): string | null {
