@@ -478,6 +478,7 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
       org: effectiveOrg,
       visibility: visibility ?? 'private',
       includeDocker: Boolean(includeDocker),
+      workspaceId: req.workspace!.workspaceId,
       ...(deploy === undefined ? {} : { deploy }),
       ...(project.description ? { description: project.description } : {})
     };

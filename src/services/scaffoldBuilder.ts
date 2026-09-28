@@ -129,14 +129,30 @@ const SCAFFOLD_DEV_DEPENDENCIES: Record<string, string> = {
  */
 const COVERAGE_SCRIPT = 'jest --coverage --coverageReporters=json-summary --coverageReporters=text';
 
+/**
+ * The scaffolded backend's default port, everywhere one is quoted.
+ *
+ * A frontend's `.env.example` and a backend's CORS allowlist have to agree on
+ * this without importing from one another -- they are two separate
+ * repositories the moment they are pushed -- so both read it from here.
+ */
+const BACKEND_DEFAULT_PORT = 3000;
+/** Vite's own default, kept explicit so the frontend and backend never guess the same port. */
+const REACT_DEV_PORT = 5173;
+/** One above the backend's, so `next dev`/`next start` do not collide with it locally. */
+const NEXTJS_DEV_PORT = 3001;
+
 function buildPackageJson(packageName: string, stack: CanonicalStack): string {
   let scripts: Record<string, string>;
 
   if (stack === 'nextjs') {
     scripts = {
       build: 'next build',
-      start: 'next start',
-      dev: 'next dev',
+      // -p 3001: the backend stacks default to 3000 (see BACKEND_DEFAULT_PORT),
+      // and a frontend that ran on the same port could never be developed
+      // against a local backend at the same time.
+      start: `next start -p ${NEXTJS_DEV_PORT}`,
+      dev: `next dev -p ${NEXTJS_DEV_PORT}`,
       test: 'jest',
       'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
@@ -164,6 +180,10 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
     scripts = {
       build: 'tsc -p tsconfig.build.json',
       start: 'node dist/main.js',
+      // Nest CLI's own convention. Identical to `start` here -- there is no
+      // separate production build step yet -- but a host that runs
+      // `npm run start:prod` (as most Nest deploy guides assume) finds it.
+      'start:prod': 'node dist/main.js',
       dev: 'ts-node src/main.ts',
       test: 'jest',
       'test:cov': COVERAGE_SCRIPT,
@@ -222,6 +242,19 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
     pkg.dependencies['next'] = '^16.3.6';
   }
 
+  if (stack === 'nodejs') {
+    // A plain `nodejs` stack used to compile to a command-line program with
+    // nothing listening on a port -- unrunnable as an API, and unhostable on
+    // Render, which health-checks over HTTP. Express is the least surprising
+    // choice for the stack labelled "Node.js API".
+    pkg.dependencies['express'] = '^4.21.2';
+    pkg.dependencies['cors'] = '^2.8.5';
+    pkg.devDependencies['@types/express'] = '^4.17.21';
+    pkg.devDependencies['@types/cors'] = '^2.8.17';
+    pkg.devDependencies['supertest'] = '^7.1.0';
+    pkg.devDependencies['@types/supertest'] = '^6.0.2';
+  }
+
   return JSON.stringify(pkg, null, 2) + '\n';
 }
 
@@ -237,6 +270,19 @@ function buildTsConfig(stack: CanonicalStack): string {
       moduleResolution: isFrontend ? 'bundler' : 'NodeNext',
       strict: true,
       ...(isFrontend ? { jsx: 'react-jsx' } : {}),
+      /**
+       * Nest's own decorators (`@Module`, `@Controller`, `@Get`, ...) are
+       * written against the legacy `experimentalDecorators` signatures, not
+       * the TC39 Stage 3 ones TypeScript now applies by default. A class
+       * decorator like `@Module()` happens to type-check under either, which
+       * is how this went unnoticed until the first method decorator
+       * (`@Get()`) failed with "Unable to resolve signature of method
+       * decorator" -- the two proposals shape a method decorator
+       * differently. `emitDecoratorMetadata` alongside it is what lets
+       * Nest's dependency injection read constructor parameter types at
+       * runtime.
+       */
+      ...(stack === 'nestjs' ? { experimentalDecorators: true, emitDecoratorMetadata: true } : {}),
       lib: isFrontend ? ['ES2022', 'DOM'] : ['ES2022'],
       esModuleInterop: true,
       skipLibCheck: true,
@@ -276,7 +322,18 @@ function buildJestConfig(): string {
     "    '**/*.test.ts',",
     "    '**/*.spec.tsx',",
     "    '**/*.test.tsx'",
-    '  ]',
+    '  ],',
+    '  /**',
+    "   * tsconfig's `moduleResolution: NodeNext` requires every relative import",
+    "   * to spell out its extension -- `./app.module.js` -- so the same code",
+    '   * resolves under real Node. ts-jest compiles to CommonJS underneath, and',
+    "   * Jest's own resolver looks for a literal `app.module.js` there and never",
+    '   * finds one, since only `app.module.ts` exists on disk. Stripping the',
+    '   * extension before resolution is what makes both true at once.',
+    '   */',
+    '  moduleNameMapper: {',
+    "    '^(\\\\.{1,2}/.*)\\\\.js$': '$1'",
+    '  }',
     '};',
     '',
     'export default config;',
@@ -295,6 +352,85 @@ function buildEntrySpec(serviceName: string, importPath = './index'): string {
     `describe('${serviceName}', () => {`,
     "  it('exports SERVICE_NAME', () => {",
     `    expect(SERVICE_NAME).toBe('${serviceName}');`,
+    '  });',
+    '});',
+    ''
+  ].join('\n');
+}
+
+// ─── Node.js (Express) ────────────────────────────────────────────────────────
+//
+// The app (routes and middleware) is a separate module from the entry point
+// that listens. `tests/unit/index.spec.ts` imports the app to exercise it with
+// supertest; importing `src/index.ts` instead would bind a real port every
+// time the test file loaded, on whatever `PORT` happened to be set, and every
+// suite that imported it in the same run would fight over that port.
+
+/** `CORS_ORIGINS`, comma separated, trimmed, blanks dropped. */
+function buildNodeCorsOriginsHelper(): string {
+  return [
+    '/** Origins allowed to call this API, from the comma-separated CORS_ORIGINS. */',
+    'function corsOrigins(): string[] {',
+    "  return (process.env.CORS_ORIGINS ?? '')",
+    "    .split(',')",
+    '    .map(origin => origin.trim())',
+    '    .filter(Boolean);',
+    '}'
+  ].join('\n');
+}
+
+function buildNodeApp(serviceName: string): string {
+  return [
+    "import cors from 'cors';",
+    "import express from 'express';",
+    "import type { Express } from 'express';",
+    '',
+    `export const SERVICE_NAME = '${serviceName}';`,
+    '',
+    buildNodeCorsOriginsHelper(),
+    '',
+    'export const app: Express = express();',
+    '',
+    'app.use(cors({ origin: corsOrigins() }));',
+    'app.use(express.json());',
+    '',
+    "// What Render polls, and how anything else knows the service is up.",
+    "app.get('/health', (_req, res) => {",
+    "  res.json({ status: 'ok' });",
+    '});',
+    ''
+  ].join('\n');
+}
+
+function buildNodeIndex(): string {
+  return [
+    "import { app, SERVICE_NAME } from './app.js';",
+    '',
+    'const port = Number(process.env.PORT) || 3000;',
+    '',
+    'app.listen(port, () => {',
+    "  console.log(`${SERVICE_NAME} listening on port ${port}`);",
+    '});',
+    ''
+  ].join('\n');
+}
+
+function buildNodeHealthSpec(serviceName: string): string {
+  return [
+    "import request from 'supertest';",
+    '',
+    "import { app, SERVICE_NAME } from '../../src/app';",
+    '',
+    `describe('${serviceName}', () => {`,
+    "  it('exports SERVICE_NAME', () => {",
+    `    expect(SERVICE_NAME).toBe('${serviceName}');`,
+    '  });',
+    '',
+    "  it('answers GET /health', async () => {",
+    "    const res = await request(app).get('/health');",
+    '',
+    '    expect(res.status).toBe(200);',
+    "    expect(res.body).toEqual({ status: 'ok' });",
     '  });',
     '});',
     ''
@@ -338,24 +474,36 @@ function buildEslintConfig(): string {
 }
 
 function buildEnvExample(stack: CanonicalStack): string {
-  if (stack === 'nextjs' || stack === 'react') {
+  const backendUrl = `http://localhost:${BACKEND_DEFAULT_PORT}`;
+
+  if (stack === 'react') {
+    // VITE_API_URL, not NEXT_PUBLIC_API_URL: Vite only inlines variables under
+    // its own prefix, so the Next.js name is invisible to `import.meta.env`
+    // and every request from a Vite app would target `undefined`.
+    return ['NODE_ENV=development', '', '# Base URL of the backend this frontend talks to.', `VITE_API_URL=${backendUrl}`, ''].join(
+      '\n'
+    );
+  }
+  if (stack === 'nextjs') {
     return [
       'NODE_ENV=development',
       '',
-      '# Base URL of the backend this frontend talks to.',
-      'NEXT_PUBLIC_API_URL=http://localhost:4000',
-      'API_URL=http://localhost:4000',
+      '# Base URL of the backend this frontend talks to. NEXT_PUBLIC_ so it reaches',
+      '# the browser bundle, not only server components.',
+      `NEXT_PUBLIC_API_URL=${backendUrl}`,
       ''
     ].join('\n');
   }
 
   return [
     'NODE_ENV=development',
-    'PORT=3000',
+    `PORT=${BACKEND_DEFAULT_PORT}`,
     '',
-    '# Origins permitted to call this API.',
-    'CORS_ORIGINS=http://localhost:3000',
-    'FRONTEND_URL=http://localhost:3000',
+    "# Origins permitted to call this API, comma-separated. Alpha's own scaffolded",
+    '# frontends run here in development: Vite on 5173, Next.js on 3001 (moved off',
+    '# 3000 so it does not collide with this backend).',
+    `CORS_ORIGINS=http://localhost:${REACT_DEV_PORT},http://localhost:${NEXTJS_DEV_PORT}`,
+    `FRONTEND_URL=http://localhost:${REACT_DEV_PORT}`,
     ''
   ].join('\n');
 }
@@ -427,9 +575,58 @@ function buildNestAppModule(): string {
   return [
     "import { Module } from '@nestjs/common';",
     '',
-    '@Module({ imports: [], controllers: [], providers: [] })',
+    "import { AppController } from './app.controller.js';",
+    '',
+    '@Module({ imports: [], controllers: [AppController], providers: [] })',
     'export class AppModule {}',
     ''
+  ].join('\n');
+}
+
+/** `GET /health` -- what Render polls, and how anything else knows the service is up. */
+function buildNestAppController(): string {
+  return [
+    "import { Controller, Get } from '@nestjs/common';",
+    '',
+    '@Controller()',
+    'export class AppController {',
+    "  @Get('health')",
+    '  health(): { status: string } {',
+    "    return { status: 'ok' };",
+    '  }',
+    '}',
+    ''
+  ].join('\n');
+}
+
+function buildNestAppControllerSpec(): string {
+  return [
+    "import { Test } from '@nestjs/testing';",
+    '',
+    "import { AppController } from '../../src/app.controller';",
+    '',
+    "describe('AppController', () => {",
+    "  it('answers GET /health', async () => {",
+    '    const moduleRef = await Test.createTestingModule({ controllers: [AppController] }).compile();',
+    '    const controller = moduleRef.get(AppController);',
+    '',
+    "    expect(controller.health()).toEqual({ status: 'ok' });",
+    '  });',
+    '});',
+    ''
+  ].join('\n');
+}
+
+/** `CORS_ORIGINS`, comma separated, trimmed, blanks dropped. Shared shape with the plain Node stack. */
+function buildCorsOriginsHelper(): string {
+  return [
+    '/** Origins allowed to call this API, from the comma-separated CORS_ORIGINS. */',
+    'function corsOrigins(): string[] {',
+    "  return (process.env.CORS_ORIGINS ?? '')",
+    "    .split(',')",
+    '    .map(origin => origin.trim())',
+    '    .filter(Boolean);',
+    '}'
   ].join('\n');
 }
 
@@ -438,8 +635,10 @@ function buildNestMain(): string {
     "import { NestFactory } from '@nestjs/core';",
     "import { AppModule } from './app.module.js';",
     '',
+    buildCorsOriginsHelper(),
+    '',
     'async function bootstrap(): Promise<void> {',
-    '  const app = await NestFactory.create(AppModule);',
+    '  const app = await NestFactory.create(AppModule, { cors: { origin: corsOrigins() } });',
     '  await app.listen(process.env.PORT ?? 3000);',
     '}',
     '',
@@ -668,10 +867,26 @@ function buildStandaloneScaffold(options: BuildScaffoldOptions): ScaffoldFile[] 
     { path: 'jest.config.ts', content: buildJestConfig() },
     { path: 'eslint.config.mjs', content: buildEslintConfig() },
     { path: '.env.example', content: buildEnvExample(stack) },
-    { path: 'src/index.ts', content: buildEntryPoint(serviceName) },
+    /**
+     * `nodejs` gets its real entry point here -- listening on `PORT`, `/health`
+     * and all -- rather than the generic SERVICE_NAME placeholder every other
+     * stack still gets at this same path. Everything else about that
+     * placeholder (why it exists, why react has none) is unchanged.
+     */
+    {
+      path: 'src/index.ts',
+      content: stack === 'nodejs' ? buildNodeIndex() : buildEntryPoint(serviceName)
+    },
     { path: 'tests/README.md', content: buildTestsReadme() },
-    { path: 'tests/unit/index.spec.ts', content: buildEntrySpec(serviceName, '../../src/index') }
+    {
+      path: 'tests/unit/index.spec.ts',
+      content: stack === 'nodejs' ? buildNodeHealthSpec(serviceName) : buildEntrySpec(serviceName, '../../src/index')
+    }
   ];
+
+  if (stack === 'nodejs') {
+    files.push({ path: 'src/app.ts', content: buildNodeApp(serviceName) });
+  }
 
   /**
    * Only the stacks that compile with tsc need an emit config.
@@ -702,7 +917,9 @@ function buildStandaloneScaffold(options: BuildScaffoldOptions): ScaffoldFile[] 
   if (stack === 'nestjs') {
     files.push(
       { path: 'src/app.module.ts', content: buildNestAppModule() },
-      { path: 'src/main.ts', content: buildNestMain() }
+      { path: 'src/app.controller.ts', content: buildNestAppController() },
+      { path: 'src/main.ts', content: buildNestMain() },
+      { path: 'tests/unit/app.controller.spec.ts', content: buildNestAppControllerSpec() }
     );
   } else if (stack === 'nextjs') {
     files.push(

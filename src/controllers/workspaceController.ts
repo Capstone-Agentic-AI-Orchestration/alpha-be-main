@@ -1,10 +1,11 @@
 import { Request, Response, Router } from 'express';
 
 import { route } from './asyncRoute.js';
+import { relayToCloud } from './cloudRelay.js';
 import { ALPHA_ORG } from '../config/env.js';
 import { githubApi } from '../services/githubApi.js';
 import { roleForTeamSlug } from '../services/identityService.js';
-import { cloudRequest, refreshMemberships, usesCloudDirectory } from '../services/cloudWorkspaces.js';
+import { refreshMemberships, usesCloudDirectory } from '../services/cloudWorkspaces.js';
 import { agentStore, squadStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
@@ -106,35 +107,7 @@ function sameWorkspace(req: Request, res: Response): boolean {
   return true;
 }
 
-/**
- * On a team's desktop, answer with the cloud's answer.
- *
- * Returns false when this is not a team desktop, and the route carries on
- * with its local answer. Otherwise the request goes to the same route in the
- * cloud, signed in as this desktop's GitHub account, and the cloud's status
- * and body come back unchanged -- so its permission checks are the ones that
- * count. `mirror` runs after a success, for the routes whose result this
- * machine keeps a copy of.
- */
-async function relayToCloud(
-  req: Request,
-  res: Response,
-  mirror?: (body: any) => unknown
-): Promise<boolean> {
-  if (!usesCloudDirectory()) return false;
-  try {
-    const answer = await cloudRequest(req.originalUrl.replace(/^\/api(?=\/)/, ''), {
-      method: req.method,
-      body: req.method === 'GET' || req.method === 'DELETE' ? undefined : req.body,
-      workspaceId: req.workspace?.workspaceId
-    });
-    if (answer.status < 300 && mirror) await mirror(answer.body);
-    res.status(answer.status).json(answer.body);
-  } catch (err: any) {
-    res.status(502).json({ error: `Could not reach the Alpha cloud: ${err?.message ?? err}` });
-  }
-  return true;
-}
+
 
 /**
  * The workspaces this caller belongs to. Not every workspace there is.
@@ -271,7 +244,7 @@ workspaceRouter.post(
       if (login.toLowerCase() !== userId.toLowerCase()) members.set(login.toLowerCase(), { userId: login, role });
     }
 
-    if (await relayToCloud(req, res, () => refreshMemberships(userId, 30_000))) return;
+    if (await relayToCloud(req, res, { mirror: () => refreshMemberships(userId, 30_000) })) return;
 
     const workspace = await workspaceRegistry.createWorkspace(
       userId,
@@ -291,7 +264,7 @@ workspaceRouter.put(
   route(async (req, res) => {
     if (!sameWorkspace(req, res)) return;
     if (!requireWorkspaceCapability(req, res, 'workspace.manage_settings')) return;
-    if (await relayToCloud(req, res, () => refreshMemberships(req.workspace!.userId, 30_000))) return;
+    if (await relayToCloud(req, res, { mirror: () => refreshMemberships(req.workspace!.userId, 30_000) })) return;
 
     const updated = await workspaceRegistry.updateWorkspace(
       req.params.id,
@@ -497,7 +470,7 @@ workspaceRouter.put(
     if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
     // Kept here as well: this machine's own checks read the local copy.
     const { id, projectId, userId } = req.params;
-    if (await relayToCloud(req, res, () => workspaceRegistry.assignProject(id, projectId, userId))) return;
+    if (await relayToCloud(req, res, { mirror: () => workspaceRegistry.assignProject(id, projectId, userId) })) return;
     res
       .status(201)
       .json(await workspaceRegistry.assignProject(req.params.id, req.params.projectId, req.params.userId));
@@ -511,7 +484,7 @@ workspaceRouter.delete(
     if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
     if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
     const { id, projectId, userId } = req.params;
-    if (await relayToCloud(req, res, () => workspaceRegistry.removeProjectAssignment(id, projectId, userId))) return;
+    if (await relayToCloud(req, res, { mirror: () => workspaceRegistry.removeProjectAssignment(id, projectId, userId) })) return;
 
     const removed = await workspaceRegistry.removeProjectAssignment(
       req.params.id,

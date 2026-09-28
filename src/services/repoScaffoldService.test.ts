@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * Scaffolding a repository with its CI, and a paired frontend/backend project.
  *
  * GitHub and the CI template are faked; cloud mode keeps no working copy, so
- * nothing is cloned or written to disk.
+ * nothing is cloned or written to disk. Render and Vercel are not mocked --
+ * `RENDER_API_KEY`/`VERCEL_TOKEN` are unset in every test run (there is no
+ * `.env` in CI, and this suite does not set them), so `hostingService`
+ * answers `state: 'unavailable'` without making a single HTTP call. That is
+ * also the real behaviour for anyone running this backend without those
+ * keys, which is exactly what "the repo is still created" means to test.
  */
 
 type Provisioned = { name: string; files: Array<{ path: string; content: string }> };
@@ -29,13 +34,13 @@ async function load(options: { failFor?: string } = {}) {
     }
   }));
   vi.doMock('./ciWorkflows.js', () => ({
-    buildCiWorkflows: async ({ stack, deploy }: { stack: string; deploy?: boolean }) => {
+    buildCiWorkflows: async ({ stack }: { stack: string }) => {
       const target = stack === 'react' || stack === 'nextjs' ? 'vercel' : 'render';
       return {
         files: [{ path: '.github/workflows/ci.yml', content: `# ci for ${stack}\n` }],
-        deployTarget: deploy === false ? null : target,
-        requiredSecrets: deploy === false ? [] : [`${target.toUpperCase()}_SECRET`],
-        deployVariable: deploy === false ? null : 'ALPHAORCH_DEPLOY',
+        deployTarget: target,
+        requiredSecrets: [],
+        deployVariable: null,
         source: `alphaorch-workflow@v1:${stack}`
       };
     }
@@ -63,7 +68,7 @@ afterEach(() => {
 const base = { projectKey: 'SHOP', org: 'acme' };
 
 describe('a scaffolded repository', () => {
-  it('is committed with its CI and a README that says what the CI needs', async () => {
+  it('is committed with its CI and a README that says where hosting is set up', async () => {
     const { service, provisioned } = await load();
 
     const result = await service.createScaffoldedRepository({ ...base, repoName: 'shop-api', stack: 'nestjs' });
@@ -73,24 +78,35 @@ describe('a scaffolded repository', () => {
     const readme = files.find(file => file.path === 'README.md')!.content;
     expect(readme).toContain('## CI/CD');
     expect(readme).toContain('**Render**');
-    expect(readme).toContain('- secret `RENDER_SECRET`');
-    expect(readme).toContain('- variable `ALPHAORCH_DEPLOY` set to `true`');
+    expect(readme).toContain('is set up automatically by Alpha');
     expect(result).toMatchObject({
       nameWithOwner: 'acme/shop-api',
       deployTarget: 'render',
-      requiredSecrets: ['RENDER_SECRET'],
-      deployVariable: 'ALPHAORCH_DEPLOY'
+      requiredSecrets: [],
+      deployVariable: null
     });
     expect(result.localPath).toBeUndefined();
   });
 
-  it('says nothing about deploy secrets when deploys were not requested', async () => {
+  it('runs hosting setup by default and reports it as unavailable with no Render/Vercel keys configured', async () => {
+    const { service } = await load();
+
+    const result = await service.createScaffoldedRepository({ ...base, repoName: 'shop-api', stack: 'nestjs' });
+
+    expect(result.hosting).toMatchObject({ repo: 'acme/shop-api', role: 'backend', platform: 'render', state: 'unavailable' });
+  });
+
+  it('does not attempt hosting, and says so in the README, when deploy: false', async () => {
     const { service, provisioned } = await load();
 
     const result = await service.createScaffoldedRepository({ ...base, repoName: 'shop-api', stack: 'nodejs', deploy: false });
 
-    expect(provisioned[0].files.find(file => file.path === 'README.md')!.content).not.toContain('Deploys go to');
-    expect(result).toMatchObject({ deployTarget: null, requiredSecrets: [], deployVariable: null });
+    const readme = provisioned[0].files.find(file => file.path === 'README.md')!.content;
+    expect(readme).toContain('was not set up for this repository');
+    expect(result.hosting).toBeUndefined();
+    // The CI's own shape is unaffected by `deploy` now -- there is no deploy
+    // job left in it to gate either way.
+    expect(result).toMatchObject({ deployTarget: 'render', requiredSecrets: [], deployVariable: null });
   });
 });
 
@@ -110,6 +126,10 @@ describe('a paired project', () => {
       ['acme/shop-be', 'render'],
       ['acme/shop-fe', 'vercel']
     ]);
+    // Neither side has real credentials in this test environment, but both
+    // still get a hosting answer -- and the frontend already knows its pair.
+    expect(repos[0].hosting).toMatchObject({ state: 'unavailable', partner: null });
+    expect(repos[1].hosting).toMatchObject({ state: 'unavailable', partner: 'acme/shop-be' });
   });
 
   it('deletes the backend again when the frontend cannot be created', async () => {
