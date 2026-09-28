@@ -3,8 +3,8 @@
 // Generates a starting project structure — an array of { path, content } tuples
 // ready to be written to disk and pushed to a freshly-created GitHub repository.
 //
-// Ported from ALPHACI's scaffold builder with the CI coupling removed: there is
-// no sonar-project.properties here and no workflow YAML anywhere. What is left
+// CI is deliberately not part of this: there is no sonar-project.properties
+// here and no workflow YAML (ciWorkflows.ts adds the CI caller). What is left
 // is an ordinary TypeScript project a developer would recognise — build, test,
 // lint and typecheck scripts that work the moment `npm install` finishes.
 //
