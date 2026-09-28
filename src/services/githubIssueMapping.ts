@@ -96,6 +96,21 @@ export function parseRepoRef(input: string | undefined | null): RepoRef | null {
   return null;
 }
 
+/**
+ * Every GitHub repository attached to a project, as `owner/name`, in order.
+ * A paired project has two: its `-be` and its `-fe`.
+ */
+export function reposForProject(project: Project): string[] {
+  const repos: string[] = [];
+  for (const resource of project.resources ?? []) {
+    if (resource.type !== 'github_repo') continue;
+    const parsed = parseRepoRef(resource.pathOrUrl);
+    const repo = parsed ? `${parsed.owner}/${parsed.repo}` : null;
+    if (repo && !repos.some(existing => existing.toLowerCase() === repo.toLowerCase())) repos.push(repo);
+  }
+  return repos;
+}
+
 /** The repository a project's issues live in, if it has one. */
 export function repoForProject(project: Project): string | null {
   for (const resource of project.resources ?? []) {

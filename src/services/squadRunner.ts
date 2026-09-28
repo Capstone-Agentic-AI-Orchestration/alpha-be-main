@@ -4,6 +4,7 @@ import { totalTokens } from './runUsage.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Squad, SquadRun } from '../models/index.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
+import { agentBranchName } from './githubRepoWorkspace.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -127,7 +128,7 @@ export class SquadRunner {
       issueId: issue.id,
       projectId: issue.projectId,
       // Decided once, here, because every member commits to it.
-      branchName: `feat/${issue.identifier.toLowerCase()}-squad-${Date.now().toString().slice(-4)}`,
+      branchName: agentBranchName(`squad-${squad.name}`, `${issue.identifier}-${Date.now().toString().slice(-4)}`),
       memberAgentIds: members,
       currentMemberIndex: 0,
       status: 'running',
