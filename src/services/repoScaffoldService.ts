@@ -5,8 +5,10 @@ import { IS_DESKTOP } from '../config/env.js';
 import { ensureWorkspacesRoot, projectRepoPath } from './workspaceService.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { githubService } from './githubService.js';
+import { githubApi } from './githubApi.js';
 import { provisionRepository } from './githubRepoProvisioning.js';
-import { buildProjectScaffold, normalizeProjectStack } from './scaffoldBuilder.js';
+import { buildCiWorkflows, type CiWorkflowPlan, type DeployTarget } from './ciWorkflows.js';
+import { buildProjectScaffold, normalizeProjectStack, type ScaffoldFile } from './scaffoldBuilder.js';
 
 export interface CreateScaffoldedRepoInput {
   /** Project key, used as the workspace folder name. */
@@ -25,6 +27,12 @@ export interface CreateScaffoldedRepoInput {
   description?: string;
   /** Defaults to repoName. Seeds the README title and package name. */
   serviceName?: string;
+  /**
+   * Include the deploy job in the generated CI (Render for a backend, Vercel
+   * for a frontend). Default true; it stays off until the repository has its
+   * deploy secrets and `ALPHAORCH_DEPLOY=true`.
+   */
+  deploy?: boolean;
 }
 
 export interface CreateScaffoldedRepoResult {
@@ -41,6 +49,48 @@ export interface CreateScaffoldedRepoResult {
   protectionUnavailable?: string;
   /** Set when the repository was created but the desktop could not clone it. */
   cloneError?: string;
+  /** The generated CI's deploy target, or null when deploys were not requested. */
+  deployTarget: DeployTarget | null;
+  /** Repository secrets the deploy job needs. */
+  requiredSecrets: string[];
+  /** Repository variable to set to `true` once those secrets exist. */
+  deployVariable: string | null;
+  /** Where the CI template came from. */
+  ciSource: string;
+}
+
+/** A README section saying what the generated CI does and what it waits for. */
+function ciReadmeSection(plan: CiWorkflowPlan): string {
+  const code = (text: string) => '`' + text + '`';
+  const lines = [
+    '',
+    '## CI/CD',
+    '',
+    `${code('.github/workflows/ci.yml')} runs unit tests with coverage, lint and a security scan on every ` +
+      `push and pull request to ${code('dev')}, ${code('uat')} and ${code('main')} (from ${code(plan.source)}).`,
+    '',
+    `Work lands on ${code('dev')}, is promoted to ${code('uat')}, then to ${code('main')}, by pull request only.`
+  ];
+  if (plan.deployTarget) {
+    lines.push(
+      '',
+      `Deploys go to **${plan.deployTarget === 'render' ? 'Render' : 'Vercel'}** after the checks pass. ` +
+        'They are off until the repository has:',
+      '',
+      ...plan.requiredSecrets.map(secret => `- secret ${code(secret)}`),
+      `- variable ${code(plan.deployVariable ?? '')} set to ${code('true')}`
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** Append the CI section to the scaffold's README, and add the workflow files. */
+function withCi(files: ScaffoldFile[], plan: CiWorkflowPlan): ScaffoldFile[] {
+  return [
+    ...files.map(file => (file.path === 'README.md' ? { ...file, content: file.content + ciReadmeSection(plan) } : file)),
+    ...plan.files
+  ];
 }
 
 /**
@@ -146,13 +196,17 @@ export async function createScaffoldedRepository(
 
   // Build before touching GitHub, so an unsupported stack or shape fails
   // without creating anything.
-  const files = buildProjectScaffold({
+  const canonicalStack = normalizeProjectStack(stack);
+  const scaffold = buildProjectScaffold({
     serviceName,
-    stack: normalizeProjectStack(stack),
+    stack: canonicalStack,
     repoShape,
     includeDocker,
     ...(description ? { description } : {})
   });
+  // Also before GitHub: a repository that cannot get its CI is not created.
+  const ci = await buildCiWorkflows({ stack: canonicalStack, deploy: input.deploy });
+  const files = withCi(scaffold, ci);
 
   let repo;
   try {
@@ -191,6 +245,63 @@ export async function createScaffoldedRepository(
     branches: repo.branches,
     protectedBranches: repo.protectedBranches,
     ...(repo.protectionUnavailable ? { protectionUnavailable: repo.protectionUnavailable } : {}),
-    ...(cloneError ? { cloneError } : {})
+    ...(cloneError ? { cloneError } : {}),
+    deployTarget: ci.deployTarget,
+    requiredSecrets: ci.requiredSecrets,
+    deployVariable: ci.deployVariable,
+    ciSource: ci.source
   };
+}
+
+export interface CreatePairedProjectInput extends Omit<CreateScaffoldedRepoInput, 'stack' | 'repoShape'> {
+  /** react or nextjs, for `<repoName>-fe`. */
+  frontendStack: string;
+  /** nodejs or nestjs, for `<repoName>-be`. */
+  backendStack: string;
+}
+
+/**
+ * A paired project: `<name>-be` and `<name>-fe`, each a standalone repository
+ * with its own CI and deploy target.
+ *
+ * The backend is created first. If the frontend then fails, the backend is
+ * deleted again, so a paired project is created whole or not at all.
+ */
+export async function createPairedProject(input: CreatePairedProjectInput): Promise<CreateScaffoldedRepoResult[]> {
+  const frontend = normalizeProjectStack(input.frontendStack);
+  const backend = normalizeProjectStack(input.backendStack);
+  if (frontend !== 'react' && frontend !== 'nextjs') {
+    throw new Error(`Invalid frontend stack "${input.frontendStack}". Use react or nextjs.`);
+  }
+  if (backend !== 'nodejs' && backend !== 'nestjs') {
+    throw new Error(`Invalid backend stack "${input.backendStack}". Use nodejs or nestjs.`);
+  }
+
+  const { frontendStack: _fe, backendStack: _be, ...common } = input;
+  const base = input.repoName;
+  const be = await createScaffoldedRepository({
+    ...common,
+    repoName: `${base}-be`,
+    serviceName: `${base}-be`,
+    stack: backend,
+    repoShape: 'standalone'
+  });
+  try {
+    const fe = await createScaffoldedRepository({
+      ...common,
+      repoName: `${base}-fe`,
+      serviceName: `${base}-fe`,
+      stack: frontend,
+      repoShape: 'standalone'
+    });
+    return [be, fe];
+  } catch (err) {
+    try {
+      await githubApi().delete(`/repos/${be.nameWithOwner}`);
+      if (be.localPath) await fs.rm(be.localPath, { recursive: true, force: true });
+    } catch (cleanup) {
+      logError(`Could not remove ${be.nameWithOwner} after its frontend failed; remove it by hand:`, (cleanup as Error).message);
+    }
+    throw err;
+  }
 }

@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response, Router } from 'express';
 import { githubService } from '../services/githubService.js';
-import { createScaffoldedRepository } from '../services/repoScaffoldService.js';
+import { createPairedProject, createScaffoldedRepository } from '../services/repoScaffoldService.js';
 import { projectStore } from '../store/stores.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
@@ -429,7 +429,9 @@ githubRouter.post('/github/repos', async (req: Request, res: Response) => {
  */
 githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
-  const { projectId, repoName, stack, org, visibility, shape, includeDocker } = req.body ?? {};
+  const { projectId, repoName, stack, org, visibility, shape, includeDocker, deploy, frontendStack, backendStack } =
+    req.body ?? {};
+  const paired = shape === 'paired';
 
   if (!projectId || typeof projectId !== 'string') {
     return res.status(400).json({ error: 'A "projectId" is required.' });
@@ -437,10 +439,19 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
   if (!repoName || typeof repoName !== 'string') {
     return res.status(400).json({ error: 'A repository "repoName" is required.' });
   }
-  if (!stack || !SUPPORTED_STACKS.includes(stack)) {
+  if (paired) {
+    if (!['react', 'nextjs'].includes(frontendStack) || !['nodejs', 'nestjs'].includes(backendStack)) {
+      return res.status(400).json({
+        error: 'A paired project needs "frontendStack" (react or nextjs) and "backendStack" (nodejs or nestjs).'
+      });
+    }
+  } else if (!stack || !SUPPORTED_STACKS.includes(stack)) {
     return res.status(400).json({
       error: `"stack" must be one of: ${SUPPORTED_STACKS.join(', ')}.`
     });
+  }
+  if (deploy !== undefined && typeof deploy !== 'boolean') {
+    return res.status(400).json({ error: '"deploy" must be true or false.' });
   }
   if (visibility && !['private', 'public'].includes(visibility)) {
     return res.status(400).json({ error: 'visibility must be private or public.' });
@@ -461,16 +472,19 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
   }
 
   try {
-    const result = await createScaffoldedRepository({
+    const common = {
       projectKey: project.key,
       repoName,
       org: effectiveOrg,
-      stack,
       visibility: visibility ?? 'private',
-      repoShape: shape ?? 'standalone',
       includeDocker: Boolean(includeDocker),
+      ...(deploy === undefined ? {} : { deploy }),
       ...(project.description ? { description: project.description } : {})
-    });
+    };
+    // Standalone answers the repository itself, as before; paired answers both.
+    const result = paired
+      ? { shape: 'paired', repositories: await createPairedProject({ ...common, frontendStack, backendStack }) }
+      : await createScaffoldedRepository({ ...common, stack, repoShape: shape ?? 'standalone' });
 
     // Remember the organization on first use so later repositories in this
     // project cannot silently land somewhere else.
@@ -488,6 +502,8 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
     let status = 500;
     if (isConflict) status = 409;
     else if (isClientError) status = 400;
+    // The CI template lives in alphaorch-workflow; not reaching it is upstream.
+    else if (/Could not read the CI template/.test(msg)) status = 502;
 
     return res.status(status).json({ error: msg });
   }
