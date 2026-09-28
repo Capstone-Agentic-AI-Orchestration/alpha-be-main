@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { IS_DESKTOP } from '../config/env.js';
 import { ensureWorkspacesRoot, projectRepoPath } from './workspaceService.js';
-import { initRepoWithCommit } from '../utils/gitUtils.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { githubService } from './githubService.js';
+import { provisionRepository } from './githubRepoProvisioning.js';
 import { buildProjectScaffold, normalizeProjectStack } from './scaffoldBuilder.js';
 
 export interface CreateScaffoldedRepoInput {
@@ -29,8 +30,17 @@ export interface CreateScaffoldedRepoInput {
 export interface CreateScaffoldedRepoResult {
   url: string;
   nameWithOwner: string;
-  localPath: string;
+  /** The desktop's working copy. Absent in the cloud, which keeps none. */
+  localPath?: string;
   files: string[];
+  /** The one commit every pipeline branch starts at. */
+  commitSha: string;
+  branches: string[];
+  protectedBranches: string[];
+  /** Why GitHub would not protect uat/main (e.g. a private repo on the free plan). */
+  protectionUnavailable?: string;
+  /** Set when the repository was created but the desktop could not clone it. */
+  cloneError?: string;
 }
 
 /**
@@ -88,13 +98,18 @@ async function isEmptyOrMissing(dir: string): Promise<boolean> {
 /**
  * Create an organization repository that starts life with a project structure.
  *
- * The scaffold is written into the managed workspace and pushed from there, so
- * the directory left behind is both the thing that was pushed and a working
- * copy ready for an agent — no clone step for repositories Alpha created.
+ * The scaffold goes to GitHub directly, as one commit on dev, uat and main
+ * (`provisionRepository`), the same way from the cloud as from a desktop. It
+ * used to be written into the workspace and pushed with `gh repo create
+ * --push`: that only ever worked on a desktop -- the cloud created an empty
+ * repository and dropped the files -- and left `main` as the only branch.
  *
- * Ordering matters: everything that can fail cheaply happens before the `gh`
- * call, so a failure leaves nothing on GitHub. There is no compensating delete
- * because there is nothing remote to compensate for.
+ * A desktop then clones it into the managed workspace, so an agent has a
+ * working copy. A failed clone does not undo the repository; the result says
+ * so and the project can be cloned again later.
+ *
+ * Everything that can fail cheaply (names, stack, shape, an occupied
+ * workspace) is checked before GitHub is touched.
  */
 export async function createScaffoldedRepository(
   input: CreateScaffoldedRepoInput
@@ -120,17 +135,17 @@ export async function createScaffoldedRepository(
 
   const serviceName = input.serviceName?.trim() || repoName;
   // Same resolver the clone path uses, so both land under one allowlisted root.
-  ensureWorkspacesRoot();
-  const workspaceDir = projectRepoPath(projectKey, repoName);
+  // Only a desktop keeps a working copy.
+  const workspaceDir = IS_DESKTOP ? (ensureWorkspacesRoot(), projectRepoPath(projectKey, repoName)) : undefined;
 
-  if (!(await isEmptyOrMissing(workspaceDir))) {
+  if (workspaceDir && !(await isEmptyOrMissing(workspaceDir))) {
     throw new Error(
       `A workspace already exists at ${workspaceDir}. Move or delete it before creating this repository.`
     );
   }
 
-  // Build before touching the disk, so an unsupported stack or shape fails
-  // without leaving a directory behind.
+  // Build before touching GitHub, so an unsupported stack or shape fails
+  // without creating anything.
   const files = buildProjectScaffold({
     serviceName,
     stack: normalizeProjectStack(stack),
@@ -139,41 +154,43 @@ export async function createScaffoldedRepository(
     ...(description ? { description } : {})
   });
 
-  await fs.mkdir(workspaceDir, { recursive: true });
-
+  let repo;
   try {
-    for (const file of files) {
-      const target = path.join(workspaceDir, file.path);
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, file.content, 'utf8');
-    }
-
-    await initRepoWithCommit(workspaceDir, `chore: scaffold ${serviceName}`);
-
-    const repo = await githubService.createRepository({
-      name: repoName,
+    repo = await provisionRepository({
       org: org.trim(),
+      name: repoName,
       visibility,
-      sourceDir: workspaceDir,
+      files,
+      message: `chore: scaffold ${serviceName}`,
       ...(description ? { description } : {})
     });
-
-    logInfo(`Scaffolded ${repo.nameWithOwner} (${files.length} files) at ${workspaceDir}`);
-
-    return {
-      url: repo.url,
-      nameWithOwner: repo.nameWithOwner,
-      localPath: workspaceDir,
-      files: files.map(f => f.path)
-    };
   } catch (err: any) {
-    // Remove only what this function created. Leaving a half-written directory
-    // would trip the emptiness guard above and block every retry, and nothing
-    // else references it yet. GitHub is never touched here — if the repository
-    // was in fact created, the next attempt reports the name collision, which
-    // is the accurate thing to tell someone.
-    await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
     logError(`Scaffold failed for ${org}/${repoName}: ${err?.message ?? err}`);
     throw err;
   }
+
+  let localPath: string | undefined;
+  let cloneError: string | undefined;
+  if (workspaceDir) {
+    try {
+      localPath = await githubService.cloneRepository(repo.nameWithOwner, path.dirname(workspaceDir));
+    } catch (err: any) {
+      cloneError = err?.message ?? String(err);
+      logError(`Created ${repo.nameWithOwner} but could not clone it into ${workspaceDir}: ${cloneError}`);
+    }
+  }
+
+  logInfo(`Scaffolded ${repo.nameWithOwner} (${files.length} files)${localPath ? ` at ${localPath}` : ''}`);
+
+  return {
+    url: repo.url,
+    nameWithOwner: repo.nameWithOwner,
+    ...(localPath ? { localPath } : {}),
+    files: files.map(f => f.path),
+    commitSha: repo.commitSha,
+    branches: repo.branches,
+    protectedBranches: repo.protectedBranches,
+    ...(repo.protectionUnavailable ? { protectionUnavailable: repo.protectionUnavailable } : {}),
+    ...(cloneError ? { cloneError } : {})
+  };
 }
