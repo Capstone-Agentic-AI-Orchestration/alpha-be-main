@@ -110,8 +110,8 @@ export function nextPage(link: string | null): string | null {
   return null;
 }
 
-async function call(method: string, url: string, body?: unknown): Promise<Response> {
-  const token = await tokenForThisRequest();
+async function call(method: string, url: string, body?: unknown, explicitToken?: string): Promise<Response> {
+  const token = explicitToken ?? (await tokenForThisRequest());
   const res = await fetch(url.startsWith('http') ? url : `${API}${url}`, {
     method,
     headers: {
@@ -139,39 +139,52 @@ async function call(method: string, url: string, body?: unknown): Promise<Respon
   return res;
 }
 
-const restApi: GitHubApi = {
-  async get<T>(path: string): Promise<T> {
-    return (await call('GET', path)).json() as Promise<T>;
-  },
+function restApiFor(token?: string): GitHubApi {
+  return {
+    async get<T>(path: string): Promise<T> {
+      return (await call('GET', path, undefined, token)).json() as Promise<T>;
+    },
 
-  async getAll<T>(path: string): Promise<T[]> {
-    const items: T[] = [];
-    let url: string | null = path;
-    for (let page = 0; url && page < MAX_PAGES; page++) {
-      const res = await call('GET', url);
-      items.push(...((await res.json()) as T[]));
-      url = nextPage(res.headers.get('link'));
+    async getAll<T>(path: string): Promise<T[]> {
+      const items: T[] = [];
+      let url: string | null = path;
+      for (let page = 0; url && page < MAX_PAGES; page++) {
+        const res = await call('GET', url, undefined, token);
+        items.push(...((await res.json()) as T[]));
+        url = nextPage(res.headers.get('link'));
+      }
+      return items;
+    },
+
+    async post<T>(path: string, body: unknown): Promise<T> {
+      return (await call('POST', path, body, token)).json() as Promise<T>;
+    },
+
+    async patch<T>(path: string, body: unknown): Promise<T> {
+      return (await call('PATCH', path, body, token)).json() as Promise<T>;
+    },
+
+    async put<T>(path: string, body: unknown): Promise<T> {
+      return (await call('PUT', path, body, token)).json() as Promise<T>;
+    },
+
+    async delete(path: string): Promise<void> {
+      // 204 No Content: there is no body to read.
+      await call('DELETE', path, undefined, token);
     }
-    return items;
-  },
+  };
+}
 
-  async post<T>(path: string, body: unknown): Promise<T> {
-    return (await call('POST', path, body)).json() as Promise<T>;
-  },
+const restApi: GitHubApi = restApiFor();
 
-  async patch<T>(path: string, body: unknown): Promise<T> {
-    return (await call('PATCH', path, body)).json() as Promise<T>;
-  },
-
-  async put<T>(path: string, body: unknown): Promise<T> {
-    return (await call('PUT', path, body)).json() as Promise<T>;
-  },
-
-  async delete(path: string): Promise<void> {
-    // 204 No Content: there is no body to read.
-    await call('DELETE', path);
-  }
-};
+/**
+ * The same API acting with an explicit token instead of the request's or the
+ * signed-in account's -- for a process with no request and no session of its
+ * own, such as the agents' GitHub tool server, which gets its token from `gh`.
+ */
+export function githubApiWithToken(token: string): GitHubApi {
+  return override ?? restApiFor(token);
+}
 
 let override: GitHubApi | null = null;
 

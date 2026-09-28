@@ -48,7 +48,17 @@ import { createInterface } from 'node:readline';
 
 import { githubService } from '../services/githubService.js';
 import { cloneToWorkspace } from '../services/repoCloneService.js';
-import { getCurrentBranch } from '../utils/gitUtils.js';
+import { getCurrentBranch, remoteHasDevBranch } from '../utils/gitUtils.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { githubApiWithToken, type GitHubApi } from '../services/githubApi.js';
+import {
+  AGENT_BRANCH_PREFIX,
+  compareBranches,
+  createAgentBranch,
+  getTree,
+  listPullRequests
+} from '../services/githubRepoWorkspace.js';
 import { sqliteService } from '../services/sqliteService.js';
 
 /**
@@ -108,7 +118,24 @@ function requireWorkspace(): string {
  * guaranteed. A guard that silently stops working when the remote is
  * unreachable is not a guard.
  */
-const PROTECTED_BRANCH_NAMES = new Set(['main', 'master', 'develop', 'trunk']);
+const PROTECTED_BRANCH_NAMES = new Set(['main', 'master', 'develop', 'trunk', 'dev', 'uat']);
+
+/**
+ * The REST API as this process's GitHub account.
+ *
+ * This server is spawned by the agent's CLI: it has no request and no Alpha
+ * session of its own, only the `gh` configuration the daemon handed it, so
+ * the token comes from `gh` -- the same identity every other tool here uses.
+ */
+let restApi: Promise<GitHubApi> | undefined;
+function api(): Promise<GitHubApi> {
+  restApi ??= promisify(execFile)('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true }).then(({ stdout }) => {
+    const token = String(stdout).trim();
+    if (!token) throw new Error('No GitHub account is available to this agent.');
+    return githubApiWithToken(token);
+  });
+  return restApi;
+}
 
 /** The branch pull requests target, when it can be determined. */
 async function remoteDefaultBranch(cwd: string): Promise<string | undefined> {
@@ -300,7 +327,16 @@ const TOOLS: Record<string, ToolDef> = {
     run: async ({ title, body, base }) => {
       const cwd = requireWorkspace();
       const head = await getCurrentBranch(cwd);
-      const target = base || (await remoteDefaultBranch(cwd)) || 'main';
+      const pipeline = await remoteHasDevBranch(cwd);
+      // A pipeline repository takes agent work into dev; promotion to uat and
+      // main is a project manager's pull request, never an agent's.
+      const target = base || (pipeline ? 'dev' : await remoteDefaultBranch(cwd)) || 'main';
+      if (pipeline && (target === 'uat' || target === 'main')) {
+        audit('open_pull_request', head, false, `Refused: ${target} is a promotion target.`);
+        throw new Error(
+          `Refusing to open a pull request into "${target}". In this repository work goes into dev, and a project manager promotes dev to uat and uat to main.`
+        );
+      }
 
       if (head === target) {
         throw new Error(
@@ -321,6 +357,67 @@ const TOOLS: Record<string, ToolDef> = {
     }
   },
 
+  github_repo_tree: {
+    description:
+      'List every file and folder of a remote repository at a branch, tag or commit, without cloning it. Use to find your way around a branch you are not checked out on.',
+    inputSchema: schema(
+      { repo: str('Repository as owner/name'), ref: str('Branch, tag or commit SHA, e.g. dev') },
+      ['repo', 'ref']
+    ),
+    run: async ({ repo, ref }) => getTree(repo, ref, await api())
+  },
+
+  github_compare_branches: {
+    description:
+      'Compare two branches of a remote repository: how far head is ahead of and behind base, its commits, and the files changed. Set patches to include the diff of each file.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        base: str('Branch to compare against, e.g. main'),
+        head: str('Branch with the changes, e.g. dev'),
+        patches: { type: 'boolean', description: 'Include each file diff (default false)' }
+      },
+      ['repo', 'base', 'head']
+    ),
+    run: async ({ repo, base, head, patches }) => compareBranches(repo, base, head, { patches: Boolean(patches) }, await api())
+  },
+
+  github_list_pull_requests: {
+    description: 'List pull requests of a remote repository, with their head and base branches. Promotion PRs (dev->uat, uat->main) are marked.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        state: { type: 'string', enum: ['open', 'closed', 'all'], description: 'Default open' }
+      },
+      ['repo']
+    ),
+    run: async ({ repo, state }) => listPullRequests(repo, state ?? 'open', await api())
+  },
+
+  github_create_agent_branch: {
+    access: 'write',
+    description:
+      `Create a branch on the remote for a separate piece of work, from dev by default. The name must start with "${AGENT_BRANCH_PREFIX}" (e.g. ${AGENT_BRANCH_PREFIX}reviewer/fix-login); dev, uat and main cannot be created or moved.`,
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        name: str(`Branch name, starting with ${AGENT_BRANCH_PREFIX}`),
+        from: str('Branch to start from (default dev)')
+      },
+      ['repo', 'name']
+    ),
+    run: async ({ repo, name, from }) => {
+      try {
+        const created = await createAgentBranch(repo, name, from || 'dev', await api());
+        audit('create_branch', `${repo}:${created.name}`, true, `from ${created.from}`);
+        return created;
+      } catch (err: any) {
+        audit('create_branch', `${repo}:${name}`, false, String(err?.message ?? err));
+        throw err;
+      }
+    }
+  },
+
   github_review_pull_request: {
     description:
       'Post a code review on a pull request. Use when asked to review work — read the diff first, then say what you found. ' +

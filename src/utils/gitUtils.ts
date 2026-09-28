@@ -87,6 +87,36 @@ export async function createBranch(cwd: string, branchName: string): Promise<voi
   await execFileAsync('git', ['checkout', '-B', branchName], { cwd });
 }
 
+/**
+ * Whether the checkout's remote has a `dev` branch -- a repository Alpha
+ * provisioned with the dev -> uat -> main pipeline.
+ *
+ * Asked of the remote, not the local refs, because a clone made before the
+ * branch existed would not know about it. Any failure (no remote, offline)
+ * answers false, which keeps the older behaviour: work from HEAD, PR to main.
+ */
+export async function remoteHasDevBranch(cwd: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['ls-remote', '--heads', 'origin', 'dev'], { cwd, timeout: 20_000 });
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Create (or reset) `branchName` at the remote's `base`, fetched fresh.
+ *
+ * An agent's work should start from what the team has integrated, not from
+ * whatever branch the checkout happened to be left on.
+ */
+export async function createBranchFrom(cwd: string, branchName: string, base: string): Promise<void> {
+  assertSafeBranchName(branchName);
+  assertSafeBranchName(base);
+  await execFileAsync('git', ['fetch', 'origin', base], { cwd, timeout: 120_000 });
+  await execFileAsync('git', ['checkout', '-B', branchName, `origin/${base}`], { cwd });
+}
+
 export async function getGitDiffStats(
   cwd: string
 ): Promise<{ changedFiles: number; insertions: number; deletions: number }> {

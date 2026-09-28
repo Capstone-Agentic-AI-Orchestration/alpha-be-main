@@ -13,7 +13,8 @@ import { buildEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
 import { writeRunMcpConfig, cleanupRunMcpConfig } from './mcpConfigService.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
-import { createBranch, checkoutBranch, getGitDiffStats, isGitRepo } from '../utils/gitUtils.js';
+import { createBranch, createBranchFrom, checkoutBranch, getGitDiffStats, isGitRepo, remoteHasDevBranch } from '../utils/gitUtils.js';
+import { agentBranchName } from './githubRepoWorkspace.js';
 import { githubService } from './githubService.js';
 import { supabaseService } from './supabaseService.js';
 import { updateIssueAndPush, addCommentAndShare } from './boardWriteThrough.js';
@@ -105,11 +106,12 @@ export class RunnerService extends EventEmitter {
     const now = new Date().toISOString();
     /**
      * A squad's members all commit to the branch the squad run opened. Only a
-     * lone agent gets a fresh one.
+     * lone agent gets a fresh one: `agent/<agent>/<issue>-NNNN`, so a branch
+     * says who made it and for what, and agent work is easy to find and clear.
      */
     const branchName =
       params.squad?.branchName ??
-      `feat/${issue.identifier.toLowerCase()}-${Date.now().toString().slice(-4)}`;
+      agentBranchName(agent.name, `${issue.identifier}-${Date.now().toString().slice(-4)}`);
 
     /**
      * Is anything already using this checkout?
@@ -258,8 +260,15 @@ export class RunnerService extends EventEmitter {
     const ownsBranch = !ctx.squad || ctx.squad.order === 0;
     try {
       if (ownsBranch) {
-        await createBranch(cwd, branchName);
-        this.appendLog(runId, 'workspace', `Created and checked out branch: ${branchName}`);
+        // A pipeline repository (dev -> uat -> main): start from what the team
+        // has integrated on dev. Otherwise, as before, from the checkout's HEAD.
+        if (await remoteHasDevBranch(cwd)) {
+          await createBranchFrom(cwd, branchName, 'dev');
+          this.appendLog(runId, 'workspace', `Created and checked out branch ${branchName} from origin/dev`);
+        } else {
+          await createBranch(cwd, branchName);
+          this.appendLog(runId, 'workspace', `Created and checked out branch: ${branchName}`);
+        }
       } else {
         await checkoutBranch(cwd, branchName);
         this.appendLog(runId, 'workspace', `Continuing on the squad's branch: ${branchName}`);
@@ -732,11 +741,14 @@ ${issue.description}
             // Nothing was pushed, so there is no branch on the remote to open
             // a pull request against.
             if (!mayPush) throw new SkipPullRequest();
+            // Into dev when the repository has the pipeline; dev is then
+            // promoted to uat and main by pull request, never by an agent.
+            const prBase = (await remoteHasDevBranch(cwd)) ? 'dev' : 'main';
             const createdPr = await githubService.createPullRequest(
               cwd,
               `feat: ${issue.title} [${issue.identifier}]`,
               prBody,
-              'main',
+              prBase,
               branchName
             );
             if (createdPr) {
@@ -749,7 +761,7 @@ ${issue.description}
                 actor: 'alpha',
                 action: 'open_pull_request',
                 target: prUrl,
-                detail: `${branchName} into main`,
+                detail: `${branchName} into ${prBase}`,
                 succeeded: true
               });
             }

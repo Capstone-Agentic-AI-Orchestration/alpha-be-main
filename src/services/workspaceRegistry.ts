@@ -50,6 +50,8 @@ export type WorkspaceCapability =
   | 'project.manage'
   /** Provision a new remote repository; project managers own this action. */
   | 'project.provision_repository'
+  /** Open the dev -> uat -> main promotion pull requests of a project's repositories. */
+  | 'project.promote'
   | 'issue.read'
   | 'issue.manage'
   | 'agent.read'
@@ -125,6 +127,8 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'project.update',
     'project.manage',
     'project.provision_repository',
+    // Promotion is a release decision: the PM who runs the project makes it.
+    'project.promote',
     'issue.read',
     'issue.manage',
     'agent.read',
@@ -145,6 +149,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'workspace.manage_members',
     'workspace.manage_settings',
     'project.read',
+    'project.promote',
     // No `project.create`: a project is started by a project manager, and one
     // an admin made would have no PM behind it and sit outside the catalogue.
     'project.update',
