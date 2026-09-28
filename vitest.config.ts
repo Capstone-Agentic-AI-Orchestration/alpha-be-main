@@ -2,6 +2,16 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    /**
+     * Room for the tests that boot the whole API.
+     *
+     * Several start Express, SQLite and the route stack per test, which takes
+     * well under a second alone but can pass 5s when every core is running
+     * one -- the default limit -- so a full run failed on a different handful
+     * each time while each file passed on its own. A hung test still fails.
+     */
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     env: {
       /**
        * Keep role-resolution tests independent of a developer's local `.env`.
