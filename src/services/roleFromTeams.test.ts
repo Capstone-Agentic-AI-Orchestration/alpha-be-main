@@ -29,7 +29,7 @@ describe('roleFromTeams', () => {
     const teams = [
       t('St-Peter-Sandbox', 'product-owner'),
       t('St-Peter-Sandbox', 'developer'),
-      t('Alpha-Explora', 'team-lead'),
+      t('Other-Org', 'team-lead'),
       t(WS, 'developers')
     ];
     // 'dev' from the workspace, not 'pm' from a sandbox that outranks it.

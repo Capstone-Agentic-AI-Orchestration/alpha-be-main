@@ -135,7 +135,7 @@ describe('team-based access', () => {
     // This account is in ten organisations; only the workspace one may decide.
     const me = await startWith({
       ghUser: 'LloydLim1',
-      teams: ['St-Peter-Sandbox/developer', 'Alpha-Explora/team-lead'],
+      teams: ['St-Peter-Sandbox/developer', 'Other-Org/team-lead'],
       projectOrg: ORG
     });
     expect(me.access).toBe('no_team');
