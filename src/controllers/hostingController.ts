@@ -13,6 +13,8 @@ import {
   type HostingContext
 } from '../services/hosting/hostingService.js';
 import { normalizeProjectStack } from '../services/scaffoldBuilder.js';
+import { previewsFor } from '../services/hosting/hostingPreviews.js';
+import { checkHealth } from '../services/hosting/healthCheck.js';
 import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
 import { projectStore } from '../store/stores.js';
 import type { Project } from '../models/index.js';
@@ -32,12 +34,14 @@ import { requireProjectWorkspace, requireWorkspaceCapability } from './workspace
  *  - `/projects/:id/repos/:owner/:name/hosting` -- what the app calls. In the
  *    cloud it answers directly; on a desktop it forwards to the route above.
  *
+ * Every operation is served both ways -- status, set-up, previews, and a
+ * backend's health -- from one table, so the rules above are written once.
  * Reading needs `deployment.read`; setting up needs `deployment.manage`.
  */
 export const hostingRouter = Router();
 
-/** Setting up creates services and waits for the platforms; longer than a plain relay. */
-const SET_UP_TIMEOUT_MS = 180_000;
+/** Setting up waits for both platforms, and a health check for a cold start; both outlast a plain relay. */
+const SLOW_TIMEOUT_MS = 180_000;
 
 type Access = 'read' | 'write';
 
@@ -84,10 +88,6 @@ async function projectForRepo(workspaceId: string, repo: string): Promise<Projec
   return projects.find(project => reposForProject(project).some(r => r.toLowerCase() === wanted)) ?? null;
 }
 
-function runHosting(access: Access, ctx: HostingContext) {
-  return access === 'write' ? setUpHosting(ctx) : getHostingStatus(ctx);
-}
-
 /**
  * The answer for a desktop that has no cloud to forward to: the same shape
  * as every other status, saying why nothing can be done here.
@@ -117,46 +117,113 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
   };
 }
 
+type Hints = { stack?: string; partner?: string };
+
+interface Operation {
+  /** Appended to `/hosting/:owner/:name` and to `/projects/:id/repos/:owner/:name/hosting`. */
+  suffix: '' | '/previews' | '/health';
+  method: 'get' | 'post';
+  access: Access;
+  /** Outlasts the default relay timeout. */
+  slow?: boolean;
+  /** In the cloud: the answer. */
+  run(ctx: HostingContext, req: Request): Promise<unknown>;
+  /** On a desktop with no cloud: the same shape, saying nothing can be done here. */
+  offline(repo: string, hints: Hints, req: Request): unknown;
+}
+
+const OPERATIONS: Operation[] = [
+  {
+    suffix: '',
+    method: 'get',
+    access: 'read',
+    run: ctx => getHostingStatus(ctx),
+    offline: (repo, hints) => noCloud(repo, hints.stack, hints.partner)
+  },
+  {
+    suffix: '',
+    method: 'post',
+    access: 'write',
+    slow: true,
+    run: ctx => setUpHosting(ctx),
+    offline: (repo, hints) => noCloud(repo, hints.stack, hints.partner)
+  },
+  {
+    suffix: '/previews',
+    method: 'get',
+    access: 'read',
+    run: async ctx => previewsFor(await getHostingStatus(ctx)),
+    offline: (repo, hints) => previewsFor(noCloud(repo, hints.stack, hints.partner))
+  },
+  {
+    suffix: '/health',
+    method: 'get',
+    access: 'read',
+    slow: true,
+    run: async (ctx, req) => {
+      const branch = text(req.query.branch);
+      const status = await getHostingStatus(ctx);
+      const env = status.environments.find(e => e.branch === branch);
+      if (!env?.url) {
+        return { url: null, ok: false, status: null, latencyMs: 0, error: `${branch ?? 'That branch'} has no address yet.` };
+      }
+      return checkHealth(env.url);
+    },
+    offline: () => ({
+      url: null,
+      ok: false,
+      status: null,
+      latencyMs: 0,
+      error: 'This desktop has no Alpha cloud configured, and hosting only runs in the cloud.'
+    })
+  }
+];
+
+function hintsFrom(source: Record<string, unknown>): Hints {
+  const stack = text(source.stack);
+  const partner = text(source.partner);
+  return { ...(stack ? { stack } : {}), ...(partner ? { partner } : {}) };
+}
+
+/** Query parameters an operation passes through unchanged (the branch a health check is for). */
+function passThroughQuery(req: Request): Record<string, string> {
+  const branch = text(req.query.branch);
+  return branch ? { branch } : {};
+}
+
 // ─── Repo-keyed: the cloud's own ────────────────────────────────────────────
 
-function repoKeyed(access: Access) {
+function repoKeyed(op: Operation) {
   return handle(async (req, res) => {
-    if (!requireWorkspaceCapability(req, res, capabilityFor(access))) return;
+    if (!requireWorkspaceCapability(req, res, capabilityFor(op.access))) return;
     const { owner, name } = req.params;
     const repo = `${owner}/${name}`;
-    const source = access === 'write' ? req.body ?? {} : req.query;
-    const stack = text(source.stack);
-    const partner = text(source.partner);
+    const hints = hintsFrom(op.method === 'post' ? req.body ?? {} : (req.query as Record<string, unknown>));
 
     if (!IS_CLOUD) {
-      if (await relayToCloud(req, res, access === 'write' ? { timeoutMs: SET_UP_TIMEOUT_MS } : {})) return;
-      res.json(noCloud(repo, stack, partner));
+      if (await relayToCloud(req, res, op.slow ? { timeoutMs: SLOW_TIMEOUT_MS } : {})) return;
+      res.json(await op.offline(repo, hints, req));
       return;
     }
 
-    if (!(await authorizeRepo(res, owner, name, access))) return;
+    if (!(await authorizeRepo(res, owner, name, op.access))) return;
     const project = await projectForRepo(req.workspace!.workspaceId, repo);
     res.json(
-      await runHosting(access, {
-        repo,
-        project,
-        ...(stack ? { stackHint: stack } : {}),
-        ...(partner ? { partnerHint: partner } : {})
-      })
+      await op.run(
+        { repo, project, ...(hints.stack ? { stackHint: hints.stack } : {}), ...(hints.partner ? { partnerHint: hints.partner } : {}) },
+        req
+      )
     );
   });
 }
 
-hostingRouter.get('/hosting/:owner/:name', repoKeyed('read'));
-hostingRouter.post('/hosting/:owner/:name', repoKeyed('write'));
-
 // ─── Project-scoped: what the app calls ─────────────────────────────────────
 
-function projectScoped(access: Access) {
+function projectScoped(op: Operation) {
   return handle(async (req, res) => {
     const { id, owner, name } = req.params;
     if (!requireProjectWorkspace(req, res, id)) return;
-    if (!requireWorkspaceCapability(req, res, capabilityFor(access))) return;
+    if (!requireWorkspaceCapability(req, res, capabilityFor(op.access))) return;
 
     const project = await projectStore().get(req.workspace!.workspaceId, id);
     if (!project) {
@@ -170,29 +237,30 @@ function projectScoped(access: Access) {
     }
 
     if (IS_CLOUD) {
-      if (!(await authorizeRepo(res, owner, name, access))) return;
-      res.json(await runHosting(access, { repo, project }));
+      if (!(await authorizeRepo(res, owner, name, op.access))) return;
+      res.json(await op.run({ repo, project }, req));
       return;
     }
 
     // A desktop: hand the cloud what this project knows, on the repo-keyed route.
     const hints = hostingHintsFor(project, repo);
     if (!usesCloudDirectory()) {
-      res.json(noCloud(repo, hints.stack, hints.partner));
+      res.json(await op.offline(repo, hints, req));
       return;
     }
     const [repoOwner, repoName] = repo.split('/');
-    const path = `/hosting/${encodeURIComponent(repoOwner)}/${encodeURIComponent(repoName)}`;
-    const query = new URLSearchParams(hints).toString();
-    await relayToCloud(
-      req,
-      res,
-      access === 'write'
-        ? { path, body: hints, timeoutMs: SET_UP_TIMEOUT_MS }
-        : { path: query ? `${path}?${query}` : path }
-    );
+    const path = `/hosting/${encodeURIComponent(repoOwner)}/${encodeURIComponent(repoName)}${op.suffix}`;
+    const timeout = op.slow ? { timeoutMs: SLOW_TIMEOUT_MS } : {};
+    if (op.method === 'post') {
+      await relayToCloud(req, res, { path, body: hints, ...timeout });
+      return;
+    }
+    const query = new URLSearchParams({ ...hints, ...passThroughQuery(req) }).toString();
+    await relayToCloud(req, res, { path: query ? `${path}?${query}` : path, ...timeout });
   });
 }
 
-hostingRouter.get('/projects/:id/repos/:owner/:name/hosting', projectScoped('read'));
-hostingRouter.post('/projects/:id/repos/:owner/:name/hosting', projectScoped('write'));
+for (const op of OPERATIONS) {
+  hostingRouter[op.method](`/hosting/:owner/:name${op.suffix}`, repoKeyed(op));
+  hostingRouter[op.method](`/projects/:id/repos/:owner/:name/hosting${op.suffix}`, projectScoped(op));
+}

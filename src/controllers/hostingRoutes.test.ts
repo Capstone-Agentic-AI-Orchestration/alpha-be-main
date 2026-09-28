@@ -242,6 +242,19 @@ describe('on a desktop', () => {
     expect(calls.some(c => c.kind === 'setup' || c.kind === 'status' || c.kind === 'github')).toBe(false);
   });
 
+  it('forwards previews and a health check to the same operation in the cloud, with the branch', async () => {
+    const { app, calls } = await startApi({ role: 'dev' });
+
+    await call(app, 'GET', `${projectRoute}/previews`);
+    await call(app, 'GET', `${projectRoute}/health?branch=uat`);
+
+    expect(calls.map(c => [c.path, c.timeoutMs])).toEqual([
+      [`/hosting/${ORG}/shop-fe/previews?stack=react&partner=${encodeURIComponent(`${ORG}/shop-be`)}`, undefined],
+      // A health check may be waking a sleeping service.
+      [`/hosting/${ORG}/shop-fe/health?stack=react&partner=${encodeURIComponent(`${ORG}/shop-be`)}&branch=uat`, 180_000]
+    ]);
+  });
+
   it('answers unavailable, in the usual shape, when no cloud is configured', async () => {
     const { app, calls } = await startApi({ role: 'dev', cloudConfigured: false });
 
