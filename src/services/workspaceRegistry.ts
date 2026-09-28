@@ -64,6 +64,8 @@ export type WorkspaceCapability =
   | 'chat.write'
   | 'deployment.read'
   | 'deployment.manage'
+  /** Set or remove hosting variables on the uat and dev environments; `main` needs `deployment.manage`. */
+  | 'deployment.env_preview'
   | 'analytics.read'
   | 'intake.submit';
 
@@ -104,6 +106,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'chat.read',
     'chat.write',
     'deployment.read',
+    'deployment.env_preview',
     /*
      * Point this machine at a folder for a project. A developer's own act on
      * their own disk, which is why it is not `project.manage`: that is the
@@ -138,6 +141,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'chat.read',
     'chat.write',
     'deployment.read',
+    'deployment.env_preview',
     'deployment.manage',
     'analytics.read',
     'workspace.manage_settings',
@@ -165,6 +169,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'chat.read',
     'chat.write',
     'deployment.read',
+    'deployment.env_preview',
     'deployment.manage',
     'analytics.read'
   ]

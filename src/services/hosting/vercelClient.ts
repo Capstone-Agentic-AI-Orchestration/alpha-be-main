@@ -76,6 +76,20 @@ export interface VercelEnvVarInput {
   target: VercelEnvTarget[];
   /** Restricts a `preview` target to one branch; omit for every preview. */
   gitBranch?: string;
+  /**
+   * `sensitive`: write-only, never readable again through Vercel's API or dashboard --
+   * what anything a person or agent sets is. `plain` only for the URLs Alpha derives.
+   */
+  type?: 'plain' | 'sensitive';
+}
+
+export interface VercelEnvVar {
+  id?: string;
+  key: string;
+  value?: string;
+  type?: string;
+  target: string[];
+  gitBranch?: string;
 }
 
 export interface VercelDomain {
@@ -114,7 +128,9 @@ export interface VercelClient {
   disableSsoProtection(projectId: string): Promise<void>;
   upsertEnvVars(projectId: string, vars: VercelEnvVarInput[]): Promise<void>;
   /** `value` is absent for a `sensitive`/`encrypted` variable; Alpha only ever writes `plain` ones. */
-  listEnvVars(projectId: string): Promise<Array<{ key: string; value?: string; target: string[]; gitBranch?: string }>>;
+  listEnvVars(projectId: string): Promise<VercelEnvVar[]>;
+  /** Remove one variable record, by the id `listEnvVars` reports for it. */
+  deleteEnvVar(projectId: string, envId: string): Promise<void>;
   /** `false` when Vercel refused a branch domain (some plans do not allow it); caller falls back to the git alias. */
   addBranchDomain(projectId: string, domainName: string, gitBranch: string): Promise<boolean>;
   listDomains(projectId: string): Promise<VercelDomain[]>;
@@ -269,16 +285,20 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
       await call<unknown>(
         'POST',
         `/v10/projects/${projectId}/env?upsert=true`,
-        vars.map(v => ({ key: v.key, value: v.value, type: 'plain', target: v.target, ...(v.gitBranch ? { gitBranch: v.gitBranch } : {}) }))
+        vars.map(v => ({ key: v.key, value: v.value, type: v.type ?? 'plain', target: v.target, ...(v.gitBranch ? { gitBranch: v.gitBranch } : {}) }))
       );
     },
 
     async listEnvVars(projectId: string) {
-      const body = await call<{ envs: Array<{ key: string; value?: string; target: string[]; gitBranch?: string }> }>(
+      const body = await call<{ envs: VercelEnvVar[] }>(
         'GET',
         `/v10/projects/${projectId}/env`
       );
       return body?.envs ?? [];
+    },
+
+    async deleteEnvVar(projectId: string, envId: string) {
+      await call<void>('DELETE', `/v9/projects/${projectId}/env/${encodeURIComponent(envId)}`);
     },
 
     async addBranchDomain(projectId: string, domainName: string, gitBranch: string) {

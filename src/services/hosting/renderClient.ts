@@ -96,6 +96,8 @@ export interface RenderClient {
   /** Does not trigger a deploy; call `triggerDeploy` after setting every variable. */
   setEnvVar(serviceId: string, key: string, value: string): Promise<void>;
   listEnvVars(serviceId: string): Promise<Array<{ key: string; value: string }>>;
+  /** Remove one variable. Does not trigger a deploy. */
+  deleteEnvVar(serviceId: string, key: string): Promise<void>;
   triggerDeploy(serviceId: string): Promise<{ id: string }>;
   /** `null` when the service has never deployed. */
   latestDeploy(serviceId: string): Promise<RenderDeploy | null>;
@@ -210,6 +212,10 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
 
     async setEnvVar(serviceId: string, key: string, value: string) {
       await call<void>('PUT', `/services/${serviceId}/env-vars/${encodeURIComponent(key)}`, { value });
+    },
+
+    async deleteEnvVar(serviceId: string, key: string) {
+      await call<void>('DELETE', `/services/${serviceId}/env-vars/${encodeURIComponent(key)}`);
     },
 
     async listEnvVars(serviceId: string) {

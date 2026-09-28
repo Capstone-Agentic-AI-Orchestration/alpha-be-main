@@ -17,6 +17,10 @@ import { previewsFor } from '../services/hosting/hostingPreviews.js';
 import { checkHealth } from '../services/hosting/healthCheck.js';
 import { getHostingLogs } from '../services/hosting/hostingLogs.js';
 import { parseDeploymentLogsQuery } from '../services/hosting/logCursor.js';
+import { deleteHostingEnv, EnvRequestError, listHostingEnv, setHostingEnv } from '../services/hosting/hostingEnv.js';
+import type { HostingActor } from '../services/hosting/hostingAudit.js';
+import type { HostingBranch } from '../services/hosting/hostingService.js';
+import type { WorkspaceCapability } from '../services/workspaceRegistry.js';
 import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
 import { projectStore } from '../store/stores.js';
 import type { Project } from '../models/index.js';
@@ -110,6 +114,10 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
     try {
       await fn(req, res);
     } catch (err) {
+      if (err instanceof EnvRequestError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
       if (err instanceof GitHubApiError) {
         res.status([401, 403, 404].includes(err.status) ? err.status : 502).json({ error: err.message });
         return;
@@ -121,11 +129,18 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
 
 type Hints = { stack?: string; partner?: string };
 
+/** A DELETE carries its arguments in the query: the relay sends no body on one. */
+function hasBody(op: { method: string }): boolean {
+  return op.method === 'post' || op.method === 'put';
+}
+
 interface Operation {
   /** Appended to `/hosting/:owner/:name` and to `/projects/:id/repos/:owner/:name/hosting`. */
-  suffix: '' | '/previews' | '/health' | '/logs';
-  method: 'get' | 'post';
+  suffix: '' | '/previews' | '/health' | '/logs' | '/env';
+  method: 'get' | 'post' | 'put' | 'delete';
   access: Access;
+  /** When the capability depends on the request (which environment a variable change is for). */
+  capability?: (req: Request) => WorkspaceCapability;
   /** Outlasts the default relay timeout. */
   slow?: boolean;
   /** In the cloud: the answer. */
@@ -192,8 +207,63 @@ const OPERATIONS: Operation[] = [
       next: null,
       filters: []
     })
+  },
+  {
+    suffix: '/env',
+    method: 'get',
+    access: 'read',
+    run: ctx => listHostingEnv(ctx),
+    offline: repo => ({ repo, role: null, state: 'unavailable', error: NO_CLOUD, environments: [], vars: [] })
+  },
+  {
+    suffix: '/env',
+    method: 'put',
+    access: 'write',
+    slow: true,
+    capability: req => envCapability(text(req.body?.environment)),
+    run: (ctx, req) =>
+      setHostingEnv(
+        ctx,
+        { environment: text(req.body?.environment) as HostingBranch, vars: req.body?.vars, redeploy: req.body?.redeploy !== false },
+        actorOf(req),
+        req.workspace!.workspaceId
+      ),
+    offline: () => {
+      throw new EnvRequestError(NO_CLOUD);
+    }
+  },
+  {
+    suffix: '/env',
+    method: 'delete',
+    access: 'write',
+    slow: true,
+    capability: req => envCapability(text(req.query.environment)),
+    run: (ctx, req) =>
+      deleteHostingEnv(
+        ctx,
+        text(req.query.environment) as HostingBranch,
+        text(req.query.key) ?? '',
+        { redeploy: req.query.redeploy !== 'false' },
+        actorOf(req),
+        req.workspace!.workspaceId
+      ),
+    offline: () => {
+      throw new EnvRequestError(NO_CLOUD);
+    }
   }
 ];
+
+const NO_CLOUD = 'This desktop has no Alpha cloud configured, and hosting only runs in the cloud.';
+
+/** Production is a release decision; the preview environments are a developer's to change too. */
+function envCapability(environment: string | undefined): WorkspaceCapability {
+  return environment === 'uat' || environment === 'dev' ? 'deployment.env_preview' : 'deployment.manage';
+}
+
+/** Who a change is recorded as: the signed-in person. (An agent acting for them is recorded in phase 4.) */
+function actorOf(req: Request): HostingActor {
+  return { login: req.session?.login ?? req.workspace?.userId ?? 'unknown', kind: 'user' };
+}
 
 /** The log query parameters, as the logs route and its desktop forward both read them. */
 const LOG_QUERY_KEYS = ['startTime', 'endTime', 'direction', 'limit', 'type', 'level', 'text', 'instance'] as const;
@@ -215,7 +285,7 @@ function hintsFrom(source: Record<string, unknown>): Hints {
 /** Query parameters an operation passes through unchanged: the branch, and a log query's filters and window. */
 function passThroughQuery(req: Request): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const key of ['branch', ...LOG_QUERY_KEYS]) {
+  for (const key of ['branch', 'environment', 'key', 'redeploy', ...LOG_QUERY_KEYS]) {
     const value = text(req.query[key]);
     if (value) out[key] = value;
   }
@@ -226,10 +296,10 @@ function passThroughQuery(req: Request): Record<string, string> {
 
 function repoKeyed(op: Operation) {
   return handle(async (req, res) => {
-    if (!requireWorkspaceCapability(req, res, capabilityFor(op.access))) return;
+    if (!requireWorkspaceCapability(req, res, op.capability?.(req) ?? capabilityFor(op.access))) return;
     const { owner, name } = req.params;
     const repo = `${owner}/${name}`;
-    const hints = hintsFrom(op.method === 'post' ? req.body ?? {} : (req.query as Record<string, unknown>));
+    const hints = hintsFrom(hasBody(op) ? req.body ?? {} : (req.query as Record<string, unknown>));
 
     if (!IS_CLOUD) {
       if (await relayToCloud(req, res, op.slow ? { timeoutMs: SLOW_TIMEOUT_MS } : {})) return;
@@ -254,7 +324,7 @@ function projectScoped(op: Operation) {
   return handle(async (req, res) => {
     const { id, owner, name } = req.params;
     if (!requireProjectWorkspace(req, res, id)) return;
-    if (!requireWorkspaceCapability(req, res, capabilityFor(op.access))) return;
+    if (!requireWorkspaceCapability(req, res, op.capability?.(req) ?? capabilityFor(op.access))) return;
 
     const project = await projectStore().get(req.workspace!.workspaceId, id);
     if (!project) {
@@ -282,8 +352,8 @@ function projectScoped(op: Operation) {
     const [repoOwner, repoName] = repo.split('/');
     const path = `/hosting/${encodeURIComponent(repoOwner)}/${encodeURIComponent(repoName)}${op.suffix}`;
     const timeout = op.slow ? { timeoutMs: SLOW_TIMEOUT_MS } : {};
-    if (op.method === 'post') {
-      await relayToCloud(req, res, { path, body: hints, ...timeout });
+    if (hasBody(op)) {
+      await relayToCloud(req, res, { path, body: { ...(req.body ?? {}), ...hints }, ...timeout });
       return;
     }
     const query = new URLSearchParams({ ...hints, ...passThroughQuery(req) }).toString();

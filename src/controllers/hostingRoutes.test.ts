@@ -23,7 +23,8 @@ const project = {
 /** The deployment capabilities as `workspaceRegistry` grants them. */
 const CAN: Record<string, string[]> = {
   'deployment.read': ['dev', 'pm', 'admin'],
-  'deployment.manage': ['pm', 'admin']
+  'deployment.manage': ['pm', 'admin'],
+  'deployment.env_preview': ['dev', 'pm', 'admin']
 };
 
 interface Options {
@@ -88,12 +89,27 @@ async function startApi(options: Options = {}) {
       }
     };
   });
+  vi.doMock('../services/hosting/hostingEnv.js', async () => {
+    const actual = await vi.importActual<typeof import('../services/hosting/hostingEnv.js')>('../services/hosting/hostingEnv.js');
+    return {
+      ...actual,
+      setHostingEnv: async (ctx: any, request: any, actor: any) => {
+        calls.push({ kind: 'env_set', repo: ctx.repo, environment: request.environment, keys: request.vars.map((v: any) => v.key), actor: actor.login });
+        return { environment: request.environment, changed: [], failed: [], redeployed: false };
+      },
+      deleteHostingEnv: async (ctx: any, environment: string, key: string) => {
+        calls.push({ kind: 'env_delete', repo: ctx.repo, environment, key });
+        return { environment, changed: [key], failed: [], redeployed: false };
+      }
+    };
+  });
 
   const { hostingRouter } = await import('./hostingController.js');
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).workspace = { workspaceId: 'ws-1', role: options.role ?? 'pm', userId: 'u1' };
+    (req as any).session = { login: 'signed-in-person' };
     next();
   });
   app.use('/api', hostingRouter);
@@ -118,7 +134,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
 
 afterEach(() => {
   delete process.env.ALPHA_MODE;
-  for (const mod of ['../store/stores.js', './workspaceContext.js', '../services/githubApi.js', '../services/cloudWorkspaces.js', '../services/hosting/hostingService.js']) {
+  for (const mod of ['../store/stores.js', './workspaceContext.js', '../services/githubApi.js', '../services/cloudWorkspaces.js', '../services/hosting/hostingService.js', '../services/hosting/hostingEnv.js']) {
     vi.doUnmock(mod);
   }
   vi.resetModules();
@@ -280,5 +296,67 @@ describe('on a desktop', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ state: 'unavailable', role: 'frontend', platform: 'vercel', partner: `${ORG}/shop-be` });
     expect(calls).toEqual([]);
+  });
+});
+
+describe('hosting variables', () => {
+  const vars = [{ key: 'STRIPE_KEY', value: 'sk_test_1' }];
+
+  it('lets a developer change uat, recorded as them', async () => {
+    const { app, calls } = await startApi({ cloud: true, role: 'dev' });
+
+    const res = await call(app, 'PUT', `${projectRoute}/env`, { environment: 'uat', vars });
+
+    expect(res.status).toBe(200);
+    expect(calls.filter(c => c.kind === 'env_set')).toEqual([
+      { kind: 'env_set', repo: `${ORG}/shop-fe`, environment: 'uat', keys: ['STRIPE_KEY'], actor: 'signed-in-person' }
+    ]);
+  });
+
+  /** Production is a release decision. */
+  it('keeps production to a project manager or admin', async () => {
+    const { app, calls } = await startApi({ cloud: true, role: 'dev' });
+
+    expect((await call(app, 'PUT', `${projectRoute}/env`, { environment: 'main', vars })).status).toBe(403);
+    expect((await call(app, 'DELETE', `${projectRoute}/env?environment=main&key=STRIPE_KEY`)).status).toBe(403);
+    expect(calls.some(c => c.kind === 'env_set' || c.kind === 'env_delete')).toBe(false);
+  });
+
+  it('lets a project manager change production', async () => {
+    const { app, calls } = await startApi({ cloud: true, role: 'pm' });
+
+    await call(app, 'DELETE', `${projectRoute}/env?environment=main&key=STRIPE_KEY`);
+
+    expect(calls.filter(c => c.kind === 'env_delete')).toEqual([
+      { kind: 'env_delete', repo: `${ORG}/shop-fe`, environment: 'main', key: 'STRIPE_KEY' }
+    ]);
+  });
+
+  it('keeps a client out entirely', async () => {
+    const { app } = await startApi({ cloud: true, role: 'client' });
+
+    expect((await call(app, 'PUT', `${projectRoute}/env`, { environment: 'uat', vars })).status).toBe(403);
+  });
+
+  it('on a desktop, forwards a change with the values in the body only', async () => {
+    const { app, calls } = await startApi({ role: 'dev' });
+
+    await call(app, 'PUT', `${projectRoute}/env`, { environment: 'uat', vars });
+    await call(app, 'DELETE', `${projectRoute}/env?environment=uat&key=STRIPE_KEY&redeploy=false`);
+
+    expect(calls[0]).toMatchObject({
+      kind: 'cloud',
+      path: `/hosting/${ORG}/shop-fe/env`,
+      method: 'PUT',
+      body: { environment: 'uat', vars, stack: 'react', partner: `${ORG}/shop-be` },
+      timeoutMs: 180_000
+    });
+    expect(calls[0].path).not.toContain('sk_test_1');
+    expect(calls[1]).toMatchObject({ method: 'DELETE', body: undefined });
+    expect(Object.fromEntries(new URL(`http://x${calls[1].path as string}`).searchParams)).toMatchObject({
+      environment: 'uat',
+      key: 'STRIPE_KEY',
+      redeploy: 'false'
+    });
   });
 });
