@@ -11,6 +11,9 @@
  * nothing here reaches the network unless a caller hands it a real `fetch`.
  */
 
+import { fetchWithRetry } from './fetchWithRetry.js';
+import { buildRenderLogsQueryParams, mapRenderLogsPage, type RenderLogsPage, type RenderLogsPayload, type RenderLogsQueryInput } from './renderLogs.js';
+
 const RENDER_API_BASE = 'https://api.render.com/v1';
 
 export class RenderApiError extends Error {
@@ -97,6 +100,13 @@ export interface RenderClient {
   /** `null` when the service has never deployed. */
   latestDeploy(serviceId: string): Promise<RenderDeploy | null>;
   deleteService(serviceId: string): Promise<void>;
+  /**
+   * One page of a service's logs (build, runtime and request), always oldest
+   * to newest. Render's logs API is scoped by owner as well as service, so
+   * the service's own `ownerId` is required. Retried on a 429, since a log
+   * view polls this.
+   */
+  queryLogs(ownerId: string, serviceId: string, query: RenderLogsQueryInput): Promise<RenderLogsPage>;
 }
 
 /** Render wraps list items as `{ cursor, <resource> }`; unwrap either that or a bare item. */
@@ -219,6 +229,18 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
 
     async deleteService(serviceId: string) {
       await call<void>('DELETE', `/services/${serviceId}`);
+    },
+
+    async queryLogs(ownerId: string, serviceId: string, query: RenderLogsQueryInput) {
+      const params = buildRenderLogsQueryParams(ownerId, serviceId, query);
+      const res = await fetchWithRetry(
+        `${RENDER_API_BASE}/logs?${params.toString()}`,
+        { method: 'GET', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } },
+        'Render',
+        fetchImpl
+      );
+      if (!res.ok) throw await parseError(res);
+      return mapRenderLogsPage((await res.json()) as RenderLogsPayload, query.direction ?? 'backward');
     }
   };
 }

@@ -211,3 +211,47 @@ describe('deleting a project', () => {
     expect(calls[0]).toMatchObject({ method: 'DELETE', url: 'https://api.vercel.com/v9/projects/proj-1' });
   });
 });
+
+describe('reading logs', () => {
+  it('reads a branch deployment’s build output when only build logs are asked for', async () => {
+    const { impl, calls } = fakeFetch(call =>
+      call.url.includes('/v7/deployments')
+        ? { status: 200, body: { deployments: [{ uid: 'dpl-uat' }] } }
+        : { status: 200, body: [{ id: 'e1', created: 1767225600000, type: 'stdout', payload: { text: 'Build completed' } }] }
+    );
+    const client = createVercelClient('token', '', impl);
+
+    const page = await client.queryLogs('proj-1', { branch: 'uat' }, { type: ['build'] });
+
+    expect(calls[0].url).toContain('branch=uat');
+    expect(calls[1].url).toContain('/v3/deployments/dpl-uat/events');
+    expect(page.logs.map(l => l.message)).toEqual(['Build completed']);
+  });
+
+  it('reads runtime logs sent as a stream of JSON lines, and filters them by level', async () => {
+    const ndjson = [
+      JSON.stringify({ id: 'r1', timestamp: 1767225600000, message: 'GET / 200', level: 'info' }),
+      JSON.stringify({ id: 'r2', timestamp: 1767225601000, message: 'boom', level: 'error' }),
+      '{"id":"r3","timest'
+    ].join('\n');
+    const impl = (async (url: string) =>
+      String(url).includes('/v7/deployments')
+        ? new Response(JSON.stringify({ deployments: [{ uid: 'dpl-prod' }] }), { status: 200 })
+        : new Response(ndjson, { status: 200, headers: { 'content-type': 'application/stream+json' } })) as unknown as typeof fetch;
+    const client = createVercelClient('token', '', impl);
+
+    const page = await client.queryLogs('proj-1', { production: true }, { level: ['error'] });
+
+    expect(page).toMatchObject({ hasMore: false, next: null });
+    expect(page.logs.map(l => l.message)).toEqual(['boom']);
+  });
+
+  it('answers no lines when the branch has never been deployed', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, body: { deployments: [] } }));
+
+    const page = await createVercelClient('token', '', impl).queryLogs('proj-1', { branch: 'dev' }, {});
+
+    expect(page.logs).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+});

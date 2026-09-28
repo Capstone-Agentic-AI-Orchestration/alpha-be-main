@@ -85,11 +85,11 @@ export function hostingConfigured(): { render: boolean; vercel: boolean } {
   return { render: Boolean(RENDER_API_KEY), vercel: Boolean(VERCEL_TOKEN) };
 }
 
-function renderClient(): RenderClient | null {
+export function renderClient(): RenderClient | null {
   return RENDER_API_KEY ? createRenderClient(RENDER_API_KEY) : null;
 }
 
-function vercelClient(): VercelClient | null {
+export function vercelClient(): VercelClient | null {
   return VERCEL_TOKEN ? createVercelClient(VERCEL_TOKEN, VERCEL_TEAM_ID) : null;
 }
 
@@ -114,6 +114,11 @@ function apiUrlKeyFor(stack: CanonicalStack): string {
 const RENDER_MANAGED_KEYS = new Set(['NODE_ENV', 'CORS_ORIGINS', 'FRONTEND_URL']);
 const VERCEL_MANAGED_KEYS = new Set(['VITE_API_URL', 'NEXT_PUBLIC_API_URL']);
 
+/** Whether Alpha itself sets key (a URL or NODE_ENV), as opposed to a person or an agent. */
+export function isAlphaManagedKey(key: string): boolean {
+  return RENDER_MANAGED_KEYS.has(key) || VERCEL_MANAGED_KEYS.has(key);
+}
+
 /**
  * The value a status may carry for an environment variable: only the ones
  * Alpha itself derived (public URLs and NODE_ENV), never anything a person
@@ -128,7 +133,7 @@ function readableValue(key: string, value: string | null, managed: ReadonlySet<s
   return managed.has(key) ? value : null;
 }
 
-function renderServiceNames(repoName: string): { main: string; uat: string } {
+export function renderServiceNames(repoName: string): { main: string; uat: string } {
   return { main: repoName, uat: `${repoName}-uat` };
 }
 
@@ -152,7 +157,7 @@ function resourceForRepo(project: Project | null | undefined, repo: string): Pro
  * platform entirely, which is worse than reporting the repo as unhostable
  * until the caller says what it is.
  */
-function resolveStack(ctx: HostingContext): CanonicalStack | null {
+export function resolveStack(ctx: HostingContext): CanonicalStack | null {
   const resource = resourceForRepo(ctx.project, ctx.repo);
   if (resource?.stack) return normalizeProjectStack(resource.stack);
   if (ctx.stackHint) return normalizeProjectStack(ctx.stackHint);

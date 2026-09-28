@@ -255,6 +255,23 @@ describe('on a desktop', () => {
     ]);
   });
 
+  it('forwards a log query with its window and filters, and nothing it does not know', async () => {
+    const { app, calls } = await startApi({ role: 'dev' });
+
+    await call(app, 'GET', `${projectRoute}/logs?branch=main&direction=forward&startTime=2026-01-01T00%3A00%3A00Z&level=error&junk=1`);
+
+    const url = new URL(`http://x${calls[0].path as string}`);
+    expect(url.pathname).toBe(`/hosting/${ORG}/shop-fe/logs`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      stack: 'react',
+      partner: `${ORG}/shop-be`,
+      branch: 'main',
+      direction: 'forward',
+      startTime: '2026-01-01T00:00:00Z',
+      level: 'error'
+    });
+  });
+
   it('answers unavailable, in the usual shape, when no cloud is configured', async () => {
     const { app, calls } = await startApi({ role: 'dev', cloudConfigured: false });
 

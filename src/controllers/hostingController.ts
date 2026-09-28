@@ -15,6 +15,8 @@ import {
 import { normalizeProjectStack } from '../services/scaffoldBuilder.js';
 import { previewsFor } from '../services/hosting/hostingPreviews.js';
 import { checkHealth } from '../services/hosting/healthCheck.js';
+import { getHostingLogs } from '../services/hosting/hostingLogs.js';
+import { parseDeploymentLogsQuery } from '../services/hosting/logCursor.js';
 import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
 import { projectStore } from '../store/stores.js';
 import type { Project } from '../models/index.js';
@@ -121,7 +123,7 @@ type Hints = { stack?: string; partner?: string };
 
 interface Operation {
   /** Appended to `/hosting/:owner/:name` and to `/projects/:id/repos/:owner/:name/hosting`. */
-  suffix: '' | '/previews' | '/health';
+  suffix: '' | '/previews' | '/health' | '/logs';
   method: 'get' | 'post';
   access: Access;
   /** Outlasts the default relay timeout. */
@@ -176,8 +178,33 @@ const OPERATIONS: Operation[] = [
       latencyMs: 0,
       error: 'This desktop has no Alpha cloud configured, and hosting only runs in the cloud.'
     })
+  },
+  {
+    suffix: '/logs',
+    method: 'get',
+    access: 'read',
+    run: (ctx, req) => getHostingLogs(ctx, text(req.query.branch), logsQuery(req)),
+    offline: () => ({
+      source: 'unavailable',
+      reason: 'This desktop has no Alpha cloud configured, and hosting only runs in the cloud.',
+      logs: [],
+      hasMore: false,
+      next: null,
+      filters: []
+    })
   }
 ];
+
+/** The log query parameters, as the logs route and its desktop forward both read them. */
+const LOG_QUERY_KEYS = ['startTime', 'endTime', 'direction', 'limit', 'type', 'level', 'text', 'instance'] as const;
+
+function logsQuery(req: Request) {
+  const raw = Object.fromEntries(LOG_QUERY_KEYS.map(key => [key, text(req.query[key])])) as Record<
+    (typeof LOG_QUERY_KEYS)[number],
+    string | undefined
+  >;
+  return parseDeploymentLogsQuery(raw);
+}
 
 function hintsFrom(source: Record<string, unknown>): Hints {
   const stack = text(source.stack);
@@ -185,10 +212,14 @@ function hintsFrom(source: Record<string, unknown>): Hints {
   return { ...(stack ? { stack } : {}), ...(partner ? { partner } : {}) };
 }
 
-/** Query parameters an operation passes through unchanged (the branch a health check is for). */
+/** Query parameters an operation passes through unchanged: the branch, and a log query's filters and window. */
 function passThroughQuery(req: Request): Record<string, string> {
-  const branch = text(req.query.branch);
-  return branch ? { branch } : {};
+  const out: Record<string, string> = {};
+  for (const key of ['branch', ...LOG_QUERY_KEYS]) {
+    const value = text(req.query[key]);
+    if (value) out[key] = value;
+  }
+  return out;
 }
 
 // ─── Repo-keyed: the cloud's own ────────────────────────────────────────────

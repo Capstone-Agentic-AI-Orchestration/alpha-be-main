@@ -16,12 +16,14 @@ export async function fetchWithRetry(
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1],
   label = 'provider',
+  /** The fetch to retry -- a client's own, so tests that hand one in are honoured. */
+  fetchImpl: typeof fetch = fetch,
 ): ReturnType<typeof fetch> {
   const maxAttempts = 3;
   const maxWaitMs = 8_000;
 
   for (let attempt = 1; ; attempt += 1) {
-    const response = await fetch(input, init);
+    const response = await fetchImpl(input, init);
 
     if (response.status !== 429 || attempt >= maxAttempts) {
       return response;
