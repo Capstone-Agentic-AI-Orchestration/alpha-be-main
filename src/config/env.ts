@@ -400,6 +400,19 @@ export const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 export const GITHUB_CALLBACK_URL = process.env.GITHUB_CALLBACK_URL || '';
 export const GITHUB_SCOPE = process.env.GITHUB_SCOPE || 'repo,workflow,read:org';
 
+/**
+ * Where provisioned repositories get their CI/CD from, as `owner/name`.
+ *
+ * The caller workflows written into every new repository are this repo's
+ * `workflow-templates/customer/*.yml`, read at `ALPHAORCH_WORKFLOW_REF`, and
+ * they call its reusable workflows. Override only for a fork of it.
+ */
+export const ALPHAORCH_WORKFLOW_REPO = (
+  process.env.ALPHAORCH_WORKFLOW_REPO || 'Capstone-Agentic-AI-Orchestration/alphaorch-workflow'
+).trim();
+/** The tag or branch the caller templates are read at; `v1` is the floating major. */
+export const ALPHAORCH_WORKFLOW_REF = (process.env.ALPHAORCH_WORKFLOW_REF || 'v1').trim();
+
 // GitHub App Configuration
 export const GITHUB_APP_ID = process.env.GITHUB_APP_ID || '';
 export const GITHUB_APP_PRIVATE_KEY = process.env.GITHUB_APP_PRIVATE_KEY || '';

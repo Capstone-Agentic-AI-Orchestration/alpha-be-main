@@ -112,8 +112,22 @@ const SCAFFOLD_DEV_DEPENDENCIES: Record<string, string> = {
   jest: '^29.7.0',
   'ts-jest': '^29.2.5',
   '@types/jest': '^29.5.14',
-  '@types/node': '^22.10.0'
+  '@types/node': '^22.10.0',
+  // Every stack's jest.config.ts is TypeScript, and jest loads a TS config
+  // through ts-node. Next.js lacked it, so its tests could not start at all.
+  'ts-node': '^10.9.2'
 };
+
+/**
+ * What the generated CI runs for coverage.
+ *
+ * `backend-tests.yml` in alphaorch-workflow runs `npm run test:cov` and reads
+ * `coverage/coverage-summary.json`; the json-summary reporter writes exactly
+ * that, and `text` keeps a readable table in the log. Frontend CI calls jest
+ * with its own coverage flags, so the script only has to exist for backends,
+ * but every stack gets it so `npm run test:cov` means the same thing anywhere.
+ */
+const COVERAGE_SCRIPT = 'jest --coverage --coverageReporters=json-summary --coverageReporters=text';
 
 function buildPackageJson(packageName: string, stack: CanonicalStack): string {
   let scripts: Record<string, string>;
@@ -124,6 +138,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       start: 'next start',
       dev: 'next dev',
       test: 'jest',
+      'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
       lint: 'eslint src tests'
     };
@@ -141,6 +156,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       start: 'vite preview',
       dev: 'vite',
       test: 'jest',
+      'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
       lint: 'eslint src tests'
     };
@@ -150,6 +166,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       start: 'node dist/main.js',
       dev: 'ts-node src/main.ts',
       test: 'jest',
+      'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
       lint: 'eslint src tests'
     };
@@ -159,6 +176,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       start: 'node dist/index.js',
       dev: 'ts-node src/index.ts',
       test: 'jest',
+      'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
       lint: 'eslint src tests'
     };
@@ -182,7 +200,6 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
     pkg.dependencies['reflect-metadata'] = '^0.2.2';
     pkg.dependencies['rxjs'] = '^7.8.1';
     pkg.devDependencies['@nestjs/testing'] = '^11.0.0';
-    pkg.devDependencies['ts-node'] = '^10.9.2';
   }
 
   if (stack === 'nextjs' || stack === 'react') {
@@ -199,11 +216,10 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
   }
 
   if (stack === 'nextjs') {
-    pkg.dependencies['next'] = '^15.1.0';
-  }
-
-  if (stack === 'nodejs' || stack === 'react') {
-    pkg.devDependencies['ts-node'] = '^10.9.2';
+    // 16.3.6+: earlier releases depend on a postcss with a high-severity
+    // advisory (GHSA-qx2v-qp2m-jg93), which fails the generated CI's
+    // `npm audit --audit-level=high` on the first push.
+    pkg.dependencies['next'] = '^16.3.6';
   }
 
   return JSON.stringify(pkg, null, 2) + '\n';
