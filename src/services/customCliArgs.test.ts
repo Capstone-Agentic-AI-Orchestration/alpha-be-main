@@ -182,3 +182,24 @@ describe('buildEnv', () => {
     expect(buildEnv([{ key: 'EMPTY' } as any]).env).toEqual({ EMPTY: '' });
   });
 });
+
+describe('project variables that no longer apply', () => {
+  it('says so once per project, naming the keys and never a value', async () => {
+    const { vi } = await import('vitest');
+    vi.resetModules();
+    const logInfo = vi.fn();
+    vi.doMock('../utils/logger.js', () => ({ logInfo, logError: vi.fn() }));
+    const { reportIgnoredProjectEnv } = await import('./customCliArgs.js');
+    const project = { id: 'p1', key: 'SHOP', envVars: [{ key: 'SUPABASE_URL', value: 'https://secret.example' }] };
+
+    reportIgnoredProjectEnv(project);
+    reportIgnoredProjectEnv(project);
+    reportIgnoredProjectEnv({ id: 'p2', envVars: [] });
+    reportIgnoredProjectEnv(null);
+
+    expect(logInfo).toHaveBeenCalledTimes(1);
+    expect(logInfo.mock.calls[0][0]).toContain('SHOP still stores 1 project variable(s) (SUPABASE_URL)');
+    expect(logInfo.mock.calls[0][0]).not.toContain('secret.example');
+    vi.doUnmock('../utils/logger.js');
+  });
+});
