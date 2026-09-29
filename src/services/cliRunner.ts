@@ -7,7 +7,7 @@ import { chatToolsFor } from './toolPolicy.js';
 import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
-import { cleanupRunMcpConfig, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
+import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
@@ -394,6 +394,14 @@ export function buildTurnInvocation(
         // part of the prompt text rather than as a flag.
         ...(modelName ? ['--model', modelName] : []),
         ...reasoningArgs(provider, reasoningEffort),
+        /**
+         * The run's MCP servers. Codex takes no config file, only `-c`
+         * overrides, and --ignore-user-config above keeps the operator's own
+         * servers out -- so these are exactly the servers this agent was
+         * granted, each started through a launcher that reads the run's
+         * mcp.json, so no server's credentials ever appear in this argv.
+         */
+        ...codexMcpOverrides(mcp),
         // Before the terminator for the same reason --model is.
         ...customArgs,
       ],
@@ -595,13 +603,10 @@ export function buildTurnInvocation(
       /**
        * Attach the run's MCP servers.
        *
-       * Claude Code only. Neither `agy` nor `codex exec` accepts an MCP config
-       * on the command line, so an agent on those families gets no MCP servers
-       * at all — `agent.mcpServers` does nothing for them yet.
-       *
-       * That is now the truth rather than an understatement. Until
-       * --ignore-user-config was passed, codex did not get "no servers": it got
-       * every server the operator had configured in ~/.codex/config.toml.
+       * Claude Code reads the config file. Codex gets the same servers through
+       * `-c` overrides (see codexMcpOverrides, in the codex branch above).
+       * `agy` accepts neither, so an agent on that family still gets no MCP
+       * servers at all.
        */
       ...(mcp.configPath ? ['--mcp-config', mcp.configPath] : []),
       /**

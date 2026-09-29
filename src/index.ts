@@ -19,6 +19,8 @@ import { mcpRouter } from './controllers/mcpController.js';
 import { liveBuildRoomRouter } from './controllers/liveBuildRoomController.js';
 import { projectRepoRouter } from './controllers/projectRepoController.js';
 import { hostingRouter } from './controllers/hostingController.js';
+import { agentBridgeRouter } from './controllers/agentBridgeController.js';
+import { setDaemonAddress } from './services/daemonAddress.js';
 import { agentCallRouter } from './controllers/agentCallController.js';
 import { agentCallService } from './services/agentCallService.js';
 import { runnerService } from './services/runnerService.js';
@@ -189,6 +191,7 @@ app.use('/api', dataRouter);
 app.use('/api', liveBuildRoomRouter);
 app.use('/api', projectRepoRouter);
 app.use('/api', hostingRouter);
+app.use('/api', agentBridgeRouter);
 app.use('/api', agentCallRouter);
 app.use('/api', runRouter);
 app.use('/api', runtimeRouter);
@@ -367,6 +370,7 @@ databaseReady.then(
 function onListening(): void {
   const address = server.address();
   const boundPort = address && typeof address !== 'string' ? address.port : PORT;
+  setDaemonAddress(HOST, Number(boundPort));
   logInfo(`Alpha v2 backend running in ${ALPHA_MODE.toUpperCase()} mode on http://${HOST}:${boundPort}`);
   if (IS_DESKTOP) logInfo(`WebSocket Live Stream Server listening on ws://${HOST}:${boundPort}`);
 

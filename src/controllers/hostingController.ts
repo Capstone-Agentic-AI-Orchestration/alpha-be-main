@@ -260,9 +260,18 @@ function envCapability(environment: string | undefined): WorkspaceCapability {
   return environment === 'uat' || environment === 'dev' ? 'deployment.env_preview' : 'deployment.manage';
 }
 
-/** Who a change is recorded as: the signed-in person. (An agent acting for them is recorded in phase 4.) */
+/**
+ * Who a change is recorded as: the signed-in person, or an agent working a
+ * run for them. The agent label arrives from the desktop's agent bridge; it
+ * can only make a change read as the agent's rather than the person's, never
+ * grant anything, so it is taken as given.
+ */
 function actorOf(req: Request): HostingActor {
-  return { login: req.session?.login ?? req.workspace?.userId ?? 'unknown', kind: 'user' };
+  const login = req.session?.login ?? req.workspace?.userId ?? 'unknown';
+  if (req.header('X-Alpha-Actor') !== 'agent') return { login, kind: 'user' };
+  const runId = text(req.header('X-Alpha-Run-Id'));
+  const agentId = text(req.header('X-Alpha-Agent-Id'));
+  return { login, kind: 'agent', ...(runId ? { runId } : {}), ...(agentId ? { agentId } : {}) };
 }
 
 /** The log query parameters, as the logs route and its desktop forward both read them. */

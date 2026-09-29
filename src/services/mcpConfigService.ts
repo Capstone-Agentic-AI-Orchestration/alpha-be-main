@@ -5,6 +5,11 @@ import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import { mcpCredentialEnv } from './gitCredentialIsolation.js';
 import { McpAccess } from './autonomyPolicy.js';
 import { logError } from '../utils/logger.js';
+import { daemonApiUrl } from './daemonAddress.js';
+import { mintRunGrant, revokeRunGrant, type RunGrant } from './runBridge.js';
+import { reposForProject } from './githubIssueMapping.js';
+import { hostingHintsFor } from './hosting/hostingService.js';
+import type { Project } from '../models/index.js';
 
 /**
  * One MCP server as the CLIs expect it.
@@ -59,8 +64,8 @@ export const MCP_CATALOG_PATH = path.join(ALPHA_DIR, 'mcp.json');
  * always sits beside this module — `dist/mcp/` at runtime, `src/mcp/` under
  * tsx. `__dirname` holds in both because the backend compiles to CommonJS.
  */
-function builtinGithubServer(): McpServerSpec {
-  const compiled = path.join(__dirname, '..', 'mcp', 'githubMcpServer.js');
+function builtinServer(entry: string): McpServerSpec {
+  const compiled = path.join(__dirname, '..', 'mcp', `${entry}.js`);
 
   // `npm start` runs from dist, where the compiled server sits beside this
   // file. Spawn it with the same node binary the daemon is using rather than
@@ -91,7 +96,7 @@ function builtinGithubServer(): McpServerSpec {
   // same way. Prefer the tsx already installed here — `npx -y` would consult
   // the registry on every spawn, adding seconds to each turn and failing
   // outright offline.
-  const source = path.join(__dirname, '..', 'mcp', 'githubMcpServer.ts');
+  const source = path.join(__dirname, '..', 'mcp', `${entry}.ts`);
   const localTsx = path.join(
     __dirname,
     '..',
@@ -108,7 +113,11 @@ function builtinGithubServer(): McpServerSpec {
 
 export const BUILTIN_SERVERS: Record<string, McpServerSpec> = {
   get 'alpha-github'() {
-    return builtinGithubServer();
+    return builtinServer('githubMcpServer');
+  },
+  /** Hosting status, logs and variables for the run's project repositories -- see hostingMcpServer. */
+  get 'alpha-hosting'() {
+    return builtinServer('hostingMcpServer');
   }
 };
 
@@ -134,6 +143,63 @@ export function availableServers(): Record<string, McpServerSpec> {
   // The catalog wins on a name collision, so a user can point `alpha-github`
   // at their own build without editing Alpha.
   return { ...BUILTIN_SERVERS, ...readCatalog() };
+}
+
+/** TOML for one value in a `-c key=value` override: strings and arrays, JSON-quoted (a TOML basic string). */
+function toml(value: string | string[] | Record<string, string>): string {
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(v => JSON.stringify(v)).join(', ')}]`;
+  return `{ ${Object.entries(value).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(', ')} }`;
+}
+
+/**
+ * The `-c` overrides that give a Codex turn this run's MCP servers.
+ *
+ * Each stdio server is started through `launchFromConfig`, which reads the
+ * run's `mcp.json` -- so the only things on Codex's command line are the
+ * launcher, the config path and the server name, never a server's
+ * environment and the credentials in it. HTTP servers are left out: their
+ * headers carry tokens, and there is no way to pass one to Codex without
+ * putting it in argv or its environment.
+ */
+export function codexMcpOverrides(mcp: RunMcpConfig): string[] {
+  if (!mcp.configPath) return [];
+  let servers: Record<string, McpServerSpec>;
+  try {
+    servers = JSON.parse(fs.readFileSync(mcp.configPath, 'utf8'))?.mcpServers ?? {};
+  } catch (err: any) {
+    logError(`Could not read ${mcp.configPath} for Codex: ${err?.message ?? err}`);
+    return [];
+  }
+  const launcher = builtinServer('launchFromConfig');
+  if (isHttpSpec(launcher)) return [];
+  const args: string[] = [];
+  for (const [name, spec] of Object.entries(servers)) {
+    if (isHttpSpec(spec)) {
+      logError(`MCP server "${name}" is an HTTP server; Codex agents cannot be given one without exposing its token — skipping.`);
+      continue;
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) continue;
+    args.push('-c', `mcp_servers.${name}.command=${toml(launcher.command)}`);
+    args.push('-c', `mcp_servers.${name}.args=${toml([...(launcher.args ?? []), mcp.configPath, name])}`);
+    if (launcher.env && Object.keys(launcher.env).length) args.push('-c', `mcp_servers.${name}.env=${toml(launcher.env)}`);
+  }
+  return args;
+}
+
+/** What a run's `alpha-hosting` tools may reach. */
+export interface HostingRunScope {
+  agentId: string | null;
+  workspaceId: string | null;
+  repos: RunGrant['repos'];
+}
+
+/** The scope for a run on `project`: its repositories, with what the project knows about each. */
+export function hostingScopeFor(project: Project | null | undefined, agentId: string | null, workspaceId: string | null): HostingRunScope | undefined {
+  if (!project) return undefined;
+  const repos: RunGrant['repos'] = {};
+  for (const repo of reposForProject(project)) repos[repo.toLowerCase()] = { repo, ...hostingHintsFor(project, repo) };
+  return Object.keys(repos).length ? { agentId, workspaceId, repos } : undefined;
 }
 
 export interface RunMcpConfig {
@@ -188,7 +254,13 @@ export function writeRunMcpConfig(
    * an agent that cannot push says so out loud, where a silent extra permission
    * would not.
    */
-  access: McpAccess = 'read'
+  access: McpAccess = 'read',
+  /**
+   * What `alpha-hosting` may reach for this run: the project's repositories
+   * and the workspace the run was started in. Without it that server is left
+   * out -- a hosting tool with nothing to point at would only fail.
+   */
+  hosting?: HostingRunScope
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
   if (!names.length) return { configPath: null, serverNames: [] };
@@ -231,6 +303,25 @@ export function writeRunMcpConfig(
         `MCP server "${name}" needs ${missing.join(', ')} in the environment — skipping. ` +
         `Set it where the Alpha daemon runs, then start the run again.`
       );
+      continue;
+    }
+
+    /**
+     * The hosting server gets this run's token and the daemon's address, and
+     * nothing else: no platform key, no GitHub credential. The token is what
+     * limits it to this run's repositories; see runBridge.
+     */
+    if (name === 'alpha-hosting') {
+      const daemonUrl = daemonApiUrl();
+      if (!hosting || !daemonUrl || isHttpSpec(resolved)) {
+        logError(`MCP server "alpha-hosting" needs a project and a listening daemon for ${runId} — skipping.`);
+        continue;
+      }
+      const token = mintRunGrant({ runId, agentId: hosting.agentId, workspaceId: hosting.workspaceId, repos: hosting.repos, access });
+      mcpServers[name] = {
+        ...resolved,
+        env: { ...resolved.env, ALPHA_DAEMON_URL: daemonUrl, ALPHA_RUN_TOKEN: token, ALPHA_MCP_ACCESS: access }
+      };
       continue;
     }
 
@@ -375,6 +466,8 @@ export function expandEnvRefs(
 
 /** Best-effort cleanup of a run's config directory. */
 export function cleanupRunMcpConfig(runId: string): void {
+  // The run is over, so is everything its tools were allowed to do.
+  revokeRunGrant(runId);
   try {
     fs.rmSync(path.join(RUNS_DIR, runId), { recursive: true, force: true });
   } catch {
