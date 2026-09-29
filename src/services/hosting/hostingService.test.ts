@@ -117,6 +117,7 @@ async function load(options: {
   const render = options.render ?? fakeRenderClient();
   const vercel = options.vercel ?? fakeVercelClient();
   const existingRepos = new Set((options.githubRepos ?? []).map(r => r.toLowerCase()));
+  const variableWrites: Array<{ method: string; path: string; body: any }> = [];
 
   vi.doMock('./renderClient.js', async () => {
     const actual = await vi.importActual<typeof import('./renderClient.js')>('./renderClient.js');
@@ -140,13 +141,22 @@ async function load(options: {
           if (path.endsWith('/actions/secrets')) return { secrets: [] };
           if (path.endsWith('/actions/variables')) return { variables: [] };
           throw new actual.GitHubApiError('Not Found', 404);
+        },
+        // No variable exists yet: an update answers 404, so the service creates it.
+        patch: async (path: string, body: any) => {
+          variableWrites.push({ method: 'PATCH', path, body });
+          throw new actual.GitHubApiError('Not Found', 404);
+        },
+        post: async (path: string, body: any) => {
+          variableWrites.push({ method: 'POST', path, body });
+          return {};
         }
       })
     };
   });
 
   const service = await import('./hostingService.js');
-  return { service, render, vercel };
+  return { service, render, vercel, variableWrites };
 }
 
 afterEach(() => {
@@ -223,8 +233,8 @@ describe('getHostingStatus', () => {
 
     expect(status.state).toBe('ready');
     expect(status.environments).toEqual([
-      { branch: 'main', url: 'https://shop-be.onrender.com', dashboardUrl: 'https://dashboard.render.com/web/srv-1', latestDeploy: { status: 'live', createdAt: '2026-01-01T00:00:00Z', url: 'shop-be.onrender.com' } },
-      { branch: 'uat', url: 'https://shop-be-uat.onrender.com', dashboardUrl: 'https://dashboard.render.com/web/srv-2', latestDeploy: { status: 'live', createdAt: '2026-01-01T00:00:00Z', url: 'shop-be-uat.onrender.com' } }
+      { branch: 'main', url: 'https://shop-be.onrender.com', dashboardUrl: 'https://dashboard.render.com/web/srv-1', latestDeploy: { status: 'live', createdAt: '2026-01-01T00:00:00Z', url: 'shop-be.onrender.com' }, waitsForCi: null },
+      { branch: 'uat', url: 'https://shop-be-uat.onrender.com', dashboardUrl: 'https://dashboard.render.com/web/srv-2', latestDeploy: { status: 'live', createdAt: '2026-01-01T00:00:00Z', url: 'shop-be-uat.onrender.com' }, waitsForCi: null }
     ]);
   });
 
@@ -479,5 +489,33 @@ describe('frontend addresses', () => {
     const status = await service.setUpHosting({ repo: 'acme/shop-fe', stackHint: 'react', partnerHint: 'acme/shop-be' });
 
     expect(status.partnerWiring).toEqual({ ok: false, error: expect.stringContaining('Render is down') });
+  });
+});
+describe('what a set-up leaves on the repository and in the status', () => {
+  it('writes each environment’s stable URL as a repository variable', async () => {
+    const { service, variableWrites } = await load({ env: RENDER_ENV });
+
+    const status = await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(status.urlVariables).toEqual({ ok: true });
+    expect(variableWrites.filter(w => w.method === 'POST').map(w => w.body)).toEqual([
+      { name: 'ALPHA_URL_MAIN', value: 'https://shop-be.onrender.com' },
+      { name: 'ALPHA_URL_UAT', value: 'https://shop-be-uat.onrender.com' }
+    ]);
+  });
+
+  /** Render refused "wait for CI" once and fell back to every push -- a person needs to know. */
+  it('says whether each backend environment waits for CI', async () => {
+    const render = fakeRenderClient();
+    render.services.set('shop-be', { id: 'srv-1', name: 'shop-be', serviceDetails: { url: 'shop-be.onrender.com' }, dashboardUrl: 'd', autoDeployTrigger: 'checksPass' });
+    render.services.set('shop-be-uat', { id: 'srv-2', name: 'shop-be-uat', serviceDetails: { url: 'shop-be-uat.onrender.com' }, dashboardUrl: 'd', autoDeployTrigger: 'commit' });
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    const status = await service.getHostingStatus({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(status.environments.map(e => [e.branch, e.waitsForCi])).toEqual([
+      ['main', true],
+      ['uat', false]
+    ]);
   });
 });

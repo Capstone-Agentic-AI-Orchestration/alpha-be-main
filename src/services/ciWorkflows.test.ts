@@ -3,15 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 /**
  * The CI a provisioned repository is born with.
  *
- * The template is the workflow library's own; what is checked here is that the
- * right one is chosen per stack and that the deploy job -- superseded by
- * Render/Vercel deploying the repository themselves, through their own
- * GitHub Apps -- never survives into what gets committed.
+ * The templates are the workflow library's own Alpha-hosted callers; what is
+ * checked here is that the right ones are read per stack, from the configured
+ * library and ref, and that library calls point back at that library.
  */
 
-/** The shape of a customer template, trimmed to what the transforms touch. */
-const TEMPLATE = [
-  '# Granular frontend React workflow.',
+/** The shape of an Alpha-hosted caller, trimmed to what the transforms touch. */
+const CI_TEMPLATE = [
+  '# Alpha-hosted react caller.',
   'name: "Frontend CI"',
   '',
   'jobs:',
@@ -21,27 +20,30 @@ const TEMPLATE = [
   '    runs-on: ubuntu-latest',
   '    steps:',
   '      - uses: actions/checkout@v6',
-  '',
   '  build:',
   '    needs: [unit-tests]',
   '    runs-on: ubuntu-latest',
   '    steps:',
   '      - run: npm run build',
-  '  deploy-vercel:',
-  '    needs: [unit-tests, build]',
-  "    if: ${{ github.event_name == 'push' && (github.ref_name == 'dev' || github.ref_name == 'main') }}",
-  '    uses: template-owner/template-library/.github/workflows/vercel-deploy.yml@v1',
-  '    with:',
-  "      environment: ${{ github.ref_name == 'main' && 'production' || 'preview' }}",
-  '    secrets: inherit',
   ''
 ].join('\n');
 
-function fakeFetch(body = TEMPLATE, status = 200) {
+const VERIFY_TEMPLATE = [
+  'name: "Post-deploy verify"',
+  'on:',
+  '  deployment_status:',
+  'jobs:',
+  '  verify:',
+  '    uses: template-owner/template-library/.github/workflows/post-deploy-verify.yml@v1',
+  ''
+].join('\n');
+
+function fakeFetch(status = 200) {
   const urls: string[] = [];
   const impl = (async (url: string | URL) => {
     urls.push(String(url));
-    return new Response(body, { status });
+    const body = String(url).endsWith('/post-deploy-verify.yml') ? VERIFY_TEMPLATE : CI_TEMPLATE;
+    return new Response(status === 200 ? body : 'Not Found', { status });
   }) as unknown as typeof fetch;
   return { impl, urls };
 }
@@ -62,50 +64,44 @@ afterEach(() => {
 });
 
 describe('the CI a new repository gets', () => {
-  it('uses the stack’s customer template from the configured library and ref', async () => {
+  it('reads the stack’s Alpha-hosted caller and the post-deploy check from the configured library and ref', async () => {
     const ci = await load();
     const { impl, urls } = fakeFetch();
 
     const plan = await ci.buildCiWorkflows({ stack: 'react' }, impl);
 
-    expect(urls).toEqual([
-      'https://raw.githubusercontent.com/example-org/ci-library/v1/workflow-templates/customer/fe-react.yml'
+    expect(urls.sort()).toEqual([
+      'https://raw.githubusercontent.com/example-org/ci-library/v1/workflow-templates/product/fe-react.yml',
+      'https://raw.githubusercontent.com/example-org/ci-library/v1/workflow-templates/product/post-deploy-verify.yml'
     ]);
-    expect(plan.files.map(file => file.path)).toEqual(['.github/workflows/ci.yml']);
+    expect(plan.files.map(file => file.path)).toEqual(['.github/workflows/ci.yml', '.github/workflows/post-deploy-verify.yml']);
     // Hosting deploys through Vercel's own GitHub App now, never a repository secret.
     expect(plan).toMatchObject({ deployTarget: 'vercel', requiredSecrets: [], deployVariable: null });
   });
 
   it.each([
-    ['nodejs', 'be-nodejs.yml'],
-    ['nestjs', 'be-nestjs.yml'],
-    ['nextjs', 'fe-nextjs.yml'],
-    ['react', 'fe-react.yml']
-  ] as const)('picks the %s pipeline', async (stack, template) => {
+    ['nodejs', 'be-nodejs.yml', 'render'],
+    ['nestjs', 'be-nestjs.yml', 'render'],
+    ['nextjs', 'fe-nextjs.yml', 'vercel'],
+    ['react', 'fe-react.yml', 'vercel']
+  ] as const)('picks the %s caller', async (stack, template, target) => {
     const ci = await load();
-    const backend = template.startsWith('be-');
-    const body = backend ? TEMPLATE.replace(/deploy-vercel/g, 'deploy-render') : TEMPLATE;
-    const { impl, urls } = fakeFetch(body);
+    const { impl, urls } = fakeFetch();
 
     const plan = await ci.buildCiWorkflows({ stack }, impl);
 
-    expect(urls[0].endsWith(`/customer/${template}`)).toBe(true);
-    expect(plan.deployTarget).toBe(backend ? 'render' : 'vercel');
+    expect(urls.some(url => url.endsWith(`/product/${template}`))).toBe(true);
+    expect(plan.deployTarget).toBe(target);
   });
 
-  /** Superseded by the platform's own GitHub App; a workflow deploy would be a second, drifting path. */
-  it('always leaves the deploy job out, whichever platform the stack hosts on', async () => {
+  it('commits the template as the library wrote it, under a header saying where it came from', async () => {
     const ci = await load();
-    const { impl } = fakeFetch();
 
-    const plan = await ci.buildCiWorkflows({ stack: 'react' }, impl);
-    const yaml = plan.files[0].content;
+    const [ciFile] = (await ci.buildCiWorkflows({ stack: 'react' }, fakeFetch().impl)).files;
 
-    expect(yaml).not.toContain('deploy-vercel');
-    expect(yaml).toContain('  build:');
-    expect(yaml).toContain('      - run: npm run build');
-    expect(yaml.split('\n')[0]).toContain('Generated by Alpha from example-org/ci-library@v1');
-    expect(yaml).toContain('# Hosting is set up separately by Alpha, on Vercel.');
+    expect(ciFile.content.split('\n')[0]).toBe('# Generated by Alpha from example-org/ci-library@v1:workflow-templates/product/fe-react.yml.');
+    expect(ciFile.content).toContain('# Hosting is set up separately by Alpha, on Vercel.');
+    expect(ciFile.content).toContain('      - run: npm run build');
   });
 
   /** The library is whatever repository the templates were read from -- a fork calls its own. */
@@ -113,46 +109,29 @@ describe('the CI a new repository gets', () => {
     const ci = await load({ repo: 'acme/ci-fork', ref: 'v2' });
     const { impl, urls } = fakeFetch();
 
-    const yaml = (await ci.buildCiWorkflows({ stack: 'react' }, impl)).files[0].content;
+    const [ciFile, verifyFile] = (await ci.buildCiWorkflows({ stack: 'react' }, impl)).files;
 
     expect(urls[0]).toContain('/acme/ci-fork/v2/');
-    expect(yaml).toContain('uses: acme/ci-fork/.github/workflows/frontend-tests.yml@v1');
-    expect(yaml).not.toContain('template-owner/template-library');
-    expect(yaml).toContain('      - uses: actions/checkout@v6');
+    expect(ciFile.content).toContain('uses: acme/ci-fork/.github/workflows/frontend-tests.yml@v1');
+    expect(verifyFile.content).toContain('uses: acme/ci-fork/.github/workflows/post-deploy-verify.yml@v1');
+    expect(ciFile.content + verifyFile.content).not.toContain('template-owner/template-library');
+    expect(ciFile.content).toContain('      - uses: actions/checkout@v6');
   });
 
-  it.each([
-    [{ ref: 'v1' }],
-    [{ repo: LIBRARY }]
-  ])('refuses, before fetching anything, when the template library is not configured (%o)', async settings => {
-    const ci = await load(settings);
-    const { impl, urls } = fakeFetch();
-
-    await expect(ci.buildCiWorkflows({ stack: 'react' }, impl)).rejects.toThrow(/ALPHAORCH_WORKFLOW_REPO and ALPHAORCH_WORKFLOW_REF/);
-    expect(urls).toEqual([]);
-  });
-
-  it('refuses, before anything is created, when the template cannot be read', async () => {
+  it('refuses, before anything is created, when a template cannot be read', async () => {
     const ci = await load();
 
-    await expect(ci.buildCiWorkflows({ stack: 'react' }, fakeFetch('Not Found', 404).impl)).rejects.toThrow(
-      /Could not read the CI template .*fe-react\.yml \(HTTP 404\)/
-    );
-  });
-});
-
-describe('editing a workflow', () => {
-  it('removes a job in the middle without touching its neighbours', async () => {
-    const ci = await load();
-    const yaml = ['jobs:', '  a:', '    run: 1', '', '  b:', '    run: 2', '', '  c:', '    run: 3', ''].join('\n');
-
-    expect(ci.withoutJob(yaml, 'b')).toBe(['jobs:', '  a:', '    run: 1', '', '  c:', '    run: 3', ''].join('\n'));
+    await expect(ci.buildCiWorkflows({ stack: 'react' }, fakeFetch(404).impl)).rejects.toThrow(/Could not read the CI template .*\(HTTP 404\)/);
   });
 
-  it('refuses a job that is not there, rather than silently doing nothing', async () => {
-    const ci = await load();
-    const yaml = ['jobs:', '  a:', '    run: 1', ''].join('\n');
+  it.each([[{ ref: 'v1' }], [{ repo: LIBRARY }]])(
+    'refuses, before fetching anything, when the template library is not configured (%o)',
+    async settings => {
+      const ci = await load(settings);
+      const { impl, urls } = fakeFetch();
 
-    expect(() => ci.withoutJob(yaml, 'missing')).toThrow(/no "missing" job/);
-  });
+      await expect(ci.buildCiWorkflows({ stack: 'react' }, impl)).rejects.toThrow(/ALPHAORCH_WORKFLOW_REPO and ALPHAORCH_WORKFLOW_REF/);
+      expect(urls).toEqual([]);
+    }
+  );
 });

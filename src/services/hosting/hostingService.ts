@@ -49,11 +49,19 @@ export interface HostingStatus {
   partner?: string | null;
   /** Present after a set-up that had a partner to wire into. */
   partnerWiring?: PartnerWiring;
+  /** Present after a set-up: whether the ALPHA_URL_* repository variables were written. */
+  urlVariables?: { ok: boolean; error?: string };
   environments: Array<{
     branch: HostingBranch;
     url: string | null;
     dashboardUrl: string | null;
     latestDeploy: { status: string; createdAt: string | null; url: string | null } | null;
+    /**
+     * Whether this environment deploys only after the repository's CI checks pass.
+     * false: it deploys on every push, whatever CI says. null: the platform does not
+     * say (Vercel -- see its Deployment Checks setting).
+     */
+    waitsForCi?: boolean | null;
   }>;
   envVars: Array<{ key: string; value: string | null; scope: string; managedByAlpha: boolean }>;
   github: { secrets: string[]; variables: Array<{ name: string; value: string }> };
@@ -438,8 +446,8 @@ async function setUpBackend(
     const record: ProjectResourceHosting = {
       platform: 'render',
       render: {
-        main: { id: main.id, url: main.serviceDetails?.url ?? null, dashboardUrl: main.dashboardUrl ?? null },
-        uat: { id: uat.id, url: uat.serviceDetails?.url ?? null, dashboardUrl: uat.dashboardUrl ?? null }
+        main: { id: main.id, url: main.serviceDetails?.url ?? null, dashboardUrl: main.dashboardUrl ?? null, autoDeployTrigger: main.autoDeployTrigger ?? null },
+        uat: { id: uat.id, url: uat.serviceDetails?.url ?? null, dashboardUrl: uat.dashboardUrl ?? null, autoDeployTrigger: uat.autoDeployTrigger ?? null }
       }
     };
 
@@ -477,7 +485,9 @@ async function statusFromRenderRecord(
       dashboardUrl: service.dashboardUrl,
       latestDeploy: deploy
         ? { status: deploy.status, createdAt: deploy.createdAt ?? null, url: service.url ?? null }
-        : null
+        : null,
+      // Set up to wait for CI; when Render refused that setting, it deploys on every push.
+      waitsForCi: service.autoDeployTrigger ? service.autoDeployTrigger === 'checksPass' : null
     });
     const vars = await client.listEnvVars(service.id).catch(() => []);
     for (const v of vars) {
@@ -664,6 +674,42 @@ async function rollback(created: Array<() => Promise<void>>, action: string): Pr
   }
 }
 
+/** The GitHub Actions variable that holds each environment's stable URL. */
+const URL_VARIABLES: Record<HostingBranch, string> = { main: 'ALPHA_URL_MAIN', uat: 'ALPHA_URL_UAT', dev: 'ALPHA_URL_DEV' };
+
+/**
+ * Put each environment's stable URL on the repository as a GitHub Actions
+ * variable (not a secret: these are public URLs), for workflows that need an
+ * address without a deployment event -- e2e and API tests against uat.
+ *
+ * Best-effort, and reported: the hosting is up whether or not these were
+ * written, so a failure (the caller lacks access to the repository's
+ * variables) is said rather than thrown.
+ */
+async function writeUrlVariables(repo: string, status: HostingStatus): Promise<{ ok: boolean; error?: string }> {
+  const failures: string[] = [];
+  for (const env of status.environments) {
+    if (!env.url) continue;
+    const name = URL_VARIABLES[env.branch];
+    try {
+      await githubApi().patch(`/repos/${repo}/actions/variables/${name}`, { name, value: env.url });
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 404) {
+        try {
+          await githubApi().post(`/repos/${repo}/actions/variables`, { name, value: env.url });
+          continue;
+        } catch (createErr) {
+          failures.push(`${name}: ${(createErr as Error).message}`);
+          continue;
+        }
+      }
+      failures.push(`${name}: ${(err as Error).message}`);
+    }
+  }
+  if (failures.length) logError(`Could not write URL variables on ${repo}:`, failures.join('; '));
+  return failures.length ? { ok: false, error: failures.join('; ') } : { ok: true };
+}
+
 /** How wiring this repository into its partner went -- part of the status, so a failure is never silent. */
 export interface PartnerWiring {
   ok: boolean;
@@ -779,8 +825,8 @@ export async function getHostingStatus(ctx: HostingContext): Promise<HostingStat
       const record: ProjectResourceHosting = {
         platform: 'render',
         render: {
-          main: main ? { id: main.id, url: main.serviceDetails?.url ?? null, dashboardUrl: main.dashboardUrl ?? null } : null,
-          uat: uat ? { id: uat.id, url: uat.serviceDetails?.url ?? null, dashboardUrl: uat.dashboardUrl ?? null } : null
+          main: main ? { id: main.id, url: main.serviceDetails?.url ?? null, dashboardUrl: main.dashboardUrl ?? null, autoDeployTrigger: main.autoDeployTrigger ?? null } : null,
+          uat: uat ? { id: uat.id, url: uat.serviceDetails?.url ?? null, dashboardUrl: uat.dashboardUrl ?? null, autoDeployTrigger: uat.autoDeployTrigger ?? null } : null
         }
       };
       return statusFromRenderRecord(ctx.repo, role, record, partner, client);
@@ -828,9 +874,10 @@ export async function setUpHosting(ctx: HostingContext): Promise<HostingStatus> 
     const { status } = role === 'backend' ? await setUpBackend(ctx, partner) : await setUpFrontend(ctx, stack, partner);
 
     const partnerWiring = partner ? await refreshPartner(partner, role, ctx.repo) : undefined;
+    const urlVariables = await writeUrlVariables(ctx.repo, status);
 
     logInfo(`Hosting set up for ${ctx.repo} on ${platform} (${status.state}).`);
-    return partnerWiring ? { ...status, partnerWiring } : status;
+    return { ...status, ...(partnerWiring ? { partnerWiring } : {}), urlVariables };
   } catch (err: any) {
     logError(`Hosting setup failed for ${ctx.repo}:`, err?.message ?? err);
     return { repo: ctx.repo, role, platform, configured: true, state: 'failed', error: err?.message ?? String(err), partner, environments: [], envVars: [], github: { secrets: [], variables: [] } };
