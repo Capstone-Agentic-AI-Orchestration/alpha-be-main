@@ -11,6 +11,7 @@
  * nothing here reaches the network unless a caller hands it a real `fetch`.
  */
 
+import { logError } from '../../utils/logger.js';
 import { fetchWithRetry } from './fetchWithRetry.js';
 import { buildRenderLogsQueryParams, mapRenderLogsPage, type RenderLogsPage, type RenderLogsPayload, type RenderLogsQueryInput } from './renderLogs.js';
 
@@ -86,6 +87,12 @@ export interface CreateRenderServiceInput {
   autoDeployTrigger?: 'checksPass';
 }
 
+export interface RenderServiceSettings {
+  buildCommand?: string;
+  startCommand?: string;
+  autoDeployTrigger?: 'checksPass' | 'commit' | 'off';
+}
+
 export interface RenderClient {
   listOwners(): Promise<RenderOwner[]>;
   /** `null` when Render has no service of that name (a fresh setup, or one deleted by hand). */
@@ -102,6 +109,8 @@ export interface RenderClient {
   /** `null` when the service has never deployed. */
   latestDeploy(serviceId: string): Promise<RenderDeploy | null>;
   deleteService(serviceId: string): Promise<void>;
+  /** Change a service's build/start commands or deploy trigger. Does not trigger a deploy. */
+  updateService(serviceId: string, patch: RenderServiceSettings): Promise<RenderServiceRecord>;
   /**
    * One page of a service's logs (build, runtime and request), always oldest
    * to newest. Render's logs API is scoped by owner as well as service, so
@@ -177,8 +186,9 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
         ownerId: input.ownerId,
         repo: input.repo,
         branch: input.branch,
-        autoDeploy: 'yes',
-        ...(input.autoDeployTrigger ? { autoDeployTrigger: input.autoDeployTrigger } : {}),
+        // `autoDeployTrigger` supersedes the older yes/no `autoDeploy`; sending
+        // both can be refused, so the trigger goes alone when there is one.
+        ...(input.autoDeployTrigger ? { autoDeployTrigger: input.autoDeployTrigger } : { autoDeploy: 'yes' }),
         envVars: input.envVars ?? [],
         serviceDetails: {
           runtime: 'node',
@@ -199,12 +209,14 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
       try {
         return await call<{ service: RenderServiceRecord; deployId?: string }>('POST', '/services', body);
       } catch (err) {
-        // autoDeployTrigger is undocumented for this endpoint; some accounts
-        // refuse it outright rather than ignoring it. Retry once without it
-        // so the field being experimental never blocks provisioning.
+        // An account that refuses the trigger on create still gets a service:
+        // retried with plain auto-deploy, and the refusal said out loud --
+        // the caller then tries the trigger again with an update, and the
+        // hosting status reports whether the service waits for CI.
         if (input.autoDeployTrigger && err instanceof RenderApiError && (err.status === 400 || err.status === 422)) {
+          logError(`Render refused autoDeployTrigger=${input.autoDeployTrigger} creating ${input.name}; creating it with auto-deploy on push:`, err.message);
           const { autoDeployTrigger: _drop, ...withoutTrigger } = body as typeof body & { autoDeployTrigger?: string };
-          return call<{ service: RenderServiceRecord; deployId?: string }>('POST', '/services', withoutTrigger);
+          return call<{ service: RenderServiceRecord; deployId?: string }>('POST', '/services', { ...withoutTrigger, autoDeploy: 'yes' });
         }
         throw err;
       }
@@ -231,6 +243,17 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
       const items = await call<unknown[]>('GET', `/services/${serviceId}/deploys?limit=1`);
       const [first] = items;
       return first ? unwrap<RenderDeploy>(first, 'deploy') : null;
+    },
+
+    async updateService(serviceId: string, patch: RenderServiceSettings) {
+      const envSpecificDetails = {
+        ...(patch.buildCommand ? { buildCommand: patch.buildCommand } : {}),
+        ...(patch.startCommand ? { startCommand: patch.startCommand } : {})
+      };
+      return call<RenderServiceRecord>('PATCH', `/services/${serviceId}`, {
+        ...(patch.autoDeployTrigger ? { autoDeployTrigger: patch.autoDeployTrigger } : {}),
+        ...(Object.keys(envSpecificDetails).length ? { serviceDetails: { envSpecificDetails } } : {})
+      });
     },
 
     async deleteService(serviceId: string) {

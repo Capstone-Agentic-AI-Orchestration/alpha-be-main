@@ -106,7 +106,6 @@ describe('creating a service', () => {
       ownerId: 'own-1',
       repo: 'https://github.com/acme/shop-be',
       branch: 'main',
-      autoDeploy: 'yes',
       autoDeployTrigger: 'checksPass',
       serviceDetails: {
         runtime: 'node',
@@ -263,5 +262,43 @@ describe('reading logs', () => {
     const { impl } = fakeFetch(() => ({ status: 401, body: { message: 'unauthorized' } }));
 
     await expect(createRenderClient('bad', impl).queryLogs('own-1', 'srv-1', {})).rejects.toThrow(/Render 401: unauthorized/);
+  });
+});
+describe('the deploy trigger and service settings', () => {
+  it('creates a service with the CI trigger alone, not alongside autoDeploy', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 201, body: { service: { id: 'srv-1', name: 'shop-be' } } }));
+
+    await createRenderClient('rnd_key', impl).createService({
+      name: 'shop-be', ownerId: 'own-1', repo: 'https://github.com/acme/shop-be', branch: 'main',
+      healthCheckPath: '/health', buildCommand: 'b', startCommand: 's', autoDeployTrigger: 'checksPass'
+    });
+
+    expect(calls[0].body).toMatchObject({ autoDeployTrigger: 'checksPass' });
+    expect(calls[0].body).not.toHaveProperty('autoDeploy');
+  });
+
+  it('falls back to auto-deploy on push when Render refuses the trigger', async () => {
+    let attempt = 0;
+    const { impl, calls } = fakeFetch(() => (++attempt === 1 ? { status: 400, body: { message: 'invalid autoDeployTrigger' } } : { status: 201, body: { service: { id: 'srv-1', name: 'shop-be' } } }));
+
+    await createRenderClient('rnd_key', impl).createService({
+      name: 'shop-be', ownerId: 'own-1', repo: 'https://github.com/acme/shop-be', branch: 'main',
+      healthCheckPath: '/health', buildCommand: 'b', startCommand: 's', autoDeployTrigger: 'checksPass'
+    });
+
+    expect(calls[1].body).toMatchObject({ autoDeploy: 'yes' });
+    expect(calls[1].body).not.toHaveProperty('autoDeployTrigger');
+  });
+
+  it('updates build, start and trigger with one PATCH', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, body: { id: 'srv-1', name: 'shop-be' } }));
+
+    await createRenderClient('rnd_key', impl).updateService('srv-1', { buildCommand: 'b', startCommand: 's', autoDeployTrigger: 'checksPass' });
+
+    expect(calls[0]).toMatchObject({
+      method: 'PATCH',
+      body: { autoDeployTrigger: 'checksPass', serviceDetails: { envSpecificDetails: { buildCommand: 'b', startCommand: 's' } } }
+    });
+    expect(calls[0].url).toContain('/v1/services/srv-1');
   });
 });
