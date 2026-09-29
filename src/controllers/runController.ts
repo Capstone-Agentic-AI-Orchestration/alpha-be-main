@@ -5,7 +5,7 @@ import { route } from './asyncRoute.js';
 import { agentStore, issueStore, projectStore, runStore } from '../store/stores.js';
 import { analyticsFrom } from '../services/runAnalytics.js';
 import { githubService } from '../services/githubService.js';
-import { resolveProjectWorkspace } from '../services/workspaceService.js';
+import { repoOfGitHubUrl, resolveProjectWorkspace } from '../services/workspaceService.js';
 import { logError, logInfo } from '../utils/logger.js';
 import {
   requireEntityWorkspace,
@@ -214,7 +214,8 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
      * working copy on Render for `gh` to run in -- and approving is the one
      * thing a project manager on the web must be able to finish.
      */
-    const workspace = IS_CLOUD ? null : project ? resolveProjectWorkspace(project) : null;
+    // The pull request's repository: merging runs `gh` in its checkout.
+    const workspace = IS_CLOUD ? null : project ? resolveProjectWorkspace(project, repoOfGitHubUrl(run.prUrl)) : null;
 
     if (!workspace && !IS_CLOUD) {
       return res.status(409).json({

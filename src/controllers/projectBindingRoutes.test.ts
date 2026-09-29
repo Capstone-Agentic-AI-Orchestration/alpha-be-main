@@ -281,7 +281,7 @@ describe('binding a project to a folder', () => {
     await call(app, 'PUT', '/api/projects/p1/binding', { localDir: dir });
 
     const { resolveProjectWorkspace } = await import('../services/workspaceService.js');
-    expect(resolveProjectWorkspace(project)).toEqual({ dir: path.resolve(dir), managed: false });
+    expect(resolveProjectWorkspace(project)).toEqual({ dir: path.resolve(dir), managed: false, repo: 'acme/checkout' });
   });
 
   it('is set up in one press: cloned, then bound', async () => {
@@ -291,9 +291,10 @@ describe('binding a project to a folder', () => {
     const res = await call(app, 'POST', '/api/projects/p1/clone');
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ projectId: 'p1', isManaged: true });
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({ projectId: 'p1', repo: 'acme/checkout', isManaged: true });
     expect(cloned).toHaveLength(1);
-    expect(fs.existsSync(path.join(res.body.localDir, '.git'))).toBe(true);
+    expect(fs.existsSync(path.join(res.body[0].localDir, '.git'))).toBe(true);
   });
 
   /** So pressing it again after a failure finishes the job rather than refusing. */
@@ -358,5 +359,104 @@ describe('binding a project to a folder', () => {
     const dir = aCheckout('checkout', 'https://github.com/acme/checkout.git');
 
     expect((await call(app, 'PUT', '/api/projects/nope/binding', { localDir: dir })).status).toBe(404);
+  });
+});
+
+describe('a project with a frontend and a backend', () => {
+  const PAIR = [
+    { id: 'r-be', type: 'github_repo', name: 'shop-be', pathOrUrl: 'https://github.com/acme/shop-be' },
+    { id: 'r-fe', type: 'github_repo', name: 'shop-fe', pathOrUrl: 'https://github.com/acme/shop-fe' }
+  ];
+
+  async function withPair(svc: any) {
+    const { runWithWorkspace } = await import('../services/workspaceContext.js');
+    return runWithWorkspace('ws-default', () => svc.createProject({ id: 'p9', name: 'Shop', key: 'SHP', resources: PAIR }));
+  }
+
+  it('clones and binds both in one press, and lists each on this machine', async () => {
+    const { app, svc } = await startApi();
+    await withPair(svc);
+
+    const res = await call(app, 'POST', '/api/projects/p9/clone');
+
+    expect(res.status).toBe(200);
+    expect(res.body.map((b: any) => b.repo)).toEqual(['acme/shop-be', 'acme/shop-fe']);
+    const { body } = await call(app, 'GET', '/api/projects/p9/checkouts');
+    expect(body.checkouts.map((c: any) => [c.repo, Boolean(c.localDir), c.status?.exists])).toEqual([
+      ['acme/shop-be', true, true],
+      ['acme/shop-fe', true, true]
+    ]);
+  });
+
+  it('tells which half a pasted folder is from its origin, wherever it was cloned', async () => {
+    const { app, svc } = await startApi();
+    await withPair(svc);
+    const dir = aCheckout('anywhere/at/all/shop-fe', 'https://github.com/acme/shop-fe.git');
+
+    const res = await call(app, 'PUT', '/api/projects/p9/binding', { localDir: dir });
+
+    expect(res.body).toMatchObject({ repo: 'acme/shop-fe', localDir: path.resolve(dir) });
+    const { body } = await call(app, 'GET', '/api/projects/p9/checkouts');
+    expect(body.checkouts.map((c: any) => [c.repo, c.localDir])).toEqual([
+      ['acme/shop-be', null],
+      ['acme/shop-fe', path.resolve(dir)]
+    ]);
+  });
+
+  /** The half this machine has is never used for work on the half it does not. */
+  it('answers for the repository asked about, and nothing else', async () => {
+    const { app, svc } = await startApi();
+    const project = await withPair(svc);
+    const be = aCheckout('shop-be', 'https://github.com/acme/shop-be.git');
+    await call(app, 'PUT', '/api/projects/p9/binding', { localDir: be });
+
+    const { resolveProjectWorkspace } = await import('../services/workspaceService.js');
+    expect(resolveProjectWorkspace(project, 'acme/shop-fe')).toBeNull();
+    expect(resolveProjectWorkspace(project, 'acme/shop-be')?.dir).toBe(path.resolve(be));
+    expect(resolveProjectWorkspace(project)?.dir).toBe(path.resolve(be));
+  });
+
+  it('clones only the one named, and forgets only the one named', async () => {
+    const { app, svc } = await startApi();
+    await withPair(svc);
+
+    const res = await call(app, 'POST', '/api/projects/p9/clone', { repo: 'acme/shop-fe' });
+    expect(res.body.map((b: any) => b.repo)).toEqual(['acme/shop-fe']);
+    await call(app, 'POST', '/api/projects/p9/clone', { repo: 'acme/shop-be' });
+
+    await call(app, 'DELETE', '/api/projects/p9/binding?repo=acme/shop-fe');
+    const { body } = await call(app, 'GET', '/api/projects/p9/checkouts');
+    expect(body.checkouts.map((c: any) => [c.repo, Boolean(c.localDir)])).toEqual([
+      ['acme/shop-be', true],
+      ['acme/shop-fe', false]
+    ]);
+  });
+
+  it('refuses a repository the project does not have', async () => {
+    const { app, svc } = await startApi();
+    await withPair(svc);
+
+    const res = await call(app, 'POST', '/api/projects/p9/clone', { repo: 'acme/payroll' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe('wrong_repository');
+  });
+
+  /** A folder bound before per-repository bindings keeps working, as its first repository's. */
+  it('reads an older project binding as the first repository’s, and moves it on the next change', async () => {
+    const { app, svc } = await startApi();
+    const project = await withPair(svc);
+    const be = aCheckout('old-be', 'https://github.com/acme/shop-be.git');
+    svc.saveProjectBinding({ projectId: 'p9', localDir: be, isManaged: false });
+
+    const { resolveProjectWorkspace } = await import('../services/workspaceService.js');
+    expect(resolveProjectWorkspace(project, 'acme/shop-be')?.dir).toBe(path.resolve(be));
+
+    const fe = aCheckout('new-fe', 'https://github.com/acme/shop-fe.git');
+    await call(app, 'PUT', '/api/projects/p9/binding', { localDir: fe });
+
+    expect(svc.getProjectBinding('p9')).toBeNull();
+    expect(svc.getRepoBinding('p9', 'acme/shop-be')?.localDir).toBe(path.resolve(be));
+    expect(svc.getRepoBinding('p9', 'acme/shop-fe')?.localDir).toBe(path.resolve(fe));
   });
 });

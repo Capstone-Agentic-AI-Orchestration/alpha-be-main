@@ -3,10 +3,10 @@ import path from 'node:path';
 import type { LocalProjectBinding, Project } from '../models/index.js';
 import { checkWorkspace } from '../controllers/workspaceValidation.js';
 import { githubService } from './githubService.js';
-import { repoForProject } from './githubIssueMapping.js';
+import { repoForProject, reposForProject } from './githubIssueMapping.js';
 import { sqliteService } from './sqliteService.js';
 import { logInfo } from '../utils/logger.js';
-import { clonePathFor, isEmptyOrMissing, isExistingCheckout } from './workspaceService.js';
+import { clonePathFor, isEmptyOrMissing, isExistingCheckout, resolveProjectWorkspace } from './workspaceService.js';
 import { checkoutStatus, type CheckoutStatus } from './localCheckout.js';
 
 /**
@@ -41,12 +41,52 @@ export interface BoundProject extends LocalProjectBinding {
   ownerRepo?: string;
 }
 
-export function projectBinding(projectId: string): LocalProjectBinding | null {
-  return sqliteService.getProjectBinding(projectId);
+
+/**
+ * The project's first folder on this machine: its first repository's that is
+ * here, or a project binding from before per-repository ones. What the older
+ * one-folder view of a project reads; `repositoryCheckouts` has them all.
+ */
+export function projectBinding(project: Project): LocalProjectBinding | null {
+  const bindings = sqliteService.listRepoBindings(project.id);
+  for (const repo of reposForProject(project)) {
+    const found = bindings.find(b => b.repo === repo.toLowerCase());
+    if (found) return found;
+  }
+  return sqliteService.getProjectBinding(project.id);
 }
 
 /**
- * Point this machine at a folder for a project.
+ * Move a project binding from before per-repository bindings onto the
+ * repository it was checked against -- the project's first. Nothing is lost:
+ * the same folder, now under its repository's name. A project with no
+ * repository keeps its project binding, since there is no repository to key
+ * it by.
+ */
+export function migrateLegacyBinding(project: Project): void {
+  const legacy = sqliteService.getProjectBinding(project.id);
+  const first = repoForProject(project);
+  if (!legacy || !first) return;
+  if (!sqliteService.getRepoBinding(project.id, first)) {
+    sqliteService.saveRepoBinding({
+      projectId: project.id,
+      repo: first,
+      localDir: legacy.localDir,
+      isManaged: legacy.isManaged,
+      ...(legacy.activeBranch ? { activeBranch: legacy.activeBranch } : {})
+    });
+  }
+  sqliteService.deleteProjectBinding(project.id);
+}
+
+/**
+ * Point this machine at a folder for one of the project's repositories.
+ *
+ * Which one is read from the folder itself -- its `origin` -- so a developer
+ * pastes wherever they cloned it and does not also have to say which half of
+ * a pair it is. `repo`, when given, must agree. A folder whose origin is
+ * none of the project's repositories is refused: binding the wrong checkout
+ * is how an agent confidently edits another project.
  *
  * `managed` says Alpha put the code there itself (a clone it made), which is
  * what tells `resolveProjectWorkspace` it may refresh it.
@@ -54,61 +94,95 @@ export function projectBinding(projectId: string): LocalProjectBinding | null {
 export async function bindProject(
   project: Project,
   localDir: unknown,
-  { managed = false }: { managed?: boolean } = {}
+  { managed = false, repo }: { managed?: boolean; repo?: string } = {}
 ): Promise<BoundProject> {
   const check = checkWorkspace(localDir);
   if (!check.ok) throw new BindingError(check.detail ?? 'That folder cannot be used.', 'invalid_folder');
 
   const dir = path.resolve(String(localDir).trim());
   const inspection = await githubService.inspectLocalRepo(dir);
-  const wanted = repoForProject(project);
+  const repos = reposForProject(project);
+  const origin = inspection.ownerRepo;
 
   /**
-   * The same repository, or none to compare against.
-   *
    * A project with no repository attached is bound on the person's word --
-   * there is nothing to check it against. One that has a repository is
-   * checked, because an agent editing the wrong checkout looks exactly like
-   * an agent editing the right one until someone reads the diff.
+   * there is nothing to check it against -- and as a whole.
    */
-  if (wanted && inspection.ownerRepo && inspection.ownerRepo.toLowerCase() !== wanted.toLowerCase()) {
+  if (repos.length === 0) {
+    const saved = sqliteService.saveProjectBinding({
+      projectId: project.id,
+      localDir: dir,
+      isManaged: managed,
+      ...(inspection.branch ? { activeBranch: inspection.branch } : {})
+    });
+    allowFolder(dir, managed, project.name);
+    logInfo(`Bound ${project.key || project.name} to ${dir}`);
+    return { ...saved, ...(origin ? { ownerRepo: origin } : {}) };
+  }
+
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  if (repo && !repos.some(candidate => same(candidate, repo))) {
+    throw new BindingError(`${repo} is not one of ${project.name}'s repositories.`, 'wrong_repository');
+  }
+  // Named, or read from the origin, or -- a folder with no origin -- the
+  // only repository there is, on the person's word as before.
+  const target = repo
+    ? repos.find(candidate => same(candidate, repo))!
+    : origin
+      ? repos.find(candidate => same(candidate, origin))
+      : repos.length === 1
+        ? repos[0]
+        : undefined;
+  if (origin && (!target || !same(origin, target))) {
     throw new BindingError(
-      `${dir} is a checkout of ${inspection.ownerRepo}, not ${wanted}.`,
+      `${dir} is a checkout of ${origin}, not ${target ?? `one of this project's repositories (${repos.join(', ')})`}.`,
+      'wrong_repository'
+    );
+  }
+  if (!target) {
+    throw new BindingError(
+      `${dir} has no GitHub origin, so Alpha cannot tell which of ${repos.join(' and ')} it is. Choose the repository it belongs to.`,
       'wrong_repository'
     );
   }
 
-  const saved = sqliteService.saveProjectBinding({
+  migrateLegacyBinding(project);
+  const saved = sqliteService.saveRepoBinding({
     projectId: project.id,
+    repo: target,
     localDir: dir,
     isManaged: managed,
-    activeBranch: inspection.branch
+    ...(inspection.branch ? { activeBranch: inspection.branch } : {})
   });
-
-  /**
-   * Choosing the folder is the act of consent, so it goes on the allowlist.
-   *
-   * A managed clone needs nothing: the workspaces root is allowlisted once and
-   * the check matches on prefix.
-   */
-  if (!managed && !sqliteService.isPathAllowed(dir)) {
-    sqliteService.addAllowedPath(dir, project.name);
-  }
-
-  logInfo(`Bound ${project.key || project.name} to ${dir}${inspection.branch ? ` (${inspection.branch})` : ''}`);
-  return { ...saved, ownerRepo: inspection.ownerRepo };
-}
-
-export function unbindProject(projectId: string): boolean {
-  return sqliteService.deleteProjectBinding(projectId);
+  allowFolder(dir, managed, project.name);
+  logInfo(`Bound ${target} (${project.key || project.name}) to ${dir}${inspection.branch ? ` (${inspection.branch})` : ''}`);
+  return { ...saved, ownerRepo: target };
 }
 
 /**
- * Get the project's code onto this machine and bind it, in one act.
+ * Choosing the folder is the act of consent, so it goes on the allowlist.
+ *
+ * A managed clone needs nothing: the workspaces root is allowlisted once and
+ * the check matches on prefix.
+ */
+function allowFolder(dir: string, managed: boolean, projectName: string): void {
+  if (!managed && !sqliteService.isPathAllowed(dir)) sqliteService.addAllowedPath(dir, projectName);
+}
+
+/** Forget where this machine keeps one repository, or -- with none named -- all of the project's. */
+export function unbindProject(projectId: string, repo?: string): boolean {
+  if (repo) return sqliteService.deleteRepoBinding(projectId, repo);
+  const project = sqliteService.deleteProjectBinding(projectId);
+  return sqliteService.deleteRepoBindings(projectId) > 0 || project;
+}
+
+/**
+ * Get the project's code onto this machine and bind it, in one act: one
+ * repository when named, otherwise every one this machine does not have yet.
  *
  * The alternative is what a new collaborator does today: find the repository,
  * clone it by hand somewhere, then come back and type the path. Alpha knows
- * the repository and where it puts clones, so it can do both.
+ * the repositories and where it puts clones, so it can do both.
  *
  * Asking twice is not an error. A checkout already at the managed path is
  * bound rather than refused -- which is what makes this safe to press again
@@ -116,26 +190,58 @@ export function unbindProject(projectId: string): boolean {
  * that is not empty and is not a checkout is left strictly alone: Alpha did
  * not put it there.
  */
-export async function cloneAndBindProject(project: Project): Promise<BoundProject> {
-  const ownerRepo = repoForProject(project);
-  if (!ownerRepo) {
+export async function cloneAndBindProject(project: Project, repo?: string): Promise<BoundProject[]> {
+  const repos = reposForProject(project);
+  if (repos.length === 0) {
     throw new BindingError(`${project.name} has no GitHub repository to clone.`, 'invalid_folder');
   }
-
-  const { dir } = clonePathFor(ownerRepo);
-  if (!isExistingCheckout(dir)) {
-    if (!isEmptyOrMissing(dir)) {
-      throw new BindingError(`${dir} already holds something that is not a checkout.`, 'invalid_folder');
-    }
-    await githubService.cloneRepository(ownerRepo, path.dirname(dir));
-    logInfo(`Cloned ${ownerRepo} for ${project.key || project.name}`);
+  const wanted = repo ? repos.filter(candidate => candidate.toLowerCase() === repo.toLowerCase()) : repos;
+  if (repo && wanted.length === 0) {
+    throw new BindingError(`${repo} is not one of ${project.name}'s repositories.`, 'wrong_repository');
   }
 
-  return bindProject(project, dir, { managed: true });
+  migrateLegacyBinding(project);
+  const bound: BoundProject[] = [];
+  for (const ownerRepo of wanted) {
+    // One already on this machine, wherever it is, is left where it is.
+    const existing = resolveProjectWorkspace(project, ownerRepo);
+    if (!repo && existing && isExistingCheckout(existing.dir)) continue;
+
+    const { dir } = clonePathFor(ownerRepo);
+    if (!isExistingCheckout(dir)) {
+      if (!isEmptyOrMissing(dir)) {
+        throw new BindingError(`${dir} already holds something that is not a checkout.`, 'invalid_folder');
+      }
+      await githubService.cloneRepository(ownerRepo, path.dirname(dir));
+      logInfo(`Cloned ${ownerRepo} for ${project.key || project.name}`);
+    }
+    bound.push(await bindProject(project, dir, { managed: true, repo: ownerRepo }));
+  }
+  return bound;
 }
 
-/** What state the bound checkout is in: branch, uncommitted work, unpushed commits. */
-export async function boundCheckoutStatus(projectId: string): Promise<CheckoutStatus | null> {
-  const binding = sqliteService.getProjectBinding(projectId);
-  return binding ? checkoutStatus(binding.localDir) : null;
+/** One repository of the project, and where -- if anywhere -- this machine has it. */
+export interface RepositoryCheckout {
+  repo: string;
+  /** Null when this machine has no checkout of it. */
+  localDir: string | null;
+  managed: boolean;
+  status: CheckoutStatus | null;
+}
+
+/** Every repository of the project, each with this machine's checkout of it, in the project's order. */
+export async function repositoryCheckouts(project: Project): Promise<RepositoryCheckout[]> {
+  return Promise.all(
+    reposForProject(project).map(async repo => {
+      const workspace = resolveProjectWorkspace(project, repo);
+      if (!workspace) return { repo, localDir: null, managed: false, status: null };
+      return { repo, localDir: workspace.dir, managed: workspace.managed, status: await checkoutStatus(workspace.dir) };
+    })
+  );
+}
+
+/** What state the first bound checkout is in: branch, uncommitted work, unpushed commits. */
+export async function boundCheckoutStatus(project: Project): Promise<CheckoutStatus | null> {
+  const workspace = resolveProjectWorkspace(project);
+  return workspace ? checkoutStatus(workspace.dir) : null;
 }

@@ -23,6 +23,7 @@ import {
   boundCheckoutStatus,
   cloneAndBindProject,
   projectBinding,
+  repositoryCheckouts,
   unbindProject
 } from '../services/projectBindings.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
@@ -321,10 +322,29 @@ dataRouter.post('/projects/check-workspace', desktopOnly, (req: Request, res: Re
 dataRouter.get('/projects/:id/binding', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  res.json(IS_CLOUD ? null : projectBinding(req.params.id));
+  if (IS_CLOUD) return res.json(null);
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  res.json(project ? projectBinding(project) : null);
 }));
 
-/** Point this machine at a folder for a project. The developer's own act. */
+/**
+ * Each of the project's repositories, and where this machine has it -- or
+ * that it does not. What the "on this machine" state of each repository row
+ * is drawn from. Empty in the cloud, which keeps no checkouts.
+ */
+dataRouter.get('/projects/:id/checkouts', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  if (IS_CLOUD) return res.json({ checkouts: [] });
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json({ checkouts: await repositoryCheckouts(project) });
+}));
+
+/**
+ * Point this machine at a folder for one of the project's repositories. The
+ * developer's own act. `repo` is optional: the folder's origin says which.
+ */
 dataRouter.put('/projects/:id/binding', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
@@ -332,7 +352,8 @@ dataRouter.put('/projects/:id/binding', desktopOnly, route(async (req: Request, 
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    res.json(await bindProject(project, req.body?.localDir));
+    const repo = typeof req.body?.repo === 'string' && req.body.repo.trim() ? req.body.repo.trim() : undefined;
+    res.json(await bindProject(project, req.body?.localDir, repo ? { repo } : {}));
   } catch (err) {
     if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
     throw err;
@@ -340,7 +361,9 @@ dataRouter.put('/projects/:id/binding', desktopOnly, route(async (req: Request, 
 }));
 
 /**
- * Clone the project's repository here and bind it, in one press.
+ * Clone the project's repositories here and bind them, in one press: the one
+ * named in `repo`, or every one this machine does not have yet. Answers the
+ * checkouts it bound.
  *
  * Idempotent: a checkout already at the managed path is bound rather than
  * refused, so pressing it again after a failed clone finishes the job.
@@ -352,7 +375,8 @@ dataRouter.post('/projects/:id/clone', desktopOnly, route(async (req: Request, r
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    res.json(await cloneAndBindProject(project));
+    const repo = typeof req.body?.repo === 'string' && req.body.repo.trim() ? req.body.repo.trim() : undefined;
+    res.json(await cloneAndBindProject(project, repo));
   } catch (err) {
     if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
     // A clone can fail for a dozen reasons on the far side -- no access, no
@@ -370,13 +394,17 @@ dataRouter.post('/projects/:id/clone', desktopOnly, route(async (req: Request, r
 dataRouter.get('/projects/:id/binding/status', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  res.json(await boundCheckoutStatus(req.params.id));
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json(await boundCheckoutStatus(project));
 }));
 
 dataRouter.delete('/projects/:id/binding', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  res.json({ success: unbindProject(req.params.id) });
+  // `?repo=owner/name` forgets one repository's folder; none forgets them all.
+  const repo = typeof req.query.repo === 'string' && req.query.repo.trim() ? req.query.repo.trim() : undefined;
+  res.json({ success: unbindProject(req.params.id, repo) });
 }));
 
 dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {

@@ -21,6 +21,7 @@ import {
   Workspace,
   ProjectBuildStep,
   LocalProjectBinding,
+  LocalRepoBinding,
   BuildStepPhase,
   AgentCall,
   AgentCallTarget,
@@ -189,6 +190,24 @@ export class SQLiteService {
         last_synced_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      /*
+       * The same, per repository: a paired project's -be and -fe are two
+       * checkouts, each wherever its developer keeps it. A project binding
+       * from before this table is read as its first repository's until it is
+       * moved here (see projectBindings.migrateLegacyBinding).
+       */
+      CREATE TABLE IF NOT EXISTS local_repo_bindings (
+        project_id TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        local_dir TEXT NOT NULL,
+        is_managed INTEGER NOT NULL DEFAULT 0,
+        active_branch TEXT,
+        last_synced_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, repo)
       );
 
       CREATE TABLE IF NOT EXISTS projects (
@@ -1151,6 +1170,62 @@ export class SQLiteService {
 
   deleteProjectBinding(projectId: string): boolean {
     return this.db.prepare('DELETE FROM local_project_bindings WHERE project_id = ?').run(projectId).changes > 0;
+  }
+
+  // --- Local repository bindings ---
+
+  listRepoBindings(projectId: string): LocalRepoBinding[] {
+    const rows = this.db.prepare('SELECT * FROM local_repo_bindings WHERE project_id = ?').all(projectId) as any[];
+    return rows.map(row => ({ ...toBinding(row), repo: row.repo }));
+  }
+
+  getRepoBinding(projectId: string, repo: string): LocalRepoBinding | null {
+    const row = this.db
+      .prepare('SELECT * FROM local_repo_bindings WHERE project_id = ? AND repo = ?')
+      .get(projectId, repo.toLowerCase()) as any;
+    return row ? { ...toBinding(row), repo: row.repo } : null;
+  }
+
+  saveRepoBinding(binding: {
+    projectId: string;
+    repo: string;
+    localDir: string;
+    isManaged?: boolean;
+    activeBranch?: string;
+  }): LocalRepoBinding {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO local_repo_bindings
+           (project_id, repo, local_dir, is_managed, active_branch, last_synced_at, created_at, updated_at)
+         VALUES (@projectId, @repo, @localDir, @isManaged, @activeBranch, @now, @now, @now)
+         ON CONFLICT(project_id, repo) DO UPDATE SET
+           local_dir = excluded.local_dir,
+           is_managed = excluded.is_managed,
+           active_branch = excluded.active_branch,
+           last_synced_at = excluded.last_synced_at,
+           updated_at = excluded.updated_at`
+      )
+      .run({
+        projectId: binding.projectId,
+        repo: binding.repo.toLowerCase(),
+        localDir: binding.localDir,
+        isManaged: binding.isManaged ? 1 : 0,
+        activeBranch: binding.activeBranch ?? null,
+        now
+      });
+    return this.getRepoBinding(binding.projectId, binding.repo)!;
+  }
+
+  deleteRepoBinding(projectId: string, repo: string): boolean {
+    return (
+      this.db.prepare('DELETE FROM local_repo_bindings WHERE project_id = ? AND repo = ?').run(projectId, repo.toLowerCase())
+        .changes > 0
+    );
+  }
+
+  deleteRepoBindings(projectId: string): number {
+    return this.db.prepare('DELETE FROM local_repo_bindings WHERE project_id = ?').run(projectId).changes;
   }
 
   addAllowedPath(filePath: string, name: string) {
