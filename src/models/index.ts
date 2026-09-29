@@ -179,6 +179,30 @@ export interface LocalProjectBinding {
   updatedAt: string;
 }
 
+/**
+ * One Render service or Vercel project, as `hostingService` created or last
+ * confirmed it -- enough to look it up by id instead of by name next time.
+ *
+ * This is a cache, not the source of truth: Render and Vercel's own APIs are.
+ * A resource with no `hosting` field (never set up, or set up before this
+ * field existed) is rediscovered from them by the naming convention alone
+ * (`<repo>` / `<repo>-uat` for Render, `<repo>` for Vercel) -- which is also
+ * how the repo-keyed hosting routes work, since they run with no `Project` to
+ * read a cache from at all. See `services/hosting/hostingService.ts`.
+ */
+export interface ProjectResourceHosting {
+  platform: 'render' | 'vercel';
+  /** Backend only: the two Render services, keyed by which branch each deploys. */
+  render?: {
+    main: { id: string; url: string | null; dashboardUrl: string | null } | null;
+    uat: { id: string; url: string | null; dashboardUrl: string | null } | null;
+  };
+  /** Frontend only: the one Vercel project every environment lives under. */
+  vercel?: {
+    projectId: string;
+  };
+}
+
 export interface ProjectResource {
   id: string;
   type: 'github_repo' | 'local_path' | 'local_dir' | 'documentation' | 'api_endpoint';
@@ -194,6 +218,8 @@ export interface ProjectResource {
    * Absent means there is no local checkout yet.
    */
   localPath?: string;
+  /** Render/Vercel hosting Alpha set up for this repository. Absent means never set up, or not yet discovered. */
+  hosting?: ProjectResourceHosting;
 }
 
 export interface Project {

@@ -216,9 +216,89 @@ describe('buildProjectScaffold', () => {
 
   it('emits no CI configuration — that is a separate concern', () => {
     for (const stack of SUPPORTED_STACKS) {
-      const p = paths(buildProjectScaffold({ serviceName: 'svc', stack, includeDocker: true }));
+      const p = buildProjectScaffold({ serviceName: 'svc', stack, includeDocker: true }).map(f => f.path);
       expect(p).not.toContain('sonar-project.properties');
       expect(p.some(f => f.startsWith('.github/'))).toBe(false);
     }
+  });
+
+  describe('nodejs is a real HTTP server', () => {
+    it('has its own app module, separate from the entry point that listens', () => {
+      const files = buildProjectScaffold({ serviceName: 'billing-api', stack: 'nodejs' });
+      const p = paths(files);
+      expect(p).toContain('src/app.ts');
+      expect(p).toContain('src/index.ts');
+
+      const app = read(files, 'src/app.ts');
+      expect(app).toContain("app.get('/health'");
+      expect(app).toContain("status: 'ok'");
+      expect(app).toContain('cors(');
+      expect(app).toContain('CORS_ORIGINS');
+
+      const index = read(files, 'src/index.ts');
+      expect(index).toContain('app.listen(');
+      expect(index).not.toContain("'/health'");
+    });
+
+    it('tests /health with supertest against the app, not a bound port', () => {
+      const spec = read(buildProjectScaffold({ serviceName: 'billing-api', stack: 'nodejs' }), 'tests/unit/index.spec.ts');
+      expect(spec).toContain("import request from 'supertest'");
+      expect(spec).toContain("from '../../src/app'");
+      expect(spec).toContain("request(app).get('/health')");
+    });
+
+    it('carries express and cors as real dependencies, pinned', () => {
+      const pkg = JSON.parse(read(buildProjectScaffold({ serviceName: 'billing-api', stack: 'nodejs' }), 'package.json'));
+      expect(pkg.dependencies.express).toBeDefined();
+      expect(pkg.dependencies.cors).toBeDefined();
+      expect(pkg.devDependencies.supertest).toBeDefined();
+      for (const range of [pkg.dependencies.express, pkg.dependencies.cors, pkg.devDependencies.supertest]) {
+        expect(range).not.toBe('*');
+      }
+    });
+  });
+
+  describe('nestjs listens for real traffic', () => {
+    it('gets a health controller and CORS from CORS_ORIGINS', () => {
+      const files = buildProjectScaffold({ serviceName: 'orders', stack: 'nestjs' });
+      const p = paths(files);
+      expect(p).toContain('src/app.controller.ts');
+      expect(read(files, 'src/app.controller.ts')).toContain("@Get('health')");
+
+      const main = read(files, 'src/main.ts');
+      expect(main).toContain('process.env.PORT');
+      expect(main).toContain('CORS_ORIGINS');
+      expect(main).toContain('cors: { origin: corsOrigins() }');
+    });
+
+    it('has a start:prod script', () => {
+      const pkg = JSON.parse(read(buildProjectScaffold({ serviceName: 'orders', stack: 'nestjs' }), 'package.json'));
+      expect(pkg.scripts['start:prod']).toBeTruthy();
+    });
+  });
+
+  describe('frontend API URLs use the right prefix for their bundler', () => {
+    it('react reads VITE_API_URL, never NEXT_PUBLIC_*', () => {
+      const env = read(buildProjectScaffold({ serviceName: 'dashboard', stack: 'react' }), '.env.example');
+      expect(env).toContain('VITE_API_URL=http://localhost:3000');
+      expect(env).not.toContain('NEXT_PUBLIC_');
+    });
+
+    it('nextjs reads NEXT_PUBLIC_API_URL and runs on 3001 locally', () => {
+      const files = buildProjectScaffold({ serviceName: 'storefront', stack: 'nextjs' });
+      expect(read(files, '.env.example')).toContain('NEXT_PUBLIC_API_URL=http://localhost:3000');
+
+      const pkg = JSON.parse(read(files, 'package.json'));
+      expect(pkg.scripts.dev).toContain('-p 3001');
+      expect(pkg.scripts.start).toContain('-p 3001');
+    });
+  });
+
+  describe('a backend’s .env.example', () => {
+    it.each(['nodejs', 'nestjs'] as const)('points CORS_ORIGINS at both frontend dev servers for %s', stack => {
+      const env = read(buildProjectScaffold({ serviceName: 'svc', stack }), '.env.example');
+      expect(env).toContain('PORT=3000');
+      expect(env).toContain('CORS_ORIGINS=http://localhost:5173,http://localhost:3001');
+    });
   });
 });

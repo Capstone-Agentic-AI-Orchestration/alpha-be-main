@@ -405,13 +405,15 @@ export const GITHUB_SCOPE = process.env.GITHUB_SCOPE || 'repo,workflow,read:org'
  *
  * The caller workflows written into every new repository are this repo's
  * `workflow-templates/customer/*.yml`, read at `ALPHAORCH_WORKFLOW_REF`, and
- * they call its reusable workflows. Override only for a fork of it.
+ * they call its reusable workflows.
+ *
+ * No default: it names one organisation's repository, and a guessed one would
+ * quietly give every other deployment someone else's CI. Unset, scaffolding
+ * refuses before anything is created on GitHub and says which setting is missing.
  */
-export const ALPHAORCH_WORKFLOW_REPO = (
-  process.env.ALPHAORCH_WORKFLOW_REPO || 'Capstone-Agentic-AI-Orchestration/alphaorch-workflow'
-).trim();
-/** The tag or branch the caller templates are read at; `v1` is the floating major. */
-export const ALPHAORCH_WORKFLOW_REF = (process.env.ALPHAORCH_WORKFLOW_REF || 'v1').trim();
+export const ALPHAORCH_WORKFLOW_REPO = (process.env.ALPHAORCH_WORKFLOW_REPO || '').trim();
+/** The tag or branch the caller templates are read at, e.g. the floating major `v1`. No default, for the same reason. */
+export const ALPHAORCH_WORKFLOW_REF = (process.env.ALPHAORCH_WORKFLOW_REF || '').trim();
 
 // GitHub App Configuration
 export const GITHUB_APP_ID = process.env.GITHUB_APP_ID || '';
@@ -422,3 +424,31 @@ export const GITHUB_APP_WEBHOOK_SECRET = process.env.GITHUB_APP_WEBHOOK_SECRET |
  * named an App that does not exist, so an unset value sent people to a 404.
  */
 export const GITHUB_APP_SLUG = process.env.GITHUB_APP_SLUG || '';
+
+/**
+ * Render and Vercel credentials for automatic hosting of repositories Alpha
+ * provisions -- cloud only, and never read on a desktop.
+ *
+ * A desktop reaches this the same way it reaches every other cloud-only
+ * capability: it forwards the request to `ALPHA_CLOUD_API` with its own
+ * GitHub token, and the cloud is the only process that ever sees these
+ * values. Shipping them to a desktop build would put a token that can create
+ * billed infrastructure on every teammate's machine.
+ */
+export const RENDER_API_KEY = process.env.RENDER_API_KEY || '';
+/**
+ * The Render owner (workspace) new services are created under. Optional:
+ * when unset, `renderClient` asks `GET /v1/owners` and uses the first team
+ * owner it finds, falling back to the first owner of any kind -- so a single-
+ * team Render account needs no configuration at all.
+ */
+export const RENDER_OWNER_ID = (process.env.RENDER_OWNER_ID || '').trim();
+/** Where new Render services are created. Optional: unset, the request carries no region and Render picks its own default. */
+export const RENDER_REGION = (process.env.RENDER_REGION || '').trim();
+export const VERCEL_TOKEN = process.env.VERCEL_TOKEN || '';
+/**
+ * The Vercel team new projects are created under. Vercel requires this on
+ * every API call once the token belongs to a team account (a personal-account
+ * token has no team and needs none).
+ */
+export const VERCEL_TEAM_ID = (process.env.VERCEL_TEAM_ID || '').trim();

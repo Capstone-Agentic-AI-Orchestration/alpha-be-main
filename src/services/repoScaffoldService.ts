@@ -1,14 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { IS_DESKTOP } from '../config/env.js';
+import { ALPHA_CLOUD_API, IS_CLOUD, IS_DESKTOP } from '../config/env.js';
 import { ensureWorkspacesRoot, projectRepoPath } from './workspaceService.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { githubService } from './githubService.js';
 import { githubApi } from './githubApi.js';
 import { provisionRepository } from './githubRepoProvisioning.js';
 import { buildCiWorkflows, type CiWorkflowPlan, type DeployTarget } from './ciWorkflows.js';
-import { buildProjectScaffold, normalizeProjectStack, type ScaffoldFile } from './scaffoldBuilder.js';
+import { buildProjectScaffold, normalizeProjectStack, type CanonicalStack, type ScaffoldFile } from './scaffoldBuilder.js';
+import { cloudRequest } from './cloudWorkspaces.js';
+import { platformForStack, roleForStack, setUpHosting, unavailableHostingStatus, type HostingStatus } from './hosting/hostingService.js';
 
 export interface CreateScaffoldedRepoInput {
   /** Project key, used as the workspace folder name. */
@@ -28,11 +30,29 @@ export interface CreateScaffoldedRepoInput {
   /** Defaults to repoName. Seeds the README title and package name. */
   serviceName?: string;
   /**
-   * Include the deploy job in the generated CI (Render for a backend, Vercel
-   * for a frontend). Default true; it stays off until the repository has its
-   * deploy secrets and `ALPHAORCH_DEPLOY=true`.
+   * Set up Render/Vercel hosting for this repository once it exists. Default
+   * true. There is no deploy job to gate any more -- the platforms deploy
+   * through their own GitHub Apps -- so this now controls one thing only:
+   * whether `hostingService` runs at all. `false` leaves the repository
+   * unhosted; the scaffold result's `hosting` field is then absent rather
+   * than `unavailable`, since unavailable means "hosting was wanted but this
+   * server cannot do it," not "hosting was not asked for."
    */
   deploy?: boolean;
+  /**
+   * `owner/name` of this repository's pair, when one already exists.
+   * `createPairedProject` sets this on the frontend's call once its backend
+   * has been created, so the frontend's hosting setup knows the backend's
+   * URLs immediately instead of leaving them for a later retry. Not part of
+   * the public scaffold API -- a standalone repository has no pair to name.
+   */
+  partnerNameWithOwner?: string;
+  /**
+   * The workspace this scaffold was asked for in. A desktop's hosting forward
+   * carries it, so the cloud checks the caller's role in *that* workspace
+   * rather than whichever one it would resolve first.
+   */
+  workspaceId?: string;
 }
 
 export interface CreateScaffoldedRepoResult {
@@ -49,48 +69,99 @@ export interface CreateScaffoldedRepoResult {
   protectionUnavailable?: string;
   /** Set when the repository was created but the desktop could not clone it. */
   cloneError?: string;
-  /** The generated CI's deploy target, or null when deploys were not requested. */
-  deployTarget: DeployTarget | null;
-  /** Repository secrets the deploy job needs. */
+  /** Which platform this stack hosts on. Always set -- see `ciWorkflows.CiWorkflowPlan`. */
+  deployTarget: DeployTarget;
+  /** Always empty: hosting deploys through the platform's own GitHub App, never a repository secret. */
   requiredSecrets: string[];
-  /** Repository variable to set to `true` once those secrets exist. */
+  /** Always null, for the same reason. */
   deployVariable: string | null;
   /** Where the CI template came from. */
   ciSource: string;
+  /** Absent when `deploy: false`. `state: 'unavailable'` when this server has no credentials for the platform. */
+  hosting?: HostingStatus;
 }
 
-/** A README section saying what the generated CI does and what it waits for. */
-function ciReadmeSection(plan: CiWorkflowPlan): string {
+/** A README section saying what the generated CI does, and where hosting is set up. */
+function ciReadmeSection(plan: CiWorkflowPlan, hostingRequested: boolean): string {
   const code = (text: string) => '`' + text + '`';
-  const lines = [
+  const platformName = plan.deployTarget === 'render' ? 'Render' : 'Vercel';
+  return [
     '',
     '## CI/CD',
     '',
     `${code('.github/workflows/ci.yml')} runs unit tests with coverage, lint and a security scan on every ` +
       `push and pull request to ${code('dev')}, ${code('uat')} and ${code('main')} (from ${code(plan.source)}).`,
     '',
-    `Work lands on ${code('dev')}, is promoted to ${code('uat')}, then to ${code('main')}, by pull request only.`
-  ];
-  if (plan.deployTarget) {
-    lines.push(
-      '',
-      `Deploys go to **${plan.deployTarget === 'render' ? 'Render' : 'Vercel'}** after the checks pass. ` +
-        'They are off until the repository has:',
-      '',
-      ...plan.requiredSecrets.map(secret => `- secret ${code(secret)}`),
-      `- variable ${code(plan.deployVariable ?? '')} set to ${code('true')}`
-    );
-  }
-  lines.push('');
-  return lines.join('\n');
+    `Work lands on ${code('dev')}, is promoted to ${code('uat')}, then to ${code('main')}, by pull request only.`,
+    '',
+    hostingRequested
+      ? `Hosting on **${platformName}** is set up automatically by Alpha. See its status, URLs and deploys from ` +
+        'this repository’s project in Alpha.'
+      : `Hosting on **${platformName}** was not set up for this repository. Alpha can set it up from this ` +
+        'repository’s project page.',
+    ''
+  ].join('\n');
 }
 
 /** Append the CI section to the scaffold's README, and add the workflow files. */
-function withCi(files: ScaffoldFile[], plan: CiWorkflowPlan): ScaffoldFile[] {
+function withCi(files: ScaffoldFile[], plan: CiWorkflowPlan, hostingRequested: boolean): ScaffoldFile[] {
   return [
-    ...files.map(file => (file.path === 'README.md' ? { ...file, content: file.content + ciReadmeSection(plan) } : file)),
+    ...files.map(file =>
+      file.path === 'README.md' ? { ...file, content: file.content + ciReadmeSection(plan, hostingRequested) } : file
+    ),
     ...plan.files
   ];
+}
+
+/**
+ * Hosting setup for a freshly scaffolded repository.
+ *
+ * Cloud mode calls `hostingService` directly -- only the cloud ever holds
+ * Render/Vercel credentials. A desktop has none and must never be given any
+ * (a token that can create billed infrastructure does not belong on a
+ * teammate's laptop), so it forwards the same request to the cloud with its
+ * own GitHub token instead, exactly like every other cloud-only capability
+ * (`cloudWorkspaces.cloudRequest`). `partner` is passed explicitly rather
+ * than discovered: at scaffold time Alpha already knows the pairing, because
+ * it just created both repositories itself.
+ */
+async function runHostingSetup(
+  nameWithOwner: string,
+  stack: CanonicalStack,
+  partner?: string,
+  workspaceId?: string
+): Promise<HostingStatus> {
+  if (IS_CLOUD) {
+    return setUpHosting({ repo: nameWithOwner, stackHint: stack, ...(partner ? { partnerHint: partner } : {}) });
+  }
+
+  if (!ALPHA_CLOUD_API) {
+    return unavailableHostingStatus(
+      nameWithOwner,
+      roleForStack(stack),
+      platformForStack(stack),
+      'This desktop has no cloud configured, and hosting only runs in the cloud.',
+      partner ?? null
+    );
+  }
+
+  const [owner, name] = nameWithOwner.split('/');
+  const answer = await cloudRequest<HostingStatus>(`/hosting/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
+    method: 'POST',
+    body: { stack, ...(partner ? { partner } : {}) },
+    ...(workspaceId ? { workspaceId } : {}),
+    // Creating services waits on both platforms; the default timeout is for quick reads.
+    timeoutMs: 180_000
+  });
+  if (answer.status >= 200 && answer.status < 300) return answer.body;
+
+  return unavailableHostingStatus(
+    nameWithOwner,
+    roleForStack(stack),
+    platformForStack(stack),
+    (answer.body as { error?: string } | null)?.error ?? `The cloud answered ${answer.status} setting up hosting.`,
+    partner ?? null
+  );
 }
 
 /**
@@ -205,8 +276,9 @@ export async function createScaffoldedRepository(
     ...(description ? { description } : {})
   });
   // Also before GitHub: a repository that cannot get its CI is not created.
-  const ci = await buildCiWorkflows({ stack: canonicalStack, deploy: input.deploy });
-  const files = withCi(scaffold, ci);
+  const ci = await buildCiWorkflows({ stack: canonicalStack });
+  const hostingRequested = input.deploy !== false;
+  const files = withCi(scaffold, ci, hostingRequested);
 
   let repo;
   try {
@@ -236,6 +308,26 @@ export async function createScaffoldedRepository(
 
   logInfo(`Scaffolded ${repo.nameWithOwner} (${files.length} files)${localPath ? ` at ${localPath}` : ''}`);
 
+  let hosting: HostingStatus | undefined;
+  if (hostingRequested) {
+    try {
+      hosting = await runHostingSetup(repo.nameWithOwner, canonicalStack, input.partnerNameWithOwner, input.workspaceId);
+    } catch (err: any) {
+      // Hosting is best-effort at scaffold time: the repository above is
+      // real and already pushed. A hosting failure is reported, not thrown --
+      // throwing here would read as "the scaffold failed" for a repository
+      // that in fact exists and can have hosting retried on its project page.
+      logError(`Hosting setup failed for ${repo.nameWithOwner}:`, err?.message ?? err);
+      hosting = unavailableHostingStatus(
+        repo.nameWithOwner,
+        roleForStack(canonicalStack),
+        platformForStack(canonicalStack),
+        err?.message ?? String(err),
+        input.partnerNameWithOwner ?? null
+      );
+    }
+  }
+
   return {
     url: repo.url,
     nameWithOwner: repo.nameWithOwner,
@@ -249,11 +341,13 @@ export async function createScaffoldedRepository(
     deployTarget: ci.deployTarget,
     requiredSecrets: ci.requiredSecrets,
     deployVariable: ci.deployVariable,
-    ciSource: ci.source
+    ciSource: ci.source,
+    ...(hosting ? { hosting } : {})
   };
 }
 
-export interface CreatePairedProjectInput extends Omit<CreateScaffoldedRepoInput, 'stack' | 'repoShape'> {
+export interface CreatePairedProjectInput
+  extends Omit<CreateScaffoldedRepoInput, 'stack' | 'repoShape' | 'partnerNameWithOwner'> {
   /** react or nextjs, for `<repoName>-fe`. */
   frontendStack: string;
   /** nodejs or nestjs, for `<repoName>-be`. */
@@ -292,7 +386,12 @@ export async function createPairedProject(input: CreatePairedProjectInput): Prom
       repoName: `${base}-fe`,
       serviceName: `${base}-fe`,
       stack: frontend,
-      repoShape: 'standalone'
+      repoShape: 'standalone',
+      // The backend now exists, so the frontend's own hosting setup can wire
+      // its API URL straight to it and, in turn, put the frontend's URL onto
+      // the backend's CORS_ORIGINS -- the "PUT CORS on Render" step of the
+      // paired order happens inside this one call.
+      partnerNameWithOwner: be.nameWithOwner
     });
     return [be, fe];
   } catch (err) {
