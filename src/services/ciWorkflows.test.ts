@@ -53,8 +53,10 @@ const LIBRARY = 'example-org/ci-library';
 
 async function load(settings: { repo?: string; ref?: string } = { repo: LIBRARY, ref: 'v1' }) {
   vi.resetModules();
-  if (settings.repo) process.env.ALPHAORCH_WORKFLOW_REPO = settings.repo;
-  if (settings.ref) process.env.ALPHAORCH_WORKFLOW_REF = settings.ref;
+  // Empty rather than deleted when not given: env.ts loads the developer's own .env, and dotenv
+  // fills in a variable that is absent -- but never one that is set, even to ''.
+  process.env.ALPHAORCH_WORKFLOW_REPO = settings.repo ?? '';
+  process.env.ALPHAORCH_WORKFLOW_REF = settings.ref ?? '';
   return import('./ciWorkflows.js');
 }
 
