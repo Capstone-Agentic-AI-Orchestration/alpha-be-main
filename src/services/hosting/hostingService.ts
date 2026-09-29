@@ -361,6 +361,46 @@ async function readPartnerFrontendUrls(repo: string): Promise<FrontendUrls> {
 
 // ─── Backend (Render) ───────────────────────────────────────────────────────
 
+/**
+ * How a scaffolded backend is built and started on Render.
+ *
+ * `--include=dev` because Alpha sets `NODE_ENV=production` on the service,
+ * Render passes a service's variables to its build, and `npm install` under
+ * that NODE_ENV skips devDependencies -- TypeScript and the `@types`
+ * packages the build needs. The first build (before the variable existed)
+ * passed and every build after it failed; this keeps them all the same.
+ */
+const RENDER_SETTINGS = {
+  buildCommand: 'npm install --include=dev && npm run build',
+  startCommand: 'npm run start',
+  autoDeployTrigger: 'checksPass'
+} as const;
+
+/**
+ * Bring a service's build, start and deploy-trigger settings to what Alpha
+ * expects -- for a service created before a fix to them, or one whose
+ * trigger Render refused on create. Best-effort: a service that cannot be
+ * updated keeps working as it was, and its status says whether it waits
+ * for CI.
+ */
+async function ensureRenderSettings(client: RenderClient, service: RenderServiceRecord): Promise<RenderServiceRecord> {
+  const details = service.serviceDetails as (RenderServiceRecord['serviceDetails'] & { envSpecificDetails?: { buildCommand?: string; startCommand?: string } }) | undefined;
+  const build = details?.envSpecificDetails?.buildCommand ?? details?.buildCommand;
+  const start = details?.envSpecificDetails?.startCommand ?? details?.startCommand;
+  const stale =
+    build !== RENDER_SETTINGS.buildCommand ||
+    start !== RENDER_SETTINGS.startCommand ||
+    service.autoDeployTrigger !== RENDER_SETTINGS.autoDeployTrigger;
+  if (!stale) return service;
+  try {
+    await client.updateService(service.id, RENDER_SETTINGS);
+    return await client.getService(service.id);
+  } catch (err) {
+    logError(`Could not update the build or deploy settings of Render service ${service.name}:`, (err as Error).message);
+    return service;
+  }
+}
+
 async function findOrCreateRenderService(
   client: RenderClient,
   ownerId: string,
@@ -371,7 +411,7 @@ async function findOrCreateRenderService(
   created: Array<() => Promise<void>>
 ): Promise<RenderServiceRecord> {
   const existing = await client.findServiceByName(name);
-  if (existing) return existing;
+  if (existing) return ensureRenderSettings(client, existing);
 
   let result;
   try {
@@ -382,9 +422,7 @@ async function findOrCreateRenderService(
       branch,
       ...(RENDER_REGION ? { region: RENDER_REGION } : {}),
       healthCheckPath,
-      buildCommand: 'npm install && npm run build',
-      startCommand: 'npm run start',
-      autoDeployTrigger: 'checksPass'
+      ...RENDER_SETTINGS
     });
   } catch (err) {
     throw friendlyRenderRepoError(err, repoUrl);
@@ -392,11 +430,9 @@ async function findOrCreateRenderService(
   created.push(async () => {
     await client.deleteService(result.service.id);
   });
-  // Read back the service Render actually created: the real url, the real
-  // dashboard link, and whether `autoDeployTrigger` stuck (Render documents
-  // it only for Blueprints/the dashboard, so an account that rejects it here
-  // silently falls back to plain `autoDeploy`, which is still correct).
-  return client.getService(result.service.id);
+  // Read back the service Render actually created -- the real url and
+  // dashboard link -- and put the deploy trigger on it if create refused it.
+  return ensureRenderSettings(client, await client.getService(result.service.id));
 }
 
 async function setRenderEnvAndDeploy(

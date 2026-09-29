@@ -18,6 +18,7 @@ function fakeRenderClient(overrides: Partial<Record<string, any>> = {}) {
   const envVars = new Map<string, Record<string, string>>();
   const deploysTriggered: string[] = [];
   const deleted: string[] = [];
+  const updates: Array<{ id: string; patch: any }> = [];
   let nextId = 1;
 
   const client = {
@@ -50,10 +51,14 @@ function fakeRenderClient(overrides: Partial<Record<string, any>> = {}) {
       deleted.push(id);
       for (const [name, service] of services) if (service.id === id) services.delete(name);
     }),
+    updateService: vi.fn(async (id: string, patch: any) => {
+      updates.push({ id, patch });
+      return [...services.values()].find(s => s.id === id);
+    }),
     ...overrides
   };
 
-  return { client, services, envVars, deploysTriggered, deleted };
+  return { client, services, envVars, deploysTriggered, deleted, updates };
 }
 
 function fakeVercelClient(overrides: Partial<Record<string, any>> = {}) {
@@ -104,14 +109,19 @@ function fakeVercelClient(overrides: Partial<Record<string, any>> = {}) {
   return { client, projects, envVars, domains, deployments, deleted };
 }
 
+const HOSTING_KEYS = ['RENDER_API_KEY', 'VERCEL_TOKEN', 'RENDER_OWNER_ID', 'VERCEL_TEAM_ID', 'RENDER_REGION'] as const;
+
 async function load(options: {
-  env?: Partial<Record<'RENDER_API_KEY' | 'VERCEL_TOKEN' | 'RENDER_OWNER_ID', string>>;
+  env?: Partial<Record<(typeof HOSTING_KEYS)[number], string>>;
   render?: ReturnType<typeof fakeRenderClient>;
   vercel?: ReturnType<typeof fakeVercelClient>;
   githubRepos?: string[];
 } = {}) {
   process.env.ALPHA_MODE = 'cloud';
-  for (const [key, value] of Object.entries(options.env ?? {})) process.env[key] = value;
+  // Every hosting setting is given a value -- '' when the test does not name it -- because env.ts
+  // loads the developer's own .env, and dotenv fills in a variable that is absent (never one that
+  // is set, even to ''). A developer with real tokens locally must not change what a test sees.
+  for (const key of HOSTING_KEYS) process.env[key] = options.env?.[key] ?? '';
   vi.resetModules();
 
   const render = options.render ?? fakeRenderClient();
@@ -517,5 +527,54 @@ describe('what a set-up leaves on the repository and in the status', () => {
       ['main', true],
       ['uat', false]
     ]);
+  });
+});
+describe('how a backend is built on Render', () => {
+  /** NODE_ENV=production reaches the build, and npm then skips the devDependencies the build needs. */
+  it('installs dev dependencies to build, and asks to deploy only once CI passes', async () => {
+    const { service, render } = await load({ env: RENDER_ENV });
+
+    await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    const input = render.client.createService.mock.calls[0][0];
+    expect(input).toMatchObject({
+      buildCommand: 'npm install --include=dev && npm run build',
+      startCommand: 'npm run start',
+      autoDeployTrigger: 'checksPass'
+    });
+  });
+
+  it('repairs an existing service’s build command and trigger on a retry', async () => {
+    const render = fakeRenderClient();
+    render.services.set('shop-be', {
+      id: 'srv-old',
+      name: 'shop-be',
+      serviceDetails: { url: 'shop-be.onrender.com', envSpecificDetails: { buildCommand: 'npm install && npm run build', startCommand: 'npm run start' } },
+      autoDeployTrigger: 'commit',
+      dashboardUrl: 'd'
+    });
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(render.updates.filter(u => u.id === 'srv-old').map(u => u.patch)).toEqual([
+      { buildCommand: 'npm install --include=dev && npm run build', startCommand: 'npm run start', autoDeployTrigger: 'checksPass' }
+    ]);
+  });
+
+  it('leaves a service already set up correctly alone', async () => {
+    const render = fakeRenderClient();
+    render.services.set('shop-be', {
+      id: 'srv-ok',
+      name: 'shop-be',
+      serviceDetails: { url: 'shop-be.onrender.com', envSpecificDetails: { buildCommand: 'npm install --include=dev && npm run build', startCommand: 'npm run start' } },
+      autoDeployTrigger: 'checksPass',
+      dashboardUrl: 'd'
+    });
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(render.updates.filter(u => u.id === 'srv-ok')).toEqual([]);
   });
 });

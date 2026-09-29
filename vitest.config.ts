@@ -28,7 +28,20 @@ export default defineConfig({
        * Set empty here because dotenv does not overwrite a variable that is
        * already set. A test that wants a cloud sets its own, fake one.
        */
-      ALPHA_CLOUD_API: ''
+      ALPHA_CLOUD_API: '',
+      /**
+       * Never a real hosting platform from a test, for the same reason: a
+       * developer's .env may hold Render and Vercel tokens, which would make
+       * every "not configured" path configured. A test that wants a platform
+       * sets its own, fake token.
+       */
+      RENDER_API_KEY: '',
+      RENDER_OWNER_ID: '',
+      RENDER_REGION: '',
+      VERCEL_TOKEN: '',
+      VERCEL_TEAM_ID: '',
+      ALPHAORCH_WORKFLOW_REPO: '',
+      ALPHAORCH_WORKFLOW_REF: ''
     }
   }
 });
