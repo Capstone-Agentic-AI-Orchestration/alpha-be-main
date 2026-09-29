@@ -399,7 +399,8 @@ describe('the team’s roster', () => {
       source({ assignments: [{ project_id: 'gh-repo-100', user_id: 'Dev1', status: 'removed' }] })
     );
     const afterRemoved = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
-    expect(workspaceRegistry.canAccessProject(afterRemoved!, 'gh-repo-100')).toBe(false);
+    // Assignments now decide only what a client may reach; the record itself must still follow the team's.
+    expect(afterRemoved!.access.assignedProjectIds.has('gh-repo-100')).toBe(false);
 
     // And the same when the row is gone from the team's copy altogether.
     await board.pullSharedBoard(
@@ -408,7 +409,7 @@ describe('the team’s roster', () => {
     );
     await board.pullSharedBoard('ws-default', source({ assignments: [] }));
     const afterGone = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
-    expect(workspaceRegistry.canAccessProject(afterGone!, 'gh-repo-100')).toBe(false);
+    expect(afterGone!.access.assignedProjectIds.has('gh-repo-100')).toBe(false);
   });
 });
 

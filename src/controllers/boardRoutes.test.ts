@@ -169,19 +169,13 @@ describe('the cloud project routes', () => {
    * someone assigned them an issue in it -- so the list now says what the
    * workspace has, and which of it is theirs.
    */
-  it('show a developer the workspace’s projects, and which are theirs', async () => {
+  /** Belonging to the workspace is the grant: a developer works in every project, no assignment needed. */
+  it('show a developer every project in the workspace, as theirs to work in', async () => {
     const admin = await startCloudApi();
     await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
 
     session = { login: 'Dev1', role: 'dev' };
     const dev = await startCloudApi();
-    expect((await call(dev, 'GET', '/api/projects')).body.map((p: any) => [p.key, p.assigned])).toEqual([
-      ['CHK', false]
-    ]);
-
-    const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
-    const project = (await db.query<{ id: string }>('select id from projects')).rows[0];
-    await workspaceRegistry.assignProject('ws-default', project.id, 'Dev1');
     expect((await call(dev, 'GET', '/api/projects')).body.map((p: any) => [p.key, p.assigned])).toEqual([
       ['CHK', true]
     ]);
@@ -203,7 +197,7 @@ describe('the cloud project routes', () => {
   });
 
   /** An issue is work, not a catalogue entry: it stays behind assignment. */
-  it('still show a developer no issues from a project they are not on', async () => {
+  it('show a developer the issues of every project in the workspace', async () => {
     const admin = await startCloudApi();
     const project = (await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
     await call(admin, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id });
@@ -211,7 +205,7 @@ describe('the cloud project routes', () => {
     session = { login: 'Dev1', role: 'dev' };
     const dev = await startCloudApi();
 
-    expect((await call(dev, 'GET', '/api/issues')).body).toEqual([]);
+    expect((await call(dev, 'GET', '/api/issues')).body.map((i: any) => i.title)).toEqual(['Fix cart']);
   });
 
   /** Projects are started by project managers; an admin's would have no PM behind it. */

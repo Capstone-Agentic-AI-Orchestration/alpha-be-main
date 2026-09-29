@@ -360,11 +360,9 @@ class WorkspaceRegistry {
   /**
    * Whether this caller may know the project exists.
    *
-   * Everyone inside the workspace may, clients aside: a developer has to be
-   * able to find the project they are about to be put on, and to bind it to a
-   * folder before anyone assigns them an issue in it. Discovery is not access
-   * -- `canAccessProject` below still decides whose issues, runs and chats a
-   * person may reach, and it stays assignment-scoped.
+   * Everyone inside the workspace may, clients aside -- the same set that may
+   * work in it (`canAccessProject`). A client knows only the projects they are
+   * assigned to.
    */
   canDiscoverProject(context: WorkspaceContext, projectId: string): boolean {
     if (!this.inWorkspace(context, 'projects', projectId)) return false;
@@ -378,14 +376,24 @@ class WorkspaceRegistry {
   }
 
   /**
-   * PMs and admins have workspace-wide project visibility. Clients and
-   * developers are assignment-scoped, and an empty assignment set is
+   * Who may work in a project: its repositories, pipeline, hosting, issues,
+   * runs and agent calls.
+   *
+   * The workspace's team -- developers, PMs and admins -- may work in every
+   * PM-owned project in it. Belonging to the workspace is the grant; a
+   * per-project assignment is not needed on top, and developers are not
+   * scoped to a subset. What still separates people is their role's
+   * capabilities (a developer cannot set up hosting or change production),
+   * and private things stay private (chats are the owner's; squads are).
+   *
+   * Clients are external, so they stay assignment-scoped: a client reaches
+   * only projects they are assigned to, and an empty assignment set is
    * intentionally empty rather than a reason to fall back to all projects.
    */
   canAccessProject(context: WorkspaceContext, projectId: string): boolean {
     if (!this.inWorkspace(context, 'projects', projectId)) return false;
-    if (context.role === 'pm' || context.role === 'admin') return this.isPmOwnedProject(context, projectId);
-    return context.access.assignedProjectIds.has(projectId);
+    if (context.role === 'client') return context.access.assignedProjectIds.has(projectId);
+    return this.isPmOwnedProject(context, projectId);
   }
 
   /**
