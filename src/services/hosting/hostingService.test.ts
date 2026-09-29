@@ -42,6 +42,10 @@ function fakeRenderClient(overrides: Partial<Record<string, any>> = {}) {
     addToEnvironment: vi.fn(async (environmentId: string, resourceIds: string[]) => {
       moved.push({ environmentId, resourceIds });
     }),
+    deleteProject: vi.fn(async (id: string) => {
+      deleted.push(id);
+      for (const [name, project] of projects) if (project.id === id) projects.delete(name);
+    }),
     findServiceByName: vi.fn(async (name: string) => services.get(name) ?? null),
     getService: vi.fn(async (id: string) => [...services.values()].find(s => s.id === id)),
     createService: vi.fn(async (input: any) => {
@@ -664,5 +668,85 @@ describe('when Vercel cannot link the repository', () => {
     expect(status.state).toBe('failed');
     expect(status.error).toContain('You need to add a Login Connection to your GitHub account first.');
     expect(status.error).toMatch(/owns VERCEL_TOKEN needs GitHub connected/);
+  });
+});
+
+describe('removing a repository’s hosting', () => {
+  const linked = (id: string, name: string, repo = 'https://github.com/acme/shop-be') => ({ id, name, repo, serviceDetails: {} });
+
+  it('removes both services and the project that grouped only them', async () => {
+    const render = fakeRenderClient();
+    render.services.set('shop-be', linked('srv-a', 'shop-be'));
+    render.services.set('shop-be-uat', linked('srv-b', 'shop-be-uat'));
+    render.projects.set('shop-be', { id: 'prj-1', name: 'shop-be' });
+    render.environments.push({ id: 'evm-1', name: 'production', projectId: 'prj-1', serviceIds: ['srv-a'] } as any);
+    render.environments.push({ id: 'evm-2', name: 'uat', projectId: 'prj-1', serviceIds: ['srv-b'] } as any);
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    const result = await service.tearDownHosting('acme/shop-be');
+
+    expect(render.deleted).toEqual(['srv-a', 'srv-b', 'prj-1']);
+    expect(result).toEqual({
+      repo: 'acme/shop-be',
+      removed: ['Render service shop-be', 'Render service shop-be-uat', 'Render project shop-be'],
+      kept: [],
+      failed: []
+    });
+  });
+
+  it('never removes a same-named service of another repository', async () => {
+    const render = fakeRenderClient();
+    render.services.set('shop-be', linked('srv-x', 'shop-be', 'https://github.com/someone/else'));
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    const result = await service.tearDownHosting('acme/shop-be');
+
+    expect(render.deleted).toEqual([]);
+    expect(result.kept).toEqual(['Render service shop-be (linked to https://github.com/someone/else)']);
+  });
+
+  /** Deleting a Render project deletes what it still holds. */
+  it('keeps the project when it still holds anything else', async () => {
+    const render = fakeRenderClient();
+    render.services.set('shop-be', linked('srv-a', 'shop-be'));
+    render.projects.set('shop-be', { id: 'prj-1', name: 'shop-be' });
+    render.environments.push({ id: 'evm-1', name: 'production', projectId: 'prj-1', serviceIds: ['srv-a'], databasesIds: ['db-1'] } as any);
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    const result = await service.tearDownHosting('acme/shop-be');
+
+    expect(render.deleted).toEqual(['srv-a']);
+    expect(result.kept).toEqual(['Render project shop-be (still holds 1 other resource)']);
+  });
+
+  it('removes the Vercel project linked to the repository, and keeps one linked elsewhere', async () => {
+    const vercel = fakeVercelClient();
+    vercel.projects.set('shop-fe', { id: 'proj-1', name: 'shop-fe', link: { org: 'acme', repo: 'shop-fe' } });
+    vercel.projects.set('other-fe', { id: 'proj-2', name: 'other-fe', link: { org: 'someone', repo: 'other-fe' } });
+    const { service } = await load({ env: VERCEL_ENV, vercel });
+
+    expect((await service.tearDownHosting('acme/shop-fe')).removed).toEqual(['Vercel project shop-fe']);
+    expect((await service.tearDownHosting('acme/other-fe')).kept).toEqual(['Vercel project other-fe (linked to someone/other-fe)']);
+    expect(vercel.deleted).toEqual(['proj-1']);
+  });
+
+  it('reports a platform failure instead of throwing, so the caller can stop before the repository', async () => {
+    const render = fakeRenderClient({
+      deleteService: vi.fn(async () => {
+        throw new Error('Render 500: try later');
+      })
+    });
+    render.services.set('shop-be', linked('srv-a', 'shop-be'));
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    const result = await service.tearDownHosting('acme/shop-be');
+
+    expect(result.failed).toEqual(['Render service shop-be: Render 500: try later']);
+  });
+
+  it('has nothing to report when nothing was ever set up', async () => {
+    const { service } = await load({ env: { ...RENDER_ENV, ...VERCEL_ENV } });
+
+    expect(await service.tearDownHosting('acme/shop-be')).toEqual({ repo: 'acme/shop-be', removed: [], kept: [], failed: [] });
   });
 });

@@ -9,8 +9,10 @@ import {
   platformForStack,
   roleForStack,
   setUpHosting,
+  tearDownHosting,
   unavailableHostingStatus,
-  type HostingContext
+  type HostingContext,
+  type HostingTeardown
 } from '../services/hosting/hostingService.js';
 import { normalizeProjectStack } from '../services/scaffoldBuilder.js';
 import { previewsFor } from '../services/hosting/hostingPreviews.js';
@@ -49,10 +51,12 @@ export const hostingRouter = Router();
 /** Setting up waits for both platforms, and a health check for a cold start; both outlast a plain relay. */
 const SLOW_TIMEOUT_MS = 180_000;
 
-type Access = 'read' | 'write';
+/** `admin`: removing hosting -- a PM, with admin rights on the repository on GitHub. */
+type Access = 'read' | 'write' | 'admin';
 
-function capabilityFor(access: Access) {
-  return access === 'write' ? ('deployment.manage' as const) : ('deployment.read' as const);
+function capabilityFor(access: Access): WorkspaceCapability {
+  if (access === 'admin') return 'project.provision_repository';
+  return access === 'write' ? 'deployment.manage' : 'deployment.read';
 }
 
 const text = (value: unknown): string | undefined =>
@@ -72,7 +76,11 @@ async function authorizeRepo(res: Response, owner: string, name: string, access:
     return false;
   }
   try {
-    const repo = await githubApi().get<{ permissions?: { push?: boolean } }>(`/repos/${owner}/${name}`);
+    const repo = await githubApi().get<{ permissions?: { push?: boolean; admin?: boolean } }>(`/repos/${owner}/${name}`);
+    if (access === 'admin' && !repo.permissions?.admin) {
+      res.status(403).json({ error: `Removing hosting needs admin rights on ${owner}/${name}.` });
+      return false;
+    }
     if (access === 'write' && !repo.permissions?.push) {
       res.status(403).json({ error: `Changing hosting needs push access to ${owner}/${name}.` });
       return false;
@@ -164,6 +172,15 @@ const OPERATIONS: Operation[] = [
     slow: true,
     run: ctx => setUpHosting(ctx),
     offline: (repo, hints) => noCloud(repo, hints.stack, hints.partner)
+  },
+  {
+    suffix: '',
+    method: 'delete',
+    access: 'admin',
+    slow: true,
+    run: ctx => tearDownHosting(ctx.repo),
+    // Hosting only ever runs in the cloud, so a desktop without one has none to remove.
+    offline: (repo): HostingTeardown => ({ repo, removed: [], kept: [], failed: [] })
   },
   {
     suffix: '/previews',

@@ -13,6 +13,8 @@ import {
   promote,
   RepoWorkspaceError
 } from '../services/githubRepoWorkspace.js';
+import { deleteProjectRepository, RepoDeletionError } from '../services/repoDeletionService.js';
+import type { Project } from '../models/index.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
 /**
@@ -25,7 +27,7 @@ import { requireProjectWorkspace, requireWorkspaceCapability } from './workspace
  */
 export const projectRepoRouter = Router();
 
-type Handler = (req: Request, res: Response, repo: string) => Promise<unknown>;
+type Handler = (req: Request, res: Response, repo: string, project: Project) => Promise<unknown>;
 
 /** Resolve the project and the attached repository, then run `handler` with it. */
 function withProjectRepo(handler: Handler) {
@@ -44,21 +46,30 @@ function withProjectRepo(handler: Handler) {
         res.status(404).json({ error: `${owner}/${name} is not a repository of this project.` });
         return;
       }
-      await handler(req, res, repo);
+      await handler(req, res, repo, project);
     } catch (err) {
-      if (err instanceof RepoWorkspaceError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      if (err instanceof GitHubApiError) {
-        // GitHub's own status says what happened: 404 unknown ref, 401 signed out.
-        const status = [401, 403, 404, 409, 422].includes(err.status) ? err.status : 502;
-        res.status(status).json({ error: err.message });
-        return;
-      }
-      next(err);
+      if (!sendKnownError(res, err)) next(err);
     }
   };
+}
+
+/** Answer an error this router knows the meaning of; false leaves it to Express. */
+function sendKnownError(res: Response, err: unknown): boolean {
+  if (err instanceof RepoDeletionError) {
+    res.status(err.status).json({ error: err.message, ...(err.hosting ? { hosting: err.hosting } : {}) });
+    return true;
+  }
+  if (err instanceof RepoWorkspaceError) {
+    res.status(err.status).json({ error: err.message });
+    return true;
+  }
+  if (err instanceof GitHubApiError) {
+    // GitHub's own status says what happened: 404 unknown ref, 401 signed out.
+    const status = [401, 403, 404, 409, 422].includes(err.status) ? err.status : 502;
+    res.status(status).json({ error: err.message });
+    return true;
+  }
+  return false;
 }
 
 const query = (req: Request, key: string): string | undefined =>
@@ -135,5 +146,25 @@ projectRepoRouter.post(
     }
     const result = await promote(repo, from, to);
     return res.status(result.status === 'opened' ? 201 : 200).json(result);
+  })
+);
+
+/**
+ * Delete one of the project's repositories: its Render and Vercel hosting,
+ * the repository on GitHub, and the project's link to it.
+ *
+ * `?confirm=<owner/name>` must name the repository, the way GitHub asks for
+ * it to be typed -- a delete that cannot be undone is never one stray
+ * request away. PM-only, like creating one, and GitHub's own admin check
+ * runs before anything is removed.
+ */
+projectRepoRouter.delete(
+  '/projects/:id/repos/:owner/:name',
+  withProjectRepo(async (req, res, repo, project) => {
+    if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
+    if (query(req, 'confirm')?.toLowerCase() !== repo.toLowerCase()) {
+      return res.status(400).json({ error: `Type ${repo} to confirm deleting it.` });
+    }
+    return res.json(await deleteProjectRepository({ workspaceId: req.workspace!.workspaceId, project, repo }));
   })
 );
