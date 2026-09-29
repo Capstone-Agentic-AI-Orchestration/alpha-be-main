@@ -55,8 +55,21 @@ export interface RenderServiceRecord {
   autoDeploy?: string;
   /** Present only when the create/update request asked for it and Render accepted it. */
   autoDeployTrigger?: string;
+  /** The project environment the service belongs to; absent for an ungrouped service. */
+  environmentId?: string;
   dashboardUrl?: string;
   serviceDetails?: RenderServiceDetails;
+}
+
+export interface RenderProject {
+  id: string;
+  name: string;
+}
+
+export interface RenderEnvironment {
+  id: string;
+  name: string;
+  projectId?: string;
 }
 
 export interface RenderDeploy {
@@ -78,6 +91,8 @@ export interface CreateRenderServiceInput {
   buildCommand: string;
   startCommand: string;
   envVars?: Array<{ key: string; value: string }>;
+  /** Creates the service inside this project environment; ungrouped when absent. */
+  environmentId?: string;
   /**
    * Documented only for Blueprints and the dashboard, not this endpoint --
    * worth asking for anyway, since a service that redeploys once checks pass
@@ -111,6 +126,14 @@ export interface RenderClient {
   deleteService(serviceId: string): Promise<void>;
   /** Change a service's build/start commands or deploy trigger. Does not trigger a deploy. */
   updateService(serviceId: string, patch: RenderServiceSettings): Promise<RenderServiceRecord>;
+  /** `null` when the owner has no project of exactly that name. */
+  findProjectByName(ownerId: string, name: string): Promise<RenderProject | null>;
+  /** Creates the project together with its environments. */
+  createProject(ownerId: string, name: string, environments: string[]): Promise<RenderProject>;
+  listEnvironments(projectId: string): Promise<RenderEnvironment[]>;
+  createEnvironment(projectId: string, name: string): Promise<RenderEnvironment>;
+  /** Moves existing services into an environment. */
+  addToEnvironment(environmentId: string, resourceIds: string[]): Promise<void>;
   /**
    * One page of a service's logs (build, runtime and request), always oldest
    * to newest. Render's logs API is scoped by owner as well as service, so
@@ -186,6 +209,7 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
         ownerId: input.ownerId,
         repo: input.repo,
         branch: input.branch,
+        ...(input.environmentId ? { environmentId: input.environmentId } : {}),
         // `autoDeployTrigger` supersedes the older yes/no `autoDeploy`; sending
         // both can be refused, so the trigger goes alone when there is one.
         ...(input.autoDeployTrigger ? { autoDeployTrigger: input.autoDeployTrigger } : { autoDeploy: 'yes' }),
@@ -254,6 +278,36 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
         ...(patch.autoDeployTrigger ? { autoDeployTrigger: patch.autoDeployTrigger } : {}),
         ...(Object.keys(envSpecificDetails).length ? { serviceDetails: { envSpecificDetails } } : {})
       });
+    },
+
+    async findProjectByName(ownerId: string, name: string) {
+      const items = await call<unknown[]>(
+        'GET',
+        `/projects?ownerId=${encodeURIComponent(ownerId)}&name=${encodeURIComponent(name)}&limit=20`
+      );
+      const projects = items.map(item => unwrap<RenderProject>(item, 'project'));
+      return projects.find(project => project.name === name) ?? null;
+    },
+
+    async createProject(ownerId: string, name: string, environments: string[]) {
+      return call<RenderProject>('POST', '/projects', {
+        name,
+        ownerId,
+        environments: environments.map(environment => ({ name: environment }))
+      });
+    },
+
+    async listEnvironments(projectId: string) {
+      const items = await call<unknown[]>('GET', `/environments?projectId=${encodeURIComponent(projectId)}&limit=20`);
+      return items.map(item => unwrap<RenderEnvironment>(item, 'environment'));
+    },
+
+    async createEnvironment(projectId: string, name: string) {
+      return call<RenderEnvironment>('POST', '/environments', { name, projectId });
+    },
+
+    async addToEnvironment(environmentId: string, resourceIds: string[]) {
+      await call<unknown>('POST', `/environments/${environmentId}/resources`, { resourceIds });
     },
 
     async deleteService(serviceId: string) {
