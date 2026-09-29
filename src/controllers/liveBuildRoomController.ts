@@ -1,7 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
-import type { Agent, ProjectBuildStep, PrototypeRun, Squad, SquadRun } from '../models/index.js';
+import type { Agent, AgentCall, AgentCallActivity, ProjectBuildStep, PrototypeRun, RunActivity, Squad, SquadRun } from '../models/index.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { sqliteService } from '../services/sqliteService.js';
 import {
@@ -13,6 +13,7 @@ export const liveBuildRoomRouter = Router();
 
 type RoomCardStatus = 'completed' | 'running' | 'waiting' | 'review' | 'failed' | 'idle';
 type RoomPhaseStatus = 'completed' | 'running' | 'waiting' | 'review' | 'failed';
+const STALE_AGENT_SIGNAL_MS = 5 * 60 * 1000;
 
 interface RoomPhase {
   id: string;
@@ -20,6 +21,40 @@ interface RoomPhase {
   description: string;
   status: RoomPhaseStatus;
   progress: number;
+}
+
+interface RoomActivity {
+  id: string;
+  sequence: number;
+  kind: 'status' | 'stage' | 'assistant' | 'tool' | 'tool_result' | 'file_change' | 'handoff' | 'error' | 'summary';
+  message: string;
+  detail?: string;
+  paths?: string[];
+  createdAt: string;
+}
+
+interface RoomAgentCard {
+  executionId: string;
+  source: 'squad' | 'project_chat' | 'agent_run';
+  sourceLabel: string;
+  agentId: string;
+  agentName: string;
+  agentRole: string;
+  avatar?: string;
+  color?: string;
+  status: RoomCardStatus;
+  progress: number;
+  currentTask: string;
+  currentStage?: string;
+  runId?: string;
+  agentCallId?: string;
+  squadRunId?: string;
+  activity: RoomActivity[];
+  filePaths: string[];
+  branchName?: string;
+  updatedAt?: string | null;
+  isStale?: boolean;
+  output?: { kind: string; label: string; value: string };
 }
 
 /** Percentages represent completed stages only; active work has no invented share. */
@@ -65,6 +100,119 @@ function currentTask(run: any | undefined, status: RoomCardStatus): string {
   if (status === 'waiting') return 'Waiting for squad handoff';
   if (status === 'idle') return 'Ready to run';
   return run?.stages?.[run.currentStageIndex]?.label || 'Execution in progress';
+}
+
+function callCardStatus(status: AgentCall['status']): RoomCardStatus {
+  if (status === 'completed') return 'completed';
+  if (status === 'awaiting_confirmation') return 'review';
+  if (status === 'failed' || status === 'cancelled') return 'failed';
+  if (status === 'queued') return 'waiting';
+  if (status === 'running') return 'running';
+  return 'idle';
+}
+
+function callTask(
+  call: Pick<AgentCall, 'status' | 'operationMode' | 'origin'> & { activities: AgentCallActivity[]; error?: string },
+  status: RoomCardStatus,
+  targetLabel?: string
+): string {
+  if (status === 'waiting') return 'Queued for execution';
+  if (status === 'review') return 'Waiting for your confirmation';
+  if (status === 'failed') return call.error ? `Stopped: ${safeOperationalText(call.error, 180)}` : 'Run stopped — review activity';
+  if (status === 'completed') return 'Agent call completed';
+  const latestStage = [...(call.activities ?? [])].reverse().find(activity => activity.kind === 'stage' || activity.kind === 'status');
+  if (latestStage?.message) return latestStage.message;
+  if (targetLabel) return `${call.operationMode === 'implement' ? 'Working on' : 'Reviewing'} ${targetLabel}`;
+  return call.origin === 'chat_turn' ? 'Responding in project chat' : 'Agent call in progress';
+}
+
+function safeOperationalText(value?: string, limit = 600): string | undefined {
+  if (!value) return undefined;
+  return value.slice(0, limit)
+    .replace(/(\bauthorization\s*:\s*bearer\s+)[^\s"'`]+/gi, '$1[redacted]')
+    .replace(/(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|private[_-]?key|client[_-]?secret|token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,"'`]+)/gi, '$1[redacted]')
+    .replace(/(--(?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|password|secret)(?:=|\s+))(?:"[^"]*"|'[^']*'|[^\s"'`]+)/gi, '$1[redacted]');
+}
+
+function safeProjectPath(value: string): string {
+  const normalized = value.replace(/\\/g, '/');
+  if (/^(?:[a-z]:\/|\/)/i.test(normalized)) {
+    return normalized.split('/').filter(Boolean).slice(-4).join('/').slice(0, 180);
+  }
+  return normalized.slice(0, 180);
+}
+
+function roomRunActivity(activities: RunActivity[] = []): RoomActivity[] {
+  return activities.slice(-40).map(activity => {
+    const toolName = activity.toolName?.replace(/[^A-Za-z0-9_. -]/g, '').slice(0, 80);
+    return {
+      id: activity.id,
+      sequence: activity.sequence,
+      kind: activity.kind === 'tool' && /edit|write|patch|replace/i.test(toolName ?? '') ? 'file_change' : activity.kind,
+      message: safeOperationalText(activity.message, 320) ?? '',
+      toolName,
+      detail: safeOperationalText(activity.detail),
+      paths: roomRunActivityPaths(activity),
+      createdAt: activity.createdAt
+    };
+  });
+}
+
+function roomRunActivityPaths(activity: RunActivity): string[] | undefined {
+  if (activity.kind !== 'tool') return undefined;
+  let paths: unknown[] = [];
+  try {
+    const parsed = JSON.parse(activity.detail ?? '{}');
+    const input = parsed && typeof parsed.input === 'object' && !Array.isArray(parsed.input) ? parsed.input : {};
+    paths = [
+      parsed.file_path, parsed.path, parsed.filename, parsed.target_file,
+      input.file_path, input.path, input.filename, input.target_file
+    ];
+  } catch {
+    // Older runs may only contain the human-readable activity message.
+  }
+  const describedPath = activity.message.match(/^(?:Edited|Read)\s+(?!files with\b)(.+)$/i)?.[1];
+  const values = [...paths, describedPath]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map(value => safeProjectPath(value.trim()));
+  return values.length ? Array.from(new Set(values)) : undefined;
+}
+
+function safeRoomRun(run: PrototypeRun): PrototypeRun {
+  return {
+    ...run,
+    plan: run.plan.map(item => safeOperationalText(item, 360) ?? ''),
+    testSummary: safeOperationalText(run.testSummary, 700),
+    activities: (run.activities ?? []).slice(-40).map(activity => ({
+      ...activity,
+      message: safeOperationalText(activity.message, 320) ?? '',
+      detail: safeOperationalText(activity.detail)
+    })),
+    stages: run.stages.map(stage => ({
+      ...stage,
+      description: safeOperationalText(stage.description, 360) ?? '',
+      logs: (stage.logs ?? []).slice(-8).map(log => safeOperationalText(log, 500) ?? '')
+    }))
+  };
+}
+
+function latestCallActivityAt(call: Pick<AgentCall, 'activities' | 'startedAt' | 'createdAt'>): string {
+  return call.activities.at(-1)?.createdAt ?? call.startedAt ?? call.createdAt;
+}
+
+function hasStaleAgentSignal(status: RoomCardStatus, updatedAt?: string | null): boolean {
+  if (status !== 'running' || !updatedAt) return false;
+  const timestamp = Date.parse(updatedAt);
+  return Number.isFinite(timestamp) && Date.now() - timestamp > STALE_AGENT_SIGNAL_MS;
+}
+
+function describeHandoffWork(run?: PrototypeRun): string {
+  const summary = [...(run?.activities ?? [])].reverse().find(activity => activity.kind === 'summary');
+  if (summary?.message) return safeOperationalText(summary.message, 320) ?? 'Completed work was passed forward.';
+  if (run?.changedFiles) {
+    return `${run.changedFiles} file${run.changedFiles === 1 ? '' : 's'} changed on the shared branch.`;
+  }
+  return 'The next agent received the completed work on the shared branch.';
 }
 
 function squadProgress(
@@ -117,11 +265,14 @@ function phaseRows(
   selectedSquad: Squad,
   agentsById: ReadonlyMap<string, Agent>,
   squadsById: ReadonlyMap<string, Squad>,
+  visibleAgentIds: ReadonlySet<string>,
   selectedRun: SquadRun | undefined,
   memberRunByAgent: ReadonlyMap<string, PrototypeRun>
 ): RoomPhase[] {
   const enabledSteps = steps
     .filter(step => step.enabled)
+    .filter(step => !step.agentId || visibleAgentIds.has(step.agentId))
+    .filter(step => !step.squadId || squadsById.has(step.squadId))
     .sort((a, b) => a.position - b.position);
 
   if (enabledSteps.length > 0) {
@@ -152,17 +303,18 @@ function phaseRows(
 
   // Without an explicit project pipeline, show the project's real squad
   // membership rather than a generic requirements-to-release template.
-  return selectedSquad.memberAgentIds.map((agentId, memberIndex) => {
+  return selectedSquad.memberAgentIds.flatMap((agentId, memberIndex) => {
+    if (!visibleAgentIds.has(agentId)) return [];
     const agent = agentsById.get(agentId);
     const run = memberRunByAgent.get(agentId);
     const status = phaseStatusForCard(cardStatus(run, selectedRun, memberIndex));
-    return {
+    return [{
       id: `squad-member-${agentId}`,
       label: agent?.name ?? agentId,
       description: agent?.role ?? 'Assigned squad member',
       status,
       progress: progressForRun(run)
-    };
+    }];
   });
 }
 
@@ -193,7 +345,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
   if (!workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, req.params.projectId)) {
-    return res.status(404).json({ error: 'This project does not have an accessible squad.' });
+    return res.status(404).json({ error: 'This project room is not available to this account.' });
   }
 
   const workspaceId = req.workspace!.workspaceId;
@@ -223,24 +375,50 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       )
     }));
 
+  const accessibleSquadIds = new Set(squads.map(squad => squad.id));
+  const squadsById = new Map(squads.map(squad => [squad.id, squad]));
   const squadRuns = (await runStore().listSquadRuns(workspaceId))
     .filter(run => run.projectId === project.id && projectSquadIds.has(run.squadId))
     .filter(run => workspaceRegistry.canAccessSquad(req.workspace!, run.squadId))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-  const squadRun = squadRuns[0];
+  const squadRun = squadRuns.find(run => run.status === 'running' || run.status === 'awaiting_approval') ?? squadRuns[0];
   const selectedSquad = squads.find(squad => squad.id === squadRun?.squadId) ?? squads[0];
-  if (!selectedSquad) return res.status(404).json({ error: 'This project does not have an accessible squad.' });
-
-  const selectedRun = squadRun && squadRun.squadId === selectedSquad.id ? squadRun : undefined;
+  const selectedRun = squadRun && squadRun.squadId === selectedSquad?.id ? squadRun : undefined;
+  const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
+  const allProjectRuns = (await runStore().list(workspaceId)).filter(run => run.projectId === project.id);
+  const projectAgentCalls = sqliteService.getAgentCalls({ workspaceId, projectId: project.id });
+  const roomAgentIds = new Set([
+    ...squads.flatMap(squad => squad.memberAgentIds),
+    ...squadRuns.flatMap(run => run.memberAgentIds),
+    ...allProjectRuns.map(run => run.agentId),
+    ...projectAgentCalls.filter(call => accessibleSquadIds.has(call.squadId)).map(call => call.agentId)
+  ]);
+  const roomAgentVisibility = await Promise.all(Array.from(roomAgentIds, async agentId => ({
+    agentId,
+    visible: await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId)
+  })));
+  const visibleAgentIds = new Set(roomAgentVisibility.filter(item => item.visible).map(item => item.agentId));
+  const visibleSquadRunIds = new Set(squadRuns.map(run => run.id));
+  const visibleSquadRuns = allProjectRuns.filter(run => run.squadRunId && visibleSquadRunIds.has(run.squadRunId) && visibleAgentIds.has(run.agentId));
+  const standaloneRunCandidates = allProjectRuns.filter(run => {
+    if (run.squadRunId) return false;
+    const issue = issues.find(item => item.id === run.issueId && item.projectId === project.id);
+    if (!issue) return false;
+    if (issue.assignedAgentId === run.agentId) return true;
+    const assignedSquad = issue.assignedSquadId ? squadsById.get(issue.assignedSquadId) : undefined;
+    return Boolean(assignedSquad?.memberAgentIds.includes(run.agentId));
+  });
+  const visibleStandaloneRuns = standaloneRunCandidates.filter(run => visibleAgentIds.has(run.agentId));
+  const projectRuns = [...visibleSquadRuns, ...visibleStandaloneRuns];
   const memberRuns = selectedRun
-    ? (await runStore().runsForSquadRun(workspaceId, selectedRun.id))
-      .filter(run => run.projectId === project.id)
+    ? projectRuns.filter(run => run.squadRunId === selectedRun.id)
       .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))
     : [];
-  const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
-  const chatCalls = (await Promise.all(
-    sqliteService.getAgentCalls({ workspaceId, projectId: project.id })
-      .filter(call => projectSquadIds.has(call.squadId))
+  const memberRunByAgent = new Map(memberRuns.map(run => [run.agentId, run]));
+
+  const authorizedChatCalls = (await Promise.all(
+    projectAgentCalls
+      .filter(call => accessibleSquadIds.has(call.squadId))
       .map(async call => {
         const allowed = await workspaceRegistry.canAccessProjectAgent(
           req.workspace!, call.projectId, call.squadId, call.agentId
@@ -256,11 +434,11 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
           : undefined;
         const target = call.revisionTarget ? {
           type: call.revisionTarget.type,
-          id: issueTarget?.id ?? (call.revisionTarget.type === 'file' ? call.revisionTarget.id : pullRequest?.id ?? ''),
+          id: issueTarget?.id ?? (call.revisionTarget.type === 'file' ? safeProjectPath(call.revisionTarget.id) : pullRequest?.id ?? ''),
           label: issueTarget
             ? `${issueTarget.identifier} · ${issueTarget.title}`
             : call.revisionTarget.type === 'file'
-              ? call.revisionTarget.id
+              ? safeProjectPath(call.revisionTarget.id)
               : pullRequest?.label
         } : undefined;
         return {
@@ -283,8 +461,10 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
           completedAt: call.completedAt,
           activities: (call.activities ?? []).slice(-60).map(activity => ({
             ...activity,
-            detail: activity.detail?.slice(0, 180),
-            paths: activity.paths?.slice(0, 30).map(value => value.slice(0, 180))
+            message: safeOperationalText(activity.message, 320) ?? '',
+            toolName: activity.toolName?.replace(/[^A-Za-z0-9_. -]/g, '').slice(0, 80),
+            detail: safeOperationalText(activity.detail),
+            paths: activity.paths?.slice(0, 30).map(safeProjectPath)
           })),
           artifacts: call.artifacts
             .filter(artifact => artifact.artifactType !== 'patch')
@@ -294,44 +474,252 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
         };
       })
   )).filter((call): call is NonNullable<typeof call> => Boolean(call))
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .slice(0, 100);
-  const squadsById = new Map(squads.map(squad => [squad.id, squad]));
-  const memberRunByAgent = new Map(memberRuns.map(run => [run.agentId, run]));
+    .sort((a, b) => Date.parse(latestCallActivityAt(b)) - Date.parse(latestCallActivityAt(a)));
 
-  const agentCards = selectedSquad.memberAgentIds.map((agentId, memberIndex) => {
-    const agent = membersById.get(agentId);
-    const run = memberRunByAgent.get(agentId);
-    const status = cardStatus(run, selectedRun, memberIndex);
-    return {
-      agentId,
-      agentName: agent?.name ?? agentId,
-      agentRole: agent?.role ?? 'Agent',
-      avatar: agent?.avatar,
-      color: agent?.color,
+  const isLiveCall = (call: { status: string }) =>
+    call.status === 'queued' || call.status === 'running' || call.status === 'awaiting_confirmation';
+  const chatCalls = [
+    ...authorizedChatCalls.filter(isLiveCall),
+    ...authorizedChatCalls.filter(call => !isLiveCall(call)).slice(0, 100)
+  ].sort((a, b) => Date.parse(latestCallActivityAt(b)) - Date.parse(latestCallActivityAt(a)));
+
+  const handoffs: Array<{
+    id: string;
+    executionId: string;
+    source: 'squad' | 'project_chat';
+    squadRunId?: string;
+    agentCallId?: string;
+    fromAgentId?: string;
+    from: string;
+    toAgentId?: string;
+    to: string;
+    summary: string;
+    createdAt: string;
+    branchName?: string;
+  }> = [];
+
+  for (const historicalRun of squadRuns.slice(0, 40)) {
+    const runsForThisSquad = projectRuns.filter(run => run.squadRunId === historicalRun.id);
+    const runsByAgent = new Map(runsForThisSquad.map(run => [run.agentId, run]));
+    for (let nextIndex = 1; nextIndex < historicalRun.memberAgentIds.length; nextIndex += 1) {
+      const fromAgentId = historicalRun.memberAgentIds[nextIndex - 1];
+      const toAgentId = historicalRun.memberAgentIds[nextIndex];
+      if (!visibleAgentIds.has(fromAgentId) || !visibleAgentIds.has(toAgentId)) continue;
+      const nextRun = runsByAgent.get(toAgentId);
+      if ((historicalRun.currentMemberIndex ?? -1) < nextIndex && !nextRun) continue;
+      const fromRun = runsByAgent.get(fromAgentId);
+      const from = membersById.get(fromAgentId)?.name ?? fromAgentId;
+      const to = membersById.get(toAgentId)?.name ?? toAgentId;
+      const executionId = nextRun?.id ?? `${historicalRun.id}:agent:${toAgentId}`;
+      handoffs.push({
+        id: `${historicalRun.id}:handoff:${nextIndex}`,
+        executionId,
+        source: 'squad',
+        squadRunId: historicalRun.id,
+        fromAgentId,
+        from,
+        toAgentId,
+        to,
+        summary: describeHandoffWork(fromRun),
+        createdAt: nextRun?.createdAt ?? historicalRun.updatedAt,
+        branchName: historicalRun.branchName
+      });
+    }
+  }
+
+  for (const call of chatCalls) {
+    for (const activity of call.activities.filter(item => item.kind === 'handoff')) {
+      const sender = activity.message.match(/^Received project chat context from\s+(.+)$/i)?.[1];
+      const senderAgent = sender
+        ? Array.from(membersById.values()).find(agent => agent.name.toLocaleLowerCase() === sender.toLocaleLowerCase())
+        : undefined;
+      const senderIsVisible = Boolean(senderAgent && visibleAgentIds.has(senderAgent.id));
+      handoffs.push({
+        id: `${call.id}:${activity.id}`,
+        executionId: call.id,
+        source: 'project_chat',
+        agentCallId: call.id,
+        from: senderIsVisible ? senderAgent!.name : 'Previous project agent',
+        toAgentId: call.agentId,
+        to: call.agentName,
+        summary: senderAgent && !senderIsVisible
+          ? 'Project context was passed to this agent.'
+          : activity.detail || activity.message,
+        createdAt: activity.createdAt,
+        branchName: call.workingBranch
+      });
+    }
+  }
+  handoffs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+
+  const liveChatCalls = chatCalls.filter(isLiveCall);
+  const activeSquadRuns = squadRuns.filter(run => run.status === 'running' || run.status === 'awaiting_approval');
+  const activeStandaloneRuns = projectRuns.filter(run =>
+    !run.squadRunId && ['queued', 'running', 'validating', 'awaiting_approval'].includes(run.status)
+  );
+  const hasProjectLiveWork = activeSquadRuns.length > 0 || liveChatCalls.length > 0 || activeStandaloneRuns.length > 0;
+  const squadRunsForCards = activeSquadRuns.length
+    ? activeSquadRuns
+    : hasProjectLiveWork
+      ? []
+      : selectedRun
+        ? [selectedRun]
+        : [];
+  const agentCards: RoomAgentCard[] = squadRunsForCards.flatMap(projectSquadRun => {
+    const squad = squadsById.get(projectSquadRun.squadId);
+    if (!squad) return [];
+    const runsByAgent = new Map(
+      projectRuns.filter(run => run.squadRunId === projectSquadRun.id).map(run => [run.agentId, run])
+    );
+    return projectSquadRun.memberAgentIds.flatMap((agentId, memberIndex) => {
+      if (!visibleAgentIds.has(agentId)) return [];
+      const agent = membersById.get(agentId);
+      const run = runsByAgent.get(agentId);
+      const status = cardStatus(run, projectSquadRun, memberIndex);
+      const executionId = run?.id ?? `${projectSquadRun.id}:agent:${agentId}`;
+      const handoffActivity = handoffs
+        .filter(event => event.executionId === executionId && event.source === 'squad')
+        .map((event, index) => ({
+          id: event.id,
+          sequence: 10000 + index,
+          kind: 'handoff' as const,
+          message: `Handoff received from ${event.from}`,
+          detail: event.summary,
+          createdAt: event.createdAt
+        }));
+      const activity = [...roomRunActivity(run?.activities), ...handoffActivity]
+        .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      return [{
+        executionId,
+        source: 'squad' as const,
+        sourceLabel: `${squad.name} squad`,
+        agentId,
+        agentName: agent?.name ?? agentId,
+        agentRole: agent?.role ?? 'Agent',
+        avatar: agent?.avatar,
+        color: agent?.color,
+        status,
+        progress: progressForRun(run),
+        currentTask: currentTask(run, status),
+        currentStage: run?.stages?.[run.currentStageIndex]?.label,
+        runId: run?.id,
+        squadRunId: projectSquadRun.id,
+        activity,
+        filePaths: [...new Set(activity.flatMap(item => item.paths ?? []))],
+        branchName: run?.branchName ?? projectSquadRun.branchName,
+        updatedAt: run?.updatedAt ?? projectSquadRun.updatedAt,
+        isStale: hasStaleAgentSignal(status, run?.updatedAt ?? projectSquadRun.updatedAt),
+        output: run?.prUrl
+          ? { kind: 'pull_request', label: 'Pull request', value: run.prUrl }
+          : run?.branchName || projectSquadRun.branchName
+            ? { kind: 'branch', label: 'Working branch', value: run?.branchName ?? projectSquadRun.branchName }
+            : undefined
+      }];
+    });
+  });
+
+  for (const run of activeStandaloneRuns) {
+    const agent = membersById.get(run.agentId);
+    if (!agent) continue;
+    const status = cardStatus(run, undefined, 0);
+    const issue = issues.find(item => item.id === run.issueId && item.projectId === project.id);
+    const activity = roomRunActivity(run.activities);
+    agentCards.push({
+      executionId: run.id,
+      source: 'agent_run',
+      sourceLabel: issue?.identifier ? `${issue.identifier} · Direct run` : 'Direct project run',
+      agentId: run.agentId,
+      agentName: agent.name,
+      agentRole: agent.role ?? 'Agent',
+      avatar: agent.avatar,
+      color: agent.color,
       status,
       progress: progressForRun(run),
       currentTask: currentTask(run, status),
-      currentStage: run?.stages?.[run.currentStageIndex]?.label,
-      runId: run?.id,
-      activity: (run?.activities ?? []).slice(-5),
-      updatedAt: run?.updatedAt ?? selectedRun?.updatedAt ?? null,
-      output: run?.prUrl
+      currentStage: run.stages?.[run.currentStageIndex]?.label,
+      runId: run.id,
+      activity,
+      filePaths: [...new Set(activity.flatMap(item => item.paths ?? []))],
+      branchName: run.branchName,
+      updatedAt: run.updatedAt,
+      isStale: hasStaleAgentSignal(status, run.updatedAt),
+      output: run.prUrl
         ? { kind: 'pull_request', label: 'Pull request', value: run.prUrl }
-        : run?.branchName
+        : run.branchName
           ? { kind: 'branch', label: 'Working branch', value: run.branchName }
           : undefined
-    };
-  });
+    });
+  }
 
-  const currentMemberIndex = selectedRun?.currentMemberIndex ?? -1;
-  const currentAgentId = selectedRun?.memberAgentIds?.[currentMemberIndex];
-  const currentRun = currentAgentId ? memberRunByAgent.get(currentAgentId) : undefined;
-  const previousAgentId = currentMemberIndex > 0 ? selectedRun?.memberAgentIds?.[currentMemberIndex - 1] : undefined;
-  const nextAgentId = selectedRun?.memberAgentIds?.[currentMemberIndex + 1];
-  const agentName = (id?: string) => id ? membersById.get(id)?.name ?? id : undefined;
+  for (const call of liveChatCalls) {
+    const agent = membersById.get(call.agentId);
+    if (!agent) continue;
+    const status = callCardStatus(call.status);
+    const targetLabel = call.target?.label || call.target?.type;
+    agentCards.push({
+      executionId: call.id,
+      source: 'project_chat',
+      sourceLabel: 'Project chat',
+      agentId: call.agentId,
+      agentName: call.agentName,
+      agentRole: call.agentRole,
+      avatar: agent.avatar,
+      color: agent.color,
+      status,
+      progress: 0,
+      currentTask: callTask(call, status, targetLabel),
+      currentStage: call.activities.slice().reverse().find(activity => activity.kind === 'stage')?.message,
+      agentCallId: call.id,
+      activity: call.activities.slice(-40),
+      filePaths: [...new Set(call.activities.flatMap(activity => activity.paths ?? []))],
+      branchName: call.workingBranch,
+      updatedAt: latestCallActivityAt(call),
+      isStale: hasStaleAgentSignal(status, latestCallActivityAt(call)),
+      output: call.workingBranch
+        ? { kind: 'branch', label: 'Working branch', value: call.workingBranch }
+        : undefined
+    });
+  }
 
-  const artifacts = memberRuns.flatMap(run => {
+  if (agentCards.length === 0 && selectedSquad) {
+    agentCards.push(...selectedSquad.memberAgentIds.flatMap((agentId, memberIndex) => {
+      if (!visibleAgentIds.has(agentId)) return [];
+      const agent = membersById.get(agentId);
+      const run = memberRunByAgent.get(agentId);
+      const status = cardStatus(run, selectedRun, memberIndex);
+      const activity = roomRunActivity(run?.activities);
+      return [{
+        executionId: run?.id ?? `ready:${selectedSquad.id}:${agentId}`,
+        source: 'squad' as const,
+        sourceLabel: `${selectedSquad.name} squad`,
+        agentId,
+        agentName: agent?.name ?? agentId,
+        agentRole: agent?.role ?? 'Agent',
+        avatar: agent?.avatar,
+        color: agent?.color,
+        status,
+        progress: progressForRun(run),
+        currentTask: currentTask(run, status),
+        currentStage: run?.stages?.[run.currentStageIndex]?.label,
+        runId: run?.id,
+        squadRunId: selectedRun?.id,
+        activity,
+        filePaths: [...new Set(activity.flatMap(item => item.paths ?? []))],
+        branchName: run?.branchName ?? selectedRun?.branchName,
+        updatedAt: run?.updatedAt ?? selectedRun?.updatedAt ?? null,
+        isStale: hasStaleAgentSignal(status, run?.updatedAt ?? selectedRun?.updatedAt),
+        output: run?.prUrl
+          ? { kind: 'pull_request', label: 'Pull request', value: run.prUrl }
+          : run?.branchName ?? selectedRun?.branchName
+            ? { kind: 'branch', label: 'Working branch', value: run?.branchName ?? selectedRun?.branchName! }
+            : undefined
+      }];
+    }));
+  }
+
+  const selectedRunMemberIds = new Set(memberRuns.map(run => run.id));
+  const artifactRuns = projectRuns.filter(run => selectedRunMemberIds.has(run.id) || agentCards.some(card => card.runId === run.id));
+  const artifacts = artifactRuns.flatMap(run => {
     const agent = membersById.get(run.agentId);
     const rows: Array<Record<string, unknown>> = [];
     if (run.changedFiles) {
@@ -359,10 +747,37 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
 
   const completed = agentCards.filter(card => card.status === 'completed').length;
   const running = agentCards.filter(card => card.status === 'running').length;
-  const waiting = agentCards.filter(card => card.status === 'waiting' || card.status === 'idle').length;
+  const waiting = agentCards.filter(card => card.status === 'waiting').length;
+  const review = agentCards.filter(card => card.status === 'review').length;
+  const failed = agentCards.filter(card => card.status === 'failed').length;
+  const stale = agentCards.filter(card => card.isStale).length;
+  const measuredProgress = agentCards.filter(card => card.status !== 'idle' && card.progress > 0);
   const latestChatActivity = chatCalls
-    .flatMap(call => call.activities.slice(-1).map(activity => activity.createdAt))
+    .map(call => latestCallActivityAt(call))
     .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+
+  const currentMemberIndex = selectedRun?.currentMemberIndex ?? -1;
+  const currentAgentId = selectedRun?.memberAgentIds?.[currentMemberIndex];
+  const currentRun = currentAgentId ? memberRunByAgent.get(currentAgentId) : undefined;
+  const previousAgentId = currentMemberIndex > 0 ? selectedRun?.memberAgentIds?.[currentMemberIndex - 1] : undefined;
+  const nextAgentId = selectedRun?.memberAgentIds?.[currentMemberIndex + 1];
+  const visibleSelectedMemberIds = (selectedRun?.memberAgentIds ?? []).filter(agentId => visibleAgentIds.has(agentId));
+  const visibleCurrentMemberIndex = currentAgentId && visibleAgentIds.has(currentAgentId)
+    ? visibleSelectedMemberIds.indexOf(currentAgentId)
+    : -1;
+  const agentName = (id?: string) => id && visibleAgentIds.has(id) ? membersById.get(id)?.name ?? id : undefined;
+  const issueForRun = (run?: PrototypeRun) => run
+    ? issues.find(issue => issue.id === run.issueId && issue.projectId === project.id)
+    : undefined;
+  const issueForCall = (call: typeof liveChatCalls[number]) => call.target?.type === 'issue'
+    ? issues.find(issue => issue.id === call.target?.id && issue.projectId === project.id)
+    : undefined;
+  const roomIssue = selectedRun
+    ? issues.find(issue => issue.id === selectedRun.issueId && issue.projectId === project.id)
+    : activeStandaloneRuns.map(issueForRun).find(Boolean)
+      ?? liveChatCalls.map(issueForCall).find(Boolean)
+      ?? (selectedSquad ? issues.find(issue => issue.projectId === project.id && issue.assignedSquadId === selectedSquad.id) : undefined)
+      ?? issues.find(issue => issue.projectId === project.id);
   res.json({
     project: {
       id: project.id,
@@ -372,15 +787,19 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       color: project.color,
       status: project.status
     },
-    squad: {
+    squad: selectedSquad ? {
       ...selectedSquad,
+      memberAgentIds: selectedSquad.memberAgentIds.filter(agentId => visibleAgentIds.has(agentId)),
       ownerId: workspaceRegistry.squadOwnerId(req.workspace!, selectedSquad.id),
       projectIds: Array.from(projectSquadIds),
-      memberCount: selectedSquad.memberAgentIds.length
-    },
-    squads,
+      memberCount: selectedSquad.memberAgentIds.filter(agentId => visibleAgentIds.has(agentId)).length
+    } : null,
+    squads: squads.map(squad => {
+      const memberAgentIds = squad.memberAgentIds.filter(agentId => visibleAgentIds.has(agentId));
+      return { ...squad, memberAgentIds, memberCount: memberAgentIds.length };
+    }),
     eligible: true,
-    canRun: workspaceRegistry.can(req.workspace!.role, 'squad.run'),
+    canRun: Boolean(selectedSquad) && workspaceRegistry.can(req.workspace!.role, 'squad.run'),
     canManage: workspaceRegistry.can(req.workspace!.role, 'squad.manage'),
     status: selectedRun?.status ?? 'idle',
     summary: {
@@ -388,35 +807,43 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       completed,
       running,
       waiting,
-      progress: agentCards.length ? Math.round(agentCards.reduce((sum, card) => sum + card.progress, 0) / agentCards.length) : 0
+      review,
+      failed,
+      stale,
+      progress: measuredProgress.length ? Math.round(measuredProgress.reduce((sum, card) => sum + card.progress, 0) / measuredProgress.length) : 0
     },
-    phases: phaseRows(
+    phases: selectedSquad && selectedRun ? phaseRows(
       projectBuildSteps ?? [],
       selectedSquad,
       membersById,
       squadsById,
+      visibleAgentIds,
       selectedRun,
       memberRunByAgent
-    ),
-    issue: selectedRun
-      ? issues.find(issue => issue.id === selectedRun.issueId)
-      : issues.find(issue => issue.projectId === project.id && issue.assignedSquadId === selectedSquad.id),
+    ) : [],
+    issue: roomIssue,
     activeRun: selectedRun ? {
       ...selectedRun,
-      memberRuns,
-      activities: currentRun?.activities ?? []
+      mission: safeOperationalText(selectedRun.mission, 700) ?? '',
+      plan: selectedRun.plan.map(item => safeOperationalText(item, 360) ?? ''),
+      stoppedReason: safeOperationalText(selectedRun.stoppedReason, 500),
+      memberAgentIds: visibleSelectedMemberIds,
+      currentMemberIndex: visibleCurrentMemberIndex,
+      memberRuns: memberRuns.map(safeRoomRun),
+      activities: currentRun ? safeRoomRun(currentRun).activities ?? [] : []
     } : null,
     agentCards,
-    activity: currentRun?.activities ?? [],
+    activity: roomRunActivity(currentRun?.activities),
+    handoffs: handoffs.slice(0, 120),
     handoff: {
       from: agentName(previousAgentId) ?? 'Project brief',
-      to: agentName(currentAgentId) ?? agentName(selectedSquad.memberAgentIds[0]) ?? 'Squad',
+      to: agentName(currentAgentId) ?? agentName(selectedSquad?.memberAgentIds[0]) ?? 'No active agent',
       current: agentName(currentAgentId),
       next: agentName(nextAgentId)
     },
     artifacts,
     chatCalls,
-    lastUpdated: [selectedRun?.updatedAt, latestChatActivity, chatCalls[0]?.createdAt, project.createdAt]
+    lastUpdated: [selectedRun?.updatedAt, latestChatActivity, ...agentCards.map(card => card.updatedAt ?? undefined), project.createdAt]
       .filter((value): value is string => Boolean(value))
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0]
   });

@@ -330,6 +330,7 @@ export interface RunActivity {
   sequence: number;
   kind: RunActivityKind;
   message: string;
+  toolName?: string;
   createdAt: string;
   stageId?: StageId;
   /** Provider stream identifier used to update one assistant entry in place. */
@@ -544,6 +545,7 @@ export interface AgentCallActivity {
   sequence: number;
   kind: AgentCallActivityKind;
   message: string;
+  toolName?: string;
   detail?: string;
   paths?: string[];
   createdAt: string;
