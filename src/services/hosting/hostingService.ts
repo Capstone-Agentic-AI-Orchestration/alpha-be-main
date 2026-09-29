@@ -974,3 +974,106 @@ export async function setUpHosting(ctx: HostingContext): Promise<HostingStatus> 
     return { repo: ctx.repo, role, platform, configured: true, state: 'failed', error: err?.message ?? String(err), partner, environments: [], envVars: [], github: { secrets: [], variables: [] } };
   }
 }
+
+// ─── Removing hosting ───────────────────────────────────────────────────────
+
+/** What removing a repository's hosting did, one readable line per platform resource. */
+export interface HostingTeardown {
+  repo: string;
+  removed: string[];
+  /** Found but not Alpha's to remove -- linked to another repository, or still holding something else. */
+  kept: string[];
+  /** Could not be removed; the repository should not be deleted until these are. */
+  failed: string[];
+}
+
+/** `https://github.com/<owner>/<name>` in any casing, with or without `.git`. */
+function sameRepoUrl(url: string | undefined, repo: string): boolean {
+  const ref = parseRepoRef(url ?? '');
+  return Boolean(ref) && `${ref!.owner}/${ref!.repo}`.toLowerCase() === repo.toLowerCase();
+}
+
+/**
+ * Remove everything Alpha set up to host `owner/name`: the Render services
+ * and the Render project grouping them, and the Vercel project.
+ *
+ * Found by the same names setup uses, and removed only when the platform
+ * says it is linked to this repository -- a same-named service of another
+ * repository is reported as kept, never deleted. The Render project goes
+ * only once nothing but this repository's services was in it, since
+ * deleting a Render project deletes whatever it still holds.
+ *
+ * Idempotent: anything already gone is simply not listed, so a teardown
+ * that failed half-way is finished by running it again.
+ */
+export async function tearDownHosting(repo: string): Promise<HostingTeardown> {
+  const name = repo.split('/')[1];
+  const result: HostingTeardown = { repo, removed: [], kept: [], failed: [] };
+
+  const render = renderClient();
+  if (render) {
+    const deletedIds: string[] = [];
+    for (const serviceName of Object.values(renderServiceNames(name))) {
+      try {
+        const service = await render.findServiceByName(serviceName);
+        if (!service) continue;
+        if (!sameRepoUrl(service.repo, repo)) {
+          result.kept.push(`Render service ${serviceName} (linked to ${service.repo ?? 'no repository'})`);
+          continue;
+        }
+        await render.deleteService(service.id);
+        deletedIds.push(service.id);
+        result.removed.push(`Render service ${serviceName}`);
+      } catch (err) {
+        result.failed.push(`Render service ${serviceName}: ${(err as Error).message}`);
+      }
+    }
+
+    try {
+      const ownerId = await resolveRenderOwnerId(render);
+      const project = await render.findProjectByName(ownerId, name);
+      if (project) {
+        const environments = await render.listEnvironments(project.id);
+        // Render may still list a service it has just deleted; those do not count.
+        const remaining = environments.flatMap(e => [
+          ...(e.serviceIds ?? []).filter(id => !deletedIds.includes(id)),
+          ...(e.databasesIds ?? []),
+          ...(e.redisIds ?? []),
+          ...(e.envGroupIds ?? [])
+        ]);
+        if (remaining.length) {
+          result.kept.push(`Render project ${name} (still holds ${remaining.length} other resource${remaining.length === 1 ? '' : 's'})`);
+        } else {
+          await render.deleteProject(project.id);
+          result.removed.push(`Render project ${name}`);
+        }
+      }
+    } catch (err) {
+      result.failed.push(`Render project ${name}: ${(err as Error).message}`);
+    }
+  }
+
+  const vercel = vercelClient();
+  if (vercel) {
+    try {
+      const project = await vercel.findProjectByName(name);
+      if (project) {
+        if (project.link?.repo && linkedRepo(project).toLowerCase() === repo.toLowerCase()) {
+          await vercel.deleteProject(project.id);
+          result.removed.push(`Vercel project ${name}`);
+        } else {
+          result.kept.push(`Vercel project ${name} (linked to ${project.link?.repo ? linkedRepo(project) : 'no repository'})`);
+        }
+      }
+    } catch (err) {
+      result.failed.push(`Vercel project ${name}: ${(err as Error).message}`);
+    }
+  }
+
+  logInfo(
+    `Hosting teardown for ${repo}: removed [${result.removed.join(', ')}]` +
+      (result.kept.length ? `; kept [${result.kept.join(', ')}]` : '') +
+      (result.failed.length ? `; failed [${result.failed.join(', ')}]` : '')
+  );
+  return result;
+}

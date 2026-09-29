@@ -70,6 +70,11 @@ export interface RenderEnvironment {
   id: string;
   name: string;
   projectId?: string;
+  /** What the environment holds -- absent when Render leaves a kind out. */
+  serviceIds?: string[];
+  databasesIds?: string[];
+  redisIds?: string[];
+  envGroupIds?: string[];
 }
 
 export interface RenderDeploy {
@@ -134,6 +139,8 @@ export interface RenderClient {
   createEnvironment(projectId: string, name: string): Promise<RenderEnvironment>;
   /** Moves existing services into an environment. */
   addToEnvironment(environmentId: string, resourceIds: string[]): Promise<void>;
+  /** Deletes the project and everything still in it -- callers check it is empty first. */
+  deleteProject(projectId: string): Promise<void>;
   /**
    * One page of a service's logs (build, runtime and request), always oldest
    * to newest. Render's logs API is scoped by owner as well as service, so
@@ -308,6 +315,10 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
 
     async addToEnvironment(environmentId: string, resourceIds: string[]) {
       await call<unknown>('POST', `/environments/${environmentId}/resources`, { resourceIds });
+    },
+
+    async deleteProject(projectId: string) {
+      await call<void>('DELETE', `/projects/${projectId}`);
     },
 
     async deleteService(serviceId: string) {

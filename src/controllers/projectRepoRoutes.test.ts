@@ -34,7 +34,8 @@ async function startApi(options: { role?: string; canSeeProject?: boolean; promo
       return true;
     },
     requireWorkspaceCapability: (_req: any, res: any, capability: string) => {
-      const allowed = capability !== 'project.promote' || ['pm', 'admin'].includes(options.role ?? 'dev');
+      const managerOnly = ['project.promote', 'project.provision_repository'].includes(capability);
+      const allowed = !managerOnly || ['pm', 'admin'].includes(options.role ?? 'dev');
       if (!allowed) res.status(403).json({ error: `Your workspace role cannot ${capability.replace('.', ' ')}.` });
       return allowed;
     }
@@ -162,5 +163,34 @@ describe('promotion', () => {
     const res = await call(app, 'POST', '/api/projects/p1/repos/acme/shop-be/promote', { from: 'uat', to: 'main' });
 
     expect(res).toEqual({ status: 200, body: { status: 'existing', url: 'u', number: 4 } });
+  });
+});
+
+describe('deleting a repository', () => {
+  it('is a project manager’s to do, not a developer’s', async () => {
+    const { app } = await startApi({ role: 'dev' });
+
+    const res = await call(app, 'DELETE', '/api/projects/p1/repos/acme/shop-be?confirm=acme/shop-be');
+
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses without the repository typed out to confirm', async () => {
+    const { app } = await startApi({ role: 'pm' });
+
+    const missing = await call(app, 'DELETE', '/api/projects/p1/repos/acme/shop-be');
+    const wrong = await call(app, 'DELETE', '/api/projects/p1/repos/acme/shop-be?confirm=acme/shop-fe');
+
+    expect(missing.status).toBe(400);
+    expect(wrong.status).toBe(400);
+    expect(missing.body.error).toBe('Type acme/shop-be to confirm deleting it.');
+  });
+
+  it('refuses a repository that is not the project’s', async () => {
+    const { app } = await startApi({ role: 'pm' });
+
+    const res = await call(app, 'DELETE', '/api/projects/p1/repos/acme/payroll?confirm=acme/payroll');
+
+    expect(res.status).toBe(404);
   });
 });
