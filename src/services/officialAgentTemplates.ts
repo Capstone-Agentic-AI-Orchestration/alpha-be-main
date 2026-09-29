@@ -128,7 +128,8 @@ export function agentFromOfficialTemplate(template: OfficialAgentTemplate, creat
     autonomyLevel: template.autonomyLevel,
     temperature: 0.2,
     skills: template.skills,
-    mcpServers: template.key === 'github-finalization' ? ['alpha-github'] : [],
+    // The Operator ships work and watches it run: GitHub, and the hosting it deploys to.
+    mcpServers: template.key === 'github-finalization' ? ['alpha-github', 'alpha-hosting'] : [],
     concurrencyLimit: 1,
     allowedUsers: 'team',
     templateKey: template.key,

@@ -118,7 +118,8 @@ runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) =
       issueId,
       agentId,
       plan: plan || [],
-      scenario
+      scenario,
+      workspaceId: req.workspace!.workspaceId
     });
     workspaceRegistry.bind('prototype_runs', run.id, req.workspace!.workspaceId);
     res.status(201).json(run);
@@ -321,7 +322,8 @@ runRouter.post('/runs/:id/retry', desktopOnly, async (req: Request, res: Respons
       issueId: existing.issueId,
       agentId: existing.agentId,
       plan: existing.plan,
-      scenario: 'success'
+      scenario: 'success',
+      workspaceId: req.workspace!.workspaceId
     });
     workspaceRegistry.bind('prototype_runs', newRun.id, req.workspace!.workspaceId);
     res.status(201).json(newRun);

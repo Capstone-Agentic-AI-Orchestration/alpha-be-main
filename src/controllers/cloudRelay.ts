@@ -15,6 +15,12 @@ export interface RelayOptions {
   /** Runs after a success, for the routes whose result this machine keeps a copy of. */
   mirror?: (body: any) => unknown;
   timeoutMs?: number;
+  /** The workspace to act in, when it is not this request's own (an agent's run names its own). */
+  workspaceId?: string;
+  /** The cloud route's method, when it is not this request's own. */
+  method?: string;
+  /** Extra headers for the cloud, e.g. who a change is recorded as. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -33,16 +39,18 @@ export interface RelayOptions {
 export async function relayToCloud(req: Request, res: Response, options: RelayOptions = {}): Promise<boolean> {
   if (!usesCloudDirectory()) return false;
   try {
+    const method = options.method ?? req.method;
     const answer = await cloudRequest(options.path ?? req.originalUrl.replace(/^\/api(?=\/)/, ''), {
-      method: req.method,
+      method,
       body:
         options.body !== undefined
           ? options.body
-          : req.method === 'GET' || req.method === 'DELETE'
+          : method === 'GET' || method === 'DELETE'
             ? undefined
             : req.body,
-      workspaceId: req.workspace?.workspaceId,
-      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {})
+      workspaceId: options.workspaceId ?? req.workspace?.workspaceId,
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+      ...(options.headers ? { headers: options.headers } : {})
     });
     if (answer.status < 300 && options.mirror) await options.mirror(answer.body);
     res.status(answer.status).json(answer.body);

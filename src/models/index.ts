@@ -190,12 +190,20 @@ export interface LocalProjectBinding {
  * how the repo-keyed hosting routes work, since they run with no `Project` to
  * read a cache from at all. See `services/hosting/hostingService.ts`.
  */
+export interface RenderServiceHosting {
+  id: string;
+  url: string | null;
+  dashboardUrl: string | null;
+  /** `checksPass` when the service deploys only after CI passes; `commit` when on every push. */
+  autoDeployTrigger?: string | null;
+}
+
 export interface ProjectResourceHosting {
   platform: 'render' | 'vercel';
   /** Backend only: the two Render services, keyed by which branch each deploys. */
   render?: {
-    main: { id: string; url: string | null; dashboardUrl: string | null } | null;
-    uat: { id: string; url: string | null; dashboardUrl: string | null } | null;
+    main: RenderServiceHosting | null;
+    uat: RenderServiceHosting | null;
   };
   /** Frontend only: the one Vercel project every environment lives under. */
   vercel?: {

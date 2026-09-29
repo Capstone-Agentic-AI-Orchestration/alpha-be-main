@@ -11,7 +11,9 @@ import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceServ
 import { agentReadiness } from './agentReadiness.js';
 import { buildEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
-import { writeRunMcpConfig, cleanupRunMcpConfig } from './mcpConfigService.js';
+import { writeRunMcpConfig, cleanupRunMcpConfig, hostingScopeFor } from './mcpConfigService.js';
+import { redactToolInput } from './toolInputRedaction.js';
+import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { createBranch, createBranchFrom, checkoutBranch, getGitDiffStats, isGitRepo, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
@@ -39,6 +41,8 @@ export interface StartRunParams {
    * first member may create it. See SquadMemberContext.
    */
   squad?: SquadMemberContext;
+  /** The workspace the run was started in; the run's hosting tools act in it. */
+  workspaceId?: string;
 }
 
 export interface SquadMemberContext {
@@ -218,7 +222,8 @@ export class RunnerService extends EventEmitter {
           cwd,
           branchName,
           plan,
-          squad: params.squad
+          squad: params.squad,
+          workspaceId: params.workspaceId
         });
       }, {
         // A queued run can be cancelled while an earlier run owns the
@@ -246,6 +251,7 @@ export class RunnerService extends EventEmitter {
     branchName: string;
     plan: string[];
     squad?: SquadMemberContext;
+    workspaceId?: string;
   }) {
     const { runId, issue, agent, cwd, branchName, plan } = ctx;
 
@@ -345,7 +351,8 @@ export class RunnerService extends EventEmitter {
       persona.mcpServers,
       { ...projectEnv, ...env },
       cwd,
-      access
+      access,
+      hostingScopeFor(ctx.project, agent.id ?? null, ctx.workspaceId ?? null)
     );
 
     /**
@@ -384,7 +391,10 @@ export class RunnerService extends EventEmitter {
       args,
       cwd,
       // Agent env first, then the family's isolation overrides — see cliHome.
-      env: { ...env, ...invocation.env },
+      // Then the credential isolation chat has always had: the run prompt tells
+      // the agent the shell cannot reach GitHub, and without this it could. Only
+      // the MCP servers get the credentials back (mcpCredentialEnv).
+      env: { ...env, ...invocation.env, ...agentCredentialEnv() },
       // The task description is multi-line, so it cannot travel in argv.
       stdin: invocation.stdin,
       onStdout: () => {},
@@ -419,10 +429,10 @@ export class RunnerService extends EventEmitter {
             this.appendLog(
               runId,
               currentStage,
-              `[Tool Call] ${ev.toolName}: ${JSON.stringify(ev.toolInput || {})}`,
+              `[Tool Call] ${ev.toolName}: ${JSON.stringify(redactToolInput(ev.toolName, ev.toolInput || {}))}`,
               'tool',
               {
-                detail: JSON.stringify(ev.toolInput || {}),
+                detail: JSON.stringify(redactToolInput(ev.toolName, ev.toolInput || {})),
                 activityMessage: this.describeToolActivity(ev.toolName, ev.toolInput)
               }
             );
@@ -543,6 +553,21 @@ Pushing your work:
 - Local git is unaffected: \`git status\`, \`git diff\` and \`git log\` all work normally.`
       : '';
 
+    /** Only when the hosting tools are granted -- and only the writing half when this run may write. */
+    const hostingSection = mcpServers.includes('alpha-hosting')
+      ? `
+
+Hosting (Render for backends, Vercel for frontends):
+- \`hosting_status\` and \`hosting_logs\` show each environment's URL, latest deploy and recent logs (secrets already redacted). Use them to check a deploy or diagnose an error.${
+          access === 'write'
+            ? `
+- \`hosting_env_set\` / \`hosting_env_delete\` change a hosted environment's variables and redeploy it. uat and dev apply at once; a change to main (production) is queued for a person to approve — say so, do not retry it.
+- Values are write-only: never print, echo or commit a secret, and do not expect to read one back.`
+            : `
+- This run cannot change hosting variables. Describe any change needed for a person to make.`
+        }`
+      : '';
+
     return `You are working on Issue ${issue.identifier}: ${issue.title}
 
 Description:
@@ -552,7 +577,7 @@ Instructions:
 1. First analyze relevant files in the workspace.
 2. Implement the required changes cleanly and concisely.
 3. Run existing tests or add new tests to verify your implementation.
-4. Summarize your completed work.${remoteSection}`;
+4. Summarize your completed work.${remoteSection}${hostingSection}`;
   }
 
   private async handleProcessExit(

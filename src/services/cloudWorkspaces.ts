@@ -37,7 +37,7 @@ const ACTION_TIMEOUT_MS = 90_000;
 
 export async function cloudRequest<T = unknown>(
   path: string,
-  init: { method?: string; body?: unknown; workspaceId?: string; timeoutMs?: number } = {}
+  init: { method?: string; body?: unknown; workspaceId?: string; timeoutMs?: number; headers?: Record<string, string> } = {}
 ): Promise<CloudAnswer<T>> {
   const token = await tokenForThisRequest();
   const res = await fetch(`${ALPHA_CLOUD_API}${path}`, {
@@ -46,6 +46,7 @@ export async function cloudRequest<T = unknown>(
       Authorization: `Bearer ${token}`,
       Accept: 'application/json',
       ...(init.workspaceId ? { 'X-Workspace-Id': init.workspaceId } : {}),
+      ...(init.headers ?? {}),
       ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' })
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),

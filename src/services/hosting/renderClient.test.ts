@@ -235,3 +235,33 @@ describe('deleting a service', () => {
     expect(calls[0]).toMatchObject({ method: 'DELETE', url: 'https://api.render.com/v1/services/srv-1' });
   });
 });
+
+describe('reading logs', () => {
+  it('asks Render for one service’s logs, scoped by owner, and returns them oldest first', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 200,
+      body: {
+        hasMore: false,
+        logs: [
+          { id: 'b', message: 'second', timestamp: '2026-01-01T00:00:02Z', labels: [{ name: 'level', value: 'error' }] },
+          { id: 'a', message: 'first', timestamp: '2026-01-01T00:00:01Z', labels: [] }
+        ]
+      }
+    }));
+    const client = createRenderClient('rnd_key', impl);
+
+    const page = await client.queryLogs('own-1', 'srv-1', { direction: 'backward', limit: 50, level: ['error'] });
+
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/v1/logs');
+    expect(url.searchParams.get('ownerId')).toBe('own-1');
+    expect(url.searchParams.getAll('resource')).toEqual(['srv-1']);
+    expect(page.logs.map(l => [l.message, l.level])).toEqual([['first', 'info'], ['second', 'error']]);
+  });
+
+  it('throws Render’s own error rather than answering with no lines', async () => {
+    const { impl } = fakeFetch(() => ({ status: 401, body: { message: 'unauthorized' } }));
+
+    await expect(createRenderClient('bad', impl).queryLogs('own-1', 'srv-1', {})).rejects.toThrow(/Render 401: unauthorized/);
+  });
+});

@@ -8,7 +8,35 @@
  * throws `VercelApiError` with Vercel's own status and message attached.
  */
 
+import type { DeploymentLogLine } from './deploymentLogs.js';
+import { fetchWithRetry } from './fetchWithRetry.js';
+import {
+  filterVercelLogLines,
+  mapVercelBuildEventLine,
+  mapVercelRuntimeLogLine,
+  type VercelBuildEventEntry,
+  type VercelRuntimeLogEntry
+} from './vercelLogs.js';
+
 const VERCEL_API_BASE = 'https://api.vercel.com';
+
+/** A page of Vercel logs: one bounded read, no cursor -- Vercel's log endpoints offer none. */
+export interface VercelLogsPage {
+  logs: DeploymentLogLine[];
+  hasMore: false;
+  next: null;
+}
+
+export interface VercelLogsQuery {
+  /** `['build']` reads the build output; anything else reads runtime logs. */
+  type?: readonly string[];
+  level?: readonly string[];
+  text?: string;
+}
+
+/** The runtime-logs endpoint streams and may stay open; read what arrives within this long. */
+const RUNTIME_LOG_READ_MS = 4_000;
+const LOG_PAGE_LINES = 100;
 
 export class VercelApiError extends Error {
   constructor(
@@ -48,6 +76,20 @@ export interface VercelEnvVarInput {
   target: VercelEnvTarget[];
   /** Restricts a `preview` target to one branch; omit for every preview. */
   gitBranch?: string;
+  /**
+   * `sensitive`: write-only, never readable again through Vercel's API or dashboard --
+   * what anything a person or agent sets is. `plain` only for the URLs Alpha derives.
+   */
+  type?: 'plain' | 'sensitive';
+}
+
+export interface VercelEnvVar {
+  id?: string;
+  key: string;
+  value?: string;
+  type?: string;
+  target: string[];
+  gitBranch?: string;
 }
 
 export interface VercelDomain {
@@ -86,7 +128,9 @@ export interface VercelClient {
   disableSsoProtection(projectId: string): Promise<void>;
   upsertEnvVars(projectId: string, vars: VercelEnvVarInput[]): Promise<void>;
   /** `value` is absent for a `sensitive`/`encrypted` variable; Alpha only ever writes `plain` ones. */
-  listEnvVars(projectId: string): Promise<Array<{ key: string; value?: string; target: string[]; gitBranch?: string }>>;
+  listEnvVars(projectId: string): Promise<VercelEnvVar[]>;
+  /** Remove one variable record, by the id `listEnvVars` reports for it. */
+  deleteEnvVar(projectId: string, envId: string): Promise<void>;
   /** `false` when Vercel refused a branch domain (some plans do not allow it); caller falls back to the git alias. */
   addBranchDomain(projectId: string, domainName: string, gitBranch: string): Promise<boolean>;
   listDomains(projectId: string): Promise<VercelDomain[]>;
@@ -112,6 +156,13 @@ export interface VercelClient {
    */
   deploymentAliases(deploymentId: string): Promise<string[]>;
   deleteProject(projectId: string): Promise<void>;
+  /**
+   * Logs of the newest deployment in `scope` -- production, or one branch --
+   * oldest to newest. Build output when only `build` is asked for, runtime
+   * logs otherwise. Filtered here by level and text, which Vercel's endpoints
+   * do not take.
+   */
+  queryLogs(projectId: string, scope: VercelDeploymentScope, query: VercelLogsQuery): Promise<VercelLogsPage>;
 }
 
 async function parseError(res: Response): Promise<VercelApiError> {
@@ -124,6 +175,52 @@ async function parseError(res: Response): Promise<VercelApiError> {
     /* not JSON */
   }
   return new VercelApiError(`Vercel ${res.status}: ${message}`, res.status);
+}
+
+/**
+ * Runtime-log entries from a response that may be one JSON document or a
+ * stream of newline-delimited ones, and that may never end on its own:
+ * whatever arrives within `RUNTIME_LOG_READ_MS` is read, then the stream is
+ * let go. A partial last line is dropped.
+ */
+async function readRuntimeLogEntries(res: Response): Promise<VercelRuntimeLogEntry[]> {
+  if (!res.body) return [];
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<{ done: true; value?: undefined }>(resolve => {
+    timer = setTimeout(() => resolve({ done: true }), RUNTIME_LOG_READ_MS);
+  });
+  try {
+    for (;;) {
+      const chunk = await Promise.race([reader.read(), deadline]);
+      if (chunk.done) break;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    clearTimeout(timer);
+    void reader.cancel().catch(() => undefined);
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  // One document: an array, or `{ logs: [...] }`.
+  try {
+    const parsed = JSON.parse(trimmed) as VercelRuntimeLogEntry[] | { logs?: VercelRuntimeLogEntry[] };
+    return Array.isArray(parsed) ? parsed : parsed.logs ?? [];
+  } catch {
+    // A stream: one JSON object per line.
+  }
+  const entries: VercelRuntimeLogEntry[] = [];
+  for (const line of trimmed.split('\n')) {
+    try {
+      entries.push(JSON.parse(line) as VercelRuntimeLogEntry);
+    } catch {
+      /* the unfinished last line, or noise */
+    }
+  }
+  return entries;
 }
 
 export function createVercelClient(token: string, teamId: string, fetchImpl: typeof fetch = fetch): VercelClient {
@@ -149,6 +246,15 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  async function latestDeployment(projectId: string, scope: VercelDeploymentScope): Promise<VercelDeployment | null> {
+    const filter = 'production' in scope ? 'target=production' : `branch=${encodeURIComponent(scope.branch)}`;
+    const body = await call<{ deployments: VercelDeployment[] }>(
+      'GET',
+      `/v7/deployments?projectId=${encodeURIComponent(projectId)}&limit=1&${filter}`
+    );
+    return body?.deployments?.[0] ?? null;
   }
 
   return {
@@ -179,16 +285,20 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
       await call<unknown>(
         'POST',
         `/v10/projects/${projectId}/env?upsert=true`,
-        vars.map(v => ({ key: v.key, value: v.value, type: 'plain', target: v.target, ...(v.gitBranch ? { gitBranch: v.gitBranch } : {}) }))
+        vars.map(v => ({ key: v.key, value: v.value, type: v.type ?? 'plain', target: v.target, ...(v.gitBranch ? { gitBranch: v.gitBranch } : {}) }))
       );
     },
 
     async listEnvVars(projectId: string) {
-      const body = await call<{ envs: Array<{ key: string; value?: string; target: string[]; gitBranch?: string }> }>(
+      const body = await call<{ envs: VercelEnvVar[] }>(
         'GET',
         `/v10/projects/${projectId}/env`
       );
       return body?.envs ?? [];
+    },
+
+    async deleteEnvVar(projectId: string, envId: string) {
+      await call<void>('DELETE', `/v9/projects/${projectId}/env/${encodeURIComponent(envId)}`);
     },
 
     async addBranchDomain(projectId: string, domainName: string, gitBranch: string) {
@@ -225,15 +335,7 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
       return body!;
     },
 
-    async latestDeployment(projectId: string, scope: VercelDeploymentScope) {
-      const filter =
-        'production' in scope ? 'target=production' : `branch=${encodeURIComponent(scope.branch)}`;
-      const body = await call<{ deployments: VercelDeployment[] }>(
-        'GET',
-        `/v7/deployments?projectId=${encodeURIComponent(projectId)}&limit=1&${filter}`
-      );
-      return body?.deployments?.[0] ?? null;
-    },
+    latestDeployment,
 
     async deploymentAliases(deploymentId: string) {
       const body = await call<{ alias?: string[] }>('GET', `/v13/deployments/${encodeURIComponent(deploymentId)}`);
@@ -242,6 +344,44 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
 
     async deleteProject(projectId: string) {
       await call<void>('DELETE', `/v9/projects/${projectId}`);
+    },
+
+    async queryLogs(projectId: string, scope: VercelDeploymentScope, query: VercelLogsQuery) {
+      const empty: VercelLogsPage = { logs: [], hasMore: false, next: null };
+      const deployment = await latestDeployment(projectId, scope);
+      if (!deployment?.uid) return empty;
+
+      const buildOnly = Boolean(query.type?.length) && query.type!.every(type => type === 'build');
+      const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+      let lines: DeploymentLogLine[];
+
+      if (buildOnly) {
+        const res = await fetchWithRetry(
+          url(`/v3/deployments/${encodeURIComponent(deployment.uid)}/events?limit=${LOG_PAGE_LINES}`),
+          { method: 'GET', headers },
+          'Vercel',
+          fetchImpl
+        );
+        if (!res.ok) throw await parseError(res);
+        const events = (await res.json()) as VercelBuildEventEntry[];
+        lines = (Array.isArray(events) ? events : [])
+          .map((event, index) => mapVercelBuildEventLine(event, index))
+          .filter((line): line is DeploymentLogLine => line !== null);
+      } else {
+        const res = await fetchWithRetry(
+          url(`/v1/projects/${encodeURIComponent(projectId)}/deployments/${encodeURIComponent(deployment.uid)}/runtime-logs`),
+          { method: 'GET', headers, signal: AbortSignal.timeout(RUNTIME_LOG_READ_MS + 2_000) },
+          'Vercel',
+          fetchImpl
+        );
+        if (!res.ok) throw await parseError(res);
+        const entries = await readRuntimeLogEntries(res);
+        lines = entries.slice(-LOG_PAGE_LINES).map((entry, index) => mapVercelRuntimeLogLine(entry, index));
+      }
+
+      const filtered = filterVercelLogLines(lines, { level: query.level, text: query.text });
+      filtered.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+      return { logs: filtered, hasMore: false, next: null };
     }
   };
 }
