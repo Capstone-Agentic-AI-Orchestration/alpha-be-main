@@ -26,6 +26,8 @@
  * a flag that does nothing is exactly the kind of thing that goes unnoticed.
  */
 
+import { logInfo } from '../utils/logger.js';
+
 /**
  * Flags the runner owns. Matched on the flag name, so `--model=x` and
  * `--model x` are both caught.
@@ -191,4 +193,24 @@ export function buildEnv(
   }
 
   return { env, rejected };
+}
+
+const reportedIgnoredProjects = new Set<string>();
+
+/**
+ * Project-level variables are no longer passed to agents: variables are set
+ * per repository now, on its hosted environments, and each agent keeps its
+ * own. A desktop that stored some before keeps them on disk untouched --
+ * nothing is deleted -- and is told once per project that they no longer
+ * apply, so a missing `${VAR}` in an MCP server is not a mystery.
+ */
+export function reportIgnoredProjectEnv(project: { id: string; key?: string; envVars?: { key: string }[] } | null | undefined): void {
+  const stored = project?.envVars ?? [];
+  if (!project || stored.length === 0 || reportedIgnoredProjects.has(project.id)) return;
+  reportedIgnoredProjects.add(project.id);
+  logInfo(
+    `Project ${project.key ?? project.id} still stores ${stored.length} project variable(s) ` +
+      `(${stored.map(v => v.key).join(', ')}); project variables are no longer passed to agents. ` +
+      'Set them on the agent, or on the repository for its hosted environments.'
+  );
 }

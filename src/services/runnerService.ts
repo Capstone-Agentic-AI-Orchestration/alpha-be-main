@@ -9,7 +9,7 @@ import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
 import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
 import { agentReadiness } from './agentReadiness.js';
-import { buildEnv } from './customCliArgs.js';
+import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
 import { writeRunMcpConfig, cleanupRunMcpConfig, hostingScopeFor } from './mcpConfigService.js';
 import { redactToolInput } from './toolInputRedaction.js';
@@ -332,14 +332,12 @@ export class RunnerService extends EventEmitter {
      * granting an agent a server worked when you talked to it and did nothing
      * when it worked a card — the half of Alpha the grant exists for.
      *
-     * The environment is layered project-then-agent so one global catalog entry
-     * resolves to this project's Supabase (or database, or workspace). The
-     * agent wins a collision because it is the narrower of the two: a project
-     * value is a default for everyone working the board, and an agent's is a
-     * deliberate exception to it.
+     * The environment is the agent's own. Project-level variables used to be
+     * layered underneath it; variables are set per repository now, so they no
+     * longer reach an agent (see `reportIgnoredProjectEnv`).
      */
     const access = mcpAccessFor(persona.autonomyLevel, 'run');
-    const { env: projectEnv } = buildEnv(ctx.project?.envVars);
+    reportIgnoredProjectEnv(ctx.project);
     const { env } = buildEnv(agent.envVars);
     /*
      * The agent's autonomy decides whether its tools may touch the remote.
@@ -349,7 +347,7 @@ export class RunnerService extends EventEmitter {
     const mcp = writeRunMcpConfig(
       runId,
       persona.mcpServers,
-      { ...projectEnv, ...env },
+      env,
       cwd,
       access,
       hostingScopeFor(ctx.project, agent.id ?? null, ctx.workspaceId ?? null)

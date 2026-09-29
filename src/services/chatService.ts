@@ -10,7 +10,7 @@ import {
   allowAttachedWorkspace
 } from './workspaceService.js';
 import { resolveAgentLogged } from './personaService.js';
-import { buildEnv } from './customCliArgs.js';
+import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import {
   DEFAULT_ASSISTANT,
   DEFAULT_ASSISTANT_PROMPT,
@@ -572,9 +572,8 @@ export class ChatService extends EventEmitter {
     }
 
     const { env } = buildEnv(agent.envVars);
-    // A thread pinned to a project resolves that project's MCP values, so
-    // asking an agent about ALF in chat reaches the same Supabase its runs do.
-    const { env: projectEnv } = buildEnv(threadProject(threadId)?.envVars);
+    // The agent's own values, as in a run; project variables no longer apply.
+    reportIgnoredProjectEnv(threadProject(threadId));
 
     const cwd = chatWorkspace(threadId);
     const turn = await runCliTurn({
@@ -596,7 +595,7 @@ ${priorTurn}` : prompt,
       priorSession: priorSession?.cliSessionId ?? null,
       personaChanged,
       mcpServers: persona.mcpServers,
-      mcpEnv: { ...projectEnv, ...env },
+      mcpEnv: env,
       // What this agent may actually do this turn. Resolved from the persona
       // rather than the raw row so a persona file's `skills:` overlay counts,
       // the same way it does for every other field.
