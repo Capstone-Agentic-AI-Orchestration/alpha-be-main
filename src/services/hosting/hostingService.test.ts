@@ -19,10 +19,29 @@ function fakeRenderClient(overrides: Partial<Record<string, any>> = {}) {
   const deploysTriggered: string[] = [];
   const deleted: string[] = [];
   const updates: Array<{ id: string; patch: any }> = [];
+  const projects = new Map<string, { id: string; name: string }>();
+  const environments: Array<{ id: string; name: string; projectId: string }> = [];
+  const moved: Array<{ environmentId: string; resourceIds: string[] }> = [];
   let nextId = 1;
 
   const client = {
     listOwners: vi.fn(async () => [{ id: 'own-team', type: 'team' }]),
+    findProjectByName: vi.fn(async (_ownerId: string, name: string) => projects.get(name) ?? null),
+    createProject: vi.fn(async (_ownerId: string, name: string, envNames: string[]) => {
+      const project = { id: `prj-${projects.size + 1}`, name };
+      projects.set(name, project);
+      for (const env of envNames) environments.push({ id: `evm-${project.id}-${env}`, name: env, projectId: project.id });
+      return project;
+    }),
+    listEnvironments: vi.fn(async (projectId: string) => environments.filter(e => e.projectId === projectId)),
+    createEnvironment: vi.fn(async (projectId: string, name: string) => {
+      const env = { id: `evm-${projectId}-${name}`, name, projectId };
+      environments.push(env);
+      return env;
+    }),
+    addToEnvironment: vi.fn(async (environmentId: string, resourceIds: string[]) => {
+      moved.push({ environmentId, resourceIds });
+    }),
     findServiceByName: vi.fn(async (name: string) => services.get(name) ?? null),
     getService: vi.fn(async (id: string) => [...services.values()].find(s => s.id === id)),
     createService: vi.fn(async (input: any) => {
@@ -58,7 +77,7 @@ function fakeRenderClient(overrides: Partial<Record<string, any>> = {}) {
     ...overrides
   };
 
-  return { client, services, envVars, deploysTriggered, deleted, updates };
+  return { client, services, envVars, deploysTriggered, deleted, updates, projects, environments, moved };
 }
 
 function fakeVercelClient(overrides: Partial<Record<string, any>> = {}) {
@@ -576,5 +595,74 @@ describe('how a backend is built on Render', () => {
     await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
 
     expect(render.updates.filter(u => u.id === 'srv-ok')).toEqual([]);
+  });
+});
+describe('grouping a backend into a Render project', () => {
+  it('creates a project named after the repo, with production and uat, and creates each service in its environment', async () => {
+    const { service, render } = await load({ env: RENDER_ENV });
+
+    await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(render.client.createProject).toHaveBeenCalledWith('own-team', 'shop-be', ['production', 'uat']);
+    const [main, uat] = render.client.createService.mock.calls.map(c => c[0]);
+    const envOf = (name: string) => render.environments.find(e => e.name === name)!.id;
+    expect(main.environmentId).toBe(envOf('production'));
+    expect(uat.environmentId).toBe(envOf('uat'));
+  });
+
+  it('reuses the project on a retry, adding an environment it is missing', async () => {
+    const render = fakeRenderClient();
+    render.projects.set('shop-be', { id: 'prj-old', name: 'shop-be' });
+    render.environments.push({ id: 'evm-prod', name: 'production', projectId: 'prj-old' });
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(render.client.createProject).not.toHaveBeenCalled();
+    expect(render.client.createEnvironment).toHaveBeenCalledWith('prj-old', 'uat');
+  });
+
+  it('moves ungrouped services into the project, and leaves grouped ones where they are', async () => {
+    const render = fakeRenderClient();
+    const settled = { envSpecificDetails: { buildCommand: 'npm install --include=dev && npm run build', startCommand: 'npm run start' } };
+    render.services.set('shop-be', { id: 'srv-loose', name: 'shop-be', serviceDetails: settled, autoDeployTrigger: 'checksPass' });
+    render.services.set('shop-be-uat', { id: 'srv-placed', name: 'shop-be-uat', serviceDetails: settled, autoDeployTrigger: 'checksPass', environmentId: 'evm-elsewhere' });
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    const production = render.environments.find(e => e.name === 'production')!.id;
+    expect(render.moved).toEqual([{ environmentId: production, resourceIds: ['srv-loose'] }]);
+  });
+
+  it('still creates working services, ungrouped, when Render refuses the project', async () => {
+    const render = fakeRenderClient({
+      createProject: vi.fn(async () => {
+        throw new Error('Render 402: upgrade your workspace');
+      })
+    });
+    const { service } = await load({ env: RENDER_ENV, render });
+
+    const status = await service.setUpHosting({ repo: 'acme/shop-be', stackHint: 'nodejs' });
+
+    expect(status.state).toBe('ready');
+    expect(render.client.createService.mock.calls.every(c => c[0].environmentId === undefined)).toBe(true);
+  });
+});
+
+describe('when Vercel cannot link the repository', () => {
+  it('keeps Vercel’s own reason and names both things that can be missing', async () => {
+    const vercel = fakeVercelClient();
+    vercel.client.createProject = vi.fn(async () => {
+      const { VercelApiError } = await import('./vercelClient.js');
+      throw new VercelApiError('Vercel 400: You need to add a Login Connection to your GitHub account first.', 400);
+    });
+    const { service } = await load({ env: VERCEL_ENV, vercel });
+
+    const status = await service.setUpHosting({ repo: 'acme/shop-fe', stackHint: 'react' });
+
+    expect(status.state).toBe('failed');
+    expect(status.error).toContain('You need to add a Login Connection to your GitHub account first.');
+    expect(status.error).toMatch(/owns VERCEL_TOKEN needs GitHub connected/);
   });
 });

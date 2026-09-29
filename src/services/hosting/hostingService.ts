@@ -279,9 +279,19 @@ function friendlyRenderRepoError(err: unknown, repo: string): Error {
   return err as Error;
 }
 
+/**
+ * Vercel links a repository through the GitHub login of the account that owns
+ * `VERCEL_TOKEN`, not only through the app on the organization -- so either
+ * one missing gives this 400. Vercel's own reason is kept, since it is the
+ * only thing that says which.
+ */
 function friendlyVercelRepoError(err: unknown, repo: string): Error {
-  if (err instanceof VercelApiError && err.status === 400 && /github/i.test(err.message)) {
-    return new Error(`Vercel cannot reach ${repo}. Install the Vercel GitHub app on the organization.`);
+  if (err instanceof VercelApiError && err.status === 400 && /github|login connection/i.test(err.message)) {
+    const reason = err.message.replace(/^Vercel 400:\s*/, '');
+    return new Error(
+      `Vercel cannot link ${repo} (${reason}). The Vercel account that owns VERCEL_TOKEN needs GitHub connected ` +
+        `(Vercel Account Settings, Authentication), and the Vercel GitHub app needs access to this repository.`
+    );
   }
   return err as Error;
 }
@@ -401,6 +411,38 @@ async function ensureRenderSettings(client: RenderClient, service: RenderService
   }
 }
 
+/**
+ * The Render environment each branch's service lives in. Two, because a
+ * Hobby workspace allows at most two environments per project.
+ */
+const RENDER_ENVIRONMENTS = { main: 'production', uat: 'uat' } as const;
+
+type RenderEnvironmentIds = Partial<Record<keyof typeof RENDER_ENVIRONMENTS, string>>;
+
+/**
+ * The Render project a backend's services are grouped under -- named after
+ * the repository, with a `production` and a `uat` environment -- found or
+ * created. Best-effort: a workspace that refuses projects still gets working
+ * services, only ungrouped, and a retry tries the grouping again.
+ */
+async function ensureRenderProject(client: RenderClient, ownerId: string, projectName: string): Promise<RenderEnvironmentIds> {
+  const wanted = Object.values(RENDER_ENVIRONMENTS);
+  try {
+    let project = await client.findProjectByName(ownerId, projectName);
+    if (!project) project = await client.createProject(ownerId, projectName, wanted);
+
+    const environments = await client.listEnvironments(project.id);
+    for (const name of wanted) {
+      if (!environments.some(e => e.name === name)) environments.push(await client.createEnvironment(project.id, name));
+    }
+    const idOf = (name: string) => environments.find(e => e.name === name)?.id;
+    return { main: idOf(RENDER_ENVIRONMENTS.main), uat: idOf(RENDER_ENVIRONMENTS.uat) };
+  } catch (err) {
+    logError(`Could not group the Render services of ${projectName} into a project; they stay ungrouped:`, (err as Error).message);
+    return {};
+  }
+}
+
 async function findOrCreateRenderService(
   client: RenderClient,
   ownerId: string,
@@ -408,10 +450,21 @@ async function findOrCreateRenderService(
   repoUrl: string,
   branch: string,
   healthCheckPath: string,
+  environmentId: string | undefined,
   created: Array<() => Promise<void>>
 ): Promise<RenderServiceRecord> {
   const existing = await client.findServiceByName(name);
-  if (existing) return ensureRenderSettings(client, existing);
+  if (existing) {
+    // An ungrouped service -- one made before grouping existed -- moves into
+    // the project. One already in some environment stays where it is, since
+    // that is where someone put it.
+    if (environmentId && !existing.environmentId) {
+      await client
+        .addToEnvironment(environmentId, [existing.id])
+        .catch(err => logError(`Could not move Render service ${name} into its project:`, (err as Error).message));
+    }
+    return ensureRenderSettings(client, existing);
+  }
 
   let result;
   try {
@@ -420,6 +473,7 @@ async function findOrCreateRenderService(
       ownerId,
       repo: repoUrl,
       branch,
+      ...(environmentId ? { environmentId } : {}),
       ...(RENDER_REGION ? { region: RENDER_REGION } : {}),
       healthCheckPath,
       ...RENDER_SETTINGS
@@ -462,10 +516,11 @@ async function setUpBackend(
     ? await readPartnerFrontendUrls(partner).catch(() => ({ production: null, uat: null, dev: null }))
     : { production: null, uat: null, dev: null };
   const ownerId = await resolveRenderOwnerId(client);
+  const environments = await ensureRenderProject(client, ownerId, name);
 
   try {
-    const main = await findOrCreateRenderService(client, ownerId, names.main, repoUrl, 'main', '/health', created);
-    const uat = await findOrCreateRenderService(client, ownerId, names.uat, repoUrl, 'uat', '/health', created);
+    const main = await findOrCreateRenderService(client, ownerId, names.main, repoUrl, 'main', '/health', environments.main, created);
+    const uat = await findOrCreateRenderService(client, ownerId, names.uat, repoUrl, 'uat', '/health', environments.uat, created);
 
     const corsForMain = partnerUrls.production ? [partnerUrls.production] : [];
     const corsForUat = [partnerUrls.uat, partnerUrls.dev].filter((v): v is string => Boolean(v));

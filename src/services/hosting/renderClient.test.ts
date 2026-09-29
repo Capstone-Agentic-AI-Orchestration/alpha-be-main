@@ -302,3 +302,56 @@ describe('the deploy trigger and service settings', () => {
     expect(calls[0].url).toContain('/v1/services/srv-1');
   });
 });
+describe('projects and environments', () => {
+  it('finds a project by its exact name, scoped to the owner', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 200,
+      body: [{ cursor: 'a', project: { id: 'prj-2', name: 'shop-be-old' } }, { cursor: 'b', project: { id: 'prj-1', name: 'shop-be' } }]
+    }));
+
+    const project = await createRenderClient('rnd_key', impl).findProjectByName('own-1', 'shop-be');
+
+    expect(project).toEqual({ id: 'prj-1', name: 'shop-be' });
+    expect(calls[0].url).toContain('/v1/projects?ownerId=own-1&name=shop-be');
+  });
+
+  it('creates a project together with its named environments', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 201, body: { id: 'prj-1', name: 'shop-be', environmentIds: ['evm-1', 'evm-2'] } }));
+
+    await createRenderClient('rnd_key', impl).createProject('own-1', 'shop-be', ['production', 'uat']);
+
+    expect(calls[0]).toMatchObject({
+      method: 'POST',
+      body: { name: 'shop-be', ownerId: 'own-1', environments: [{ name: 'production' }, { name: 'uat' }] }
+    });
+  });
+
+  it('unwraps the {cursor, environment} list shape', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, body: [{ cursor: 'a', environment: { id: 'evm-1', name: 'production', projectId: 'prj-1' } }] }));
+
+    const environments = await createRenderClient('rnd_key', impl).listEnvironments('prj-1');
+
+    expect(environments).toEqual([{ id: 'evm-1', name: 'production', projectId: 'prj-1' }]);
+    expect(calls[0].url).toContain('/v1/environments?projectId=prj-1');
+  });
+
+  it('moves services into an environment by id', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, body: { id: 'evm-1' } }));
+
+    await createRenderClient('rnd_key', impl).addToEnvironment('evm-1', ['srv-1']);
+
+    expect(calls[0]).toMatchObject({ method: 'POST', body: { resourceIds: ['srv-1'] } });
+    expect(calls[0].url).toContain('/v1/environments/evm-1/resources');
+  });
+
+  it('creates a service inside an environment when given one', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 201, body: { service: { id: 'srv-1', name: 'shop-be' } } }));
+
+    await createRenderClient('rnd_key', impl).createService({
+      name: 'shop-be', ownerId: 'own-1', repo: 'https://github.com/acme/shop-be', branch: 'main',
+      healthCheckPath: '/health', buildCommand: 'b', startCommand: 's', environmentId: 'evm-1'
+    });
+
+    expect(calls[0].body).toMatchObject({ environmentId: 'evm-1' });
+  });
+});
