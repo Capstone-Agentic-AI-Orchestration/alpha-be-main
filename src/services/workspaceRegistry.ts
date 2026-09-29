@@ -462,8 +462,10 @@ class WorkspaceRegistry {
   }
 
   canAccessLiveBuildRoom(context: WorkspaceContext, projectId: string): boolean {
-    if (context.role === 'client' || !this.canAccessProject(context, projectId)) return false;
-    return this.listProjectSquadIds(context, projectId).some(squadId => this.canAccessSquad(context, squadId));
+    // The room observes project work, not only squad runs. A project with a
+    // direct agent call (or no current squad assignment) still has a valid,
+    // project-scoped room; project access remains the authorization boundary.
+    return context.role !== 'client' && this.canAccessProject(context, projectId);
   }
 
   /**
@@ -490,6 +492,21 @@ class WorkspaceRegistry {
      */
     const squad = await squadStore().get(context.workspaceId, squadId);
     if (!squad?.memberAgentIds?.includes(agentId)) return false;
+
+    return this.canAccessProjectAgentRun(context, projectId, agentId);
+  }
+
+  /**
+   * Authorize operational run metadata for one explicitly assigned project agent.
+   * A run does not always belong to a squad run, but private agent visibility
+   * still applies when a project member is inspecting that run.
+   */
+  async canAccessProjectAgentRun(
+    context: WorkspaceContext,
+    projectId: string,
+    agentId: string
+  ): Promise<boolean> {
+    if (context.role === 'client' || !this.canAccessProject(context, projectId)) return false;
 
     const agent = await agentStore().get(context.workspaceId, agentId);
     if (!agent || agent.isArchived) return false;

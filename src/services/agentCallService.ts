@@ -573,7 +573,7 @@ export class AgentCallService extends EventEmitter {
         id,
         isFileWrite ? 'file_change' : 'tool',
         isFileWrite ? 'Agent is editing project files' : knownLabels[rawTool] || `${rawTool} activity`,
-        { detail: command, paths: paths.length ? paths : undefined }
+        { toolName: rawTool, detail: command, paths: paths.length ? paths : undefined }
       );
       return;
     }
@@ -602,7 +602,7 @@ export class AgentCallService extends EventEmitter {
     id: string,
     kind: AgentCallActivityKind,
     message: string,
-    extra: Pick<AgentCallActivity, 'detail' | 'paths'> = {}
+    extra: Pick<AgentCallActivity, 'toolName' | 'detail' | 'paths'> = {}
   ): AgentCallActivity | undefined {
     const current = sqliteService.getAgentCall(id);
     if (!current) return undefined;
@@ -611,6 +611,7 @@ export class AgentCallService extends EventEmitter {
       sequence: (current.activities?.at(-1)?.sequence ?? 0) + 1,
       kind,
       message: message.slice(0, 160),
+      toolName: extra.toolName?.slice(0, 80),
       detail: extra.detail ? extra.detail.slice(0, 300) : undefined,
       paths: extra.paths?.slice(0, 100).map(value => value.slice(0, 300)),
       createdAt: new Date().toISOString()

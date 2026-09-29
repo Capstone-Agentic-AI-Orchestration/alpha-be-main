@@ -431,7 +431,8 @@ export class RunnerService extends EventEmitter {
               'tool',
               {
                 detail: JSON.stringify(redactToolInput(ev.toolName, ev.toolInput || {})),
-                activityMessage: this.describeToolActivity(ev.toolName, ev.toolInput)
+                activityMessage: this.describeToolActivity(ev.toolName, ev.toolInput),
+                toolName: String(ev.toolName).replace(/[^A-Za-z0-9_. -]/g, '').slice(0, 80)
               }
             );
           } else if (ev.type === 'tool_result' || ev.type === 'error') {
@@ -983,6 +984,7 @@ ${issue.description}
     activityOptions: {
       streamKey?: string;
       isStreaming?: boolean;
+      toolName?: string;
       detail?: string;
       activityMessage?: string;
     } = {}
@@ -1008,6 +1010,7 @@ ${issue.description}
       message: activityOptions.activityMessage ?? message,
       streamKey: activityOptions.streamKey,
       isStreaming: activityOptions.isStreaming,
+      toolName: activityOptions.toolName,
       detail: activityOptions.detail
     });
 
@@ -1031,6 +1034,7 @@ ${issue.description}
       stageId?: StageId;
       streamKey?: string;
       isStreaming?: boolean;
+      toolName?: string;
       detail?: string;
       append?: boolean;
     }
@@ -1054,6 +1058,7 @@ ${issue.description}
         stageId: input.stageId ?? previous.stageId,
         isStreaming: input.isStreaming ?? false,
         streamed: previous.streamed || previous.isStreaming || input.isStreaming || undefined,
+        toolName: input.toolName ?? previous.toolName,
         detail: input.detail ?? previous.detail
       };
       activities[matchIndex] = activity;
@@ -1064,6 +1069,7 @@ ${issue.description}
         sequence,
         kind: input.kind,
         message: input.message,
+        toolName: input.toolName,
         createdAt: new Date().toISOString(),
         stageId: input.stageId,
         streamKey: input.streamKey,
