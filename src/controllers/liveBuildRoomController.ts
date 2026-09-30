@@ -1,6 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
+import { IS_CLOUD } from '../config/env.js';
+import { agentStore, chatStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import type { Agent, AgentCall, AgentCallActivity, ProjectBuildStep, PrototypeRun, RunActivity, Squad, SquadRun } from '../models/index.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -360,7 +361,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   ]);
   const projectSquadIds = new Set(workspaceRegistry.listProjectSquadIds(req.workspace!, project.id));
   const ownerThreads = new Map(
-    sqliteService.getChatThreads(req.workspace!.userId)
+    (await chatStore().listThreads(workspaceId, req.workspace!.userId))
       .filter(thread => thread.projectId === project.id)
       .map(thread => [thread.id, thread] as const)
   );
@@ -386,7 +387,12 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const selectedRun = squadRun && squadRun.squadId === selectedSquad?.id ? squadRun : undefined;
   const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
   const allProjectRuns = (await runStore().list(workspaceId)).filter(run => run.projectId === project.id);
-  const projectAgentCalls = sqliteService.getAgentCalls({ workspaceId, projectId: project.id });
+  // Project-chat calls run on the desktop and remain in that owner's private
+  // local history. Cloud rooms use the shared Postgres run telemetry instead;
+  // never let a cloud request fall through to the desktop SQLite store.
+  const projectAgentCalls = IS_CLOUD
+    ? []
+    : sqliteService.getAgentCalls({ workspaceId, projectId: project.id });
   const roomAgentIds = new Set([
     ...squads.flatMap(squad => squad.memberAgentIds),
     ...squadRuns.flatMap(run => run.memberAgentIds),

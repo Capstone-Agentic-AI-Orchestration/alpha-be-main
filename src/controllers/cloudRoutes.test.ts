@@ -212,6 +212,19 @@ describe('the cloud, without SQLite', () => {
     }
   });
 
+  it('loads a project room from cloud stores without opening desktop SQLite', async () => {
+    session = { login: 'PM1', role: 'pm' };
+    const app = await startCloudApi();
+    const created = await call(app, 'POST', '/api/projects', { name: 'Room project', key: 'ROOM' });
+    expect(created.status).toBe(201);
+
+    const room = await call(app, 'GET', `/api/projects/${created.body.id}/live-build-room`);
+
+    expect(room.status).toBe(200);
+    expect(room.body.project).toMatchObject({ id: created.body.id, name: 'Room project' });
+    expect(room.body.agentCards).toEqual([]);
+  });
+
   /** None, rather than a scan of Render's disk that finds none every time. */
   it('reports no runtimes', async () => {
     const app = await startCloudApi();
