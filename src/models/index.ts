@@ -180,6 +180,17 @@ export interface LocalProjectBinding {
 }
 
 /**
+ * Where one of a project's repositories is on THIS machine.
+ *
+ * A project can have several repositories -- a paired `-be` and `-fe` -- and
+ * each is a checkout of its own, anywhere on disk, so each has its own row.
+ * `repo` is `owner/name`, lower-cased.
+ */
+export interface LocalRepoBinding extends LocalProjectBinding {
+  repo: string;
+}
+
+/**
  * One Render service or Vercel project, as `hostingService` created or last
  * confirmed it -- enough to look it up by id instead of by name next time.
  *

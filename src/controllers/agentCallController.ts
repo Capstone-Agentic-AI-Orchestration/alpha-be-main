@@ -9,6 +9,7 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { agentCallService } from '../services/agentCallService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
+import { reposForProject } from '../services/githubIssueMapping.js';
 import { agentStore, projectStore, squadStore } from '../store/stores.js';
 import { route } from './asyncRoute.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -184,6 +185,12 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
 
   const workspace = resolveProjectWorkspace(project);
   const hasWorkingCopy = Boolean(workspace && fs.existsSync(workspace.dir));
+  // Each repository's own answer, so a pair with only one half here says so.
+  const repos = reposForProject(project);
+  const onMachine = repos.filter(repo => {
+    const found = resolveProjectWorkspace(project, repo);
+    return Boolean(found && fs.existsSync(found.dir));
+  }).length;
   res.json({
     project: {
       id: project.id,
@@ -191,8 +198,8 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
       key: project.key,
       branch: await branchForProject(project),
       workingCopy: hasWorkingCopy
-        ? { status: 'connected', managed: workspace?.managed ?? false }
-        : { status: 'not_connected', managed: false },
+        ? { status: 'connected', managed: workspace?.managed ?? false, repositories: repos.length, onMachine }
+        : { status: 'not_connected', managed: false, repositories: repos.length, onMachine },
       assignedSquadNames: visibleSquads.map(squad => squad.name)
     },
     squads: visibleSquads,

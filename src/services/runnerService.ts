@@ -90,11 +90,15 @@ export class RunnerService extends EventEmitter {
      * the same directory a run would edit. The reasoning for having no fallback
      * lives with the resolver — see `resolveProjectWorkspace`.
      */
-    const workspace = resolveProjectWorkspace(project);
+    // The issue's own repository when it has one: a card on the -fe runs in
+    // the frontend's checkout, never in whichever one this machine has.
+    const workspace = resolveProjectWorkspace(project, issue.githubRepo);
 
     if (!workspace) {
       throw new Error(
-        `Project "${project.name}" has no working copy. Attach a local folder, or clone one of its repositories, before running an agent.`
+        issue.githubRepo
+          ? `${issue.githubRepo} is not on this machine. Clone it from the project's resources, or link the folder you cloned it into, before running an agent on this issue.`
+          : `Project "${project.name}" has no working copy. Attach a local folder, or clone one of its repositories, before running an agent.`
       );
     }
 

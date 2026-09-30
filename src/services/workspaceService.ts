@@ -5,6 +5,23 @@ import { IS_CLOUD, WORKSPACES_DIR } from '../config/env.js';
 import { sqliteService } from './sqliteService.js';
 import { Project } from '../models/index.js';
 import { logInfo } from '../utils/logger.js';
+import { parseRepoRef, repoForProject, reposForProject } from './githubIssueMapping.js';
+
+/** `owner/name` of a repository resource, or null. */
+function parseRepoName(pathOrUrl: string): string | null {
+  const ref = parseRepoRef(pathOrUrl);
+  return ref ? `${ref.owner}/${ref.repo}` : null;
+}
+
+/**
+ * `owner/name` of the repository any github.com URL points into -- a pull
+ * request, an issue, a file -- or null. What a run's or a call's work is
+ * about, for `resolveProjectWorkspace`.
+ */
+export function repoOfGitHubUrl(url: string | null | undefined): string | null {
+  const match = /^https?:\/\/github\.com\/([^/]+)\/([^/#?]+)/i.exec(url ?? '');
+  return match ? `${match[1]}/${match[2].replace(/\.git$/i, '')}` : null;
+}
 
 /**
  * Managed working copies.
@@ -99,26 +116,72 @@ export interface ProjectWorkspace {
   dir: string;
   /** True when Alpha cloned it; false when the user attached it by hand. */
   managed: boolean;
+  /** The repository the folder is a checkout of, when that is known. */
+  repo?: string;
 }
 
+const sameRepo = (a: string | null | undefined, b: string | null | undefined) =>
+  Boolean(a && b) && a!.toLowerCase() === b!.toLowerCase();
+
+/**
+ * `repo`: the one repository the work is about -- the issue's, the pull
+ * request's. Then the answer is that repository's checkout or nothing: a run
+ * on the frontend's issue must never land in the backend's folder because
+ * that is the one this machine happens to have.
+ *
+ * Without it, the first of the project's repositories this machine has.
+ */
 export function resolveProjectWorkspace(
-  project: Pick<Project, 'id' | 'name' | 'resources'>
+  project: Pick<Project, 'id' | 'name' | 'resources'>,
+  repo?: string | null
 ): ProjectWorkspace | null {
+  const repos = reposForProject(project as Project);
+  const first = repoForProject(project as Project);
+  // Strict only about a repository the project has. Any other -- a project
+  // worked from one hand-attached folder, a pull request from elsewhere --
+  // has no checkout of its own to insist on, so the default answers.
+  if (repo && !repos.some(candidate => sameRepo(candidate, repo))) repo = null;
+
   /**
    * What this machine was told, first.
    *
-   * A binding is the developer's own answer for this project -- a folder they
-   * chose, or a clone Alpha made here -- and the project row cannot carry it:
-   * the row is the team's, and the cloud drops local paths on write. Before
-   * bindings, a shared project had nowhere to say where its code was on any
-   * particular laptop.
+   * A binding is the developer's own answer -- a folder they chose, or a
+   * clone Alpha made here -- and the project row cannot carry it: the row is
+   * the team's, and the cloud drops local paths on write. One per
+   * repository; a project binding from before those is its first
+   * repository's, which is the one it was checked against.
    */
   if (!IS_CLOUD && project.id) {
-    const binding = sqliteService.getProjectBinding(project.id);
-    if (binding) return { dir: path.resolve(binding.localDir), managed: binding.isManaged };
+    const bindings = sqliteService.listRepoBindings(project.id);
+    const legacy = sqliteService.getProjectBinding(project.id);
+    const bound = (wanted: string): ProjectWorkspace | null => {
+      const row = bindings.find(b => sameRepo(b.repo, wanted));
+      if (row) return { dir: path.resolve(row.localDir), managed: row.isManaged, repo: wanted };
+      if (legacy && sameRepo(first, wanted)) return { dir: path.resolve(legacy.localDir), managed: legacy.isManaged, repo: wanted };
+      return null;
+    };
+
+    if (repo) {
+      const found = bound(repo);
+      if (found) return found;
+    } else {
+      for (const candidate of repos) {
+        const found = bound(candidate);
+        if (found) return found;
+      }
+      if (legacy) return { dir: path.resolve(legacy.localDir), managed: legacy.isManaged };
+    }
   }
 
   const resources = project.resources ?? [];
+  if (repo) {
+    // A checkout Alpha made when it created the repository here.
+    const made = resources.find(
+      r => r.type === 'github_repo' && r.localPath && sameRepo(parseRepoName(r.pathOrUrl), repo)
+    );
+    return made?.localPath ? { dir: path.resolve(made.localPath), managed: true, repo } : null;
+  }
+
   const managed = resources.find(r => r.type === 'github_repo' && r.localPath);
   const attached = resources.find(r => r.type === 'local_path' || r.type === 'local_dir');
 

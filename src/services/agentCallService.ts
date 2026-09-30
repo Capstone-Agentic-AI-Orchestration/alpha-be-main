@@ -17,7 +17,7 @@ import {
   Project
 } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
-import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
+import { resolveProjectWorkspace, allowAttachedWorkspace, repoOfGitHubUrl } from './workspaceService.js';
 import { resolveAgentLogged } from './personaService.js';
 import { runCliTurn } from './cliRunner.js';
 import { agentReadiness } from './agentReadiness.js';
@@ -136,6 +136,18 @@ function safeErrorDetail(value: string): string {
     .replace(/([A-Za-z]:\\[^\s"']+|\\\\[^\s"']+)/g, '[local path]')
     .replace(/\/(?:[^\s"']+\/)*[^\s"']+/g, '[local path]')
     .slice(0, 240);
+}
+
+/**
+ * The repository a call's target is in, when it says: a pull request by its
+ * URL, an issue by the repository it was filed in. Null leaves the choice to
+ * `resolveProjectWorkspace`'s default.
+ */
+function repoOfTarget(target: AgentCallTarget | undefined): string | null {
+  if (!target?.id) return null;
+  if (target.type === 'pull_request') return repoOfGitHubUrl(target.id);
+  if (target.type === 'issue') return sqliteService.getIssues().find(issue => issue.id === target.id)?.githubRepo ?? null;
+  return null;
 }
 
 /**
@@ -362,7 +374,8 @@ export class AgentCallService extends EventEmitter {
 
     const project = sqliteService.getProjects().find(item => item.id === call.projectId);
     if (!project) throw new Error('Project not found.');
-    const workspace = resolveProjectWorkspace(project);
+    // The same checkout the call ran in, so the patch lands where it was made.
+    const workspace = resolveProjectWorkspace(project, repoOfTarget(call.revisionTarget));
     if (!workspace || !fs.existsSync(workspace.dir)) {
       throw new Error('This project has no local working copy on this machine.');
     }
@@ -627,7 +640,7 @@ export class AgentCallService extends EventEmitter {
     mode: AgentCallMode,
     target?: AgentCallTarget
   ): AgentCallWorkspaceInfo {
-    const resolved = resolveProjectWorkspace(project);
+    const resolved = resolveProjectWorkspace(project, repoOfTarget(target));
     if (resolved && fs.existsSync(resolved.dir) && fs.statSync(resolved.dir).isDirectory()) {
       if (!resolved.managed) allowAttachedWorkspace(resolved, project.name);
       return { ...resolved, temporary: false };
