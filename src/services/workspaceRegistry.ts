@@ -514,7 +514,7 @@ class WorkspaceRegistry {
     const visibility = agent.allowedUsers ?? 'team';
     if (visibility === 'admins') return context.role === 'admin';
     if (visibility === 'private') return agent.owner === context.userId;
-    if (visibility === 'team') return context.role !== 'client';
+    if (visibility === 'team') return true;
     return visibility === 'everyone';
   }
 
