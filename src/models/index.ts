@@ -656,8 +656,12 @@ export interface RuntimeEngine {
   account?: {
     email?: string;
     org?: string;
-    billing?: 'subscription' | 'api';
+    /** How the runtime authenticates to its provider. */
+    authMethod?: string;
+    /** Account-backed access does not always reveal a paid tier. */
+    billing?: 'subscription' | 'api' | 'account' | 'unknown';
     plan?: string;
+    note?: string;
   };
   detectedAt?: string;
   /** Model-catalog freshness and provenance. */
