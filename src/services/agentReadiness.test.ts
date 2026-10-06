@@ -62,8 +62,14 @@ describe('agentReadiness', () => {
     expect(agentReadiness({ modelProvider: 'OpenAI', modelName: 'codex' }, runtimes).status).toBe('signed_out');
   });
 
-  it('treats Google Gemini as its own runtime', () => {
-    expect(forProvider('Google Gemini', 'offline').detail).toContain('gemini');
+  it('checks Antigravity readiness for Google Gemini agents', () => {
+    const agy = runtime('Antigravity', 'online', ['gemini-3.8-flash-high']);
+    const result = agentReadiness(
+      { modelProvider: 'Google Gemini', modelName: 'gemini-3.8-flash-high' },
+      [runtime('Google Gemini', 'offline'), agy]
+    );
+    expect(result.status).toBe('ready');
+    expect(result.detail).toContain('agy');
   });
 
   it('handles a scanning runtime without claiming failure', () => {

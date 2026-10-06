@@ -70,9 +70,9 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
     install: 'Install the Antigravity IDE, which ships the agy CLI'
   },
   'Google Gemini': {
-    bin: 'gemini',
-    signIn: 'gemini',
-    install: 'npm install -g @google/gemini-cli'
+    bin: 'agy',
+    signIn: 'agy',
+    install: 'Install Google Antigravity CLI from antigravity.google/cli'
   },
   Ollama: {
     bin: 'ollama',
@@ -142,7 +142,12 @@ export function agentReadiness(
   runtimes: RuntimeEngine[]
 ): AgentReadiness {
   const cli = PROVIDER_CLI[agent.modelProvider];
-  const runtime = runtimes.find(r => r.provider === agent.modelProvider);
+  // Google Gemini agents are dispatched through Antigravity CLI (`agy`), not
+  // the separate Gemini Developer CLI. Readiness must reflect the binary the
+  // runner will actually start.
+  const runtime = agent.modelProvider === 'Google Gemini'
+    ? runtimes.find(r => r.id === 'antigravity')
+    : runtimes.find(r => r.provider === agent.modelProvider);
 
   if (!runtime) {
     return {

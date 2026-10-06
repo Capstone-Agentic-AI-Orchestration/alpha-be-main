@@ -30,7 +30,7 @@ function runClosedStdin(
   args: string[],
   timeoutMs = 30_000,
   options: { env?: NodeJS.ProcessEnv } = {}
-): Promise<{ ok: boolean; stdout: string; timedOut: boolean }> {
+): Promise<{ ok: boolean; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise(resolve => {
     let child: ReturnType<typeof crossSpawn>;
     try {
@@ -42,24 +42,26 @@ function runClosedStdin(
         env: options.env ? { ...process.env, ...options.env } : process.env
       });
     } catch {
-      resolve({ ok: false, stdout: '', timedOut: false });
+      resolve({ ok: false, stdout: '', stderr: '', timedOut: false });
       return;
     }
 
     let stdout = '';
+    let stderr = '';
     let settled = false;
     const finish = (ok: boolean, timedOut: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ok, stdout, timedOut });
+      resolve({ ok, stdout, stderr, timedOut });
     };
 
     const timer = setTimeout(() => { child.kill(); finish(false, true); }, timeoutMs);
 
     child.stdout?.on('data', d => { stdout += String(d); });
+    child.stderr?.on('data', d => { stderr += String(d); });
     child.on('error', () => finish(false, false));
-    child.on('exit', code => finish(code === 0, false));
+    child.on('close', code => finish(code === 0, false));
   });
 }
 
@@ -584,6 +586,7 @@ export class RuntimeService {
         account: {
           email: auth.email,
           org: auth.orgName,
+          authMethod: auth.authMethod === 'claude.ai' ? 'Claude account' : 'Anthropic API key',
           billing: auth.authMethod === 'claude.ai' ? 'subscription' : 'api',
           plan: auth.subscriptionType
         },
@@ -623,23 +626,46 @@ export class RuntimeService {
     }
 
     const version = versionProbe.stdout.trim();
-    const doctorProbe = await runClosedStdin(bin, ['doctor'], 30_000);
-    const doctorOut = doctorProbe.stdout.toLowerCase();
-    // `codex doctor` can report non-blocking diagnostics such as
-    // "rollout DB scan errors 0" or a non-interactive TERM warning. Neither
-    // means the CLI cannot run. Only an explicit authentication failure should
-    // downgrade an installed runtime.
-    const isSignedOut = /not logged in|authentication failed|auth(?:entication)? required/.test(doctorOut);
+    const authProbe = await runClosedStdin(bin, ['login', 'status'], 15_000);
+    const authOutput = `${authProbe.stdout}\n${authProbe.stderr}`.trim();
+    const authText = authOutput.toLowerCase();
+    const accountLogin = /logged in using chatgpt|logged in with chatgpt/.test(authText);
+    const apiKeyLogin = /logged in using (?:an? )?api key|logged in with (?:an? )?api key/.test(authText);
+    const signedOut = /not logged in|authentication failed|auth(?:entication)? required/.test(authText);
+
+    // Older Codex versions may not expose login status consistently. `doctor`
+    // remains a fallback, but only positive auth evidence marks the runtime ready.
+    let doctorText = '';
+    if (!accountLogin && !apiKeyLogin && !signedOut) {
+      const doctorProbe = await runClosedStdin(bin, ['doctor'], 30_000);
+      doctorText = `${doctorProbe.stdout}\n${doctorProbe.stderr}`.toLowerCase();
+    }
+    const doctorAccountLogin = /stored auth mode\s*[: ]+chatgpt|stored chatgpt tokens\s*[: ]+true/.test(doctorText);
+    const doctorApiKeyLogin = /stored auth mode\s*[: ]+(?:api[_ -]?key|apikey)|stored api key\s*[: ]+true/.test(doctorText);
+    const doctorSignedOut = /not logged in|authentication failed|auth(?:entication)? required/.test(doctorText);
+    const isAccountLogin = accountLogin || doctorAccountLogin;
+    const isApiKeyLogin = apiKeyLogin || doctorApiKeyLogin;
     return {
       id: 'codex',
       name: 'OpenAI Codex CLI',
       provider: 'OpenAI',
-      // A versioned CLI that cannot answer its optional doctor command is still
-      // installed; report it as online rather than pretending it is absent.
-      status: isSignedOut ? 'degraded' : 'online',
+      status: isAccountLogin || isApiKeyLogin ? 'online' : 'degraded',
       version,
       models,
       endpoint: catalog.endpoint,
+      account: isAccountLogin
+        ? {
+            authMethod: 'ChatGPT account',
+            billing: 'account',
+            note: 'Codex confirms ChatGPT account sign-in, but does not report the account plan.'
+          }
+        : isApiKeyLogin
+          ? { authMethod: 'OpenAI API key', billing: 'api' }
+          : {
+              authMethod: signedOut || doctorSignedOut ? 'Not signed in' : 'Sign-in not confirmed',
+              billing: 'unknown',
+              note: 'Run `codex login` and scan runtimes again.'
+            },
       ...catalogMetadata(catalog, now),
       detectedAt: now
     };
@@ -671,11 +697,26 @@ export class RuntimeService {
 
     if (listing.ok) {
       const models = parseAntigravityModelIds(listing.stdout);
+      const settingsPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+      let usesGeminiApiKey = false;
+      try {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as { modelProvider?: unknown };
+        usesGeminiApiKey = settings.modelProvider === 'gemini' && Boolean(process.env.GEMINI_API_KEY?.trim());
+      } catch {
+        // A missing settings file means the CLI uses its account sign-in flow.
+      }
       return {
         ...base,
         status: models.length ? 'online' : 'degraded',
         version,
         models,
+        account: usesGeminiApiKey
+          ? { authMethod: 'Gemini API key', billing: 'api' }
+          : {
+              authMethod: 'Antigravity account',
+              billing: 'account',
+              note: 'The model scan confirms account access; Antigravity does not report the exact plan tier here.'
+            },
         catalogSource: 'cli',
         catalogFetchedAt: now,
         catalogError: models.length ? undefined : 'Antigravity returned no models'
@@ -703,7 +744,7 @@ export class RuntimeService {
     const bin = RuntimeService.geminiPath();
     const catalog = await discoverGeminiCatalog();
     const probe = await runClosedStdin(bin, ['--version'], 15_000);
-    if (probe.ok) {
+    if (probe.ok && catalog.models.length) {
       return {
         id: 'gemini',
         name: 'Google Gemini CLI',
@@ -711,6 +752,10 @@ export class RuntimeService {
         status: 'online',
         version: probe.stdout.trim(),
         models: catalog.models,
+        account: {
+          authMethod: process.env.GOOGLE_API_KEY?.trim() ? 'Google API key' : 'Gemini API key',
+          billing: 'api'
+        },
         ...catalogMetadata(catalog, now),
         detectedAt: now
       };
@@ -719,8 +764,16 @@ export class RuntimeService {
       id: 'gemini',
       name: 'Google Gemini CLI',
       provider: 'Google Gemini',
-      status: 'offline',
+      status: probe.ok ? 'degraded' : 'offline',
+      version: probe.ok ? probe.stdout.trim() : undefined,
       models: catalog.models,
+      ...(probe.ok ? {
+        account: {
+          authMethod: 'Gemini API key not verified',
+          billing: 'unknown' as const,
+          note: 'Alpha uses Antigravity CLI for Google Gemini agents. Configure a working Gemini API key for this separate CLI runtime.'
+        }
+      } : {}),
       ...catalogMetadata(catalog, now),
       detectedAt: now
     };
@@ -818,7 +871,7 @@ export class RuntimeService {
     const cli = findLMStudio();
     const versionProbe = fs.existsSync(cli)
       ? await runClosedStdin(cli, ['--version'], 15_000)
-      : { ok: false, stdout: '', timedOut: false };
+      : { ok: false, stdout: '', stderr: '', timedOut: false };
     const version = versionProbe.ok ? versionProbe.stdout.trim() : undefined;
     const baseUrl = 'http://127.0.0.1:1234';
     const headers = process.env.LM_API_TOKEN?.trim()
