@@ -1,0 +1,22 @@
+{
+  "formatVersion": 1,
+  "approvedOn": "2026-10-07",
+  "sourceProject": "gupmckxxaaxlameekihy",
+  "targetProject": "pvbppmajgsbkrnvxlzrn",
+  "targetName": "Alpha Ticketing Staging",
+  "purpose": "Fresh staging control-plane baseline only; never deploy this bootstrap to live",
+  "migrationVersion": "20261007154549",
+  "migrationName": "live_control_plane_baseline",
+  "localFile": "supabase/migrations/20261007154549_live_control_plane_baseline.sql",
+  "sha256": "b8431000716dca81c28187d58011690849b88267f99516fa5de131ddb491dc4a",
+  "normalizedRemoteMd5": "f21c7de0404fed0a736c4ef155d0a7e3",
+  "sourceMigrationCount": 15,
+  "excludedRepositoryMigrations": ["0016_internal_agent_management.sql", "0017_hosting_audit.sql"],
+  "verifiedCatalogObjects": 496,
+  "verifiedAccessEntries": 72,
+  "verifiedApplicationTables": 21,
+  "verifiedApplicationRows": 0,
+  "cliVersion": "2.120.0",
+  "cliGeneratedVersion": "20261007153515",
+  "versionNote": "CLI created the file. After hosted MCP application assigned a version, the new local file was aligned to that observed version without changing its SQL or either remote ledger. Historical repository migrations remain unchanged."
+}

@@ -1,7 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
-import { DatabaseError } from '../store/database.js';
+import { DatabaseCommitError, DatabaseError } from '../store/database.js';
 import { WorkspaceRequestError } from '../store/workspaceDirectory.js';
 import { logError } from '../utils/logger.js';
+import { TicketWorkflowError } from '../ticketing/workflow.js';
+import { TicketReadInvariantError } from '../ticketing/readModels.js';
+import { PublicTicketIntakeError, publicTicketIntakeErrorResponse } from '../ticketing/publicIntake.js';
 
 /**
  * Turn a thrown error into the JSON shape the rest of the API already answers with.
@@ -47,6 +50,23 @@ export function jsonErrorHandler(
   // handler, and delegates to its own if the response has already started.
   if (res.headersSent) return next(err);
 
+  if (err instanceof PublicTicketIntakeError) {
+    const response = publicTicketIntakeErrorResponse(err);
+    if (response.retryAfterSeconds !== null) res.setHeader('Retry-After', String(response.retryAfterSeconds));
+    return res.status(response.status).json(response.body);
+  }
+
+  // Ticket rules use deliberate public messages, not driver/request contents.
+  // Preserve their status/code instead of treating stale or forbidden actions
+  // as a 500. No private audit, command body or resolved evidence is logged.
+  if (err instanceof TicketWorkflowError) {
+    return res.status(err.status).json({ error: err.message, code: err.code });
+  }
+  if (err instanceof TicketReadInvariantError) {
+    logError('Ticket read invariant failed; no ticket content was returned.');
+    return res.status(500).json({ error: 'The ticket view could not be verified.', code: 'ticket_view_unavailable' });
+  }
+
   const error = err as SqliteError;
   const message = error?.message ?? String(err);
   const code = error?.code ?? '';
@@ -75,6 +95,17 @@ export function jsonErrorHandler(
    */
   if (err instanceof WorkspaceRequestError) {
     return res.status(err.status).json({ error: err.message });
+  }
+
+  // A lost COMMIT acknowledgement is not an ordinary retryable outage.
+  // The operation may already exist: reconcile it before another write.
+  if (err instanceof DatabaseCommitError) {
+    logError('Database transaction outcome unconfirmed; operation reconciliation required.');
+    return res.status(409).json({
+      error: err.message,
+      code: 'transaction_outcome_unknown',
+      reconciliationRequired: true
+    });
   }
 
   /**

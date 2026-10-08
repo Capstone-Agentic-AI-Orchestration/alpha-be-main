@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { classifyProcessExit } from './runLifecycle.js';
 
 describe('classifyProcessExit', () => {
+  it('does not classify a failed spawn as a successful run', () => {
+    expect(classifyProcessExit(null, null, 'spawn_error')).toMatchObject({ kind: 'failed', message: expect.stringContaining('could not be started') });
+  });
   it('only treats an un-signalled zero exit as success', () => {
     expect(classifyProcessExit(0, null)).toEqual({ kind: 'success' });
     expect(classifyProcessExit(null, 'SIGTERM')).toEqual({

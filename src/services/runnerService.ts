@@ -387,6 +387,23 @@ export class RunnerService extends EventEmitter {
     const { bin, args, family } = invocation;
     const parser = new StreamParser(family);
 
+    // Cancellation can arrive while asynchronous branch preparation is in
+    // progress, after the queue's initial shouldStart check.
+    const latestBeforeSpawn = sqliteService.getPrototypeRuns().find(run => run.id === runId);
+    if (!latestBeforeSpawn || latestBeforeSpawn.status !== 'running') {
+      cleanupRunMcpConfig(runId);
+      return;
+    }
+
+    // The workspace queue must own this checkout until BOTH the process and
+    // its verification/commit/PR pipeline settle. Returning after spawn released
+    // the queue while the agent was still editing the same working tree.
+    let finishProcess!: () => void;
+    let failProcess!: (error: unknown) => void;
+    const processFinished = new Promise<void>((resolve, reject) => {
+      finishProcess = resolve;
+      failProcess = reject;
+    });
     const child = processManager.spawnProcess({
       runId,
       bin,
@@ -401,7 +418,14 @@ export class RunnerService extends EventEmitter {
       stdin: invocation.stdin,
       onStdout: () => {},
       onExit: async (code, signal, terminationReason) => {
-        await this.handleProcessExit(runId, cwd, branchName, issue, code, signal, terminationReason);
+        try {
+          await this.handleProcessExit(runId, cwd, branchName, issue, code, signal, terminationReason);
+          finishProcess();
+        } catch (error) {
+          // Reject the queued task, whose existing handler records failure.
+          // Never leave an unhandled async exit callback or a wedged queue.
+          failProcess(error);
+        }
       }
     });
 
@@ -477,6 +501,7 @@ export class RunnerService extends EventEmitter {
         this.appendLog(runId, currentStage, `[stderr] ${line}`, 'error');
       });
     }
+    await processFinished;
   }
 
   /**
@@ -641,7 +666,7 @@ Instructions:
       });
 
       const statusAfterVerification = sqliteService.getPrototypeRuns().find(item => item.id === runId)?.status;
-      if (!statusAfterVerification || statusAfterVerification === 'cancelled') return;
+      if (statusAfterVerification !== 'running') return;
 
       // Keep the command result in the existing run log. Output is bounded by
       // verificationService, and each line is stored separately so it remains

@@ -19,6 +19,11 @@ export interface Sql {
   query<T = Record<string, unknown>>(text: string, params?: readonly unknown[]): Promise<{ rows: T[] }>;
 }
 
+/** A unit of database-only work, always on one checked-out connection. */
+export interface TransactionalSql extends Sql {
+  transaction<T>(work: (tx: Sql) => Promise<T>): Promise<T>;
+}
+
 /**
  * A database call that failed, with the driver's error kept for the log.
  *
@@ -61,6 +66,20 @@ export class DatabaseError extends Error {
     const detail = (this.cause as { detail?: unknown })?.detail;
     const match = typeof detail === 'string' ? /Key \(([^)]+)\)=/.exec(detail) : null;
     return match ? match[1] : null;
+  }
+}
+
+/**
+ * COMMIT was not acknowledged. The caller must reconcile its durable operation
+ * ID before retrying: a dropped response is not proof that nothing was saved.
+ */
+export class DatabaseCommitError extends DatabaseError {
+  readonly outcome = 'unknown' as const;
+
+  constructor(cause: unknown) {
+    super(cause);
+    this.name = 'DatabaseCommitError';
+    this.message = 'The transaction result could not be confirmed. Check the operation before retrying.';
   }
 }
 
@@ -117,7 +136,7 @@ let pool: pg.Pool | null = null;
  * every policy advisory. A code path that reaches here on the desktop is a
  * bug, and should fail where it can be seen.
  */
-export function database(): Sql {
+export function database(): TransactionalSql {
   if (!IS_CLOUD) {
     throw new Error(
       'Only the cloud connects to Postgres directly. The desktop reaches it through the Data API, as one signed-in user.'
@@ -133,7 +152,8 @@ export function database(): Sql {
   return fromPool(pool);
 }
 
-function fromPool(p: pg.Pool): Sql {
+/** Exported for isolated adapter tests; does not construct or connect a pool. */
+export function fromPool(p: Pick<pg.Pool, 'query' | 'connect'>): TransactionalSql {
   return {
     async query<T>(text: string, params: readonly unknown[] = []) {
       try {
@@ -141,6 +161,76 @@ function fromPool(p: pg.Pool): Sql {
         return { rows: result.rows as T[] };
       } catch (err) {
         throw new DatabaseError(err);
+      }
+    },
+    async transaction<T>(work: (tx: Sql) => Promise<T>): Promise<T> {
+      let client: pg.PoolClient;
+      try {
+        client = await p.connect();
+      } catch (err) {
+        throw new DatabaseError(err);
+      }
+
+      let destroy = false;
+      let active = false;
+      let statementFailure: DatabaseError | undefined;
+      const tx: Sql = {
+        async query<R>(text: string, params: readonly unknown[] = []) {
+          if (!active) throw new Error('This database transaction is no longer active.');
+          if (statementFailure) throw statementFailure;
+          try {
+            const result = await client.query(text, [...params]);
+            return { rows: result.rows as R[] };
+          } catch (err) {
+            statementFailure = new DatabaseError(err);
+            throw statementFailure;
+          }
+        }
+      };
+
+      try {
+        try {
+          await client.query('BEGIN');
+          active = true;
+        } catch (err) {
+          // BEGIN may have reached the server before the connection failed.
+          destroy = true;
+          throw new DatabaseError(err);
+        }
+
+        let value: T;
+        try {
+          // Callers must await every statement and use tx, not database().query.
+          // No provider/network side effects or nested transaction control here.
+          value = await work(tx);
+          // Catching an SQL failure inside work must not turn an aborted
+          // transaction into a reported success (Postgres may answer ROLLBACK).
+          if (statementFailure) throw statementFailure;
+        } catch (err) {
+          active = false;
+          try {
+            await client.query('ROLLBACK');
+          } catch {
+            destroy = true;
+          }
+          // Preserve domain errors and the original statement error.
+          throw err;
+        }
+
+        active = false;
+        try {
+          const result = await client.query('COMMIT');
+          if (result.command !== 'COMMIT') throw new Error('COMMIT was not acknowledged.');
+        } catch (err) {
+          destroy = true;
+          // Do not claim rollback or automatically rerun work after an
+          // ambiguous commit. Business idempotency resolves the saved outcome.
+          throw new DatabaseCommitError(err);
+        }
+        return value;
+      } finally {
+        active = false;
+        client.release(destroy);
       }
     }
   };

@@ -83,10 +83,16 @@ const SUPABASE_STUBS = `
   $$;
 `;
 
-/** A fresh database, migrated. Close it in `afterAll`. */
-export async function createTestDatabase(): Promise<PGlite> {
+/** A fresh local database with provider stubs only. No network or real users. */
+export async function createSupabaseTestDatabase(): Promise<PGlite> {
   const db = new PGlite();
   await db.exec(SUPABASE_STUBS);
+  return db;
+}
+
+/** A fresh database, migrated. Close it in `afterAll`. */
+export async function createTestDatabase(): Promise<PGlite> {
+  const db = await createSupabaseTestDatabase();
   // Every migration, in order -- a hard-coded list silently skips the next one.
   for (const file of fs.readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql')).sort()) {
     await db.exec(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8'));

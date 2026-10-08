@@ -1,0 +1,28 @@
+{
+  "formatVersion": 1,
+  "verifiedOn": "2026-10-08",
+  "targetProject": "pvbppmajgsbkrnvxlzrn",
+  "migrationVersion": "20261007160159",
+  "migrationName": "pin_project_owner_search_path",
+  "localFile": "supabase/migrations/20261007160159_pin_project_owner_search_path.sql",
+  "sha256": "76613636830b56325a4bef5069fa4f895620fdf7a92e05fb73880c7d87c8f9a8",
+  "normalizedRemoteMd5": "c7d7c71365157d0d50b96aeedde734aa",
+  "cliVersion": "2.120.0",
+  "cliGeneratedVersion": "20261007155544",
+  "versionNote": "Only this new CLI-generated file was aligned to the observed hosted MCP version; SQL, historical migrations and remote ledgers were not rewritten.",
+  "intentionalCatalogDelta": {
+    "kind": "function",
+    "name": "alpha.keep_project_owner()",
+    "fingerprint": "852236f08e8603092534481b95b78eb7",
+    "change": "Pin search_path to empty; preserve function identity, body, owner, ACL and invoker mode"
+  },
+  "verifiedCatalogObjects": 496,
+  "unchangedEffectiveAccessEntries": 72,
+  "applicationTables": 21,
+  "applicationRows": 0,
+  "securityWarnings": 0,
+  "remainingSecurityInfo": ["rls_enabled_no_policy:alpha_private.sessions (deliberately server-only)"],
+  "liveChanged": false,
+  "authSmtpOrStorageConfigured": false,
+  "emailsSent": false
+}

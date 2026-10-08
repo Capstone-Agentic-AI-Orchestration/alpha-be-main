@@ -1,0 +1,2488 @@
+{
+  "formatVersion": 1,
+  "capturedOn": "2026-10-07",
+  "sourceProject": "gupmckxxaaxlameekihy",
+  "notice": "Read-only structural metadata, not a live backup. MD5 compares PostgreSQL catalog definitions; not a security signature.",
+  "objects": [
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.expires_at",
+      "fingerprint": "b8dc5465af83f15c27cdf633bf07ef1c"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.last_seen_at",
+      "fingerprint": "803d56e7cb1fe700c1ecc69062976206"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.login",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.name",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.role",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.token_cipher",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.token_iv",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "alpha_private.sessions.token_tag",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.agent_call_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.artifact_type",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.content",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.content_reference",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.owner_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.path",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_call_artifacts.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.agent_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.completed_at",
+      "fingerprint": "803d56e7cb1fe700c1ecc69062976206"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.error",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.instruction",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.message_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.operation_mode",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.requested_by",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.result_message_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.revision_target_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.revision_target_label",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.revision_target_type",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.squad_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.started_at",
+      "fingerprint": "803d56e7cb1fe700c1ecc69062976206"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.status",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.thread_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.working_copy_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agent_calls.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.allowed_users",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.autonomy_level",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.avatar",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.color",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.concurrency_limit",
+      "fingerprint": "271f0edf20c848116d6040ef30f6ea55"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.description",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.is_archived",
+      "fingerprint": "6f3b34640a9d8195fa5628899e707a3d"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.is_mine",
+      "fingerprint": "e9ad2cca649cc9fa1bd53c038e7284a7"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.is_seeded",
+      "fingerprint": "1b2d399aaa0209161b2a562d0ec668df"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.mcp_servers",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.model_name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.model_provider",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.owner",
+      "fingerprint": "38d5b109156823b74edf086f53fc5b3d"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.phase",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.reasoning_effort",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.role",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.skills",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.system_prompt",
+      "fingerprint": "355712bef00a27c3b6c4d73bb69a2254"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.temperature",
+      "fingerprint": "d70d636ebfa45405674dea5d2f34cce5"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.template_key",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.template_version",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.agents.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.agent_call_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.agent_call_status",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.content",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.message_type",
+      "fingerprint": "3767e894a76aad1277d26b64e242a8e6"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.operation_mode",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.revision_target",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.sender_name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.sender_type",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.squad_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.thinking_process",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.thread_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.timestamp",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_messages.tools_executed",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.agent_ids",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.last_message_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.last_message_snippet",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.owner_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.project_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.target_agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.target_squad_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.title",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.chat_threads.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.author_avatar",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.author_name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.author_type",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.content",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.github_id",
+      "fingerprint": "fd81c6e988744d1c05e5d816fa56a1a9"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.is_thinking",
+      "fingerprint": "6f3b34640a9d8195fa5628899e707a3d"
+    },
+    {
+      "kind": "column",
+      "name": "public.issue_comments.issue_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.assigned_agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.assigned_human",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.assigned_squad_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.branch_name",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.created_by",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.description",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.github_number",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.github_repo",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.github_url",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.identifier",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.labels",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.pr_url",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.priority",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.status",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.subtasks",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.title",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.issues.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.approval_gate",
+      "fingerprint": "1b2d399aaa0209161b2a562d0ec668df"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.depends_on",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.enabled",
+      "fingerprint": "14ea4bf43cf24757f6097b74012b9d32"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.label",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.phase",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.position",
+      "fingerprint": "d46af1903577576e333bdbf816f6741a"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.required",
+      "fingerprint": "14ea4bf43cf24757f6097b74012b9d32"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.squad_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.project_build_steps.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.color",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.created_by",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.description",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.github_org",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.icon",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.key",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.lead_agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.lead_name",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.lead_type",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.priority",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.resources",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.start_date",
+      "fingerprint": "803d56e7cb1fe700c1ecc69062976206"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.status",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.target_date",
+      "fingerprint": "803d56e7cb1fe700c1ecc69062976206"
+    },
+    {
+      "kind": "column",
+      "name": "public.projects.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.activities",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.agent_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.branch_name",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.cache_creation_tokens",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.cache_read_tokens",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.changed_files",
+      "fingerprint": "efffc2eda6b4f0205775adbd5d467c34"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.cost_usd",
+      "fingerprint": "0d4419b3b3be1aea7cf19110a9f97e66"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.current_stage_index",
+      "fingerprint": "efffc2eda6b4f0205775adbd5d467c34"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.deletions",
+      "fingerprint": "efffc2eda6b4f0205775adbd5d467c34"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.input_tokens",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.insertions",
+      "fingerprint": "efffc2eda6b4f0205775adbd5d467c34"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.issue_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.machine_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.num_turns",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.output_tokens",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.owner_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.plan",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.pr_url",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.scenario",
+      "fingerprint": "059d25b5d2cbaad40f6163588dfa8458"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.squad_order",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.squad_run_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.stages",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.status",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.test_summary",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.thinking_tokens",
+      "fingerprint": "a50c4283b5f725ee6e744c968fae597a"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.prototype_runs.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.action",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.actor",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.detail",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.issue_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.run_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.succeeded",
+      "fingerprint": "fa56500de2d6fb8f5d2ce2e52ced6e3f"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.target",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.remote_actions.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.category",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.command_example",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.description",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.installed",
+      "fingerprint": "6f3b34640a9d8195fa5628899e707a3d"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.is_enabled",
+      "fingerprint": "e9ad2cca649cc9fa1bd53c038e7284a7"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.path",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.permissions",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.skills.source",
+      "fingerprint": "0311de46b992d1c66e45902c7f8791fd"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.branch_name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.current_member_index",
+      "fingerprint": "d46af1903577576e333bdbf816f6741a"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.issue_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.machine_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.member_agent_ids",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.mission",
+      "fingerprint": "56d7e8677aee25f248fceddf8838b1ed"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.owner_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.plan",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.squad_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.status",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.stopped_reason",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.squad_runs.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.active_runs_count",
+      "fingerprint": "efffc2eda6b4f0205775adbd5d467c34"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.avatar",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.color",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.completed_runs_count",
+      "fingerprint": "efffc2eda6b4f0205775adbd5d467c34"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.description",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.leader_agent_id",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.member_agent_ids",
+      "fingerprint": "03bcdf8f24c6f6d8e8940f77b8684bff"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.mission",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.topology",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.squads.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_entity_bindings.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_entity_bindings.entity_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_entity_bindings.entity_type",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_entity_bindings.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.role",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.status",
+      "fingerprint": "f7f74a6dcbb13679c150d5a4ee87636c"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.user_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_members.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.status",
+      "fingerprint": "f7f74a6dcbb13679c150d5a4ee87636c"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.user_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_project_assignments.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.squad_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.status",
+      "fingerprint": "f7f74a6dcbb13679c150d5a4ee87636c"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.user_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_owners.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.project_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.relationship",
+      "fingerprint": "73e140260ff97a0c4fc7653533b52e91"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.squad_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.status",
+      "fingerprint": "f7f74a6dcbb13679c150d5a4ee87636c"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspace_squad_projects.workspace_id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.created_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.created_by",
+      "fingerprint": "1298613f915d7106587ac82faacb0f70"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.id",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.name",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.organization",
+      "fingerprint": "61af1481f742db258e8a20ef797fd226"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.settings_json",
+      "fingerprint": "76d26ceff0731fd880ac54724ba71355"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.slug",
+      "fingerprint": "926c1cdecd24d6e669b1ade47f6a224e"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.status",
+      "fingerprint": "f7f74a6dcbb13679c150d5a4ee87636c"
+    },
+    {
+      "kind": "column",
+      "name": "public.workspaces.updated_at",
+      "fingerprint": "ba0b45b862fea580f23faff63964f8e0"
+    },
+    {
+      "kind": "constraint",
+      "name": "alpha_private.sessions.sessions_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "alpha_private.sessions.sessions_role_check",
+      "fingerprint": "48e457e48452c848cd74bc756f13f07a"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agent_call_artifacts.agent_call_artifacts_agent_call_id_fkey",
+      "fingerprint": "5cc74826b4dfb76d6cd883fd328a8c1d"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agent_call_artifacts.agent_call_artifacts_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agent_call_artifacts.agent_call_artifacts_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agent_calls.agent_calls_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agent_calls.agent_calls_thread_id_fkey",
+      "fingerprint": "9b2d9f5af52df40d3ba069b7d8080412"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agent_calls.agent_calls_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agents.agents_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.agents.agents_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.chat_messages.chat_messages_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.chat_messages.chat_messages_thread_id_fkey",
+      "fingerprint": "9b2d9f5af52df40d3ba069b7d8080412"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.chat_threads.chat_threads_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.chat_threads.chat_threads_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issue_comments.issue_comments_issue_id_fkey",
+      "fingerprint": "2a053d2127d611968dfbe6aae3b48db1"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issue_comments.issue_comments_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issues.issues_assigned_agent_id_fkey",
+      "fingerprint": "48d8ec2f4640685e548804dcdc8413ee"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issues.issues_identifier_key",
+      "fingerprint": "6194c117714466de314d10b4f667a290"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issues.issues_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issues.issues_project_id_fkey",
+      "fingerprint": "a9e15b6d9457a732dc6f33f2cb31aa68"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.issues.issues_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.project_build_steps.project_build_steps_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.project_build_steps.project_build_steps_project_id_fkey",
+      "fingerprint": "a9e15b6d9457a732dc6f33f2cb31aa68"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.project_build_steps.project_build_steps_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.projects.projects_key_key",
+      "fingerprint": "7fd805517fb9761a53e61e55a547bf64"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.projects.projects_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.projects.projects_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.prototype_runs.prototype_runs_issue_id_fkey",
+      "fingerprint": "2a053d2127d611968dfbe6aae3b48db1"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.prototype_runs.prototype_runs_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.prototype_runs.prototype_runs_project_id_fkey",
+      "fingerprint": "a9e15b6d9457a732dc6f33f2cb31aa68"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.prototype_runs.prototype_runs_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.remote_actions.remote_actions_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.remote_actions.remote_actions_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.skills.skills_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.squad_runs.squad_runs_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.squad_runs.squad_runs_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.squads.squads_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.squads.squads_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_entity_bindings.workspace_entity_bindings_pkey",
+      "fingerprint": "09db67f57c3fea12830e1fb1958843f5"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_entity_bindings.workspace_entity_bindings_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_members.workspace_members_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_members.workspace_members_role_check",
+      "fingerprint": "48e457e48452c848cd74bc756f13f07a"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_members.workspace_members_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_members.workspace_members_workspace_id_user_id_key",
+      "fingerprint": "caa1c916a686f0d80f365402ac363044"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_project_assignments.workspace_project_assignments_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_project_assignments.workspace_project_assignments_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_project_assignments.workspace_project_assignments_workspace_id_project_id_user__key",
+      "fingerprint": "995c9db983836df4dc8a3520df13d88b"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_squad_owners.workspace_squad_owners_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_squad_owners.workspace_squad_owners_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_squad_owners.workspace_squad_owners_workspace_id_squad_id_key",
+      "fingerprint": "7ccfeaaa41f293df3cd2694ce932c016"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_squad_projects.workspace_squad_projects_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_squad_projects.workspace_squad_projects_workspace_id_fkey",
+      "fingerprint": "e550f9e0f84e06c276f3f0f5f25a9068"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspace_squad_projects.workspace_squad_projects_workspace_id_squad_id_project_id_key",
+      "fingerprint": "8a020684c71597162e753bd7df482741"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspaces.workspaces_pkey",
+      "fingerprint": "b49497afa54e8f80dfdc2b2f87edd1f8"
+    },
+    {
+      "kind": "constraint",
+      "name": "public.workspaces.workspaces_slug_key",
+      "fingerprint": "9635cebfdb63fef1769cac5be42e78d3"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.alpha_role()",
+      "fingerprint": "b5e5d998768aab74bd207d0e0c5c7adc"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.broadcast_board_change()",
+      "fingerprint": "d2906f971ed2aa4a0e5b870890e3539c"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.claims()",
+      "fingerprint": "bb069028577e687ac95848dacec8ca8c"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.in_workspace(row_workspace text)",
+      "fingerprint": "10bb9a659c50a07818f142dcb4090d37"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.is_admin()",
+      "fingerprint": "c05e22518ed659b94645a62a3938d30c"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.is_overseer()",
+      "fingerprint": "9fc8c9ac1bfe16212a79df148945911f"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.keep_project_owner()",
+      "fingerprint": "c9f1bcb11d63bcde50c37bb6fdc513b5"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.login()",
+      "fingerprint": "0a4aa8774de8d3b04018c029396c83e9"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.pm_owned(project_workspace text, project_creator text)",
+      "fingerprint": "9c303b4b8d4795c940c9ed619efdb4c3"
+    },
+    {
+      "kind": "function",
+      "name": "alpha.workspace()",
+      "fingerprint": "0b1254b27e14c721d70a1cc565fdbf00"
+    },
+    {
+      "kind": "index",
+      "name": "alpha_private.sessions.idx_sessions_expires",
+      "fingerprint": "a57c65d5ef2f5bae144ad0d500872271"
+    },
+    {
+      "kind": "index",
+      "name": "alpha_private.sessions.idx_sessions_login",
+      "fingerprint": "5c4fb007bc247635aa0f78f205d2976c"
+    },
+    {
+      "kind": "index",
+      "name": "alpha_private.sessions.sessions_pkey",
+      "fingerprint": "1242a0ba4d41f033b58b0a36ffca9840"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_call_artifacts.agent_call_artifacts_pkey",
+      "fingerprint": "562252be9785c96f5c82317b0c1d7679"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_call_artifacts.idx_artifacts_call",
+      "fingerprint": "cbfe796f664f08aedf303d3f7e9bbd70"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_call_artifacts.idx_artifacts_workspace",
+      "fingerprint": "9f2e49a5acd9c60976758f19d8a40978"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_calls.agent_calls_pkey",
+      "fingerprint": "707f975acb6a0a2fd4170e64388163da"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_calls.idx_calls_requested_by",
+      "fingerprint": "bb330bd5934e1f4c755228c627b972d3"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_calls.idx_calls_thread",
+      "fingerprint": "a8b8563f7b839042cca1926a8a50ddda"
+    },
+    {
+      "kind": "index",
+      "name": "public.agent_calls.idx_calls_workspace",
+      "fingerprint": "fdcd86eaff8527db8b119b2377e642e3"
+    },
+    {
+      "kind": "index",
+      "name": "public.agents.agents_pkey",
+      "fingerprint": "914a207c1b50735b9bd44dc6de3187c0"
+    },
+    {
+      "kind": "index",
+      "name": "public.agents.idx_agents_workspace",
+      "fingerprint": "982e61c35ec4497af3a28aa1b9e02660"
+    },
+    {
+      "kind": "index",
+      "name": "public.agents.idx_agents_workspace_template",
+      "fingerprint": "66c19a8d4daa13537af990cd02061112"
+    },
+    {
+      "kind": "index",
+      "name": "public.chat_messages.chat_messages_pkey",
+      "fingerprint": "0c71e9d9a7bca958f0e3d58abaf0f5f6"
+    },
+    {
+      "kind": "index",
+      "name": "public.chat_messages.idx_messages_thread",
+      "fingerprint": "69e772325ab815c0460784fb31ec0706"
+    },
+    {
+      "kind": "index",
+      "name": "public.chat_threads.chat_threads_pkey",
+      "fingerprint": "d85ae42efcb8eb7ac3cae95dbf62b680"
+    },
+    {
+      "kind": "index",
+      "name": "public.chat_threads.idx_threads_owner",
+      "fingerprint": "1010c26184ba666f9444762cacf9ee4a"
+    },
+    {
+      "kind": "index",
+      "name": "public.chat_threads.idx_threads_workspace",
+      "fingerprint": "c0ddc8bb68bfc63dcd279f6d135ea2bf"
+    },
+    {
+      "kind": "index",
+      "name": "public.issue_comments.idx_comments_issue",
+      "fingerprint": "8638adbbe022a40836bbe6b8bf002fee"
+    },
+    {
+      "kind": "index",
+      "name": "public.issue_comments.issue_comments_pkey",
+      "fingerprint": "dee53c65191ae23084872f6b9489aa74"
+    },
+    {
+      "kind": "index",
+      "name": "public.issues.idx_issues_agent",
+      "fingerprint": "f42f1e5c63d2a240c703c219306080d2"
+    },
+    {
+      "kind": "index",
+      "name": "public.issues.idx_issues_project",
+      "fingerprint": "1feecf721d5d9e7341b834c3d4aca3f4"
+    },
+    {
+      "kind": "index",
+      "name": "public.issues.idx_issues_workspace",
+      "fingerprint": "b10b0a8ca9507ffba588db5ffc007087"
+    },
+    {
+      "kind": "index",
+      "name": "public.issues.issues_identifier_key",
+      "fingerprint": "6ae4e6f71acd61caee05b2664c0b7fa5"
+    },
+    {
+      "kind": "index",
+      "name": "public.issues.issues_pkey",
+      "fingerprint": "1ba81a91d9485c78c0a667d1092f408c"
+    },
+    {
+      "kind": "index",
+      "name": "public.project_build_steps.idx_build_steps_project",
+      "fingerprint": "9e8127752f784f1f0e3cf134f2c9d7d0"
+    },
+    {
+      "kind": "index",
+      "name": "public.project_build_steps.idx_build_steps_workspace",
+      "fingerprint": "47c026e0c4aa5f7684213a6a94f40847"
+    },
+    {
+      "kind": "index",
+      "name": "public.project_build_steps.project_build_steps_pkey",
+      "fingerprint": "9c1eae4f9c66304953cea55e6bca9c14"
+    },
+    {
+      "kind": "index",
+      "name": "public.projects.idx_projects_created_by",
+      "fingerprint": "7cc1f6398488e8fa4f21a6804200965f"
+    },
+    {
+      "kind": "index",
+      "name": "public.projects.idx_projects_workspace",
+      "fingerprint": "4c2ec0dfbe354ba1280fa92825878362"
+    },
+    {
+      "kind": "index",
+      "name": "public.projects.projects_key_key",
+      "fingerprint": "80516424e019c4039b6115f2eeedeb8d"
+    },
+    {
+      "kind": "index",
+      "name": "public.projects.projects_pkey",
+      "fingerprint": "963ad6cb32c4fc7bdcdb527dfeb04dc3"
+    },
+    {
+      "kind": "index",
+      "name": "public.prototype_runs.idx_runs_issue",
+      "fingerprint": "d5cbf051cfd064cf6efb7bac88b7d393"
+    },
+    {
+      "kind": "index",
+      "name": "public.prototype_runs.idx_runs_owner",
+      "fingerprint": "20ae8d24f9f89d9e5fad1b2f933127a6"
+    },
+    {
+      "kind": "index",
+      "name": "public.prototype_runs.idx_runs_project",
+      "fingerprint": "572ae3a0806d25281acfe8d67f4d57ab"
+    },
+    {
+      "kind": "index",
+      "name": "public.prototype_runs.idx_runs_workspace",
+      "fingerprint": "85cadaa70ff290255e5bd8d04a2ce606"
+    },
+    {
+      "kind": "index",
+      "name": "public.prototype_runs.prototype_runs_pkey",
+      "fingerprint": "84ef30dbdd860569afb3bc8f8df514a9"
+    },
+    {
+      "kind": "index",
+      "name": "public.remote_actions.idx_actions_workspace",
+      "fingerprint": "d4ebed7fdc235c040f9f95242ae15da3"
+    },
+    {
+      "kind": "index",
+      "name": "public.remote_actions.remote_actions_pkey",
+      "fingerprint": "335006c814723c628745caeca7ff2323"
+    },
+    {
+      "kind": "index",
+      "name": "public.skills.skills_pkey",
+      "fingerprint": "0e6b09b2fa0aec54fcdf9c27ebc900b5"
+    },
+    {
+      "kind": "index",
+      "name": "public.squad_runs.idx_squad_runs_workspace",
+      "fingerprint": "2e0362bb612683841f93f9f318eee8a3"
+    },
+    {
+      "kind": "index",
+      "name": "public.squad_runs.squad_runs_pkey",
+      "fingerprint": "3b9465e1f16f9426786a6b0322edf823"
+    },
+    {
+      "kind": "index",
+      "name": "public.squads.idx_squads_workspace",
+      "fingerprint": "f63ab757aa2a228e4150dcd9d13c3298"
+    },
+    {
+      "kind": "index",
+      "name": "public.squads.squads_pkey",
+      "fingerprint": "95036a24e10bd01be2c73cd3a0cb31b3"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_entity_bindings.idx_bindings_workspace",
+      "fingerprint": "bcffe5e534200a37de0342e91e489c44"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_entity_bindings.workspace_entity_bindings_pkey",
+      "fingerprint": "f1f776b58a6b353c5db7c1c720ccd24f"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_members.idx_members_user",
+      "fingerprint": "cb69108ab38cabd98d4c318e03c8f4fd"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_members.workspace_members_pkey",
+      "fingerprint": "f25c21227ea0b2489d91af2cf983be48"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_members.workspace_members_workspace_id_user_id_key",
+      "fingerprint": "a8ec4f0dda8899581c53e05beabcbffd"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_project_assignments.workspace_project_assignments_pkey",
+      "fingerprint": "28322b97e52685f0f99794ff1deac919"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_project_assignments.workspace_project_assignments_workspace_id_project_id_user__key",
+      "fingerprint": "ca3fa4f2235fb5842efe990ab2734f50"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_squad_owners.workspace_squad_owners_pkey",
+      "fingerprint": "5f5a513f6bf364eea2f2a91abbf18adc"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_squad_owners.workspace_squad_owners_workspace_id_squad_id_key",
+      "fingerprint": "feec97975921c731535f1bb7c0778dd7"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_squad_projects.workspace_squad_projects_pkey",
+      "fingerprint": "6fc4483685b27109c97ac39f1b4d21c7"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspace_squad_projects.workspace_squad_projects_workspace_id_squad_id_project_id_key",
+      "fingerprint": "7c5de7989f6d1caf76c82833bbf2a1fd"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspaces.workspaces_pkey",
+      "fingerprint": "d3fdca9e1e55a2e692b206d3846d7217"
+    },
+    {
+      "kind": "index",
+      "name": "public.workspaces.workspaces_slug_key",
+      "fingerprint": "3d127484845597d87e6f27c78f1b75b0"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agent_call_artifacts.read own or overseen artifacts",
+      "fingerprint": "c081929dd5e7ab7ed6c6891cbc2b66e6"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agent_call_artifacts.write own artifacts",
+      "fingerprint": "93c609637ac80a52b22381180d241d03"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agent_calls.change own agent calls",
+      "fingerprint": "f7ef19fa6d00f50f1255341559df3b8a"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agent_calls.delete own agent calls",
+      "fingerprint": "bc38531f38a9a58d1e971a192574a51c"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agent_calls.make own agent calls",
+      "fingerprint": "80bcbebd684449cfa98a617d0440c243"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agent_calls.read own agent calls",
+      "fingerprint": "697d89da68303cf669fd69b8294eed40"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agents.developers add agents",
+      "fingerprint": "a227cdfd67f8cb97efb2d311c72eab2e"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agents.developers change agents",
+      "fingerprint": "bf7fd15ee51f372b6cfdc15fbd48939d"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agents.developers remove agents",
+      "fingerprint": "514e7944a8c2b11907891e6ec6a7dafa"
+    },
+    {
+      "kind": "policy",
+      "name": "public.agents.members read agents they may address",
+      "fingerprint": "f44e32f8da632d1ebfbb531172373af1"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_messages.add messages to own threads",
+      "fingerprint": "0d1da91f68617e1f80652692db81f685"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_messages.change messages in own threads",
+      "fingerprint": "bfeb330141cf6c78cae990310de43068"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_messages.delete messages in own threads",
+      "fingerprint": "17963799bda18b1a02216782afd8431b"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_messages.read messages in own threads",
+      "fingerprint": "f4c4ecc636f0913841abaa601dd4bdc7"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_threads.change own threads",
+      "fingerprint": "a1e8f7b63bc2b8f66a08f72406d2de59"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_threads.delete own threads",
+      "fingerprint": "67994ce78d28a1a5dd5d68f59e623eae"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_threads.read own threads",
+      "fingerprint": "218c7ef0bbc66ded62184ea2cbab1447"
+    },
+    {
+      "kind": "policy",
+      "name": "public.chat_threads.start own threads",
+      "fingerprint": "93c609637ac80a52b22381180d241d03"
+    },
+    {
+      "kind": "policy",
+      "name": "public.issue_comments.read comments on visible issues",
+      "fingerprint": "d8d6cc260f49ef7509109f64bc9656db"
+    },
+    {
+      "kind": "policy",
+      "name": "public.issue_comments.write comments on visible issues",
+      "fingerprint": "cfe174e93756a1f5b66f1f0c7d1ab95e"
+    },
+    {
+      "kind": "policy",
+      "name": "public.issues.internal roles add issues",
+      "fingerprint": "ebfd7c1a0fd3f0f197ec0189ce15ae98"
+    },
+    {
+      "kind": "policy",
+      "name": "public.issues.internal roles change issues",
+      "fingerprint": "7c86781864354001f8986d2c3c6585a9"
+    },
+    {
+      "kind": "policy",
+      "name": "public.issues.internal roles read issues",
+      "fingerprint": "f4ea407f0fcbf068714b8fe909982fc0"
+    },
+    {
+      "kind": "policy",
+      "name": "public.issues.internal roles remove issues",
+      "fingerprint": "aba85cbf604775bf78d1d10ddd1265b2"
+    },
+    {
+      "kind": "policy",
+      "name": "public.project_build_steps.members read build steps",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.project_build_steps.overseers add build steps",
+      "fingerprint": "7c3df786ff86ced2a3abe27590666162"
+    },
+    {
+      "kind": "policy",
+      "name": "public.project_build_steps.overseers change build steps",
+      "fingerprint": "5c8e80becdf8abf1d5214f7f866ddfaa"
+    },
+    {
+      "kind": "policy",
+      "name": "public.project_build_steps.overseers remove build steps",
+      "fingerprint": "3c67aeef5b8e4eb3514e5db6ee804fb8"
+    },
+    {
+      "kind": "policy",
+      "name": "public.projects.clients read assigned projects",
+      "fingerprint": "4a26260b2e456b3e75ccfd925e7d3272"
+    },
+    {
+      "kind": "policy",
+      "name": "public.projects.overseers remove pm-owned projects",
+      "fingerprint": "d2da57908871446de9d602e3f0c1034e"
+    },
+    {
+      "kind": "policy",
+      "name": "public.projects.pm add projects",
+      "fingerprint": "0b8d70d99f03e847fe151cf85eb46824"
+    },
+    {
+      "kind": "policy",
+      "name": "public.projects.pm-owned projects",
+      "fingerprint": "429e064461022109bfc9a473be43c392"
+    },
+    {
+      "kind": "policy",
+      "name": "public.projects.team change projects",
+      "fingerprint": "23c189fa4ccf6928aa0fc03c385eef8c"
+    },
+    {
+      "kind": "policy",
+      "name": "public.prototype_runs.change own runs",
+      "fingerprint": "a1e8f7b63bc2b8f66a08f72406d2de59"
+    },
+    {
+      "kind": "policy",
+      "name": "public.prototype_runs.delete own runs",
+      "fingerprint": "67994ce78d28a1a5dd5d68f59e623eae"
+    },
+    {
+      "kind": "policy",
+      "name": "public.prototype_runs.read own or overseen runs",
+      "fingerprint": "c081929dd5e7ab7ed6c6891cbc2b66e6"
+    },
+    {
+      "kind": "policy",
+      "name": "public.prototype_runs.start own runs",
+      "fingerprint": "93c609637ac80a52b22381180d241d03"
+    },
+    {
+      "kind": "policy",
+      "name": "public.remote_actions.append to own audit",
+      "fingerprint": "8b3c47f4d5e89ac5605c2050c05b4e10"
+    },
+    {
+      "kind": "policy",
+      "name": "public.remote_actions.read own or overseen audit",
+      "fingerprint": "19860f31682ee9408b884d309e5c1275"
+    },
+    {
+      "kind": "policy",
+      "name": "public.skills.admins add skills",
+      "fingerprint": "5d1f4ad83a1cb7a5d099482217dd342d"
+    },
+    {
+      "kind": "policy",
+      "name": "public.skills.admins change skills",
+      "fingerprint": "5cdbbe0aa3f38efdd3618c3ab41e4d9c"
+    },
+    {
+      "kind": "policy",
+      "name": "public.skills.admins remove skills",
+      "fingerprint": "fc4db84b344682130322adfbc1e9340d"
+    },
+    {
+      "kind": "policy",
+      "name": "public.skills.everyone reads skills",
+      "fingerprint": "ec823286e6b8934bf217b3c301c457e3"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squad_runs.change own squad runs",
+      "fingerprint": "a1e8f7b63bc2b8f66a08f72406d2de59"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squad_runs.delete own squad runs",
+      "fingerprint": "67994ce78d28a1a5dd5d68f59e623eae"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squad_runs.read own or overseen squad runs",
+      "fingerprint": "c081929dd5e7ab7ed6c6891cbc2b66e6"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squad_runs.start own squad runs",
+      "fingerprint": "93c609637ac80a52b22381180d241d03"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squads.developers add squads",
+      "fingerprint": "a0e08e84b508f51ec24b191324c56089"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squads.developers change squads",
+      "fingerprint": "fbe4598767094a88bee6486ebe524d1d"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squads.developers remove squads",
+      "fingerprint": "5401d53e083ab5891191702bff817aef"
+    },
+    {
+      "kind": "policy",
+      "name": "public.squads.members read squads",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_entity_bindings.overseers add bindings",
+      "fingerprint": "7c3df786ff86ced2a3abe27590666162"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_entity_bindings.overseers change bindings",
+      "fingerprint": "5c8e80becdf8abf1d5214f7f866ddfaa"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_entity_bindings.overseers remove bindings",
+      "fingerprint": "3c67aeef5b8e4eb3514e5db6ee804fb8"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_entity_bindings.read bindings",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_members.admins add members",
+      "fingerprint": "838afe7b078480bee385e883b31ff314"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_members.admins change members",
+      "fingerprint": "4a6ad702eb5bcdde1d61cd948e71052c"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_members.admins remove members",
+      "fingerprint": "1054939591a4fdd247fb264e71f75c77"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_members.read the roster",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_project_assignments.overseers add assignments",
+      "fingerprint": "7c3df786ff86ced2a3abe27590666162"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_project_assignments.overseers change assignments",
+      "fingerprint": "5c8e80becdf8abf1d5214f7f866ddfaa"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_project_assignments.overseers remove assignments",
+      "fingerprint": "3c67aeef5b8e4eb3514e5db6ee804fb8"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_project_assignments.read assignments",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_owners.change squad ownership",
+      "fingerprint": "a1d848628b86cc4c8a627aeb2d6cae3a"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_owners.claim squad ownership",
+      "fingerprint": "9e80afc2c89e4c986bb7e8564b283448"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_owners.read squad owners",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_owners.release squad ownership",
+      "fingerprint": "1f13217b5bfb45bf9a399adfa0c854a8"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_projects.overseers assign squads",
+      "fingerprint": "7c3df786ff86ced2a3abe27590666162"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_projects.overseers change squad assignments",
+      "fingerprint": "5c8e80becdf8abf1d5214f7f866ddfaa"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_projects.overseers unassign squads",
+      "fingerprint": "3c67aeef5b8e4eb3514e5db6ee804fb8"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspace_squad_projects.read squad projects",
+      "fingerprint": "13a98385ad62d59549d8becb1a212887"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspaces.admins update their workspace",
+      "fingerprint": "b7deb8da2a030f2e0f096861ca45a6d4"
+    },
+    {
+      "kind": "policy",
+      "name": "public.workspaces.read own workspace",
+      "fingerprint": "097783837895aa36ed9d223ea6c2c08e"
+    },
+    {
+      "kind": "policy",
+      "name": "realtime.messages.listen to runs you can see",
+      "fingerprint": "daef95ddc3329645dc7d0d3035bc082d"
+    },
+    {
+      "kind": "policy",
+      "name": "realtime.messages.listen to your workspace board",
+      "fingerprint": "132019341c859b99d75d3e1f764fa053"
+    },
+    {
+      "kind": "policy",
+      "name": "realtime.messages.publish to your own runs",
+      "fingerprint": "706162454155d2cb64b67e546dd00fa5"
+    },
+    {
+      "kind": "table",
+      "name": "alpha_private.sessions",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_call_artifacts",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_calls",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.agents",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_messages",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_threads",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.issue_comments",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.issues",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.project_build_steps",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.projects",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.prototype_runs",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.remote_actions",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.skills",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.squad_runs",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.squads",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_entity_bindings",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_members",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_project_assignments",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_owners",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_projects",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "table",
+      "name": "public.workspaces",
+      "fingerprint": "bb792f2c013de10b2750b5196b8e12c4"
+    },
+    {
+      "kind": "trigger",
+      "name": "public.issues.broadcast_issue_changes",
+      "fingerprint": "bc022b6d7a0eaf7f851735b619934b42"
+    },
+    {
+      "kind": "trigger",
+      "name": "public.projects.broadcast_project_changes",
+      "fingerprint": "7abd28748fc31766cf7627c59cc40e37"
+    },
+    {
+      "kind": "trigger",
+      "name": "public.projects.keep_project_owner",
+      "fingerprint": "6082e3c9ffeacaba6370ebe03e94543f"
+    }
+  ]
+}

@@ -1,0 +1,191 @@
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SpawnOptions } from './processManager.js';
+
+/** Actual RunnerService + actual WorkspaceQueue; only external effects and data
+ * are test doubles. No CLI, Git, provider, cloud or live user data is contacted.
+ */
+let tmp: string;
+let runner: import('./runnerService.js').RunnerService;
+let queue: import('./workspaceQueue.js').WorkspaceQueue;
+let rows: Map<string, any>;
+let issues: any[];
+let projects: any[];
+let processes: { options: SpawnOptions; child: EventEmitter; exited: boolean }[];
+let verify: ReturnType<typeof vi.fn>;
+let createBranch: ReturnType<typeof vi.fn>;
+let diff: ReturnType<typeof vi.fn>;
+let spawn: ReturnType<typeof vi.fn>;
+let squads: Map<string, any>;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const passedVerification = () => ({ status: 'passed', commands: [], summary: 'Fixture checks passed.' });
+
+beforeEach(async () => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-run-lifetime-'));
+  vi.resetModules(); rows = new Map(); squads = new Map(); issues = []; projects = []; processes = [];
+  let time = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => ++time);
+  const agent = { id: 'agent-fixture', name: 'Fixture agent', avatar: '', autonomyLevel: 'supervised' };
+  const sql = {
+    getPrototypeRuns: () => [...rows.values()].map(value => structuredClone(value)),
+    savePrototypeRun: (value: any) => rows.set(value.id, structuredClone(value)),
+    getIssues: () => issues.map(value => structuredClone(value)), getProjects: () => projects,
+    getAgents: () => [agent, { ...agent, id: 'agent-second' }], getRuntimes: () => [], recordRemoteAction: vi.fn(),
+    getSquads: () => [{ id: 'squad-fixture', name: 'Fixture squad', topology: 'Sequential', memberAgentIds: ['agent-fixture', 'agent-second'] }],
+    getSquadRun: (id: string) => structuredClone(squads.get(id)),
+    saveSquadRun: (value: any) => squads.set(value.id, structuredClone(value)),
+    getRunsForSquadRun: (id: string) => [...rows.values()].filter(value => value.squadRunId === id).map(value => structuredClone(value)),
+    updateIssue: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes),
+  };
+  spawn = vi.fn((options: SpawnOptions) => {
+    const child = new EventEmitter();
+    processes.push({ options, child, exited: false });
+    return child;
+  });
+  verify = vi.fn(async () => passedVerification());
+  createBranch = vi.fn(async () => undefined);
+  diff = vi.fn(async () => ({ changedFiles: 0, insertions: 0, deletions: 0 }));
+  vi.doMock('./sqliteService.js', () => ({ sqliteService: sql }));
+  vi.doMock('./processManager.js', () => ({ processManager: { spawnProcess: spawn,
+    killProcess: vi.fn(async () => undefined), isRunActive: () => true } }));
+  vi.doMock('./supabaseService.js', () => ({ supabaseService: { isConfigured: () => false } }));
+  vi.doMock('./boardWriteThrough.js', () => ({ addCommentAndShare: vi.fn(),
+    updateIssueAndPush: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes) }));
+  vi.doMock('./workspaceService.js', () => ({ resolveProjectWorkspace: (project: any) => ({ dir: project.cwd }), allowAttachedWorkspace: vi.fn() }));
+  vi.doMock('../utils/gitUtils.js', () => ({ createBranch, createBranchFrom: createBranch, checkoutBranch: createBranch,
+    remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => false }));
+  vi.doMock('./githubService.js', () => ({ githubService: {} }));
+  vi.doMock('./verificationService.js', () => ({ runVerification: verify }));
+  vi.doMock('./agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready' }) }));
+  vi.doMock('./personaService.js', () => ({ resolveAgentLogged: () => ({ name: agent.name, autonomyLevel: 'supervised',
+    modelProvider: 'Anthropic', modelName: 'fixture-model', systemPrompt: 'Fixture.', mcpServers: [] }) }));
+  vi.doMock('./cliRunner.js', () => ({ writeTurnPersona: () => undefined, buildTurnInvocation: () => ({ bin: 'test-only-not-spawned', args: [], family: 'claude', env: {} }) }));
+  vi.doMock('./mcpConfigService.js', () => ({ writeRunMcpConfig: () => ({ serverNames: [] }), cleanupRunMcpConfig: vi.fn(), hostingScopeFor: () => undefined }));
+  vi.doMock('./customCliArgs.js', () => ({ buildEnv: () => ({ env: {} }), reportIgnoredProjectEnv: vi.fn() }));
+  vi.doMock('./gitCredentialIsolation.js', () => ({ agentCredentialEnv: () => ({}) }));
+  vi.doMock('../config/env.js', async () => ({ ...await vi.importActual('../config/env.js'), RUNS_DIR: path.join(tmp, 'runs') }));
+  runner = (await import('./runnerService.js')).runnerService;
+  queue = (await import('./workspaceQueue.js')).workspaceQueue;
+});
+
+afterEach(async () => {
+  // Drain only test doubles before removing this fixture's temporary folder.
+  createBranch.mockResolvedValue(undefined); verify.mockResolvedValue(passedVerification()); diff.mockResolvedValue({ changedFiles: 0, insertions: 0, deletions: 0 });
+  await vi.waitFor(async () => {
+    for (let index = 0; index < processes.length; index++) if (!processes[index].exited) await exit(index, 1);
+    expect(queue.activeKeys()).toEqual([]);
+  });
+  vi.restoreAllMocks(); fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+function work(id: string, checkout = 'shared-checkout') {
+  const cwd = path.join(tmp, checkout); fs.mkdirSync(cwd, { recursive: true });
+  projects.push({ id: `project-${id}`, name: id, key: 'FIX', cwd });
+  issues.push({ id, projectId: `project-${id}`, identifier: `FIX-${id}`, title: id, description: 'Fixture work.', status: 'todo' });
+  return { cwd, start: () => runner.startRun({ issueId: id, agentId: 'agent-fixture', plan: [] }) };
+}
+async function exit(index: number, code = 0, reason?: Parameters<NonNullable<SpawnOptions['onExit']>>[2]) {
+  const process = processes[index]; process.exited = true;
+  await process.options.onExit?.(code, reason ? 'SIGTERM' : null, reason);
+}
+
+describe('RunnerService workspace ownership lifetime', () => {
+  it('does not let a second run switch the checkout while the first agent is working', async () => {
+    const a = work('a'); const b = work('b'); await a.start(); await b.start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1));
+    expect(createBranch).toHaveBeenCalledTimes(1); expect(queue.depth(a.cwd)).toBe(2);
+    await exit(0); await vi.waitFor(() => expect(processes).toHaveLength(2));
+    expect(createBranch).toHaveBeenCalledTimes(2); await exit(1);
+  });
+  it('holds the checkout through verification after the agent exits', async () => {
+    const check = deferred<ReturnType<typeof passedVerification>>(); verify.mockReturnValueOnce(check.promise);
+    const a = work('a'); await a.start(); await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); const finishing = exit(0);
+    await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce());
+    expect(processes).toHaveLength(1); expect(createBranch).toHaveBeenCalledTimes(1);
+    check.resolve(passedVerification()); await finishing;
+    await vi.waitFor(() => expect(processes).toHaveLength(2)); await exit(1);
+  });
+  it('holds the checkout through final diff/review preparation', async () => {
+    const stats = deferred<{ changedFiles: number; insertions: number; deletions: number }>(); diff.mockReturnValueOnce(stats.promise);
+    await work('a').start(); await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); const finishing = exit(0);
+    await vi.waitFor(() => expect(diff).toHaveBeenCalledOnce()); expect(processes).toHaveLength(1);
+    stats.resolve({ changedFiles: 0, insertions: 0, deletions: 0 }); await finishing;
+    await vi.waitFor(() => expect(processes).toHaveLength(2)); await exit(1);
+  });
+  it('still runs different checkouts concurrently', async () => {
+    await work('a', 'checkout-a').start(); await work('b', 'checkout-b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(2)); await Promise.all([exit(0), exit(1)]);
+  });
+  it('releases the checkout after a failed process', async () => {
+    const a = await work('a').start(); await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0, 1);
+    expect(rows.get(a.id).status).toBe('failed'); await vi.waitFor(() => expect(processes).toHaveLength(2)); await exit(1);
+  });
+  it('releases the checkout after a failed spawn with no process', async () => {
+    spawn.mockImplementationOnce(() => { throw new Error('Executable missing'); });
+    const a = await work('a').start(); await work('b').start();
+    await vi.waitFor(() => expect(rows.get(a.id).status).toBe('failed'));
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0);
+  });
+  it('releases on asynchronous spawn failure reported by ProcessManager', async () => {
+    const a = await work('a').start(); await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0, 1, 'spawn_error');
+    expect(rows.get(a.id).testSummary).toContain('could not be started');
+    await vi.waitFor(() => expect(processes).toHaveLength(2)); await exit(1);
+  });
+  it('releases on finalization failure without an unhandled exit callback', async () => {
+    verify.mockRejectedValueOnce(new Error('Verification infrastructure unavailable'));
+    const a = await work('a').start(); await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0);
+    await vi.waitFor(() => expect(rows.get(a.id).status).toBe('failed'));
+    await vi.waitFor(() => expect(processes).toHaveLength(2)); await exit(1);
+  });
+  it('does not release on cancellation until the active child actually exits', async () => {
+    const a = await work('a').start(); await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await runner.cancelRun(a.id);
+    expect(processes).toHaveLength(1); await exit(0, 1, 'cancelled');
+    await vi.waitFor(() => expect(processes).toHaveLength(2)); expect(rows.get(a.id).status).toBe('cancelled'); await exit(1);
+  });
+  it('skips a queued cancelled run without spawning it', async () => {
+    await work('a').start(); const b = await work('b').start();
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await runner.cancelRun(b.id); await exit(0);
+    await vi.waitFor(() => expect(queue.activeKeys()).toEqual([])); expect(processes).toHaveLength(1);
+    expect(rows.get(b.id).status).toBe('cancelled');
+  });
+  it('rechecks cancellation after asynchronous branch preparation, before spawn', async () => {
+    const prepared = deferred<void>(); createBranch.mockReturnValueOnce(prepared.promise);
+    const a = await work('a').start(); await vi.waitFor(() => expect(createBranch).toHaveBeenCalledOnce());
+    await runner.cancelRun(a.id); prepared.resolve();
+    await vi.waitFor(() => expect(queue.activeKeys()).toEqual([])); expect(processes).toHaveLength(0);
+  });
+  it('does not publish a successful review after work failed during verification', async () => {
+    const check = deferred<ReturnType<typeof passedVerification>>(); verify.mockReturnValueOnce(check.promise);
+    const a = await work('a').start(); await vi.waitFor(() => expect(processes).toHaveLength(1));
+    const finishing = exit(0); await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce());
+    rows.set(a.id, { ...rows.get(a.id), status: 'failed' });
+    check.resolve(passedVerification()); await finishing;
+    expect(rows.get(a.id).status).toBe('failed'); expect(diff).not.toHaveBeenCalled();
+  });
+  it('lets a real sequential squad enqueue its next member without a queue deadlock', async () => {
+    work('squad-issue');
+    const squadRunner = new (await import('./squadRunner.js')).SquadRunner();
+    const squadRun = await squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'squad-issue' });
+    await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0);
+    await vi.waitFor(() => expect(processes).toHaveLength(2));
+    expect(squads.get(squadRun.id).currentMemberIndex).toBe(1);
+    expect(issues.find(value => value.id === 'squad-issue').status).toBe('agent_running');
+    await exit(1);
+    await vi.waitFor(() => expect(squads.get(squadRun.id).status).toBe('awaiting_approval'));
+    expect(issues.find(value => value.id === 'squad-issue').status).toBe('review');
+  });
+});

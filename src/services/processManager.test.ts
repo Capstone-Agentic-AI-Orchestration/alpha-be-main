@@ -27,6 +27,24 @@ function fakeChild() {
 }
 
 describe('ProcessManager termination reasons', () => {
+  it('settles a failed spawn with no PID even when no exit event arrives', () => {
+    const child = fakeChild(); delete child.pid; spawnMock.mockReturnValueOnce(child);
+    const manager = new ProcessManager(); const onExit = vi.fn();
+    manager.spawnProcess({ runId: 'no-binary', bin: 'missing-cli', args: [], cwd: process.cwd(), onExit });
+    child.emit('error', new Error('ENOENT'));
+    expect(onExit).toHaveBeenCalledExactlyOnceWith(null, null, 'spawn_error');
+    expect(manager.isRunActive('no-binary')).toBe(false);
+    child.emit('exit', 1, null);
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+  it('does not mistake an error on a live PID for completed execution', () => {
+    const child = fakeChild(); spawnMock.mockReturnValueOnce(child);
+    const manager = new ProcessManager(); const onExit = vi.fn();
+    manager.spawnProcess({ runId: 'live-error', bin: 'node', args: [], cwd: process.cwd(), onExit });
+    child.emit('error', new Error('An IPC operation failed'));
+    expect(onExit).not.toHaveBeenCalled(); expect(manager.isRunActive('live-error')).toBe(true);
+    child.emit('exit', 1, null); expect(onExit).toHaveBeenCalledOnce(); expect(manager.isRunActive('live-error')).toBe(false);
+  });
   it('passes a timeout reason through a delayed exit event', async () => {
     const child = fakeChild();
     spawnMock.mockReturnValueOnce(child);

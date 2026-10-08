@@ -1,0 +1,970 @@
+{
+  "capturedOn": "2026-10-07",
+  "sourceProject": "gupmckxxaaxlameekihy",
+  "notice": "Effective application schema/table privilege metadata; RLS still applies separately.",
+  "objects": [
+    {
+      "kind": "schema",
+      "name": "alpha",
+      "role": "anon",
+      "permissions": {
+        "usage": true,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "alpha",
+      "role": "authenticated",
+      "permissions": {
+        "usage": true,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "alpha",
+      "role": "service_role",
+      "permissions": {
+        "usage": false,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "alpha_private",
+      "role": "anon",
+      "permissions": {
+        "usage": false,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "alpha_private",
+      "role": "authenticated",
+      "permissions": {
+        "usage": false,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "alpha_private",
+      "role": "service_role",
+      "permissions": {
+        "usage": false,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "public",
+      "role": "anon",
+      "permissions": {
+        "usage": true,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "public",
+      "role": "authenticated",
+      "permissions": {
+        "usage": true,
+        "create": false
+      }
+    },
+    {
+      "kind": "schema",
+      "name": "public",
+      "role": "service_role",
+      "permissions": {
+        "usage": true,
+        "create": false
+      }
+    },
+    {
+      "kind": "table",
+      "name": "alpha_private.sessions",
+      "role": "anon",
+      "permissions": {
+        "delete": false,
+        "insert": false,
+        "select": false,
+        "update": false,
+        "trigger": false,
+        "truncate": false,
+        "references": false
+      }
+    },
+    {
+      "kind": "table",
+      "name": "alpha_private.sessions",
+      "role": "authenticated",
+      "permissions": {
+        "delete": false,
+        "insert": false,
+        "select": false,
+        "update": false,
+        "trigger": false,
+        "truncate": false,
+        "references": false
+      }
+    },
+    {
+      "kind": "table",
+      "name": "alpha_private.sessions",
+      "role": "service_role",
+      "permissions": {
+        "delete": false,
+        "insert": false,
+        "select": false,
+        "update": false,
+        "trigger": false,
+        "truncate": false,
+        "references": false
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_call_artifacts",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_call_artifacts",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_call_artifacts",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_calls",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_calls",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agent_calls",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agents",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agents",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.agents",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_messages",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_messages",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_messages",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_threads",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_threads",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.chat_threads",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.issue_comments",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.issue_comments",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.issue_comments",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.issues",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.issues",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.issues",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.project_build_steps",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.project_build_steps",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.project_build_steps",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.projects",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.projects",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.projects",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.prototype_runs",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.prototype_runs",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.prototype_runs",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.remote_actions",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.remote_actions",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.remote_actions",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.skills",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.skills",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.skills",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.squad_runs",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.squad_runs",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.squad_runs",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.squads",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.squads",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.squads",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_entity_bindings",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_entity_bindings",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_entity_bindings",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_members",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_members",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_members",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_project_assignments",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_project_assignments",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_project_assignments",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_owners",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_owners",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_owners",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_projects",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_projects",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspace_squad_projects",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspaces",
+      "role": "anon",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspaces",
+      "role": "authenticated",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    },
+    {
+      "kind": "table",
+      "name": "public.workspaces",
+      "role": "service_role",
+      "permissions": {
+        "delete": true,
+        "insert": true,
+        "select": true,
+        "update": true,
+        "trigger": true,
+        "truncate": true,
+        "references": true
+      }
+    }
+  ]
+}

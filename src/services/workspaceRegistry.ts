@@ -67,7 +67,9 @@ export type WorkspaceCapability =
   /** Set or remove hosting variables on the uat and dev environments; `main` needs `deployment.manage`. */
   | 'deployment.env_preview'
   | 'analytics.read'
-  | 'intake.submit';
+  | 'intake.submit'
+  /** Manage client tickets in this PM-owned workspace; external clients do not use this membership. */
+  | 'ticket.manage';
 
 const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
   client: [
@@ -134,6 +136,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'project.promote',
     'issue.read',
     'issue.manage',
+    'ticket.manage',
     'agent.read',
     // A PM staffs the agents used by the projects they initiate.
     'agent.manage',
