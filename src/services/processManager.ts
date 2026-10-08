@@ -5,7 +5,7 @@ import { sqliteService } from './sqliteService.js';
 import { logAudit, logInfo, logError } from '../utils/logger.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 
-export type ProcessTerminationReason = 'cancelled' | 'timeout' | 'provider_error';
+export type ProcessTerminationReason = 'cancelled' | 'timeout' | 'provider_error' | 'spawn_error';
 
 export interface SpawnOptions {
   runId: string;
@@ -152,23 +152,31 @@ export class ProcessManager {
       });
     }
 
-    child.on('exit', (code, signal) => {
+    let settled = false;
+    const finish = (code: number | null, signal: string | null, failureReason?: ProcessTerminationReason) => {
+      if (settled) return;
+      settled = true;
       const entry = this.activeProcesses.get(runId);
       if (entry?.timer) clearTimeout(entry.timer);
       if (entry?.idleTimer) clearTimeout(entry.idleTimer);
       this.activeProcesses.delete(runId);
-      const terminationReason = this.terminationReasons.get(runId);
+      const terminationReason = failureReason ?? this.terminationReasons.get(runId);
       this.terminationReasons.delete(runId);
 
       logInfo(`Process for run ${runId} exited with code ${code}, signal ${signal}`);
       logAudit('PROCESS_EXIT', { runId, code, signal });
 
       if (onExit) onExit(code, signal, terminationReason);
-    });
+    };
+    child.on('exit', (code, signal) => finish(code, signal));
 
     child.on('error', (err) => {
       logError(`Process error in run ${runId}:`, err);
       logAudit('PROCESS_ERROR', { runId, error: err.message });
+      // Failed spawn (e.g. missing CLI) has no PID and may never emit exit.
+      // Clear timers and notify completion exactly once. Errors on a live PID
+      // are NOT proof of termination; keep its queue/ownership until exit.
+      if (!child.pid) finish(null, null, 'spawn_error');
     });
 
     return child;

@@ -4,8 +4,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
-import { verifyDatabase } from './store/database.js';
+import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, ALPHA_TICKETING_READS_ENABLED, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
+import { database, verifyDatabase } from './store/database.js';
 import { dataRouter } from './controllers/dataController.js';
 import { downloadRouter } from './controllers/downloadController.js';
 import { seedDefaultWorkspace, workspaceRouter } from './controllers/workspaceController.js';
@@ -36,6 +36,9 @@ import { ensureAgentFiles } from './services/agentFileService.js';
 import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
 import { DEFAULT_WORKSPACE_ID, runWithWorkspace } from './services/workspaceContext.js';
+import { createTicketPmReadRouteBoundary } from './controllers/ticketPmReadRouteFactory.js';
+import { createTicketUnavailableRouter } from './controllers/ticketUnavailableRouter.js';
+import { createTicketClientUnavailableRouter } from './controllers/ticketClientUnavailableRouter.js';
 
 /**
  * Refuse to start rather than store credentials in the clear.
@@ -135,6 +138,11 @@ app.use(
   })
 );
 
+// The browser-only client surface stays explicitly unavailable until its
+// durable ticket stores and email delivery are ready. Keep it ahead of local
+// token, workspace, and GitHub-session middleware; it never relays to desktop.
+app.use('/api/client', createTicketClientUnavailableRouter());
+
 /**
  * Optional shared secret for local callers.
  *
@@ -185,6 +193,12 @@ app.use('/api', (req, res, next) => {
  */
 app.use('/api', sessionContext);
 app.use('/api', workspaceContext);
+// Tickets lives inside the existing PM portal. Keep the new API isolated and
+// read-only until durable write adapters are complete. Desktop requests relay
+// through the same path but never construct a local ticket database.
+app.use('/api/tickets', IS_CLOUD && ALPHA_TICKETING_READS_ENABLED
+  ? createTicketPmReadRouteBoundary(database())
+  : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);
 app.use('/api', dataRouter);

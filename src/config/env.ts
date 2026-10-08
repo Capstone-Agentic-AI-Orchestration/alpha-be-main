@@ -32,6 +32,16 @@ export const IS_CLOUD = ALPHA_MODE === 'cloud';
 export const IS_DESKTOP = !IS_CLOUD;
 
 /**
+ * Read-only PM ticket API rollout gate.
+ *
+ * Ticket tables and their durable write services are being introduced in
+ * phases. Keep the existing application unchanged unless an operator has
+ * explicitly enabled the read boundary against a database with the ticket
+ * schema installed. This flag does not enable ticket writes or client routes.
+ */
+export const ALPHA_TICKETING_READS_ENABLED = process.env.ALPHA_TICKETING_READS_ENABLED === '1';
+
+/**
  * An installed desktop app, as opposed to a daemon someone is running from a
  * checkout. Set by the Electron shell from `app.isPackaged`.
  *

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { NextFunction, Request, Response } from 'express';
 
 import { IS_CLOUD, SESSION_TTL_MS } from '../config/env.js';
@@ -108,7 +109,10 @@ async function bearerSession(req: Request): Promise<Session | null> {
     role: identity.role,
     githubToken,
     // Lives as long as the request: the next one is verified again (from cache).
-    expiresAt: new Date(Date.now() + 60_000).toISOString()
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    // This request handle is generated only after verifyGitHubToken succeeds;
+    // it is not the bearer token and is never returned to the renderer.
+    ticketAuthentication: { kind: 'verified_github_bearer', verificationId: randomUUID() }
   };
 }
 

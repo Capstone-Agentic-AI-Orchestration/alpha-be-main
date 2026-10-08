@@ -1,0 +1,164 @@
+{
+  "format_version": 1,
+  "captured_on": "2026-10-07",
+  "environment": "shared-live",
+  "project_ref": "gupmckxxaaxlameekihy",
+  "repository_commit": "c867852",
+  "normalization": "CRLF to LF; trim outer ASCII whitespace",
+  "notice": "Historical read-only snapshot, not live schema verification or permission to deploy.",
+  "migrations": [
+    {
+      "local_file": "0001_control_plane_schema.sql",
+      "local_sha256": "3c142df276431f22b634cb0c7f69a00b8f61577ff178d5deff0657f8241cc377",
+      "remote_version": "20260921145036",
+      "remote_name": "control_plane_schema",
+      "remote_sql_md5": "122e591e6fe972655e90886e3a2f4f07",
+      "review": "exact_normalized_sql",
+      "notes": "Normalized source fingerprint matches the recorded migration."
+    },
+    {
+      "local_file": "0002_row_level_security.sql",
+      "local_sha256": "3034c63c1e9bb256c7f70415e624186559872fc61930c88c99089181dce1098d",
+      "remote_version": "20260921145305",
+      "remote_name": "row_level_security",
+      "remote_sql_md5": "eb4e31b912cf12d498823deefb7ddb5c",
+      "review": "exact_normalized_sql",
+      "notes": "Normalized source fingerprint matches the recorded migration."
+    },
+    {
+      "local_file": "0003_agent_exec_config_stays_local.sql",
+      "local_sha256": "03f53cf368273277cccad534ce1785c9896c0a484cf3717e05c63ffceb0ba505",
+      "remote_version": "20260921231218",
+      "remote_name": "agent_exec_config_stays_local",
+      "remote_sql_md5": "605c03a7edc9a7fd2a47d9075904cb8e",
+      "review": "exact_normalized_sql",
+      "notes": "Normalized source fingerprint matches the recorded migration."
+    },
+    {
+      "local_file": "0004_trust_only_alpha_tokens.sql",
+      "local_sha256": "3493cf7411f293e6bbeddf35698a3784cd5d27cc54d605dc904d32fb9ef18f4d",
+      "remote_version": "20260921231230",
+      "remote_name": "trust_only_alpha_tokens",
+      "remote_sql_md5": "eedcf7a7f830019096963ca865419995",
+      "review": "exact_normalized_sql",
+      "notes": "Normalized source fingerprint matches the recorded migration."
+    },
+    {
+      "local_file": "0005_index_foreign_keys.sql",
+      "local_sha256": "75688ef9898fe3bc29c0e9d306ac3eed8bffcb699707166c2149509c885dfab4",
+      "remote_version": "20260921231234",
+      "remote_name": "index_foreign_keys",
+      "remote_sql_md5": "a7ffb6f13ef8c55dec6095a0ef6633c7",
+      "review": "exact_normalized_sql",
+      "notes": "Normalized source fingerprint matches the recorded migration."
+    },
+    {
+      "local_file": "0006_private_run_channels.sql",
+      "local_sha256": "0071d6457aae807031c693108837e1e0990f1ed16b35549dd167917e794a40ea",
+      "remote_version": "20260922032515",
+      "remote_name": "private_run_channels",
+      "remote_sql_md5": "62459521fdac89be816df7eff8824db1",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0007_server_sessions.sql",
+      "local_sha256": "5470f84cd08a6111fc6d083575b2b91fb83c7de5b87e46667f3c4e769bade2bc",
+      "remote_version": "20260922032523",
+      "remote_name": "server_sessions",
+      "remote_sql_md5": "5a445001c083398bd0aceb2d8987cac7",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0008_one_owner_per_squad.sql",
+      "local_sha256": "7b3e497eb97bcc5466e27b069ef123ace8d6952a90a469e7a8862d3369da81e4",
+      "remote_version": "20260922032528",
+      "remote_name": "one_owner_per_squad",
+      "remote_sql_md5": "f64f57a8c66da8558824e017fb0c586a",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0009_issue_assignee_without_roster.sql",
+      "local_sha256": "ef389d43e67b026b5d9f3e73cd1f2ca45de70756ff992895004cdf133c8d7c6b",
+      "remote_version": "20260922032535",
+      "remote_name": "issue_assignee_without_roster",
+      "remote_sql_md5": "6307bcd5ba802c57879f2e4fddf02c01",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0010_agent_visibility_and_templates.sql",
+      "local_sha256": "563083c91da9e2e926eb2b958c9d05cc3ed68723dbfd39bb3bd0fee7d4496feb",
+      "remote_version": "20260922032543",
+      "remote_name": "agent_visibility_and_templates",
+      "remote_sql_md5": "8b0645815c40239300900a1492a6ced5",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0011_shared_roster.sql",
+      "local_sha256": "843bcaf12d4d63c159c1f9c0f0ed6ead2c595667ba169295fc0425dd3d8e2f33",
+      "remote_version": "20260922090006",
+      "remote_name": "shared_roster",
+      "remote_sql_md5": "c68e307bda1a52a9db5605bd51a0f85a",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0012_live_board.sql",
+      "local_sha256": "10e7b50576f07b0f71a6fa7713acf1154c280fefe28dd0490ec9cc829f7cd40a",
+      "remote_version": "20260922111102",
+      "remote_name": "live_board",
+      "remote_sql_md5": "aaba160d0ee711b433eab60c9f467d45",
+      "review": "reviewed_difference",
+      "notes": "Recorded SQL adds DROP POLICY IF EXISTS before CREATE POLICY, differs in COMMENT ON text, and omits function-source comments. Do not replay automatically."
+    },
+    {
+      "local_file": "0013_policy_hygiene.sql",
+      "local_sha256": "4bfabf7439c436118117e0780bc3a216f593e43de238fa185d4ef3aa2f5bfef4",
+      "remote_version": "20260922130230",
+      "remote_name": "policy_hygiene",
+      "remote_sql_md5": "cf2867b9bb8e798d043b42dd161663b5",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0014_drop_join_code.sql",
+      "local_sha256": "ae469b6a4d5a9ca8b006477bbb09ff643fccdb0ded59a53ed40f8bb958703443",
+      "remote_version": "20260922165208",
+      "remote_name": "0014_drop_join_code",
+      "remote_sql_md5": "2ceafdb13719392b86af5892b4f885f8",
+      "review": "exact_normalized_sql",
+      "notes": "Normalized source fingerprint matches the recorded migration."
+    },
+    {
+      "local_file": "0015_pm_project_ownership.sql",
+      "local_sha256": "89c9f1c061d0f0fba981dab252ddcbb20bb10c42f114eef869fe18f0b97dbf9b",
+      "remote_version": "20260924151814",
+      "remote_name": "0015_pm_project_ownership",
+      "remote_sql_md5": "98882e38f40fd3004c629b9dbfdc0a5f",
+      "review": "formatting_reviewed",
+      "notes": "Source comparison found comments/formatting differences; no SQL behavior difference identified in this review. Not proof of current live object equivalence."
+    },
+    {
+      "local_file": "0016_internal_agent_management.sql",
+      "local_sha256": "0f2a2f610b9508019be850b24a7a720cf5b89559be5dda3853d8895c18862933",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "Not in recorded ledger; live agent policy names still match the earlier developer-only write policies."
+    },
+    {
+      "local_file": "0017_hosting_audit.sql",
+      "local_sha256": "b71c57169c53e0a59aec3f4b9ae068aac59fbaa5d21a26b18e15e28725453156",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "Not in recorded ledger; read-only to_regclass confirmed hosting_audit absent."
+    }
+  ]
+}

@@ -48,6 +48,15 @@ export interface Session {
   /** Decrypted per request, never stored decrypted and never logged. */
   githubToken: string;
   expiresAt: string;
+  /**
+   * Server-only proof for sensitive ticket operations. Cookie sessions carry
+   * the persisted hash id so a store can recheck revocation; a GitHub bearer
+   * carries a request-scoped handle minted only after verification. Never
+   * serialize this field or accept it from a request header/body.
+   */
+  ticketAuthentication:
+    | { kind: 'session'; sessionId: string }
+    | { kind: 'verified_github_bearer'; verificationId: string };
 }
 
 interface SessionRow {
@@ -225,7 +234,8 @@ export class SessionService {
       name: row.name ?? undefined,
       role: row.role as AlphaRole,
       githubToken,
-      expiresAt: iso(row.expires_at)
+      expiresAt: iso(row.expires_at),
+      ticketAuthentication: { kind: 'session', sessionId: row.id }
     };
   }
 

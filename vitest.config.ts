@@ -1,7 +1,12 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  // Restricted Windows workers may deny Vite's realpath on package imports.
+  // This test-only setting avoids canonicalizing paths; app builds use Vite's
+  // separate production configuration.
+  resolve: { preserveSymlinks: true },
   test: {
+    setupFiles: ['./src/test/setup.ts'],
     /**
      * Room for the tests that boot the whole API.
      *
@@ -13,6 +18,22 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     env: {
+      // Tests select cloud mode explicitly and provide an in-memory store.
+      // Do not inherit a developer's cloud deployment or SQLite path.
+      ALPHA_MODE: 'desktop',
+      ALPHA_PACKAGED: '',
+      SQLITE_DB_PATH: '',
+      DATABASE_URL: '',
+      DATABASE_CA_CERT: '',
+      SUPABASE_URL: '',
+      SUPABASE_ANON_KEY: '',
+      SUPABASE_JWT_SECRET: '',
+      GITHUB_TOKEN: '',
+      GH_TOKEN: '',
+      GITHUB_CLIENT_SECRET: '',
+      GITHUB_APP_ID: '',
+      GITHUB_APP_PRIVATE_KEY: '',
+      ALPHA_ADMINS: '',
       /**
        * Keep role-resolution tests independent of a developer's local `.env`.
        * `databaseTokenExchange.test.ts` supplies mocked memberships for this

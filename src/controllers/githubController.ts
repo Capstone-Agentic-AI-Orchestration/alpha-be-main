@@ -255,6 +255,8 @@ githubRouter.get('/github/oauth/callback', async (req: Request, res: Response) =
 /** The signed-in user, or 401. The frontend's "who am I" on boot. */
 githubRouter.get('/github/session', (req: Request, res: Response) => {
   if (!req.session) return res.status(401).json({ error: 'Not signed in.' });
+  // Explicit public allowlist: never expose GitHub credentials or the
+  // server-only ticket-authentication handle carried on this request.
   const { login, name, role, expiresAt } = req.session;
   // Deliberately not the GitHub token. It never leaves this process.
   return res.json({ login, name, role, expiresAt });
