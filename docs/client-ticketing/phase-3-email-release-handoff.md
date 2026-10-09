@@ -146,9 +146,9 @@ No DROP, DELETE, new migration, or live data mutation is required by this phase.
   demonstrated Phase 3 regression. An earlier full-suite run reported 153 test
   files and 2,640 tests passing.
 - Frontend and desktop worktrees remain unchanged by this provider switch.
-- No live database write, real email, localhost app test, push or deployment
-  was performed for the switch. Hosted credentials and confirmed real receipt
-  remain outstanding; Phase 3 is not yet complete.
+- No live database write, real email, localhost app test or deployment was
+  performed. The Phase 3 source branch was pushed for review; hosted credentials
+  and a confirmed real receipt remain outstanding, so Phase 3 is not yet complete.
 
 ## Provider documentation
 
