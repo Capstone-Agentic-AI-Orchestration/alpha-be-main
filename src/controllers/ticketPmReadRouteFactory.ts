@@ -14,6 +14,8 @@ import { createTicketMessageService } from '../services/ticketMessageService.js'
 import { createTicketCommandRouter } from './ticketCommandController.js';
 import { createTicketMessageRouter } from './ticketMessageController.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
+import { createTicketInvitationEmailRouter } from './ticketInvitationEmailController.js';
+import { PostgresTicketInvitationEmailStore } from '../store/ticketInvitationEmailPostgresStore.js';
 
 /**
  * First production composition slice for the existing PM Tickets page.
@@ -26,6 +28,7 @@ export function createTicketPmReadRouteBoundary(
   db: TransactionalSql,
   relayRequest: typeof relayPmTicketRequest = relayPmTicketRequest,
   triageEnabled = false,
+  invitationEmailDeliveryConfigured = false,
 ): Router {
   const router = Router({ caseSensitive: true, strict: true });
   const queue = createTicketQueueService(new PostgresTicketQueueStore(db));
@@ -46,6 +49,9 @@ export function createTicketPmReadRouteBoundary(
     router.use(createTicketMessageRouter({ note: messages.note,
       async reply() { throw new TicketWorkflowError(503, 'ticket_action_unavailable', 'Client conversations are not enabled yet.'); },
     }, relayRequest));
+    router.use(createTicketInvitationEmailRouter(
+      new PostgresTicketInvitationEmailStore(db), invitationEmailDeliveryConfigured,
+    ));
   }
   router.use((_req, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, private');
