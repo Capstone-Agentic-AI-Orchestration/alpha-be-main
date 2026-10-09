@@ -36,6 +36,7 @@ const SUPABASE_STUBS = `
 
   create role anon nologin;
   create role authenticated nologin;
+  create role service_role nologin;
 
   create schema if not exists realtime;
   create table realtime.messages (

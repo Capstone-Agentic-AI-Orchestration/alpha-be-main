@@ -156,7 +156,10 @@ function safeMessages<T extends PublicTicketMessage | InternalTicketNote>(
 
 /** PM-only ticket read transport. Mounted only through the opt-in read-only
  * cloud composition; client session routes use a separate auth boundary. */
-export function createTicketReadRouter(application: PmTicketReadApplication): Router {
+export function createTicketReadRouter(
+  application: PmTicketReadApplication,
+  relayRequest: typeof relayPmTicketRequest = relayPmTicketRequest,
+): Router {
   const router = Router();
   const secureHeaders = (res: Response) => {
     res.setHeader('Cache-Control', 'no-store, private');
@@ -173,7 +176,7 @@ export function createTicketReadRouter(application: PmTicketReadApplication): Ro
 
   router.get('/:ticketId', route(async (req, res) => {
     secureHeaders(res);
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
     const subject = pmTicketSubject(req, res);
     if (!subject) return;
     const target = targetFromRequest(req);
@@ -185,7 +188,7 @@ export function createTicketReadRouter(application: PmTicketReadApplication): Ro
 
   router.get('/:ticketId/messages', route(async (req, res) => {
     secureHeaders(res);
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
     const subject = pmTicketSubject(req, res);
     if (!subject) return;
     const target = targetFromRequest(req);
@@ -195,7 +198,7 @@ export function createTicketReadRouter(application: PmTicketReadApplication): Ro
 
   router.get('/:ticketId/notes', route(async (req, res) => {
     secureHeaders(res);
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
     const subject = pmTicketSubject(req, res);
     if (!subject) return;
     const target = targetFromRequest(req);

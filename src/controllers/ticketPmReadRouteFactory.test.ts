@@ -29,6 +29,25 @@ async function invoke(handler: any) {
 afterEach(() => vi.resetModules());
 
 describe('PM read-only ticket route composition', () => {
+  it('mounts command and private-note routes only when Phase 2 triage is enabled', async () => {
+    const { createTicketPmReadRouteBoundary } = await import('./ticketPmReadRouteFactory.js');
+    const db = { query: vi.fn(), transaction: vi.fn() } as unknown as TransactionalSql;
+    const relay = vi.fn(async () => false);
+    function paths(router: any): string[] {
+      return router.stack.flatMap((layer: any) => layer.route ? [layer.route.path]
+        : layer.handle?.stack ? paths(layer.handle) : []);
+    }
+    const readOnly = paths(createTicketPmReadRouteBoundary(db, relay));
+    const triage = paths(createTicketPmReadRouteBoundary(db, relay, true));
+    expect(readOnly).not.toContain('/:ticketId/commands');
+    expect(triage).toContain('/:ticketId/commands');
+    expect(triage).toContain('/operations/:operationId');
+    expect(triage).not.toContain('/:ticketId/invitations');
+    expect(triage).not.toContain('/:ticketId/scope');
+    expect(db.query).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   it('keeps workflow mutations unavailable without touching persistence', async () => {
     await withReadOnlyPmRouter(async (handler, db) => {
       const response = await invoke(handler);

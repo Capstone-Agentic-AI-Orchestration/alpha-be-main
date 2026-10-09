@@ -93,7 +93,6 @@ function createInput(operationId: string, override: Record<string, unknown> = {}
 
 beforeAll(async () => {
   local = await createSupabaseTestDatabase();
-  await local.exec('create role service_role nologin');
   await local.exec('begin');
   try {
     await local.exec(baseline);

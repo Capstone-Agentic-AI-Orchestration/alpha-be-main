@@ -79,7 +79,12 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
   async loadQueue(scope: LockedTicketQueue, page: TicketQueuePageRequest, month: TicketQueueMonth): Promise<TicketQueueRow[]> {
     const predicate = queueFilterSql(page.filter);
     const { rows } = await this.sql.query<QueueDbRow>(
-      `with base as (
+      `with queue_month_parameters as (
+         -- The year/month/zone binds are only referenced by the closed_month
+         -- predicate. PostgreSQL still needs their types when another filter
+         -- is selected because later positional binds are used for cursor/limit.
+         select $5::int as year, $6::int as month, $7::text as time_zone
+       ), base as (
          select t.workspace_id, t.id as ticket_id, t.reference, t.title, t.status, t.version,
                 t.workflow_state, t.created_at, t.client_updated_at, t.internal_updated_at,
                 t.closed_at, t.project_id,

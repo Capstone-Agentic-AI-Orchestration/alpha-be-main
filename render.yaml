@@ -31,6 +31,19 @@ services:
       - key: ALPHA_MODE
         value: cloud
 
+      # Authenticated PM reads; the separate triage switch adds Phase 2 writes.
+      # Client accounts and later workflow actions remain unavailable.
+      - key: ALPHA_TICKETING_READS_ENABLED
+        value: "1"
+      # Requires the additive ticket operation receipt migration before rollout.
+      - key: ALPHA_TICKETING_TRIAGE_ENABLED
+        value: "1"
+      # Public inquiry remains unavailable until a real provider is configured.
+      - key: TICKET_TURNSTILE_SECRET
+        sync: false
+      - key: TICKET_TURNSTILE_SITE_KEY
+        sync: false
+
       # Encrypts the GitHub token on every session row. The daemon refuses to
       # start without it rather than writing credentials in the clear, so let
       # Render mint one — a generated value is better than a memorable one.

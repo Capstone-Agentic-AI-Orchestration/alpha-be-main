@@ -27,7 +27,10 @@ function safeReceipt(value: TicketMessageReceipt, ticketId: string): TicketMessa
 }
 
 /** PM public replies and private notes; mount behind internal session/workspace middleware. */
-export function createTicketMessageRouter(application: PmTicketMessageApplication): Router {
+export function createTicketMessageRouter(
+  application: PmTicketMessageApplication,
+  relayRequest: typeof relayPmTicketRequest = relayPmTicketRequest,
+): Router {
   const router = Router();
 
   async function write(req: Request, res: Response, kind: 'reply' | 'note'): Promise<unknown> {
@@ -35,7 +38,7 @@ export function createTicketMessageRouter(application: PmTicketMessageApplicatio
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
     const subject = pmTicketSubject(req, res);
     if (!subject) return;
     const ticketId = req.params.ticketId ?? '';

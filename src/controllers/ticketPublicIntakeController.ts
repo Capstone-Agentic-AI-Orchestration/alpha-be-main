@@ -29,7 +29,7 @@ export type TicketIntakeAddressResolver = (req: Request) => string | null;
  * rate budgets, idempotency and the atomic inquiry write.
  *
  * This router must be mounted only after a durable store and real proof guard
- * have been configured. It is intentionally not mounted by index.ts yet.
+ * have been configured. index.ts mounts it only through the triage rollout gate.
  */
 export function createTicketPublicIntakeRouter(
   application: TicketPublicIntakeApplication,
