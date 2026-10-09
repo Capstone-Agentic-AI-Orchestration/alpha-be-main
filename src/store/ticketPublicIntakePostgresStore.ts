@@ -101,7 +101,7 @@ class IntakeRateLimitDenied extends Error {
  * It does not implement proof verification or mount a public route.
  */
 export class PostgresTicketPublicIntakeStore implements TicketPublicIntakeStore {
-  constructor(private readonly db: TransactionalSql) {}
+  constructor(private readonly db: TransactionalSql, private readonly acknowledgmentsEnabled = false) {}
 
   async loadPublishedEntry(slug: string): Promise<PublishedTicketIntakeEntry | null> {
     return readEntry(this.db, slug, false);
@@ -164,7 +164,7 @@ export class PostgresTicketPublicIntakeStore implements TicketPublicIntakeStore 
   }
 
   transaction<T>(work: (tx: TicketPublicIntakeTransaction) => Promise<T>): Promise<T> {
-    return this.db.transaction(sql => work(new PostgresTicketPublicIntakeTransaction(sql)));
+    return this.db.transaction(sql => work(new PostgresTicketPublicIntakeTransaction(sql, this.acknowledgmentsEnabled)));
   }
 }
 
@@ -172,7 +172,7 @@ class PostgresTicketPublicIntakeTransaction implements TicketPublicIntakeTransac
   private lockedEntry: PublishedTicketIntakeEntry | null = null;
   private createdTarget: { workspaceId: string; ticketId: string } | null = null;
 
-  constructor(private readonly sql: Sql) {}
+  constructor(private readonly sql: Sql, private readonly acknowledgmentsEnabled: boolean) {}
 
   async lockPublishedEntry(slug: string): Promise<PublishedTicketIntakeEntry | null> {
     this.lockedEntry = await readEntry(this.sql, slug, true);
@@ -292,7 +292,8 @@ class PostgresTicketPublicIntakeTransaction implements TicketPublicIntakeTransac
          (id, workspace_id, ticket_id, event_type, dedupe_key, payload, status, available_at, created_at)
        values ($1, $2, $3, 'ticket_created', $4, $5::jsonb, 'pending', $6, $6)`,
       [randomUUID(), signal.target.workspaceId, signal.target.ticketId, dedupeKey,
-        JSON.stringify({ source: 'public_inquiry', entryId: signal.entryId, operationId: signal.operationId }), signal.occurredAt],
+        JSON.stringify({ source: 'public_inquiry', entryId: signal.entryId, operationId: signal.operationId,
+          ...(this.acknowledgmentsEnabled ? { acknowledgmentVersion: 1 } : {}) }), signal.occurredAt],
     );
   }
 

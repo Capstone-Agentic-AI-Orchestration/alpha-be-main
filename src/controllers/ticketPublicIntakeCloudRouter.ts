@@ -8,9 +8,10 @@ import { route } from './asyncRoute.js';
 
 export function createTicketPublicIntakeCloudRouter(db: TransactionalSql, config: {
   sessionSecret: string; turnstileSecret: string; turnstileSiteKey: string; originAllowed: (origin: string) => boolean;
+  acknowledgmentsEnabled?: boolean;
 }) {
   const router = Router();
-  const store = new PostgresTicketPublicIntakeStore(db);
+  const store = new PostgresTicketPublicIntakeStore(db, config.acknowledgmentsEnabled === true);
   const configured = config.sessionSecret.length >= 32 && Boolean(config.turnstileSecret && config.turnstileSiteKey)
     && !isTurnstileTestKey(config.turnstileSecret) && !isTurnstileTestKey(config.turnstileSiteKey);
   router.get('/:slug/config', route(async (req, res) => {

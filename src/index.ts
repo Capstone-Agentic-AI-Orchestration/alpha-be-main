@@ -42,6 +42,10 @@ import { createTicketClientUnavailableRouter } from './controllers/ticketClientU
 import { createTicketPublicIntakeUnavailableRouter } from './controllers/ticketPublicIntakeUnavailableRouter.js';
 import { ALPHA_TICKETING_TRIAGE_ENABLED, TICKET_TURNSTILE_SECRET, TICKET_TURNSTILE_SITE_KEY } from './config/env.js';
 import { createTicketPublicIntakeCloudRouter } from './controllers/ticketPublicIntakeCloudRouter.js';
+import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, TICKET_ACK_EMAIL_PROVIDER, BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME } from './config/env.js';
+import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
+import { startTicketAcknowledgmentDelivery } from './services/ticketAcknowledgmentDeliveryService.js';
+import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknowledgmentEmailProvider.js';
 
 /**
  * Refuse to start rather than store credentials in the clear.
@@ -152,7 +156,7 @@ app.use('/api/client', createTicketClientUnavailableRouter());
 app.use('/api/public/ticket-intakes', IS_CLOUD && ALPHA_TICKETING_TRIAGE_ENABLED
   ? createTicketPublicIntakeCloudRouter(database(), { sessionSecret: ALPHA_SESSION_SECRET,
       turnstileSecret: TICKET_TURNSTILE_SECRET, turnstileSiteKey: TICKET_TURNSTILE_SITE_KEY,
-      originAllowed: isAllowedOrigin })
+      originAllowed: isAllowedOrigin, acknowledgmentsEnabled: ALPHA_TICKETING_ACK_EMAIL_ENABLED })
   : createTicketPublicIntakeUnavailableRouter());
 
 /**
@@ -437,6 +441,17 @@ function onListening(): void {
 
     // The default workspace's row, roster and core squad; see seedDefaultWorkspace.
     seedDefaultWorkspace().catch(err => logError('Could not seed the default workspace:', err));
+    const stopAcknowledgments = startTicketAcknowledgmentDelivery({
+      isCloud: IS_CLOUD, enabled: ALPHA_TICKETING_ACK_EMAIL_ENABLED && ALPHA_TICKETING_TRIAGE_ENABLED,
+      providerFactory: () => createTicketAcknowledgmentEmailProvider({
+        providerName: TICKET_ACK_EMAIL_PROVIDER,
+        resend: { apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
+          testRecipient: RESEND_TEST_RECIPIENT },
+        brevo: { apiKey: BREVO_API_KEY, senderEmail: BREVO_SENDER_EMAIL, senderName: BREVO_SENDER_NAME },
+      }), database,
+      onUnavailable: () => logError('Ticket acknowledgment email is unavailable; inquiries remain saved. Check hosted email configuration and outbox status.'),
+    });
+    server.once('close', stopAcknowledgments);
     return;
   }
 
