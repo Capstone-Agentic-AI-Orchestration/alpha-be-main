@@ -38,11 +38,11 @@ describe('PM read-only ticket route composition', () => {
         : layer.handle?.stack ? paths(layer.handle) : []);
     }
     const readOnly = paths(createTicketPmReadRouteBoundary(db, relay));
-    const triage = paths(createTicketPmReadRouteBoundary(db, relay, true));
+    const triage = paths(createTicketPmReadRouteBoundary(db, relay, true, true));
     expect(readOnly).not.toContain('/:ticketId/commands');
     expect(triage).toContain('/:ticketId/commands');
     expect(triage).toContain('/operations/:operationId');
-    expect(triage).not.toContain('/:ticketId/invitations');
+    expect(triage).toContain('/:ticketId/invitations');
     expect(triage).not.toContain('/:ticketId/scope');
     expect(db.query).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();

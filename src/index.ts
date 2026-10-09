@@ -46,6 +46,13 @@ import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, TICKET_ACK_EMAIL_PROVIDER, BREVO_API
 import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
 import { startTicketAcknowledgmentDelivery } from './services/ticketAcknowledgmentDeliveryService.js';
 import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknowledgmentEmailProvider.js';
+import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
+import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
+
+const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
+  apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
+  testRecipient: RESEND_TEST_RECIPIENT,
+});
 
 /**
  * Refuse to start rather than store credentials in the clear.
@@ -212,7 +219,8 @@ app.use('/api', workspaceContext);
 // durable cloud adapters; future features remain isolated. Desktop requests relay
 // through the same path but never construct a local ticket database.
 app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
-  ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED)
+  ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED,
+    ticketInvitationEmailProvider !== null)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);
@@ -451,6 +459,12 @@ function onListening(): void {
       onUnavailable: () => logError('Ticket acknowledgment email is unavailable; inquiries remain saved. Check hosted email configuration and outbox status.'),
     });
     server.once('close', stopAcknowledgments);
+    const stopInvitationEmails = startTicketInvitationEmailDelivery({
+      isCloud: IS_CLOUD, enabled: ALPHA_TICKETING_TRIAGE_ENABLED,
+      providerFactory: () => ticketInvitationEmailProvider, database,
+      onUnavailable: () => logError('Ticket invitation email is unavailable; no client access was created. Check hosted Resend settings.'),
+    });
+    server.once('close', stopInvitationEmails);
     return;
   }
 
