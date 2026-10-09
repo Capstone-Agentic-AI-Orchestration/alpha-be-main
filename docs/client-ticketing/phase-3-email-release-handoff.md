@@ -46,7 +46,8 @@ server, local-only adapter, checkout folder, or preservation folder is needed.
 
 Keep the existing live Agentic-Orchestration connection and all original keys.
 Do not use the staging project, reset schema, or replay prior sample inquiries.
-Phase 2's real Turnstile configuration and public intake must already be ready.
+Phase 2's allowed-origin configuration, published intake entry and public intake
+must already be ready. No Turnstile configuration is required.
 
 1. Create a Resend account. For delivery to real clients, verify an owned sending
    domain and use a sender address on that domain. The desktop app and a Vercel

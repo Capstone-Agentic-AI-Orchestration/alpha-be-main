@@ -28,8 +28,8 @@ const contactFields = {
 };
 export function isTicketInquiryContact(value: unknown): boolean { return z.object(contactFields).safeParse(value).success; }
 
-/** Public contact is unverified. This contract is not a public route or proof of
- * anti-abuse/email ownership; those must precede the future intake write.
+/** Public contact is unverified and does not grant access. Origin admission and
+ * rate limits are enforced by the public route; they do not verify email ownership.
  */
 const inquirySchema = z.object({
   schemaVersion: z.literal(1), operationId: z.string().uuid(),

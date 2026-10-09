@@ -8,25 +8,22 @@ export interface PublishedTicketIntakeEntry {
   published: boolean; mode?: TicketWriteMode;
   policy: { version: string; perSourceMax: number; perEntryMax: number; windowSeconds: number };
 }
-/** Trusted current-request verification, NEVER input/JWT metadata/IP headers.
- * The future guard must verify exact allowed origin and configured anti-bot
- * proof through the real provider, and derive this source key with a secret
- * HMAC from correctly configured trusted-proxy request identity. No raw IP.
- * Verification handles must be request-bound, not reusable browser auth tokens.
+/** Server-derived admission for one public request. Origin checks are not
+ * authentication: they constrain browser submissions, while durable database
+ * budgets limit source and total entry volume. The source key is an HMAC; raw
+ * addresses must never leave the guard.
  */
-export interface VerifiedPublicTicketIntake {
-  verificationId: string; entryId: string; rateSubjectKey: string;
+export interface PublicTicketIntakeAdmission {
+  entryId: string; rateSubjectKey: string;
   issuedAt: string; expiresAt: string;
 }
 export interface PublicTicketIntakeGuard {
-  /** Treat proofToken as an untrusted provider challenge from this HTTP
-   * request, never as login/ticket authority. Verify the exact allowed origin,
-   * server-resolved entry, hostname, score, replay and expiry with the real
-   * provider. Resolve remoteAddress only after trusted-proxy validation, then
-   * HMAC it; raw network addresses must never leave the guard. Missing
-   * request context/configuration fails closed.
+  /** Admit only an exact allowed HTTPS origin with a server-resolved source
+   * address and configured HMAC key. Origin is spoofable by non-browser callers
+   * and must never be treated as identity or a substitute for the durable rate
+   * budgets. Missing request context/configuration fails closed.
    */
-  resolveVerifiedRequest(proofToken: string, entry: PublishedTicketIntakeEntry, request: PublicTicketIntakeRequestContext): Promise<VerifiedPublicTicketIntake | null>;
+  admitRequest(entry: PublishedTicketIntakeEntry, request: PublicTicketIntakeRequestContext): Promise<PublicTicketIntakeAdmission | null>;
 }
 export interface PublicTicketIntakeOperationKey { workspaceId: string; entryId: string; operationId: string }
 export interface SavedPublicTicketIntakeOperation {
@@ -70,7 +67,7 @@ export interface TicketPublicIntakeStore {
    * raw IP/email key, counter reset after rollback, or default unlimited fallback.
    * Denial must not increment only one bucket or extend a fixed window forever.
    */
-  consumeIntakeAttempt(entry: PublishedTicketIntakeEntry, proof: VerifiedPublicTicketIntake, occurredAt: string): Promise<{ allowed: true } | { allowed: false; retryAfterSeconds: number }>;
+  consumeIntakeAttempt(entry: PublishedTicketIntakeEntry, admission: PublicTicketIntakeAdmission, occurredAt: string): Promise<{ allowed: true } | { allowed: false; retryAfterSeconds: number }>;
   /** One actual transaction: inquiry/audit/signal/dedupe together, no network.
    * Unknown COMMIT propagates; retry the SAME ID, never create a fallback ticket.
    */

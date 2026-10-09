@@ -16,8 +16,10 @@ files and `local-preservation` are not part of this PR.
 - Public inquiry requires name, email, title and details; company/date are optional.
 - `/#/request?intake=alpha-workspace` resolves a published entry on the server.
   The client cannot supply its own workspace identifier or authenticated role.
-- Cloudflare Turnstile is validated server-side for success, hostname, action,
-  intake slug and age. Missing configuration and provider dummy keys fail closed.
+- Public inquiry requires an exact allowed HTTPS origin and uses the existing
+  durable database-backed source and per-entry budgets. No external CAPTCHA/
+  Turnstile provider is required. Origin checks are not authentication or strong
+  bot protection; non-browser callers can forge the header.
 - A generic submission receipt reveals no private ticket identifier or lookup.
 - Existing cloud `database()`/`TransactionalSql` persists the inquiry, contact,
   request, audit, outbox and idempotency operation atomically in PostgreSQL.
@@ -66,13 +68,13 @@ feature/entry switches, leaving additive schema and ticket history intact.
 3. Keep all existing cloud, database, session, GitHub App and CORS settings.
    Enable `ALPHA_TICKETING_TRIAGE_ENABLED=1` only after verifying its schema.
    `ALPHA_TICKETING_READS_ENABLED` remains the existing independent read switch.
-4. Public inquiry needs a real Turnstile widget for the client web hostname.
-   Configure `TICKET_TURNSTILE_SECRET` only on the backend and
-   `TICKET_TURNSTILE_SITE_KEY` there. Never place the secret in frontend variables.
-   Without these, PM queue/triage can work, but public submissions stay disabled.
+4. Public inquiry needs the client web origin in the existing backend CORS
+   allowlist, the existing server HMAC/session secret, and an active published
+   intake entry with its write mode enabled. No Turnstile keys or CAPTCHA CSP
+   directives are required. Existing per-source and per-entry database budgets
+   remain enabled; do not trust arbitrary forwarded addresses.
 5. Web production uses `VITE_API_URL=/api` and the existing `API_ORIGIN` proxy.
-   Keep the authorized web origin in the existing CORS allowlist. If a CSP exists,
-   review only the directives needed for the Turnstile script/frame endpoint.
+   Keep the authorized web origin in the existing CORS allowlist.
 6. Build the next desktop iteration through the existing packaging process with
    its six established public settings. Do not package `.env`, database passwords,
    session/provider secrets, development flags or preserved source folders.

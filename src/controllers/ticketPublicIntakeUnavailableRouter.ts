@@ -1,8 +1,8 @@
 import { Router, type Response } from 'express';
 
 /**
- * Explicit fail-closed boundary for anonymous inquiries until the real proof
- * verifier, published intake entry, and durable runtime composition are ready.
+ * Explicit fail-closed boundary for anonymous inquiries until the real
+ * origin/rate guard, published intake entry, and durable runtime composition are ready.
  * Mount before Alpha's internal token, session, and workspace middleware.
  */
 export function createTicketPublicIntakeUnavailableRouter(): Router {

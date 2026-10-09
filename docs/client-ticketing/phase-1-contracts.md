@@ -14,10 +14,10 @@ invitation, or route enablement is authorized by this planning update.
 Date: 7 October 2026. Direction: Plan 3, limited browser-only client accounts.
 
 Current implementation checkpoint — 8 October 2026: the existing PM Tickets
-page has an opt-in, read-only cloud API. Public inquiry persistence now has a
-PostgreSQL adapter tested locally against the reviewed ticket schema, including
-private contact storage and transactional outbox/idempotency. Its route remains
-unmounted until the real proof/origin guard and staging acceptance exist. PM
+page has an opt-in, read-only cloud API. Public inquiry persistence has a
+PostgreSQL adapter tested against the reviewed ticket schema, including private
+contact storage and transactional outbox/idempotency. The cloud route is gated by
+the triage setting and exact allowed-origin/rate checks. PM
 workflow writes, client activation/email, and runner/release guards are still
 not enabled. Do not treat the UI or local database rehearsal as a working
 hosted ticketing system.

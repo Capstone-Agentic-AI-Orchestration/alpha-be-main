@@ -4,7 +4,7 @@ export type PublicTicketIntakeFailure = 'entry_unavailable' | 'writes_disabled' 
 const failures = {
   entry_unavailable: { status: 404, error: 'This inquiry entry is unavailable.' },
   writes_disabled: { status: 503, error: 'Inquiry submission is unavailable right now.' },
-  not_verified: { status: 403, error: 'Please verify this submission and try again.' },
+  not_verified: { status: 403, error: 'This inquiry could not be accepted from this page.' },
   rate_limited: { status: 429, error: 'Too many submissions. Please try again later.' },
   operation_conflict: { status: 409, error: 'This submission ID was already used for different content. Start a new submission for different work.' },
   outcome_unknown: { status: 409, error: 'The submission outcome is uncertain. Retry using the same submission ID.' },
@@ -16,9 +16,9 @@ export class PublicTicketIntakeError extends Error {
   }
 }
 
-/** Server-observed request facts supplied by the future HTTP adapter, never
- * copied from JSON/body fields. The guard validates origin and HMACs the
- * address before producing a proof/rate key; it must not persist or log either.
+/** Server-observed request facts supplied by the HTTP adapter, never copied
+ * from JSON/body fields. The guard validates origin and HMACs the address
+ * before producing a rate key; it must not persist or log either.
  */
 export interface PublicTicketIntakeRequestContext {
   origin: string | null;

@@ -5,9 +5,9 @@ import { createTicketPublicIntakeRouter, type TicketIntakeAddressResolver } from
 export interface TicketPublicIntakeRouteDependencies {
   /** Must provide durable, atomic budgets and inquiry persistence. */
   store: TicketPublicIntakeStore;
-  /** Real provider/proof verifier; no bypass or local allow-all implementation. */
+  /** Exact-origin admission and HMAC-derived source identity; no allow-all adapter. */
   guard: PublicTicketIntakeGuard;
-  /** Server-only HMAC key ring and proof lifetime. */
+  /** Server-only HMAC key ring and request-admission lifetime. */
   security: PublicTicketIntakeSecurity;
   /** Socket/trusted-proxy resolver; never a raw X-Forwarded-For parser. */
   resolveRemoteAddress: TicketIntakeAddressResolver;

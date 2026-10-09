@@ -62,10 +62,10 @@ async function seedEntry(options: {
 function intakeService(store: PostgresTicketPublicIntakeStore, entryId: string, ticketIds: string[] = ['ticket-public-1']) {
   let next = 0;
   return createTicketPublicIntakeService(store, {
-    async resolveVerifiedRequest(proofToken, entry) {
-      if (proofToken !== 'provider-proof' || entry.id !== entryId) return null;
+    async admitRequest(entry, request) {
+      if (entry.id !== entryId || request.origin !== 'https://tickets.example.invalid'
+        || request.remoteAddress !== '127.0.0.1') return null;
       return {
-        verificationId: proofToken,
         entryId,
         rateSubjectKey: 'a'.repeat(64),
         issuedAt: now.toISOString(),
@@ -74,7 +74,7 @@ function intakeService(store: PostgresTicketPublicIntakeStore, entryId: string, 
     },
   }, {
     fingerprintKeys: [{ id: 'test-key-v1', secret: new Uint8Array(32).fill(7) }],
-    maxProofAgeMs: 60_000,
+    maxRequestAgeMs: 60_000,
   }, () => new Date(now), () => ticketIds[next++] ?? `ticket-public-${next}`);
 }
 
@@ -91,14 +91,13 @@ function inquiry(operationId: string, title = 'Private intake test') {
   };
 }
 
-function localTestProofGuard(entryId: string) {
+function localTestOriginGuard(entryId: string) {
   return {
-    async resolveVerifiedRequest(proofToken: string, entry: { id: string }, request: { origin: string | null; remoteAddress: string | null }) {
-      if (proofToken !== 'provider-proof' || entry.id !== entryId
+    async admitRequest(entry: { id: string }, request: { origin: string | null; remoteAddress: string | null }) {
+      if (entry.id !== entryId
         || request.origin !== 'https://tickets.example.invalid' || request.remoteAddress !== '127.0.0.1') return null;
       const issuedAt = new Date();
       return {
-        verificationId: proofToken,
         entryId,
         rateSubjectKey: 'a'.repeat(64),
         issuedAt: issuedAt.toISOString(),
@@ -182,11 +181,11 @@ describe('PostgresTicketPublicIntakeStore against the reviewed local schema', ()
     const request = { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' };
     const input = inquiry('00000000-0000-4000-8000-000000000001');
 
-    const receipt = await service.submit('synthetic-create', 'provider-proof', input, request);
+    const receipt = await service.submit('synthetic-create', input, request);
     expect(receipt).toEqual({ received: true });
     expect(Object.keys(receipt)).toEqual(['received']);
-    expect(await service.submit('synthetic-create', 'provider-proof', input, request)).toEqual({ received: true });
-    await expect(service.submit('synthetic-create', 'provider-proof', { ...input, title: 'Different content' }, request))
+    expect(await service.submit('synthetic-create', input, request)).toEqual({ received: true });
+    await expect(service.submit('synthetic-create', { ...input, title: 'Different content' }, request))
       .rejects.toMatchObject({ code: 'operation_conflict' });
 
     expect(await counts(workspaceId)).toEqual({
@@ -248,21 +247,21 @@ describe('PostgresTicketPublicIntakeStore against the reviewed local schema', ()
     const store = new PostgresTicketPublicIntakeStore(db);
     const entry = await store.loadPublishedEntry('synthetic-rate');
     expect(entry).toMatchObject({ id: `entry-${workspaceId}`, mode: 'enabled' });
-    const proof = {
-      verificationId: 'provider-proof', entryId: `entry-${workspaceId}`,
+    const admission = {
+      entryId: `entry-${workspaceId}`,
       rateSubjectKey: 'b'.repeat(64), issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 30_000).toISOString(),
     };
 
-    expect(await store.consumeIntakeAttempt(entry!, proof, now.toISOString())).toEqual({ allowed: true });
-    expect(await store.consumeIntakeAttempt(entry!, proof, now.toISOString())).toEqual({ allowed: true });
-    const sourceDenied = await store.consumeIntakeAttempt(entry!, proof, now.toISOString());
+    expect(await store.consumeIntakeAttempt(entry!, admission, now.toISOString())).toEqual({ allowed: true });
+    expect(await store.consumeIntakeAttempt(entry!, admission, now.toISOString())).toEqual({ allowed: true });
+    const sourceDenied = await store.consumeIntakeAttempt(entry!, admission, now.toISOString());
     expect(sourceDenied.allowed).toBe(false);
     if (!sourceDenied.allowed) expect(sourceDenied.retryAfterSeconds).toBeGreaterThan(0);
 
-    const otherSources = ['c', 'd'].map(letter => ({ ...proof, rateSubjectKey: letter.repeat(64) }));
+    const otherSources = ['c', 'd'].map(letter => ({ ...admission, rateSubjectKey: letter.repeat(64) }));
     expect(await store.consumeIntakeAttempt(entry!, otherSources[0], now.toISOString())).toEqual({ allowed: true });
     expect(await store.consumeIntakeAttempt(entry!, otherSources[1], now.toISOString())).toEqual({ allowed: true });
-    const entryDenied = await store.consumeIntakeAttempt(entry!, { ...proof, rateSubjectKey: 'e'.repeat(64) }, now.toISOString());
+    const entryDenied = await store.consumeIntakeAttempt(entry!, { ...admission, rateSubjectKey: 'e'.repeat(64) }, now.toISOString());
     expect(entryDenied.allowed).toBe(false);
 
     const { rows } = await db.query<{ bucket_kind: string; subject_hash: string; attempts: number }>(
@@ -271,7 +270,7 @@ describe('PostgresTicketPublicIntakeStore against the reviewed local schema', ()
       [workspaceId, `entry-${workspaceId}`],
     );
     const entryBucket = rows.find(row => row.bucket_kind === 'entry');
-    const sourceB = rows.find(row => row.bucket_kind === 'source' && row.subject_hash === proof.rateSubjectKey);
+    const sourceB = rows.find(row => row.bucket_kind === 'source' && row.subject_hash === admission.rateSubjectKey);
     const sourceE = rows.find(row => row.bucket_kind === 'source' && row.subject_hash === 'e'.repeat(64));
     expect(entryBucket?.attempts).toBe(4);
     expect(sourceB?.attempts).toBe(2);
@@ -294,7 +293,7 @@ describe('PostgresTicketPublicIntakeStore against the reviewed local schema', ()
     };
     const store = new PostgresTicketPublicIntakeStore(failingDb);
     const service = intakeService(store, `entry-${workspaceId}`);
-    await expect(service.submit('synthetic-rollback', 'provider-proof',
+    await expect(service.submit('synthetic-rollback',
       inquiry('00000000-0000-4000-8000-000000000002'),
       { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' },
     )).rejects.toMatchObject({ code: 'unavailable' });
@@ -317,11 +316,11 @@ describe('PostgresTicketPublicIntakeStore against the reviewed local schema', ()
     expect(entry?.mode).toBe('enabled');
     await db.query(`update public.workspaces set settings_json = '{"ticketing_write_mode":"disabled"}'::jsonb where id = $1`, [workspaceId]);
     await expect(store.consumeIntakeAttempt(entry!, {
-      verificationId: 'provider-proof', entryId: `entry-${workspaceId}`,
+      entryId: `entry-${workspaceId}`,
       rateSubjectKey: 'f'.repeat(64), issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 30_000).toISOString(),
     }, now.toISOString())).rejects.toThrow();
     const service = intakeService(store, `entry-${workspaceId}`);
-    await expect(service.submit('synthetic-disabled', 'provider-proof',
+    await expect(service.submit('synthetic-disabled',
       inquiry('00000000-0000-4000-8000-000000000003'),
       { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' },
     )).rejects.toMatchObject({ code: 'writes_disabled' });
@@ -339,8 +338,8 @@ describe('acknowledgment outbox on the existing PostgreSQL test harness', () => 
     const input = inquiry('00000000-0000-4000-8000-000000000201');
     const service = intakeService(store, `entry-${workspaceId}`, ['acknowledgment-ticket']);
     const context = { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' };
-    await service.submit('acknowledgment', 'provider-proof', input, context);
-    await service.submit('acknowledgment', 'provider-proof', input, context);
+    await service.submit('acknowledgment', input, context);
+    await service.submit('acknowledgment', input, context);
     const outbox = new PostgresTicketAcknowledgmentStore(db);
     const claim = await outbox.claim('provider-identity');
     expect(claim).toMatchObject({ workspaceId, ticketId: 'acknowledgment-ticket', recipient: input.email,
@@ -360,7 +359,7 @@ describe('acknowledgment outbox on the existing PostgreSQL test harness', () => 
     const workspaceId = 'acknowledgment-retry-ws';
     await seedEntry({ workspaceId, slug: 'acknowledgment-retry' });
     const service = intakeService(new PostgresTicketPublicIntakeStore(db, true), `entry-${workspaceId}`, ['ack-retry-ticket']);
-    await service.submit('acknowledgment-retry', 'provider-proof', inquiry('00000000-0000-4000-8000-000000000202'),
+    await service.submit('acknowledgment-retry', inquiry('00000000-0000-4000-8000-000000000202'),
       { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' });
     const outbox = new PostgresTicketAcknowledgmentStore(db);
     const first = (await outbox.claim('provider-identity'))!;
@@ -385,7 +384,7 @@ describe('acknowledgment outbox on the existing PostgreSQL test harness', () => 
     const workspaceId = 'acknowledgment-scope-ws';
     await seedEntry({ workspaceId, slug: 'acknowledgment-scope' });
     const service = intakeService(new PostgresTicketPublicIntakeStore(db, true), `entry-${workspaceId}`, ['ack-scope-ticket']);
-    await service.submit('acknowledgment-scope', 'provider-proof', inquiry('00000000-0000-4000-8000-000000000203'),
+    await service.submit('acknowledgment-scope', inquiry('00000000-0000-4000-8000-000000000203'),
       { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' });
     const outbox = new PostgresTicketAcknowledgmentStore(db);
     const claim = (await outbox.claim('provider-identity'))!;
@@ -406,15 +405,14 @@ describe('public intake route composition on the local Postgres test adapter', (
     const store = new PostgresTicketPublicIntakeStore(db);
     const router = createTicketPublicIntakeRouteBoundary({
       store,
-      guard: localTestProofGuard(`entry-${workspaceId}`),
+      guard: localTestOriginGuard(`entry-${workspaceId}`),
       security: {
         fingerprintKeys: [{ id: 'test-key-v1', secret: new Uint8Array(32).fill(7) }],
-        maxProofAgeMs: 60_000,
+        maxRequestAgeMs: 60_000,
       },
       resolveRemoteAddress: () => '127.0.0.1',
     });
     const body = {
-      proofToken: 'provider-proof',
       inquiry: inquiry('00000000-0000-4000-8000-000000000101', 'Route-level inquiry'),
     };
 

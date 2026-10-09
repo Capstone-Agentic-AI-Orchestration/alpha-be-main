@@ -9,7 +9,6 @@ vi.mock('../store/ticketPublicIntakePostgresStore.js', () => ({
 
 const configuration = {
   sessionSecret: 'synthetic-session-secret-at-least-32-characters',
-  turnstileSecret: 'synthetic-secret', turnstileSiteKey: 'synthetic-public-key',
   originAllowed: () => true,
 };
 function getConfiguration(overrides: Partial<typeof configuration> = {}) {
@@ -29,26 +28,19 @@ function getConfiguration(overrides: Partial<typeof configuration> = {}) {
 beforeEach(() => { loadPublishedEntry.mockReset(); loadPublishedEntry.mockResolvedValue({ published: true, mode: 'enabled' }); });
 
 describe('production inquiry configuration boundary', () => {
-  it('publishes only the public site key and prevents caching', async () => {
+  it('enables a published form from the server key and entry switch without a provider key', async () => {
     const result = await getConfiguration();
-    expect(result.body).toEqual({ enabled: true, siteKey: configuration.turnstileSiteKey });
+    expect(result.body).toEqual({ enabled: true });
     expect(result.headers['cache-control']).toBe('no-store');
-    expect(JSON.stringify(result)).not.toContain(configuration.turnstileSecret);
     expect(JSON.stringify(result)).not.toContain(configuration.sessionSecret);
     expect(loadPublishedEntry).toHaveBeenCalledWith('published-entry');
   });
-  it.each([
-    { turnstileSecret: '' }, { turnstileSiteKey: '' }, { sessionSecret: 'too-short' },
-    { turnstileSecret: '1x0000000000000000000000000000000AA' },
-    { turnstileSecret: '2x0000000000000000000000000000000AA' },
-    { turnstileSecret: '3x0000000000000000000000000000000AA' },
-    { turnstileSiteKey: '1x00000000000000000000AA' },
-  ])('keeps submission disabled for missing or dummy credentials: %j', async overrides => {
-    expect((await getConfiguration(overrides)).body).toEqual({ enabled: false, siteKey: null });
+  it('keeps submission disabled without the existing server-side HMAC secret', async () => {
+    expect((await getConfiguration({ sessionSecret: 'too-short' })).body).toEqual({ enabled: false });
   });
   it('honors the persisted entry write switch', async () => {
     loadPublishedEntry.mockResolvedValue({ published: true, mode: 'disabled' });
-    expect((await getConfiguration()).body).toEqual({ enabled: false, siteKey: null });
+    expect((await getConfiguration()).body).toEqual({ enabled: false });
   });
   it('does not expose configuration for unpublished entries', async () => {
     loadPublishedEntry.mockResolvedValue(null);

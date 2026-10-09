@@ -5,7 +5,7 @@ import { decodeTicketWorkflow } from './ticketPostgresCodec.js';
 import type { Sql, TransactionalSql } from './database.js';
 import type {
   PublishedTicketIntakeEntry, SavedPublicTicketIntakeOperation,
-  TicketPublicIntakeStore, TicketPublicIntakeTransaction, VerifiedPublicTicketIntake,
+  TicketPublicIntakeStore, TicketPublicIntakeTransaction, PublicTicketIntakeAdmission,
 } from './ticketPublicIntakeStore.js';
 
 interface IntakeEntryDbRow {
@@ -98,7 +98,7 @@ class IntakeRateLimitDenied extends Error {
  * Durable public inquiry persistence over the same cloud-owned PostgreSQL
  * authority as PM queue reads. RLS is defense in depth here: every statement is
  * explicitly entry/workspace scoped because the cloud connection owns tables.
- * It does not implement proof verification or mount a public route.
+ * It does not implement origin admission or mount a public route.
  */
 export class PostgresTicketPublicIntakeStore implements TicketPublicIntakeStore {
   constructor(private readonly db: TransactionalSql, private readonly acknowledgmentsEnabled = false) {}
@@ -109,14 +109,14 @@ export class PostgresTicketPublicIntakeStore implements TicketPublicIntakeStore 
 
   async consumeIntakeAttempt(
     entry: PublishedTicketIntakeEntry,
-    proof: VerifiedPublicTicketIntake,
+    admission: PublicTicketIntakeAdmission,
     occurredAt: string,
   ): Promise<{ allowed: true } | { allowed: false; retryAfterSeconds: number }> {
     try {
       await this.db.transaction(async sql => {
         const current = await readEntry(sql, entry.slug, true);
         if (!current || !current.published || current.mode !== 'enabled' || !samePolicy(entry, current)
-          || proof.entryId !== current.id || !/^[a-f0-9]{64}$/.test(proof.rateSubjectKey)) {
+          || admission.entryId !== current.id || !/^[a-f0-9]{64}$/.test(admission.rateSubjectKey)) {
           throw new Error('The public intake entry changed or is unavailable.');
         }
         const nowMs = Date.parse(occurredAt);
@@ -135,7 +135,7 @@ export class PostgresTicketPublicIntakeStore implements TicketPublicIntakeStore 
         // One entry-row lock serializes both counters for this published form.
         // If either upsert is denied, throwing rolls back BOTH bucket changes.
         for (const bucket of [
-          { kind: 'source' as const, subjectHash: proof.rateSubjectKey, maximum: current.policy.perSourceMax },
+          { kind: 'source' as const, subjectHash: admission.rateSubjectKey, maximum: current.policy.perSourceMax },
           { kind: 'entry' as const, subjectHash: entrySubjectHash, maximum: current.policy.perEntryMax },
         ]) {
           const { rows } = await sql.query<{ attempts: number }>(
