@@ -23,12 +23,12 @@ const request = { origin: 'https://tickets.example.invalid', remoteAddress: '127
 
 function intake() {
   return createTicketPublicIntakeService(new PostgresTicketPublicIntakeStore(db), {
-    async resolveVerifiedRequest(token, entry) {
+    async admitRequest(entry) {
       const instant = new Date();
-      return { verificationId: token, entryId: entry.id, rateSubjectKey: 'a'.repeat(64),
+      return { entryId: entry.id, rateSubjectKey: 'a'.repeat(64),
         issuedAt: instant.toISOString(), expiresAt: new Date(instant.getTime() + 60000).toISOString() };
     },
-  }, { fingerprintKeys: [{ id: 'test', secret: new Uint8Array(32).fill(7) }], maxProofAgeMs: 60000 }, undefined, () => target.ticketId);
+  }, { fingerprintKeys: [{ id: 'test', secret: new Uint8Array(32).fill(7) }], maxRequestAgeMs: 60000 }, undefined, () => target.ticketId);
 }
 const command = (operationId: string, expectedVersion: number, decision: object) => ({ schemaVersion: 1, operationId, expectedVersion, command: decision });
 const commands = () => createTicketCommandService(new PostgresTicketTriageStore(db));
@@ -53,10 +53,10 @@ afterAll(async () => { await pg?.close(); });
 
 describe('Phase 2 durable inquiry and PM triage', () => {
   it('persists inquiry once across new service instances and retries; rejects changed payload', async () => {
-    expect(await intake().submit('triage-entry', 'proof', inquiry, request)).toEqual({ received: true });
-    expect(await intake().submit('triage-entry', 'fresh-proof', inquiry, request)).toEqual({ received: true });
+    expect(await intake().submit('triage-entry', inquiry, request)).toEqual({ received: true });
+    expect(await intake().submit('triage-entry', inquiry, request)).toEqual({ received: true });
     expect((await db.query<{ count: number }>('select count(*)::int as count from alpha_private.tickets')).rows[0].count).toBe(1);
-    await expect(intake().submit('triage-entry', 'fresh-proof', { ...inquiry, title: 'Changed' }, request)).rejects.toMatchObject({ code: 'operation_conflict' });
+    await expect(intake().submit('triage-entry', { ...inquiry, title: 'Changed' }, request)).rejects.toMatchObject({ code: 'operation_conflict' });
     const queue = await createTicketQueueService(new PostgresTicketQueueStore(db)).list(target.workspaceId, pm);
     expect(queue.items[0].id).toBe(target.ticketId);
     expect(queue.items[0].status).toBe('received');

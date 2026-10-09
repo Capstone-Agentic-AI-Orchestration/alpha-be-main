@@ -10,7 +10,6 @@ import type {
 export interface TicketPublicIntakeApplication {
   submit(
     slug: string,
-    proofToken: string,
     input: unknown,
     request: PublicTicketIntakeRequestContext,
   ): Promise<PublicTicketInquiryAcknowledgement>;
@@ -25,10 +24,10 @@ export type TicketIntakeAddressResolver = (req: Request) => string | null;
 
 /**
  * The anonymous client-intake transport boundary. Its caller receives only a
- * generic acknowledgement; the application service owns proof validation,
+ * generic acknowledgement; the application service owns origin admission,
  * rate budgets, idempotency and the atomic inquiry write.
  *
- * This router must be mounted only after a durable store and real proof guard
+ * This router must be mounted only after a durable store and origin/rate guard
  * have been configured. index.ts mounts it only through the triage rollout gate.
  */
 export function createTicketPublicIntakeRouter(
@@ -46,7 +45,6 @@ export function createTicketPublicIntakeRouter(
     const body = req.body !== null && typeof req.body === 'object' && !Array.isArray(req.body)
       ? req.body as Record<string, unknown>
       : {};
-    const proofToken = typeof body.proofToken === 'string' ? body.proofToken : '';
     let remoteAddress: string | null = null;
     try {
       remoteAddress = resolveRemoteAddress(req);
@@ -58,7 +56,6 @@ export function createTicketPublicIntakeRouter(
     try {
       acknowledgement = await application.submit(
         req.params.slug ?? '',
-        proofToken,
         body.inquiry,
         { origin: req.get('Origin') ?? null, remoteAddress: remoteAddress ?? '' },
       );

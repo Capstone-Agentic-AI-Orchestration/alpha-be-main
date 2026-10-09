@@ -40,7 +40,7 @@ import { createTicketPmReadRouteBoundary } from './controllers/ticketPmReadRoute
 import { createTicketUnavailableRouter } from './controllers/ticketUnavailableRouter.js';
 import { createTicketClientUnavailableRouter } from './controllers/ticketClientUnavailableRouter.js';
 import { createTicketPublicIntakeUnavailableRouter } from './controllers/ticketPublicIntakeUnavailableRouter.js';
-import { ALPHA_TICKETING_TRIAGE_ENABLED, TICKET_TURNSTILE_SECRET, TICKET_TURNSTILE_SITE_KEY } from './config/env.js';
+import { ALPHA_TICKETING_TRIAGE_ENABLED } from './config/env.js';
 import { createTicketPublicIntakeCloudRouter } from './controllers/ticketPublicIntakeCloudRouter.js';
 import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, TICKET_ACK_EMAIL_PROVIDER, BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME } from './config/env.js';
 import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
@@ -152,10 +152,9 @@ app.use('/api/client', createTicketClientUnavailableRouter());
 
 // Anonymous inquiry URLs terminate at a separate fail-closed boundary. Do not
 // let a public request fall through to Alpha's internal token/session/workspace
-// middleware while the proof verifier and published intake are not configured.
+// middleware while the origin/rate guard and published intake are not configured.
 app.use('/api/public/ticket-intakes', IS_CLOUD && ALPHA_TICKETING_TRIAGE_ENABLED
   ? createTicketPublicIntakeCloudRouter(database(), { sessionSecret: ALPHA_SESSION_SECRET,
-      turnstileSecret: TICKET_TURNSTILE_SECRET, turnstileSiteKey: TICKET_TURNSTILE_SITE_KEY,
       originAllowed: isAllowedOrigin, acknowledgmentsEnabled: ALPHA_TICKETING_ACK_EMAIL_ENABLED })
   : createTicketPublicIntakeUnavailableRouter());
 

@@ -76,8 +76,9 @@ grant access, select a workspace or bind an account. Files and caller-owned
 workspace/client/project/status fields are rejected. Calendar dates are checked
 for actual validity, including leap years, rather than accepted as arbitrary text.
 
-The local public-intake service now accepts a published entry slug, a request-
-bound anti-abuse proof token and a strict inquiry body. It charges a durable
+The public-intake service accepts a published entry slug, a strict inquiry body,
+and server-observed origin/address context. Its guard checks the allowed HTTPS
+origin and HMACs the server-resolved address; it charges a durable
 source/entry budget before parsing, then defines a single transaction for the
 unactivated `Received` ticket, private contact/preference record, audit/signal,
 and HMAC-fingerprinted idempotency outcome. Anonymous callers receive only a
@@ -87,10 +88,10 @@ The PM detail projection can read submitted date and explicitly labels contact
 as unverified; the client projection never includes that contact. See
 [the public intake checkpoint](application-public-intake-layer.md).
 
-This remains a service/store contract, not an operational feature: no HTTP
-route, real anti-abuse/origin verifier, durable rate-limit adapter, production
-transaction adapter, provider verifier, activation persistence, or email delivery
-is connected. The provider-neutral activation transaction contract is in
+The cloud HTTP route is feature-gated and connected to the production database
+adapter. Origin validation plus durable rate limits are not equivalent to CAPTCHA:
+non-browser callers can forge Origin. Client activation persistence and email
+delivery remain separate features. The provider-neutral activation transaction contract is in
 `application-client-activation-layer.md`.
 The inquiry stays unactivated until a later invitation flow binds the verified
 client to this same ticket; it must not create a duplicate through the signed-in

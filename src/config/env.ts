@@ -42,8 +42,6 @@ export const IS_DESKTOP = !IS_CLOUD;
 export const ALPHA_TICKETING_READS_ENABLED = process.env.ALPHA_TICKETING_READS_ENABLED === '1';
 // Additive rollout switch. Does not enable client sessions, email or execution.
 export const ALPHA_TICKETING_TRIAGE_ENABLED = process.env.ALPHA_TICKETING_TRIAGE_ENABLED === '1';
-export const TICKET_TURNSTILE_SECRET = process.env.TICKET_TURNSTILE_SECRET || '';
-export const TICKET_TURNSTILE_SITE_KEY = process.env.TICKET_TURNSTILE_SITE_KEY || '';
 
 // Phase 3: cloud-only email rollout. Unset/off leaves existing behavior intact.
 export const ALPHA_TICKETING_ACK_EMAIL_ENABLED = process.env.ALPHA_TICKETING_ACK_EMAIL_ENABLED === '1';

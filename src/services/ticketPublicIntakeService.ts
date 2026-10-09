@@ -11,7 +11,8 @@ export interface PublicTicketIntakeSecurity {
    * log these or place them in VITE settings. Missing configuration fails closed.
    */
   fingerprintKeys: readonly { id: string; secret: Uint8Array }[];
-  maxProofAgeMs: number;
+  /** Maximum age of server-created admission metadata, not a client proof. */
+  maxRequestAgeMs: number;
 }
 const opaque = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && value.trim().length > 0 && value.trim() === value;
 function checkEntry(entry: PublishedTicketIntakeEntry | null, slug: string): asserts entry is PublishedTicketIntakeEntry {
@@ -34,36 +35,34 @@ export function createTicketPublicIntakeService(
       return { id: key.id, secret: new Uint8Array(key.secret) };
     });
   } catch { keys = []; }
-  const maxAge = security?.maxProofAgeMs;
+  const maxAge = security?.maxRequestAgeMs;
   const configured = keys.length > 0 && new Set(keys.map(key => key.id)).size === keys.length
     && keys.every(key => opaque(key.id) && key.secret.byteLength >= 32 && key.secret.byteLength <= 1024)
     && Number.isSafeInteger(maxAge) && maxAge > 0 && maxAge <= 3600000;
-  async function submit(slug: string, proofToken: string, input: unknown, request: PublicTicketIntakeRequestContext): Promise<PublicTicketInquiryAcknowledgement> {
+  async function submit(slug: string, input: unknown, request: PublicTicketIntakeRequestContext): Promise<PublicTicketInquiryAcknowledgement> {
       if (!configured) throw new PublicTicketIntakeError('unavailable');
       if (!opaque(slug)) throw new PublicTicketIntakeError('entry_unavailable');
       const entry = await store.loadPublishedEntry(slug); checkEntry(entry, slug);
-      if (typeof proofToken !== 'string' || !proofToken.length || proofToken.length > 2048
-        || proofToken.trim() !== proofToken) throw new PublicTicketIntakeError('not_verified');
       if (!request || typeof request.origin !== 'string' || request.origin.length < 1 || request.origin.length > 2048
         || typeof request.remoteAddress !== 'string' || request.remoteAddress.length < 1 || request.remoteAddress.length > 256
         || request.origin.trim() !== request.origin || request.remoteAddress.trim() !== request.remoteAddress) {
         throw new PublicTicketIntakeError('not_verified');
       }
-      let proof;
-      try { proof = await guard.resolveVerifiedRequest(proofToken, entry, request); }
+      let admission;
+      try { admission = await guard.admitRequest(entry, request); }
       catch { throw new PublicTicketIntakeError('unavailable'); }
       const instant = now(); const time = instant.getTime();
       if (!Number.isFinite(time)) throw new PublicTicketIntakeError('unavailable');
       const occurredAt = instant.toISOString();
-      if (!proof || proof.verificationId !== proofToken || proof.entryId !== entry.id
-        || !/^[a-f0-9]{64}$/.test(proof.rateSubjectKey)
-        || typeof proof.issuedAt !== 'string' || proof.issuedAt.length > 200
-        || typeof proof.expiresAt !== 'string' || proof.expiresAt.length > 200
-        || !Number.isFinite(Date.parse(proof.issuedAt)) || !Number.isFinite(Date.parse(proof.expiresAt))
-        || Date.parse(proof.issuedAt) > time || time - Date.parse(proof.issuedAt) > maxAge
-        || Date.parse(proof.expiresAt) <= time || Date.parse(proof.expiresAt) - Date.parse(proof.issuedAt) > maxAge) throw new PublicTicketIntakeError('not_verified');
+      if (!admission || admission.entryId !== entry.id
+        || !/^[a-f0-9]{64}$/.test(admission.rateSubjectKey)
+        || typeof admission.issuedAt !== 'string' || admission.issuedAt.length > 200
+        || typeof admission.expiresAt !== 'string' || admission.expiresAt.length > 200
+        || !Number.isFinite(Date.parse(admission.issuedAt)) || !Number.isFinite(Date.parse(admission.expiresAt))
+        || Date.parse(admission.issuedAt) > time || time - Date.parse(admission.issuedAt) > maxAge
+        || Date.parse(admission.expiresAt) <= time || Date.parse(admission.expiresAt) - Date.parse(admission.issuedAt) > maxAge) throw new PublicTicketIntakeError('not_verified');
       // Independently committed budget: invalid bodies/failed writes still count.
-      const attempt = await store.consumeIntakeAttempt(entry, proof, occurredAt);
+      const attempt = await store.consumeIntakeAttempt(entry, admission, occurredAt);
       if (typeof attempt?.allowed !== 'boolean') throw new PublicTicketIntakeError('unavailable');
       if (attempt.allowed === false) {
         if (!Number.isSafeInteger(attempt.retryAfterSeconds) || attempt.retryAfterSeconds <= 0 || attempt.retryAfterSeconds > 86400) throw new PublicTicketIntakeError('unavailable');
@@ -77,7 +76,7 @@ export function createTicketPublicIntakeService(
           || current.policy.windowSeconds !== entry.policy.windowSeconds) throw new PublicTicketIntakeError('unavailable');
         const writeTime = now().getTime();
         if (!Number.isFinite(writeTime)) throw new PublicTicketIntakeError('unavailable');
-        if (Date.parse(proof.issuedAt) > writeTime || Date.parse(proof.expiresAt) <= writeTime || writeTime - Date.parse(proof.issuedAt) > maxAge) throw new PublicTicketIntakeError('not_verified');
+        if (Date.parse(admission.issuedAt) > writeTime || Date.parse(admission.expiresAt) <= writeTime || writeTime - Date.parse(admission.issuedAt) > maxAge) throw new PublicTicketIntakeError('not_verified');
         const writeAt = new Date(writeTime).toISOString();
         const key = { workspaceId: current.workspaceId, entryId: current.id, operationId: parsed.operationId };
         const saved = await tx.lockInquiryOperation(key);
@@ -115,8 +114,8 @@ export function createTicketPublicIntakeService(
       });
   }
   return {
-    async submit(slug: string, proofToken: string, input: unknown, request: PublicTicketIntakeRequestContext): Promise<PublicTicketInquiryAcknowledgement> {
-      try { return await submit(slug, proofToken, input, request); }
+    async submit(slug: string, input: unknown, request: PublicTicketIntakeRequestContext): Promise<PublicTicketInquiryAcknowledgement> {
+      try { return await submit(slug, input, request); }
       catch (error) {
         if (error instanceof PublicTicketIntakeError) throw error;
         if (error instanceof TicketWorkflowError && error.code === 'invalid_ticket_intake') throw new TicketWorkflowError(400, 'invalid_ticket_intake', 'This ticket request is invalid.');

@@ -38,11 +38,8 @@ services:
       # Requires the additive ticket operation receipt migration before rollout.
       - key: ALPHA_TICKETING_TRIAGE_ENABLED
         value: "1"
-      # Public inquiry remains unavailable until a real provider is configured.
-      - key: TICKET_TURNSTILE_SECRET
-        sync: false
-      - key: TICKET_TURNSTILE_SITE_KEY
-        sync: false
+      # Public inquiry uses the existing origin allowlist and durable DB budgets;
+      # no third-party CAPTCHA/Turnstile credentials are required.
       # Phase 3 is opt-in. Configure the selected sender before enabling.
       - key: ALPHA_TICKETING_ACK_EMAIL_ENABLED
         sync: false
