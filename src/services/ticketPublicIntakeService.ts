@@ -42,7 +42,8 @@ export function createTicketPublicIntakeService(
       if (!configured) throw new PublicTicketIntakeError('unavailable');
       if (!opaque(slug)) throw new PublicTicketIntakeError('entry_unavailable');
       const entry = await store.loadPublishedEntry(slug); checkEntry(entry, slug);
-      if (!opaque(proofToken)) throw new PublicTicketIntakeError('not_verified');
+      if (typeof proofToken !== 'string' || !proofToken.length || proofToken.length > 2048
+        || proofToken.trim() !== proofToken) throw new PublicTicketIntakeError('not_verified');
       if (!request || typeof request.origin !== 'string' || request.origin.length < 1 || request.origin.length > 2048
         || typeof request.remoteAddress !== 'string' || request.remoteAddress.length < 1 || request.remoteAddress.length > 256
         || request.origin.trim() !== request.origin || request.remoteAddress.trim() !== request.remoteAddress) {

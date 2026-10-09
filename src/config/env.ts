@@ -40,6 +40,10 @@ export const IS_DESKTOP = !IS_CLOUD;
  * schema installed. This flag does not enable ticket writes or client routes.
  */
 export const ALPHA_TICKETING_READS_ENABLED = process.env.ALPHA_TICKETING_READS_ENABLED === '1';
+// Additive rollout switch. Does not enable client sessions, email or execution.
+export const ALPHA_TICKETING_TRIAGE_ENABLED = process.env.ALPHA_TICKETING_TRIAGE_ENABLED === '1';
+export const TICKET_TURNSTILE_SECRET = process.env.TICKET_TURNSTILE_SECRET || '';
+export const TICKET_TURNSTILE_SITE_KEY = process.env.TICKET_TURNSTILE_SITE_KEY || '';
 
 /**
  * An installed desktop app, as opposed to a daemon someone is running from a

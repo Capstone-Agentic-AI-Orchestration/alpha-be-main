@@ -121,13 +121,16 @@ function safeCounters(value: TicketQueueCounters): Extract<TicketQueueCounters, 
  * middleware and only when a durable ticket store has been configured. The
  * workspace is derived from authenticated request state, never from query data.
  */
-export function createTicketQueueRouter(application: PmTicketQueueApplication): Router {
+export function createTicketQueueRouter(
+  application: PmTicketQueueApplication,
+  relayRequest: typeof relayPmTicketRequest = relayPmTicketRequest,
+): Router {
   const router = Router();
 
   router.get('/', route(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, private');
     res.setHeader('Pragma', 'no-cache');
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
 
     const subject = pmTicketSubject(req, res);
     if (!subject) return;

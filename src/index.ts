@@ -39,6 +39,9 @@ import { DEFAULT_WORKSPACE_ID, runWithWorkspace } from './services/workspaceCont
 import { createTicketPmReadRouteBoundary } from './controllers/ticketPmReadRouteFactory.js';
 import { createTicketUnavailableRouter } from './controllers/ticketUnavailableRouter.js';
 import { createTicketClientUnavailableRouter } from './controllers/ticketClientUnavailableRouter.js';
+import { createTicketPublicIntakeUnavailableRouter } from './controllers/ticketPublicIntakeUnavailableRouter.js';
+import { ALPHA_TICKETING_TRIAGE_ENABLED, TICKET_TURNSTILE_SECRET, TICKET_TURNSTILE_SITE_KEY } from './config/env.js';
+import { createTicketPublicIntakeCloudRouter } from './controllers/ticketPublicIntakeCloudRouter.js';
 
 /**
  * Refuse to start rather than store credentials in the clear.
@@ -143,6 +146,15 @@ app.use(
 // token, workspace, and GitHub-session middleware; it never relays to desktop.
 app.use('/api/client', createTicketClientUnavailableRouter());
 
+// Anonymous inquiry URLs terminate at a separate fail-closed boundary. Do not
+// let a public request fall through to Alpha's internal token/session/workspace
+// middleware while the proof verifier and published intake are not configured.
+app.use('/api/public/ticket-intakes', IS_CLOUD && ALPHA_TICKETING_TRIAGE_ENABLED
+  ? createTicketPublicIntakeCloudRouter(database(), { sessionSecret: ALPHA_SESSION_SECRET,
+      turnstileSecret: TICKET_TURNSTILE_SECRET, turnstileSiteKey: TICKET_TURNSTILE_SITE_KEY,
+      originAllowed: isAllowedOrigin })
+  : createTicketPublicIntakeUnavailableRouter());
+
 /**
  * Optional shared secret for local callers.
  *
@@ -193,11 +205,11 @@ app.use('/api', (req, res, next) => {
  */
 app.use('/api', sessionContext);
 app.use('/api', workspaceContext);
-// Tickets lives inside the existing PM portal. Keep the new API isolated and
-// read-only until durable write adapters are complete. Desktop requests relay
+// Tickets lives inside the existing PM portal. Optional Phase 2 triage uses
+// durable cloud adapters; future features remain isolated. Desktop requests relay
 // through the same path but never construct a local ticket database.
-app.use('/api/tickets', IS_CLOUD && ALPHA_TICKETING_READS_ENABLED
-  ? createTicketPmReadRouteBoundary(database())
+app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
+  ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);

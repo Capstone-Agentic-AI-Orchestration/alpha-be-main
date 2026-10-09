@@ -1,7 +1,9 @@
 import { Router } from 'express';
 
 import { route } from './asyncRoute.js';
-import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
+import {
+  opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest,
+} from './ticketRequestAuth.js';
 import type {
   TicketCommandReceipt, TicketOperationReceipt, TicketSubject, TicketTarget,
 } from '../store/ticketCommandStore.js';
@@ -36,12 +38,15 @@ function safeReceipt(value: TicketOperationReceipt | null, ticketId?: string): o
 }
 
 /** PM command/read-recovery transport. Mount only after a durable ticket store exists. */
-export function createTicketCommandRouter(application: PmTicketCommandApplication): Router {
+export function createTicketCommandRouter(
+  application: PmTicketCommandApplication,
+  relayRequest: typeof relayPmTicketRequest = relayPmTicketRequest,
+): Router {
   const router = Router();
 
   router.get('/operations/:operationId', route(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, private');
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
     const subject = pmTicketSubject(req, res);
     if (!subject) return;
     const ticketId = typeof req.query.ticketId === 'string' ? req.query.ticketId : '';
@@ -59,7 +64,7 @@ export function createTicketCommandRouter(application: PmTicketCommandApplicatio
     res.setHeader('Cache-Control', 'no-store, private');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (await relayPmTicketRequest(req, res)) return;
+    if (await relayRequest(req, res)) return;
     const subject = pmTicketSubject(req, res);
     if (!subject) return;
     const ticketId = req.params.ticketId ?? '';
