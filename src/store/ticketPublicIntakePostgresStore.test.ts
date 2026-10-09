@@ -14,6 +14,8 @@ import { fromPool, type Sql, type TransactionalSql } from './database.js';
 import { PostgresTicketPublicIntakeStore } from './ticketPublicIntakePostgresStore.js';
 import { PostgresTicketQueueStore } from './ticketQueuePostgresStore.js';
 import { PostgresTicketReadStore } from './ticketReadPostgresStore.js';
+import { PostgresTicketAcknowledgmentStore } from './ticketAcknowledgmentPostgresStore.js';
+import { createTicketAcknowledgmentDeliveryService } from '../services/ticketAcknowledgmentDeliveryService.js';
 
 const staging = resolve(__dirname, '../../supabase-staging');
 const baseline = readFileSync(resolve(staging, 'supabase/migrations/20261007154549_live_control_plane_baseline.sql'), 'utf8');
@@ -326,6 +328,74 @@ describe('PostgresTicketPublicIntakeStore against the reviewed local schema', ()
     expect((await counts(workspaceId)).tickets).toBe(0);
     expect((await db.query('select * from alpha_private.ticket_intake_rate_buckets where workspace_id = $1', [workspaceId])).rows).toEqual([]);
     expect((await store.loadPublishedEntry('synthetic-disabled'))?.mode).toBe('disabled');
+  });
+});
+
+describe('acknowledgment outbox on the existing PostgreSQL test harness', () => {
+  it('enrolls only new opted-in inquiries, uses the private contact, and preserves submission dedupe', async () => {
+    const workspaceId = 'acknowledgment-ws';
+    await seedEntry({ workspaceId, slug: 'acknowledgment' });
+    const store = new PostgresTicketPublicIntakeStore(db, true);
+    const input = inquiry('00000000-0000-4000-8000-000000000201');
+    const service = intakeService(store, `entry-${workspaceId}`, ['acknowledgment-ticket']);
+    const context = { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' };
+    await service.submit('acknowledgment', 'provider-proof', input, context);
+    await service.submit('acknowledgment', 'provider-proof', input, context);
+    const outbox = new PostgresTicketAcknowledgmentStore(db);
+    const claim = await outbox.claim('provider-identity');
+    expect(claim).toMatchObject({ workspaceId, ticketId: 'acknowledgment-ticket', recipient: input.email,
+      identityMatches: true, attempt: 1 });
+    expect(await outbox.canDispatch(claim!)).toBe(true);
+    expect(await outbox.claim('provider-identity')).toBeNull(); // Unexpired lease; older events are excluded.
+    await outbox.finish(claim!, 'delivered');
+    expect(await outbox.claim('provider-identity')).toBeNull();
+    const { rows } = await db.query<{ payload: unknown; status: string }>(
+      'select payload, status from alpha_private.ticket_outbox_events where workspace_id = $1', [workspaceId]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('delivered');
+    expect(JSON.stringify(rows[0].payload)).not.toContain(input.email);
+    expect(await counts(workspaceId)).toMatchObject({ tickets: 1, contacts: 1, outbox: 1, client_grants: 0, projects: 0, issues: 0 });
+  });
+  it('persists failure, retries with the same key, rejects stale leases and stops uncertain expired attempts', async () => {
+    const workspaceId = 'acknowledgment-retry-ws';
+    await seedEntry({ workspaceId, slug: 'acknowledgment-retry' });
+    const service = intakeService(new PostgresTicketPublicIntakeStore(db, true), `entry-${workspaceId}`, ['ack-retry-ticket']);
+    await service.submit('acknowledgment-retry', 'provider-proof', inquiry('00000000-0000-4000-8000-000000000202'),
+      { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' });
+    const outbox = new PostgresTicketAcknowledgmentStore(db);
+    const first = (await outbox.claim('provider-identity'))!;
+    await outbox.finish(first, 'retry', 'provider_failure');
+    expect(await outbox.claim('provider-identity')).toBeNull(); // Backoff enforced by DB.
+    await db.query('update alpha_private.ticket_outbox_events set available_at = now() where workspace_id = $1', [workspaceId]);
+    const second = (await outbox.claim('provider-identity'))!;
+    expect(second).toMatchObject({ id: first.id, attempt: 2, firstAttemptAt: first.firstAttemptAt, identityMatches: true });
+    await outbox.finish(first, 'delivered'); // Stale worker cannot overwrite new lease.
+    expect(await outbox.canDispatch(second)).toBe(true);
+    await outbox.finish(second, 'retry', 'provider_failure');
+    await db.query(`update alpha_private.ticket_outbox_events set available_at = now(),
+      payload = jsonb_set(payload, '{acknowledgmentDispatch,firstAttemptAt}', to_jsonb((now() - interval '11 minutes')::text))
+      where workspace_id = $1`, [workspaceId]);
+    let sends = 0;
+    await createTicketAcknowledgmentDeliveryService(outbox, { identity: 'provider-identity', async send() { sends++; } }).deliverNext();
+    expect(sends).toBe(0);
+    expect((await db.query<{ status: string }>('select status from alpha_private.ticket_outbox_events where workspace_id = $1', [workspaceId])).rows[0].status).toBe('dead');
+    expect((await counts(workspaceId)).tickets).toBe(1);
+  });
+  it('rechecks workspace write access and preserves identity across lease recovery', async () => {
+    const workspaceId = 'acknowledgment-scope-ws';
+    await seedEntry({ workspaceId, slug: 'acknowledgment-scope' });
+    const service = intakeService(new PostgresTicketPublicIntakeStore(db, true), `entry-${workspaceId}`, ['ack-scope-ticket']);
+    await service.submit('acknowledgment-scope', 'provider-proof', inquiry('00000000-0000-4000-8000-000000000203'),
+      { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' });
+    const outbox = new PostgresTicketAcknowledgmentStore(db);
+    const claim = (await outbox.claim('provider-identity'))!;
+    await db.query(`update public.workspaces set settings_json = '{"ticketing_write_mode":"disabled"}'::jsonb where id = $1`, [workspaceId]);
+    expect(await outbox.canDispatch(claim)).toBe(false);
+    await db.query(`update public.workspaces set settings_json = '{"ticketing_write_mode":"enabled"}'::jsonb where id = $1`, [workspaceId]);
+    await db.query(`update alpha_private.ticket_outbox_events set lease_until = now() - interval '1 second' where workspace_id = $1`, [workspaceId]);
+    const recovered = (await outbox.claim('changed-provider-identity'))!;
+    expect(recovered).toMatchObject({ id: claim.id, firstAttemptAt: claim.firstAttemptAt, identityMatches: false });
+    await outbox.finish(recovered, 'dead', 'secret_integrity_failure');
   });
 });
 

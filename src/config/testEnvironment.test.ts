@@ -29,6 +29,16 @@ describe('test configuration isolation', () => {
     expect(config.DATABASE_URL).toBe('');
   });
 
+  it('defaults to Resend with email disabled and no real provider credentials', async () => {
+    vi.stubEnv('TICKET_ACK_EMAIL_PROVIDER', undefined);
+    const config = await import('./env.js');
+    expect(config.TICKET_ACK_EMAIL_PROVIDER).toBe('resend');
+    expect(config.ALPHA_TICKETING_ACK_EMAIL_ENABLED).toBe(false);
+    expect(config.RESEND_API_KEY).toBe('');
+    expect(config.RESEND_SENDER_EMAIL).toBe('');
+    expect(config.RESEND_TEST_RECIPIENT).toBe('');
+  });
+
   it('uses each fixture home rather than a shared SQLite override', async () => {
     const fixtureHome = path.resolve('test-fixture-home');
     vi.stubEnv('ALPHA_HOME', fixtureHome);

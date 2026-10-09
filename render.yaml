@@ -43,6 +43,25 @@ services:
         sync: false
       - key: TICKET_TURNSTILE_SITE_KEY
         sync: false
+      # Phase 3 is opt-in. Configure the selected sender before enabling.
+      - key: ALPHA_TICKETING_ACK_EMAIL_ENABLED
+        sync: false
+      - key: TICKET_ACK_EMAIL_PROVIDER
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_SENDER_EMAIL
+        sync: false
+      - key: RESEND_SENDER_NAME
+        sync: false
+      - key: RESEND_TEST_RECIPIENT
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: BREVO_SENDER_NAME
+        sync: false
 
       # Encrypts the GitHub token on every session row. The daemon refuses to
       # start without it rather than writing credentials in the clear, so let

@@ -45,6 +45,17 @@ export const ALPHA_TICKETING_TRIAGE_ENABLED = process.env.ALPHA_TICKETING_TRIAGE
 export const TICKET_TURNSTILE_SECRET = process.env.TICKET_TURNSTILE_SECRET || '';
 export const TICKET_TURNSTILE_SITE_KEY = process.env.TICKET_TURNSTILE_SITE_KEY || '';
 
+// Phase 3: cloud-only email rollout. Unset/off leaves existing behavior intact.
+export const ALPHA_TICKETING_ACK_EMAIL_ENABLED = process.env.ALPHA_TICKETING_ACK_EMAIL_ENABLED === '1';
+export const TICKET_ACK_EMAIL_PROVIDER = (process.env.TICKET_ACK_EMAIL_PROVIDER ?? 'resend').trim().toLowerCase();
+export const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+export const RESEND_SENDER_EMAIL = (process.env.RESEND_SENDER_EMAIL || '').trim();
+export const RESEND_SENDER_NAME = (process.env.RESEND_SENDER_NAME || '').trim();
+export const RESEND_TEST_RECIPIENT = (process.env.RESEND_TEST_RECIPIENT || '').trim();
+export const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+export const BREVO_SENDER_EMAIL = (process.env.BREVO_SENDER_EMAIL || '').trim();
+export const BREVO_SENDER_NAME = (process.env.BREVO_SENDER_NAME || '').trim();
+
 /**
  * An installed desktop app, as opposed to a daemon someone is running from a
  * checkout. Set by the Electron shell from `app.isPackaged`.

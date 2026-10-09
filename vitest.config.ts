@@ -61,6 +61,15 @@ export default defineConfig({
       RENDER_REGION: '',
       VERCEL_TOKEN: '',
       VERCEL_TEAM_ID: '',
+      ALPHA_TICKETING_ACK_EMAIL_ENABLED: '',
+      TICKET_ACK_EMAIL_PROVIDER: 'resend',
+      RESEND_API_KEY: '',
+      RESEND_SENDER_EMAIL: '',
+      RESEND_SENDER_NAME: '',
+      RESEND_TEST_RECIPIENT: '',
+      BREVO_API_KEY: '',
+      BREVO_SENDER_EMAIL: '',
+      BREVO_SENDER_NAME: '',
       ALPHAORCH_WORKFLOW_REPO: '',
       ALPHAORCH_WORKFLOW_REF: ''
     }
