@@ -12,9 +12,8 @@ export interface TicketInvitationApplication {
 
 /**
  * PM-only invitation transport. Mount behind the existing cloud GitHub-session
- * and workspace middleware, after a durable invitation store is configured.
- * It deliberately accepts no recipient, role, workspace, or workflow fields
- * from the request body. It is not mounted in index.ts yet.
+ * and workspace middleware, inside the gated Phase 4 composition. It deliberately
+ * accepts no recipient, role, workspace, or workflow fields from the request body.
  */
 export function createTicketInvitationRouter(application: TicketInvitationApplication): Router {
   const router = Router();

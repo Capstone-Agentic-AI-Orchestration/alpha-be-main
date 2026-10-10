@@ -59,7 +59,7 @@ async function seedClient(workspaceId: string, options: {
   );
   await db.query(
     `insert into alpha_private.ticket_client_sessions
-       (session_id_hash, provider_user_id, csrf_hash, created_at, expires_at)
+       (session_id_hash, client_user_id, csrf_hash, created_at, expires_at)
      values ($1, $2, $3, $4, $5)`,
     [sessionId, client.userId, csrfHash, created, expires],
   );
@@ -98,6 +98,10 @@ beforeAll(async () => {
     await local.exec(baseline);
     await local.exec(ticketSchema);
     await local.exec(ticketIndexes);
+    // This preserved test snapshot predates Phase 4's client_user_id column
+    // name; align its ephemeral PGlite schema with the deployed live migration.
+    await local.exec(`ALTER TABLE alpha_private.ticket_client_sessions
+      RENAME COLUMN provider_user_id TO client_user_id`);
     await local.exec('commit');
   } catch (error) {
     await local.exec('rollback');

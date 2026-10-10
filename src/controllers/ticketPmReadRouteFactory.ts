@@ -16,19 +16,23 @@ import { createTicketMessageRouter } from './ticketMessageController.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { createTicketInvitationEmailRouter } from './ticketInvitationEmailController.js';
 import { PostgresTicketInvitationEmailStore } from '../store/ticketInvitationEmailPostgresStore.js';
+import { createTicketInvitationService, type TicketInvitationPolicy } from '../services/ticketInvitationService.js';
+import { PostgresTicketInvitationStore } from '../store/ticketInvitationPostgresStore.js';
+import { createTicketInvitationRouter } from './ticketInvitationController.js';
+import type { TicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
 
 /**
- * First production composition slice for the existing PM Tickets page.
- *
- * Queue/detail use the cloud's durable Postgres authority. The optional Phase 2
- * gate adds only atomic PM triage; future commands and public replies remain
- * unavailable. Desktop processes relay to cloud, never a local ticket store.
+ * Production composition for the existing PM Tickets page.
+ * Queue/detail and ticket actions use the cloud's durable Postgres authority.
+ * Phase 4 adds only PM-issued client invitations; desktop processes relay to
+ * cloud and never construct a local ticket store.
  */
 export function createTicketPmReadRouteBoundary(
   db: TransactionalSql,
   relayRequest: typeof relayPmTicketRequest = relayPmTicketRequest,
   triageEnabled = false,
   invitationEmailDeliveryConfigured = false,
+  clientActivation?: { enabled: boolean; policy: TicketInvitationPolicy; secretProtector?: TicketInvitationSecretProtector },
 ): Router {
   const router = Router({ caseSensitive: true, strict: true });
   const queue = createTicketQueueService(new PostgresTicketQueueStore(db));
@@ -49,9 +53,16 @@ export function createTicketPmReadRouteBoundary(
     router.use(createTicketMessageRouter({ note: messages.note,
       async reply() { throw new TicketWorkflowError(503, 'ticket_action_unavailable', 'Client conversations are not enabled yet.'); },
     }, relayRequest));
-    router.use(createTicketInvitationEmailRouter(
-      new PostgresTicketInvitationEmailStore(db), invitationEmailDeliveryConfigured,
-    ));
+    if (clientActivation) {
+      const invitationApp = clientActivation.enabled && clientActivation.secretProtector
+        ? createTicketInvitationService(new PostgresTicketInvitationStore(db), clientActivation.policy, clientActivation.secretProtector)
+        : { async issue() { throw new TicketWorkflowError(503, 'client_invitation_unavailable', 'Client invitations are not configured in this environment.'); } };
+      router.use(createTicketInvitationRouter(invitationApp));
+    } else if (invitationEmailDeliveryConfigured) {
+      // Retained for callers still on the Phase 3 email-only boundary. The cloud
+      // composition supplies `clientActivation` and never falls back to this.
+      router.use(createTicketInvitationEmailRouter(new PostgresTicketInvitationEmailStore(db), true));
+    }
   }
   router.use((_req, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, private');

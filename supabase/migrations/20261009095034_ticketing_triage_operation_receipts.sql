@@ -1,4 +1,5 @@
--- Phase 2 only. Append-only receipts provide retry/reconciliation for PM triage.
+-- Phase 2 only. This exact SQL is recorded in the live migration history as
+-- 20261009095034. Append-only receipts support safe PM triage retries.
 CREATE TABLE alpha_private.ticket_operation_receipts (
   workspace_id text NOT NULL,
   ticket_id text NOT NULL,

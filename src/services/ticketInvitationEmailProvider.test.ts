@@ -30,6 +30,18 @@ describe('ticket invitation email provider', () => {
     });
   });
 
+  it('sends server-authored dynamic activation content through the same guarded Resend transport', async () => {
+    const send = vi.fn(async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
+      new Response(JSON.stringify({ id: emailId }), { status: 200 }));
+    const provider = createTicketInvitationEmailProvider(config, send as typeof fetch)!;
+    await provider.sendContent('approved@example.test', 'Activate Alpha access', 'One-time link: https://example.test', 'activation-1');
+    expect(send).toHaveBeenCalledOnce();
+    const init = send.mock.calls[0]?.[1];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      to: ['approved@example.test'], subject: 'Activate Alpha access', text: 'One-time link: https://example.test',
+    });
+  });
+
   it('refuses a non-test recipient before calling Resend', async () => {
     const send = vi.fn();
     const provider = createTicketInvitationEmailProvider(config, send as typeof fetch)!;
