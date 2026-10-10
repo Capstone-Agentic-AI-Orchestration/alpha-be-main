@@ -1,0 +1,111 @@
+import type { TicketClientIdentityProvider } from '../services/ticketClientIdentityProvider.js';
+import type { TicketClientSessionPolicy } from '../services/ticketClientSessionService.js';
+import { createTicketClientSessionService } from '../services/ticketClientSessionService.js';
+import { createTicketClientActivationService } from '../services/ticketClientActivationService.js';
+import { createTicketClientSignInService } from '../services/ticketClientSignInService.js';
+import { createTicketClientWorkspaceService } from '../services/ticketClientWorkspaceService.js';
+import { createTicketQueueService } from '../services/ticketQueueService.js';
+import { createTicketReadService } from '../services/ticketReadService.js';
+import type { TicketClientActivationStore } from '../store/ticketClientActivationStore.js';
+import type { TicketClientSessionStore } from '../store/ticketClientSessionStore.js';
+import type { TicketClientWorkspaceStore } from '../store/ticketClientWorkspaceStore.js';
+import type { TicketQueueStore } from '../store/ticketQueueStore.js';
+import type { TicketReadStore } from '../store/ticketReadStore.js';
+import type { TicketClientSessionAdmission, TicketClientSessionCookiePolicy } from './ticketClientSessionController.js';
+import { createTicketClientApiRouter, type TicketClientApiApplication } from './ticketClientApiController.js';
+import { createTicketClientSessionRouter } from './ticketClientSessionController.js';
+import { createTicketClientActivationRouter } from './ticketClientActivationController.js';
+import { createTicketClientRouter } from './ticketClientRouter.js';
+import type { TicketInvitationContentEmailProvider } from '../services/ticketInvitationEmailProvider.js';
+import type { PostgresTicketClientSignInStore } from '../store/ticketClientSignInPostgresStore.js';
+import type { TicketSubject } from '../store/ticketCommandStore.js';
+import type { TicketTarget } from '../store/ticketCommandStore.js';
+import type { TicketWorkflowError } from '../ticketing/workflow.js';
+import { TicketWorkflowError as WorkflowError } from '../ticketing/workflow.js';
+
+export interface TicketClientPhaseFourRouteDependencies {
+  sessionStore: TicketClientSessionStore;
+  activationStore: TicketClientActivationStore;
+  workspaceStore: TicketClientWorkspaceStore;
+  queueStore: TicketQueueStore;
+  readStore: TicketReadStore;
+  identityProvider: TicketClientIdentityProvider;
+  signInStore: PostgresTicketClientSignInStore;
+  emailProvider: TicketInvitationContentEmailProvider;
+  webOrigin: string;
+  sessionPolicy: TicketClientSessionPolicy;
+  cookiePolicy: TicketClientSessionCookiePolicy;
+  sessionAdmission: TicketClientSessionAdmission;
+  activationAdmission: TicketClientSessionAdmission;
+  onSignInDeliveryUnavailable?: () => void;
+}
+
+function laterPhaseUnavailable(): TicketWorkflowError {
+  return new WorkflowError(503, 'client_ticket_action_unavailable', 'This client ticket action is not enabled in this phase.');
+}
+
+/** Phase 4 exposes client identity and scoped ticket reads only; all later writes stay closed. */
+export function createTicketClientPhaseFourRouteBoundary(dependencies: TicketClientPhaseFourRouteDependencies) {
+  const sessions = createTicketClientSessionService(
+    dependencies.sessionStore, dependencies.identityProvider, dependencies.sessionPolicy,
+  );
+  const activation = createTicketClientActivationService(
+    dependencies.activationStore, dependencies.identityProvider,
+  );
+  const signIn = createTicketClientSignInService(
+    dependencies.signInStore, dependencies.identityProvider, dependencies.emailProvider, dependencies.webOrigin,
+    dependencies.onSignInDeliveryUnavailable,
+  );
+  const workspaces = createTicketClientWorkspaceService(dependencies.workspaceStore);
+  const queue = createTicketQueueService(dependencies.queueStore);
+  const reads = createTicketReadService(dependencies.readStore);
+
+  const sessionApplication = {
+    ...sessions,
+    async exchangeEmailLink(tokenHash: string, type: 'invite' | 'magiclink') {
+      const verified = await dependencies.identityProvider.verifyEmailLink(tokenHash, type);
+      return verified ? sessions.exchange(verified.credential) : null;
+    },
+    requestSignInLink: signIn.request,
+  };
+  const activationApplication = {
+    async activate(input: unknown) {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw new WorkflowError(404, 'client_invitation_unavailable', 'This invitation is unavailable.');
+      }
+      const body = input as Record<string, unknown>;
+      if (typeof body.invitationToken !== 'string' || typeof body.providerTokenHash !== 'string'
+        || (body.providerTokenType !== 'invite' && body.providerTokenType !== 'magiclink')) {
+        throw new WorkflowError(404, 'client_invitation_unavailable', 'This invitation is unavailable.');
+      }
+      const verified = await dependencies.identityProvider.verifyEmailLink(body.providerTokenHash, body.providerTokenType);
+      if (!verified) throw new WorkflowError(404, 'client_invitation_unavailable', 'This invitation is unavailable.');
+      await activation.activate({ invitationToken: body.invitationToken, providerCredential: verified.credential });
+      const session = await sessions.exchange(verified.credential);
+      if (!session) throw new WorkflowError(503, 'client_activation_unavailable', 'Client activation is unavailable right now.');
+      return { activated: true as const, session };
+    },
+  };
+
+  const readOnlyApi: TicketClientApiApplication = {
+    authenticate: sessions.authenticate,
+    listWorkspaces: workspaces.list,
+    async getIntakeContext() { throw laterPhaseUnavailable(); },
+    list: queue.list,
+    detail: reads.detail,
+    async deliveryManifest(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string) { throw laterPhaseUnavailable(); },
+    async deliveryContent(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string, _fileId: string) { throw laterPhaseUnavailable(); },
+    async conversation(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
+    async reply(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
+    async execute(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
+    async lookup(_target: TicketTarget, _subject: TicketSubject, _operationId: string) { throw laterPhaseUnavailable(); },
+    async create(_contextId: string, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
+    async lookupCreation(_contextId: string, _subject: TicketSubject, _operationId: string) { throw laterPhaseUnavailable(); },
+  };
+
+  return createTicketClientRouter({
+    session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy, dependencies.sessionAdmission),
+    activation: createTicketClientActivationRouter(activationApplication, dependencies.cookiePolicy, dependencies.activationAdmission),
+    api: createTicketClientApiRouter(readOnlyApi, dependencies.cookiePolicy),
+  });
+}

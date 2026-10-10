@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, ALPHA_TICKETING_READS_ENABLED, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
+import { PORT, HOST, ALPHA_MODE, ALPHA_ORG, ALPHA_SESSION_SECRET, ALPHA_TICKETING_READS_ENABLED, DATABASE_CA_CERT, DATABASE_URL, IS_CLOUD, IS_DESKTOP, CORS_ORIGIN, hostOverrideNote, isAllowedOrigin, unsafeOriginPatterns } from './config/env.js';
 import { database, verifyDatabase } from './store/database.js';
 import { dataRouter } from './controllers/dataController.js';
 import { downloadRouter } from './controllers/downloadController.js';
@@ -40,7 +40,7 @@ import { createTicketPmReadRouteBoundary } from './controllers/ticketPmReadRoute
 import { createTicketUnavailableRouter } from './controllers/ticketUnavailableRouter.js';
 import { createTicketClientUnavailableRouter } from './controllers/ticketClientUnavailableRouter.js';
 import { createTicketPublicIntakeUnavailableRouter } from './controllers/ticketPublicIntakeUnavailableRouter.js';
-import { ALPHA_TICKETING_TRIAGE_ENABLED } from './config/env.js';
+import { ALPHA_TICKETING_TRIAGE_ENABLED, SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, ALPHA_CLOUD_API } from './config/env.js';
 import { createTicketPublicIntakeCloudRouter } from './controllers/ticketPublicIntakeCloudRouter.js';
 import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, TICKET_ACK_EMAIL_PROVIDER, BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME } from './config/env.js';
 import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
@@ -48,11 +48,38 @@ import { startTicketAcknowledgmentDelivery } from './services/ticketAcknowledgme
 import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknowledgmentEmailProvider.js';
 import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
+import { createTicketClientPhaseFourComposition } from './controllers/ticketClientPhaseFourComposition.js';
+import { resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
 
 const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
   apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
   testRecipient: RESEND_TEST_RECIPIENT,
 });
+
+const clientWebOrigin = resolveClientWebOrigin(CORS_ORIGIN, ALPHA_CLOUD_API);
+const ticketClientPhaseFour = (() => {
+  if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED || !clientWebOrigin
+    || !isAllowedOrigin(clientWebOrigin) || !SUPABASE_URL || !SUPABASE_ANON_KEY
+    || !SUPABASE_SERVICE_ROLE_KEY || !ticketInvitationEmailProvider
+    || typeof ticketInvitationEmailProvider.sendContent !== 'function') return null;
+  try {
+    return createTicketClientPhaseFourComposition({
+      database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
+      supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
+      webOrigin: clientWebOrigin, emailProvider: ticketInvitationEmailProvider,
+      onSignInDeliveryUnavailable: () => logError('Client sign-in email delivery failed. Check server-side Supabase Auth and Resend configuration.'),
+    });
+  } catch {
+    // Missing or invalid optional auth configuration keeps all client routes
+    // closed without preventing the existing cloud API from booting.
+    return null;
+  }
+})();
+
+const unavailableClientInvitation = {
+  enabled: false,
+  policy: { lifetimeMs: 60 * 60 * 1000 },
+} as const;
 
 /**
  * Refuse to start rather than store credentials in the clear.
@@ -152,10 +179,10 @@ app.use(
   })
 );
 
-// The browser-only client surface stays explicitly unavailable until its
-// durable ticket stores and email delivery are ready. Keep it ahead of local
-// token, workspace, and GitHub-session middleware; it never relays to desktop.
-app.use('/api/client', createTicketClientUnavailableRouter());
+// Mount the browser-only client surface only when the cloud, ticketing gate,
+// exact web origin, and server-side Supabase/Resend configuration are valid.
+// Keep it ahead of internal token/workspace middleware; it never relays to desktop.
+app.use('/api/client', ticketClientPhaseFour?.router ?? createTicketClientUnavailableRouter());
 
 // Anonymous inquiry URLs terminate at a separate fail-closed boundary. Do not
 // let a public request fall through to Alpha's internal token/session/workspace
@@ -220,7 +247,7 @@ app.use('/api', workspaceContext);
 // through the same path but never construct a local ticket database.
 app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
   ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED,
-    ticketInvitationEmailProvider !== null)
+    false, ticketClientPhaseFour?.pmInvitation ?? unavailableClientInvitation)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);
@@ -465,6 +492,10 @@ function onListening(): void {
       onUnavailable: () => logError('Ticket invitation email is unavailable; no client access was created. Check hosted Resend settings.'),
     });
     server.once('close', stopInvitationEmails);
+    const stopClientActivationEmails = ticketClientPhaseFour?.startDeliveryWorker(
+      () => logError('Client activation email delivery is unavailable; no client access was granted. Check server-side Supabase Auth and Resend configuration.'),
+    ) ?? (() => undefined);
+    server.once('close', stopClientActivationEmails);
     return;
   }
 

@@ -110,10 +110,10 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
               sg.write_mode, sg.display_name, w.settings_json->>'ticketing_write_mode' as workspace_write_mode
        from public.workspaces w
        join alpha_private.ticket_client_sessions s
-         on s.session_id_hash = $2 and s.provider_user_id = $3
+         on s.session_id_hash = $2 and s.client_user_id = $3
         and s.revoked_at is null and s.created_at <= now() and s.expires_at > now()
        join alpha_private.ticket_service_grants sg
-         on sg.id = $1 and sg.workspace_id = w.id and sg.client_user_id = s.provider_user_id
+         on sg.id = $1 and sg.workspace_id = w.id and sg.client_user_id = s.client_user_id
         and sg.status = 'active'
        where w.status = 'active'
        for share of w, s, sg`,

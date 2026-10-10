@@ -67,10 +67,11 @@ export class PostgresTicketAuthorization {
       `select sg.time_zone, sg.write_mode as client_write_mode
        from public.workspaces w
        join alpha_private.ticket_client_sessions s
-         on s.session_id_hash = $2 and s.provider_user_id = $3
+         on s.session_id_hash = $2 and s.client_user_id = $3
         and s.revoked_at is null and s.created_at <= now() and s.expires_at > now()
        join alpha_private.ticket_service_grants sg
-         on sg.workspace_id = w.id and sg.client_user_id = s.provider_user_id and sg.status = 'active'
+         on sg.workspace_id = w.id and sg.client_user_id = s.client_user_id
+        and sg.status = 'active' and sg.revoked_at is null
        where w.id = $1 and w.status = 'active'
        for share of w, s, sg`,
       [workspaceId, subject.sessionId, subject.userId],

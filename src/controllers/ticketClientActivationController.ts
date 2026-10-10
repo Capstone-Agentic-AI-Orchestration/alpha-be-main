@@ -4,11 +4,12 @@ import { IS_CLOUD } from '../config/env.js';
 import { route } from './asyncRoute.js';
 import {
   ticketClientOriginAllowed, ticketClientOriginPolicyValid,
-  type TicketClientSessionAdmission, type TicketClientSessionCookiePolicy,
+  setTicketClientSessionCookies, type TicketClientSessionAdmission, type TicketClientSessionCookiePolicy,
 } from './ticketClientSessionController.js';
+import type { TicketClientSessionIssue } from '../services/ticketClientSessionService.js';
 
 export interface TicketClientActivationApplication {
-  activate(input: unknown): Promise<{ activated: true }>;
+  activate(input: unknown): Promise<{ activated: true; session: TicketClientSessionIssue }>;
 }
 
 function protectResponse(res: Response): void {
@@ -24,9 +25,10 @@ function requestRecord(body: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Redeems one invitation capability after the browser has authenticated with
- * the configured identity provider. It deliberately returns no workspace,
- * ticket, contact or provider identity fields. This router is not mounted yet.
+ * Redeems one invitation capability after the browser presents a one-time
+ * identity-provider proof. It deliberately returns no workspace, ticket,
+ * contact or provider identity fields. Mount only inside the gated Phase 4
+ * client composition.
  */
 export function createTicketClientActivationRouter(
   application: TicketClientActivationApplication,
@@ -60,20 +62,23 @@ export function createTicketClientActivationRouter(
     }
 
     const body = requestRecord(req.body);
-    const credential = /^Bearer\s+(\S+)$/i.exec(req.get('Authorization') ?? '')?.[1];
-    if (!body || Object.keys(body).length !== 1 || typeof body.invitationToken !== 'string'
-      || !credential || credential.length > 8192) {
+    if (!body || Object.keys(body).length !== 3 || typeof body.invitationToken !== 'string'
+      || !/^[A-Za-z0-9_-]{43}$/.test(body.invitationToken)
+      || typeof body.providerTokenHash !== 'string' || !/^[A-Za-z0-9_-]{20,256}$/.test(body.providerTokenHash)
+      || (body.providerTokenType !== 'invite' && body.providerTokenType !== 'magiclink')) {
       return res.status(404).json({ error: 'This invitation is unavailable.' });
     }
 
     const result = await application.activate({
       invitationToken: body.invitationToken,
-      providerCredential: credential,
+      providerTokenHash: body.providerTokenHash,
+      providerTokenType: body.providerTokenType,
     });
-    if (!result || result.activated !== true) {
+    if (!result || result.activated !== true || !result.session
+      || !setTicketClientSessionCookies(res, result.session, policy.secure)) {
       return res.status(404).json({ error: 'This invitation is unavailable.' });
     }
-    return res.status(200).json({ activated: true });
+    return res.status(200).json({ activated: true, expiresAt: result.session.expiresAt });
   }));
 
   return router;

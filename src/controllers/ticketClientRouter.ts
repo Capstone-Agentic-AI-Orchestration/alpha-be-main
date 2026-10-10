@@ -8,10 +8,9 @@ export interface TicketClientRouters {
 
 /**
  * Combine the isolated client handlers and terminate unknown client paths.
- * When the application is ready, mount this at `/api/client` immediately
- * after CORS/body parsing and BEFORE the local-token, workspace, GitHub-session
- * and internal API middleware. Do not mount it until its durable applications
- * and provider configuration are available.
+ * Mount at `/api/client` immediately after CORS/body parsing and BEFORE the
+ * local-token, workspace, GitHub-session and internal API middleware. The
+ * entry point mounts this only when the gated Phase 4 composition is available.
  */
 export function createTicketClientRouter(routers: TicketClientRouters): Router {
   const router = Router({ caseSensitive: true, strict: true });

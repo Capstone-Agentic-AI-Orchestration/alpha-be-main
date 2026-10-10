@@ -23,10 +23,16 @@ export interface TicketInvitationEmailProvider {
   send(recipient: string, idempotencyKey: string): Promise<void>;
 }
 
+/** Provider interface required by the Phase 4 activation and sign-in emails. */
+export interface TicketInvitationContentEmailProvider extends TicketInvitationEmailProvider {
+  /** Dynamic, server-authored email; never accepts browser HTML. */
+  sendContent(recipient: string, subject: string, text: string, idempotencyKey: string): Promise<void>;
+}
+
 /** Uses the existing Resend settings; no new Render variables are required. */
 export function createTicketInvitationEmailProvider(config: {
   apiKey: string; senderEmail: string; senderName: string; testRecipient?: string;
-}, send: typeof fetch = fetch): TicketInvitationEmailProvider | null {
+}, send: typeof fetch = fetch): TicketInvitationContentEmailProvider | null {
   const email = z.string().email().max(254);
   const restrictedRecipient = (config.testRecipient || '').trim().toLowerCase();
   const defaultDomain = config.senderEmail.split('@')[1]?.toLowerCase() === 'resend.dev';
@@ -42,12 +48,12 @@ export function createTicketInvitationEmailProvider(config: {
     TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT,
   ])).digest('hex');
 
-  return {
-    identity,
-    async send(recipient: string, idempotencyKey: string) {
+  const sendContent = async (recipient: string, subject: string, text: string, idempotencyKey: string): Promise<void> => {
       const normalizedRecipient = recipient.trim().toLowerCase();
       if (!email.safeParse(normalizedRecipient).success || idempotencyKey.length < 1 || idempotencyKey.length > 256
         || /[\r\n]/.test(idempotencyKey)
+        || typeof subject !== 'string' || !subject.trim() || subject.length > 200 || /[\r\n]/.test(subject)
+        || typeof text !== 'string' || !text.trim() || text.length > 12_000
         || (restrictedRecipient && normalizedRecipient !== restrictedRecipient)) {
         throw new TicketInvitationEmailError(false);
       }
@@ -57,7 +63,7 @@ export function createTicketInvitationEmailProvider(config: {
           headers: { accept: 'application/json', 'content-type': 'application/json',
             Authorization: `Bearer ${config.apiKey}`, 'Idempotency-Key': idempotencyKey },
           body: JSON.stringify({ from, to: [normalizedRecipient],
-            subject: TICKET_INVITATION_EMAIL_SUBJECT, text: TICKET_INVITATION_EMAIL_TEXT }),
+            subject, text }),
         });
         if (response.ok) {
           const body: unknown = await response.json();
@@ -74,7 +80,14 @@ export function createTicketInvitationEmailProvider(config: {
         if (error instanceof TicketInvitationEmailError) throw error;
         throw new TicketInvitationEmailError(true);
       }
-    },
+  };
+
+  return {
+    identity,
+    send: (recipient, idempotencyKey) => sendContent(
+      recipient, TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT, idempotencyKey,
+    ),
+    sendContent,
   };
 }
 
