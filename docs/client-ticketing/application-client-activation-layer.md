@@ -1,6 +1,37 @@
 # Plan 3 — client invitation activation boundary
 
-Local application-layer checkpoint. This follows the existing
+The contract notes below describe the original application-layer checkpoint. The
+current Phase 4 composition is mounted by `src/index.ts` and uses the shared
+Postgres database, Supabase Auth, and the existing Resend sender.
+
+## Current hosted invitation setup
+
+- Set `ALPHA_TICKETING_TRIAGE_ENABLED=1` and keep the existing Supabase and
+  Resend server settings. `SUPABASE_SERVICE_ROLE_KEY` is required only on the
+  hosted backend; it must never be put in desktop build inputs or browser code.
+- `CORS_ORIGIN` must contain one exact HTTPS browser origin, such as
+  `https://alpha-fe-main.vercel.app`. Wildcards, paths, credentials, and request
+  headers cannot select the activation-link destination. A separate API origin
+  may also be listed when `ALPHA_CLOUD_API` identifies it unambiguously.
+- The hosted backend does not need the desktop-only `ALPHA_CLOUD_API` setting
+  to resolve a single exact browser origin. The website and its `/api` proxy may
+  share the same origin; that must not disable client activation.
+- When `RESEND_TEST_RECIPIENT` restricts delivery, the PM invitation action checks
+  the original inquiry contact after authorizing the PM, but before storing an
+  invitation. It returns `ticket_invitation_recipient_restricted` without
+  changing the ticket or queuing an email. Do not change a client's submitted
+  email or bypass this restriction to make a test pass.
+- Missing server settings leave client access closed without disabling GitHub
+  login, Projects, Issues, or PM triage. Backend startup logs identify missing
+  setting names without logging credentials; the PM sees a specific setup
+  message instead of a generic service failure.
+- Merging or deploying the backend fix is separate from publishing a desktop
+  update. A successful build/regression run does not prove that hosted settings,
+  invitation delivery, and client activation have passed a real release test.
+
+## Original contract checkpoint
+
+This follows the existing
 `src/ticketing`, `src/services`, `src/store`, and `docs/client-ticketing`
 structure. It does not contact Supabase, send email, or create an Auth user.
 
@@ -51,7 +82,7 @@ the recipient verifies the invited email and activates the same inquiry ticket;
 only then can the PM request clarification in the ticket conversation. The
 invitation is not scope agreement or work authorization.
 
-## Still pending
+## Historical limitations at the original checkpoint
 
 - A production activation-store adapter. PM invitation issuance now creates the
   matching one-time-token hash and encrypted outbox envelope; delivery is still

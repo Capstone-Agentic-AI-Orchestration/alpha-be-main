@@ -58,10 +58,20 @@ const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
 
 const clientWebOrigin = resolveClientWebOrigin(CORS_ORIGIN, ALPHA_CLOUD_API);
 const ticketClientPhaseFour = (() => {
-  if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED || !clientWebOrigin
-    || !isAllowedOrigin(clientWebOrigin) || !SUPABASE_URL || !SUPABASE_ANON_KEY
-    || !SUPABASE_SERVICE_ROLE_KEY || !ticketInvitationEmailProvider
-    || typeof ticketInvitationEmailProvider.sendContent !== 'function') return null;
+  if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED) return null;
+  const missing: string[] = [];
+  if (!clientWebOrigin || !isAllowedOrigin(clientWebOrigin)) missing.push('one exact HTTPS browser origin in CORS_ORIGIN');
+  if (!SUPABASE_URL) missing.push('SUPABASE_URL');
+  if (!SUPABASE_ANON_KEY) missing.push('SUPABASE_ANON_KEY');
+  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('server-only SUPABASE_SERVICE_ROLE_KEY');
+  if (!ticketInvitationEmailProvider || typeof ticketInvitationEmailProvider.sendContent !== 'function') {
+    missing.push('valid server-side Resend sender settings');
+  }
+  if (missing.length || !clientWebOrigin || !ticketInvitationEmailProvider) {
+    // Setting names only: never log credentials, client details or provider bodies.
+    logError(`Client portal unavailable: configure ${missing.join(', ')}.`);
+    return null;
+  }
   try {
     return createTicketClientPhaseFourComposition({
       database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
@@ -72,6 +82,7 @@ const ticketClientPhaseFour = (() => {
   } catch {
     // Missing or invalid optional auth configuration keeps all client routes
     // closed without preventing the existing cloud API from booting.
+    logError('Client portal initialization failed. Check the server-only Supabase Auth and client-session configuration.');
     return null;
   }
 })();

@@ -20,6 +20,8 @@ export class TicketInvitationEmailError extends Error {
 export interface TicketInvitationEmailProvider {
   /** Stable hash of provider, sender and fixed message content; never includes the API key. */
   readonly identity: string;
+  /** Pure server-side preflight. Does not disclose the configured recipient. */
+  canSendTo?(recipient: string): boolean;
   send(recipient: string, idempotencyKey: string): Promise<void>;
 }
 
@@ -48,13 +50,17 @@ export function createTicketInvitationEmailProvider(config: {
     TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT,
   ])).digest('hex');
 
+  const canSendTo = (recipient: string): boolean => {
+    const normalized = recipient.trim().toLowerCase();
+    return email.safeParse(normalized).success && (!restrictedRecipient || normalized === restrictedRecipient);
+  };
+
   const sendContent = async (recipient: string, subject: string, text: string, idempotencyKey: string): Promise<void> => {
       const normalizedRecipient = recipient.trim().toLowerCase();
-      if (!email.safeParse(normalizedRecipient).success || idempotencyKey.length < 1 || idempotencyKey.length > 256
+      if (!canSendTo(normalizedRecipient) || idempotencyKey.length < 1 || idempotencyKey.length > 256
         || /[\r\n]/.test(idempotencyKey)
         || typeof subject !== 'string' || !subject.trim() || subject.length > 200 || /[\r\n]/.test(subject)
-        || typeof text !== 'string' || !text.trim() || text.length > 12_000
-        || (restrictedRecipient && normalizedRecipient !== restrictedRecipient)) {
+        || typeof text !== 'string' || !text.trim() || text.length > 12_000) {
         throw new TicketInvitationEmailError(false);
       }
       try {
@@ -84,6 +90,7 @@ export function createTicketInvitationEmailProvider(config: {
 
   return {
     identity,
+    canSendTo,
     send: (recipient, idempotencyKey) => sendContent(
       recipient, TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT, idempotencyKey,
     ),
