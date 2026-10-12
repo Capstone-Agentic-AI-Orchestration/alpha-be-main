@@ -130,6 +130,12 @@ export class SupabaseService {
   });
 
   constructor() {
+    // This Supabase client is the desktop's uplink to the shared board. The
+    // hosted service uses Postgres directly; initializing this client there
+    // can invoke the desktop-only token provider and emit a misleading
+    // ALPHA_CLOUD_API warning during cloud startup.
+    if (IS_CLOUD) return;
+
     if (SUPABASE_URL && SUPABASE_ANON_KEY) {
       try {
         this.client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
