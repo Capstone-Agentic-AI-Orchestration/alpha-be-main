@@ -55,7 +55,10 @@ export function createTicketClientPhaseFourComposition(input: {
     input.supabaseUrl, input.supabaseAnonKey, input.supabaseServiceRoleKey,
   );
   const secrets = createClientTicketInvitationSecretProtector(input.sessionSecret);
-  const invitationPolicy: TicketInvitationPolicy = { lifetimeMs: INVITATION_LIFETIME_MS };
+  const invitationPolicy: TicketInvitationPolicy = {
+    lifetimeMs: INVITATION_LIFETIME_MS,
+    ...(input.emailProvider.canSendTo ? { recipientAllowed: (email: string) => input.emailProvider.canSendTo!(email) } : {}),
+  };
   const rateStore = new PostgresTicketClientAuthRateLimitStore(input.database);
   const sessionAdmission = createTicketClientAuthAdmission({
     store: rateStore, secret: input.sessionSecret, bucket: 'client_sign_in', maximumPerMinute: 8,

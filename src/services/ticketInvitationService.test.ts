@@ -21,6 +21,7 @@ function fixture(options: {
   mode?: LockedTicket['mode'];
   expireResult?: boolean;
   transactionError?: Error;
+  recipientAllowed?: (email: string) => boolean;
 } = {}) {
   const trace: string[] = [];
   const inserted: TicketInvitationRecord[] = [];
@@ -51,12 +52,49 @@ function fixture(options: {
     }),
   } as unknown as TicketInvitationStore;
   const service = createTicketInvitationService(
-    store, { lifetimeMs: 24 * 60 * 60 * 1000 }, protector, () => now, () => 'invitation-new',
+    store, { lifetimeMs: 24 * 60 * 60 * 1000,
+      ...(options.recipientAllowed ? { recipientAllowed: options.recipientAllowed } : {}),
+    }, protector, () => now, () => 'invitation-new',
   );
   return { service, tx, trace, inserted, audits, signals };
 }
 
 describe('PM client-invitation application service', () => {
+  it('rejects a restricted recipient before creating an invitation, audit or outbox signal', async () => {
+    const allowed = vi.fn(() => false);
+    const f = fixture({ recipientAllowed: allowed });
+    await expect(f.service.issue(target, pm)).rejects.toMatchObject({
+      status: 409, code: 'ticket_invitation_recipient_restricted',
+    });
+    expect(allowed).toHaveBeenCalledWith('client@example.test');
+    expect(f.trace).toEqual(['authorize', 'contact']);
+    expect(f.inserted).toEqual([]);
+    expect(f.audits).toEqual([]);
+    expect(f.signals).toEqual([]);
+  });
+
+  it('allows the approved recipient through the unchanged atomic invitation flow', async () => {
+    const allowed = vi.fn(email => email === 'client@example.test');
+    const f = fixture({ recipientAllowed: allowed });
+    await expect(f.service.issue(target, pm)).resolves.toMatchObject({
+      invitationId: 'invitation-new', alreadyPending: false,
+    });
+    expect(allowed).toHaveBeenCalledWith('client@example.test');
+    expect(f.inserted).toHaveLength(1);
+    expect(f.signals).toHaveLength(1);
+  });
+
+  it('never preflights or reads the contact when PM authorization is refused', async () => {
+    const allowed = vi.fn(() => true);
+    const f = fixture({ recipientAllowed: allowed,
+      actor: { kind: 'pm', userId: pm.userId, workspaceId: target.workspaceId, membershipActive: true, canManageTickets: false },
+    });
+    await expect(f.service.issue(target, pm)).rejects.toMatchObject({ status: 403 });
+    expect(allowed).not.toHaveBeenCalled();
+    expect(f.tx.loadInvitationContact).not.toHaveBeenCalled();
+    expect(f.inserted).toEqual([]);
+  });
+
   it('stores only a token hash and emits an encrypted, context-bound delivery signal', async () => {
     const f = fixture();
 

@@ -53,10 +53,11 @@ export interface TicketRequestReadRow extends TicketReadScope {
   preferredProjectId: string | null;
   requestedProjectLabel: string | null;
   requestedDeadline: string | null;
-  /** Original public contact is private and unverified, not an auth identity.
+  /** Original public contact and its persisted verification fact are private,
+   * not an auth identity or an access grant.
    * Client queries MUST omit it and return null; PM queries load it explicitly.
    */
-  contact: { fullName: string; email: string; company: string | null } | null;
+  contact: { fullName: string; email: string; company: string | null; emailVerified: boolean } | null;
 }
 export interface TicketDetailRows {
   header: TicketHeaderRow;

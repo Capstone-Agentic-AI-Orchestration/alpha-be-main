@@ -50,6 +50,24 @@ describe('ticket invitation email provider', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('preflights the recipient restriction without sending email or exposing its address', () => {
+    const send = vi.fn();
+    const provider = createTicketInvitationEmailProvider(config, send as typeof fetch)!;
+    expect(provider.canSendTo!(' APPROVED@example.test ')).toBe(true);
+    expect(provider.canSendTo!('client@example.test')).toBe(false);
+    expect(provider.canSendTo!('invalid-address')).toBe(false);
+    expect(provider).not.toHaveProperty('testRecipient');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('accepts other valid recipients only when the verified sender has no test restriction', () => {
+    const provider = createTicketInvitationEmailProvider({
+      ...config, senderEmail: 'support@alpha.example', testRecipient: '',
+    }, vi.fn() as typeof fetch)!;
+    expect(provider.canSendTo!('client@example.test')).toBe(true);
+    expect(provider.canSendTo!('invalid-address')).toBe(false);
+  });
+
   it('retries provider timeouts and concurrent idempotent requests, but not invalid requests', async () => {
     const timeout = createTicketInvitationEmailProvider(config, vi.fn(async () => { throw new Error('network'); }) as typeof fetch)!;
     await expect(timeout.send('approved@example.test', 'key')).rejects.toBeInstanceOf(TicketInvitationEmailError);

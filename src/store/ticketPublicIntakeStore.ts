@@ -35,7 +35,11 @@ export interface SavedPublicTicketIntakeOperation {
 export interface PublicTicketInquiryRecord {
   state: TicketWorkflow;
   header: TicketHeaderRow;
-  request: TicketRequestReadRow & { entryId: string };
+  /** Submitted contact fields cannot provide the server's verification fact. */
+  request: Omit<TicketRequestReadRow, 'contact'> & {
+    entryId: string;
+    contact: Omit<NonNullable<TicketRequestReadRow['contact']>, 'emailVerified'> | null;
+  };
 }
 export interface PublicTicketInquiryAudit {
   target: TicketTarget; entryId: string; operationId: string;

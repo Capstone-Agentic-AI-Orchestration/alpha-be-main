@@ -1,6 +1,88 @@
 # Plan 3 — client invitation activation boundary
 
-Local application-layer checkpoint. This follows the existing
+The contract notes below describe the original application-layer checkpoint. The
+current Phase 4 composition is mounted by `src/index.ts` and uses the shared
+Postgres database, Supabase Auth, and the existing Resend sender.
+
+## Current hosted invitation setup
+
+### Phases 1–4 gap review (12 October 2026)
+
+The invitation fix and verification-status changes are source changes until
+reviewed, merged and deployed. Regression tests are not proof of real Resend
+delivery or a successful client browser session. The live client-session endpoint
+still returned the configuration-related 503 during this review; intake was enabled.
+
+- Startup diagnostics now validate the exact web origin, HTTPS Supabase URL,
+  nonempty server credentials, existing session secret (at least 32 characters),
+  and configured Resend sender before constructing the client composition.
+  They name settings only. Do not rotate the existing session secret to debug
+  this optional feature: it also protects existing internal sessions.
+- Returning sign-in checks the sender's recipient restriction before generating
+  a new provider link. Unknown, ineligible and restricted addresses still receive
+  the same generic response; no open signup or email enumeration was added.
+- The PostgreSQL integration regression exercises the production composition's
+  activation, secure cookies, scoped ticket reads, CSRF rejection, sign-out and
+  returning sign-in handlers without opening a localhost server. Provider network
+  responses are simulated; this is not a real inbox/browser acceptance test.
+- Existing inquiry/acknowledgment regressions cover persisted submissions,
+  duplicate operations, private PM notes, declined inquiries, email leases and
+  controlled retries. Historical outbox rows without the acknowledgment marker
+  must not be replayed just to demonstrate email delivery.
+- No new environment variables, dependencies, migration, live permission change
+  or desktop change is needed for these corrections. Do not expose service-role
+  credentials to the frontend or installer, or bypass the configuration gate.
+
+Verification after the corrections: 157 backend test files / 2,664 tests passed;
+25 frontend test files / 303 tests passed; both production builds and all eight
+migration-audit tests passed. Initial restricted runs encountered Windows fixture
+and filesystem permission errors; the permission-enabled reruns passed without
+changing application configuration. Vite reports the existing large internal-app
+chunk warning. The desktop repository remained clean. Nothing was pushed,
+released, or changed in hosted settings or live database data by this review.
+
+Hosted acceptance remains: deploy the reviewed source; inspect startup diagnostics
+to correct only the failing setting; confirm `/api/client/session` gives the normal
+signed-out response; submit a new approved-recipient inquiry; verify actual Resend
+and inbox receipt; invite and activate the same inquiry; verify PM email status,
+cross-client denial, logout and returning sign-in. Only then call Phase 4 complete.
+
+- Set `ALPHA_TICKETING_TRIAGE_ENABLED=1` and keep the existing Supabase and
+  Resend server settings. `SUPABASE_SERVICE_ROLE_KEY` is required only on the
+  hosted backend; it must never be put in desktop build inputs or browser code.
+- `CORS_ORIGIN` must contain one exact HTTPS browser origin, such as
+  `https://alpha-fe-main.vercel.app`. Wildcards, paths, credentials, and request
+  headers cannot select the activation-link destination. A separate API origin
+  may also be listed when `ALPHA_CLOUD_API` identifies it unambiguously.
+- The hosted backend does not need the desktop-only `ALPHA_CLOUD_API` setting
+  to resolve a single exact browser origin. The website and its `/api` proxy may
+  share the same origin; that must not disable client activation.
+- When `RESEND_TEST_RECIPIENT` restricts delivery, the PM invitation action checks
+  the original inquiry contact after authorizing the PM, but before storing an
+  invitation. It returns `ticket_invitation_recipient_restricted` without
+  changing the ticket or queuing an email. Do not change a client's submitted
+  email or bypass this restriction to make a test pass.
+- Missing server settings leave client access closed without disabling GitHub
+  login, Projects, Issues, or PM triage. Backend startup logs identify missing
+  setting names without logging credentials; the PM sees a specific setup
+  message instead of a generic service failure.
+- Merging or deploying the backend fix is separate from publishing a desktop
+  update. A successful build/regression run does not prove that hosted settings,
+  invitation delivery, and client activation have passed a real release test.
+- Activation also marks the original contact's existing `email_verified` field
+  inside the same transaction as the ticket binding, grant, and audit. This
+  happens only after provider verification and matching the invited email;
+  inquiry receipt and email delivery do not mark it verified. PM detail reads
+  project this persisted field into `verified` or `unverified_submission`.
+  Verification is separate from current access: revoking a grant still blocks
+  ticket access and does not pretend that email ownership was never verified.
+  The field remains absent from client-facing contact projections. The PM UI
+  displays an unavailable status for missing/unsupported backend values rather
+  than guessing. No schema migration or new deployment setting is required.
+
+## Original contract checkpoint
+
+This follows the existing
 `src/ticketing`, `src/services`, `src/store`, and `docs/client-ticketing`
 structure. It does not contact Supabase, send email, or create an Auth user.
 
@@ -51,7 +133,7 @@ the recipient verifies the invited email and activates the same inquiry ticket;
 only then can the PM request clarification in the ticket conversation. The
 invitation is not scope agreement or work authorization.
 
-## Still pending
+## Historical limitations at the original checkpoint
 
 - A production activation-store adapter. PM invitation issuance now creates the
   matching one-time-token hash and encrypted outbox envelope; delivery is still

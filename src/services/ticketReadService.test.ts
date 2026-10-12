@@ -126,6 +126,33 @@ describe('authorized ticket detail reads', () => {
     expect(f.state.requiredIssueIds).toEqual(['issue-a']);
   });
 
+  it.each([false, true])('projects the stored contact verification fact %s without granting access', async emailVerified => {
+    const f = fixture();
+    f.state.clientId = null;
+    f.detail.request = {
+      ...target, source: 'public_inquiry', projectPreference: { kind: 'not_sure' },
+      preferredProjectId: null, requestedProjectLabel: null, requestedDeadline: null,
+      contact: { fullName: 'Inquiry Client', email: 'client@example.test', company: null, emailVerified },
+    };
+    const detail = await f.service.detail(target, pm);
+    expect(detail).toMatchObject({ internal: { request: { contact: {
+      verification: emailVerified ? 'verified' : 'unverified_submission',
+    } } } });
+    expect(f.state.clientId).toBeNull();
+    expect(f.state.status).toBe('received');
+  });
+
+  it('rejects a missing verification fact instead of inventing a contact status', async () => {
+    const f = fixture();
+    f.detail.request = {
+      ...target, source: 'public_inquiry', projectPreference: { kind: 'not_sure' },
+      preferredProjectId: null, requestedProjectLabel: null, requestedDeadline: null,
+      contact: { fullName: 'Inquiry Client', email: 'client@example.test', company: null,
+        emailVerified: undefined as unknown as boolean },
+    };
+    await expect(f.service.detail(target, pm)).rejects.toBeInstanceOf(TicketReadInvariantError);
+  });
+
   it('never derives the client-visible update from private activity', async () => {
     const f = fixture();
     const before = await f.service.detail(target, client);

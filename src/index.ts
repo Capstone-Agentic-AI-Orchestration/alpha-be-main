@@ -49,7 +49,7 @@ import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknow
 import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
 import { createTicketClientPhaseFourComposition } from './controllers/ticketClientPhaseFourComposition.js';
-import { resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
+import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
 
 const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
   apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
@@ -58,10 +58,18 @@ const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
 
 const clientWebOrigin = resolveClientWebOrigin(CORS_ORIGIN, ALPHA_CLOUD_API);
 const ticketClientPhaseFour = (() => {
-  if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED || !clientWebOrigin
-    || !isAllowedOrigin(clientWebOrigin) || !SUPABASE_URL || !SUPABASE_ANON_KEY
-    || !SUPABASE_SERVICE_ROLE_KEY || !ticketInvitationEmailProvider
-    || typeof ticketInvitationEmailProvider.sendContent !== 'function') return null;
+  if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED) return null;
+  const missing = clientAccessConfigurationProblems({
+    webOrigin: clientWebOrigin, originAllowed: Boolean(clientWebOrigin && isAllowedOrigin(clientWebOrigin)),
+    supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
+    supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
+    emailConfigured: typeof ticketInvitationEmailProvider?.sendContent === 'function',
+  });
+  if (missing.length || !clientWebOrigin || !ticketInvitationEmailProvider) {
+    // Setting names only: never log credentials, client details or provider bodies.
+    logError(`Client portal unavailable: configure ${missing.join(', ')}.`);
+    return null;
+  }
   try {
     return createTicketClientPhaseFourComposition({
       database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
@@ -72,6 +80,7 @@ const ticketClientPhaseFour = (() => {
   } catch {
     // Missing or invalid optional auth configuration keeps all client routes
     // closed without preventing the existing cloud API from booting.
+    logError('Client portal initialization failed. Check the server-only Supabase Auth and client-session configuration.');
     return null;
   }
 })();

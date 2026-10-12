@@ -30,6 +30,8 @@ function validInvitation(row: TicketInvitationRecord, target: TicketTarget): boo
 export interface TicketInvitationPolicy {
   /** Server-owned deployment setting. Never accepted from the PM request. */
   lifetimeMs: number;
+  /** Optional server-owned sender restriction, checked after PM authorization. */
+  recipientAllowed?: (email: string) => boolean;
 }
 
 export interface TicketInvitationReceipt {
@@ -53,7 +55,8 @@ export function createTicketInvitationService(
   nextId: () => string = randomUUID,
 ) {
   const policyValid = Number.isSafeInteger(policy?.lifetimeMs)
-    && policy.lifetimeMs > 0 && policy.lifetimeMs <= MAX_INVITATION_LIFETIME_MS;
+    && policy.lifetimeMs > 0 && policy.lifetimeMs <= MAX_INVITATION_LIFETIME_MS
+    && (policy.recipientAllowed === undefined || typeof policy.recipientAllowed === 'function');
   const protectorValid = typeof secretProtector?.protect === 'function'
     && typeof secretProtector?.unprotect === 'function';
 
@@ -75,6 +78,9 @@ export function createTicketInvitationService(
         const email = contact?.source === 'public_inquiry' && contact.emailVerified === false
           ? canonicalEmail(contact.email) : null;
         if (!email || !opaque(contact?.bindingId)) workflowError(409, 'ticket_invitation_unavailable', 'This inquiry is not eligible for client activation.');
+        if (policy.recipientAllowed && !policy.recipientAllowed(email)) {
+          workflowError(409, 'ticket_invitation_recipient_restricted', 'The email sender cannot deliver to this inquiry contact with its current recipient restriction.');
+        }
 
         const instant = now();
         const createdMs = instant instanceof Date ? instant.getTime() : Number.NaN;

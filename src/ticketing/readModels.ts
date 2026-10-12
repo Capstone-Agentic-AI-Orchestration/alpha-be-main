@@ -50,7 +50,7 @@ export interface PmTicketDetail extends ClientTicketDetail {
     correctionRequestedFor: string | null;
     withdrawalRequested: boolean;
     closureReason: LockedTicket['state']['closureReason'];
-    request: { source: 'authenticated_client' | 'public_inquiry'; preferredProjectId: string | null; projectLabel: string | null; requestedDeadline: string | null; contact: { fullName: string; email: string; company: string | null; verification: 'unverified_submission' } | null } | null;
+    request: { source: 'authenticated_client' | 'public_inquiry'; preferredProjectId: string | null; projectLabel: string | null; requestedDeadline: string | null; contact: { fullName: string; email: string; company: string | null; verification: 'verified' | 'unverified_submission' } | null } | null;
     scopeVersion: { id: string; summary: string; developerBrief: string | null; proposedAt: string; immutable: boolean; clientVisible: boolean } | null;
     deliveryAssessment: {
       id: string; scopeVersionId: string; summary: string; pinnedAssetId: string; issueRevisionIds: string[];
@@ -117,7 +117,10 @@ export function projectClientTicketDetail(ticket: LockedTicket, rows: TicketDeta
     } else requireInvariant(request.preferredProjectId === null && request.requestedProjectLabel === null);
     requireInvariant(request.source !== 'authenticated_client' || request.contact === null);
     requireInvariant(ticket.actor.kind !== 'client' || request.contact === null);
-    if (ticket.actor.kind === 'pm' && request.source === 'public_inquiry') requireInvariant(request.contact && isTicketInquiryContact(request.contact));
+    if (ticket.actor.kind === 'pm' && request.source === 'public_inquiry') {
+      requireInvariant(request.contact && isTicketInquiryContact(request.contact)
+        && typeof request.contact.emailVerified === 'boolean');
+    }
   }
   return {
     id: state.id, reference: header.reference, title: header.title, description: header.description,
@@ -156,7 +159,7 @@ export function projectPmTicketDetail(ticket: LockedTicket, rows: TicketDetailRo
         projectLabel: rows.request.requestedProjectLabel, requestedDeadline: rows.request.requestedDeadline,
         contact: rows.request.source === 'public_inquiry' && rows.request.contact ? {
           fullName: rows.request.contact.fullName, email: rows.request.contact.email, company: rows.request.contact.company,
-          verification: 'unverified_submission',
+          verification: rows.request.contact.emailVerified ? 'verified' : 'unverified_submission',
         } : null,
       } : null,
       scopeVersion: rows.currentScope ? {
