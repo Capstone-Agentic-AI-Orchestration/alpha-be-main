@@ -20,6 +20,8 @@ import { createTicketInvitationService, type TicketInvitationPolicy } from '../s
 import { PostgresTicketInvitationStore } from '../store/ticketInvitationPostgresStore.js';
 import { createTicketInvitationRouter } from './ticketInvitationController.js';
 import type { TicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
+import { createTicketPmDocumentRouter } from './ticketPmDocumentController.js';
+import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 
 /**
  * Production composition for the existing PM Tickets page.
@@ -33,6 +35,8 @@ export function createTicketPmReadRouteBoundary(
   triageEnabled = false,
   invitationEmailDeliveryConfigured = false,
   clientActivation?: { enabled: boolean; policy: TicketInvitationPolicy; secretProtector?: TicketInvitationSecretProtector },
+  communicationEnabled = false,
+  documents?: TicketDocumentsApplication,
 ): Router {
   const router = Router({ caseSensitive: true, strict: true });
   const queue = createTicketQueueService(new PostgresTicketQueueStore(db));
@@ -46,13 +50,15 @@ export function createTicketPmReadRouteBoundary(
     },
   }, relayRequest));
   if (triageEnabled) {
-    const store = new PostgresTicketTriageStore(db);
+    const store = new PostgresTicketTriageStore(db, { communicationEnabled });
     const commands = createTicketCommandService(store);
     const messages = createTicketMessageService(store);
     router.use(createTicketCommandRouter(commands, relayRequest));
     router.use(createTicketMessageRouter({ note: messages.note,
-      async reply() { throw new TicketWorkflowError(503, 'ticket_action_unavailable', 'Client conversations are not enabled yet.'); },
+      reply: communicationEnabled ? messages.reply
+        : async () => { throw new TicketWorkflowError(503, 'ticket_action_unavailable', 'Client conversations are not enabled yet.'); },
     }, relayRequest));
+    if (communicationEnabled && documents) router.use(createTicketPmDocumentRouter(documents, relayRequest));
     if (clientActivation) {
       const invitationApp = clientActivation.enabled && clientActivation.secretProtector
         ? createTicketInvitationService(new PostgresTicketInvitationStore(db), clientActivation.policy, clientActivation.secretProtector)

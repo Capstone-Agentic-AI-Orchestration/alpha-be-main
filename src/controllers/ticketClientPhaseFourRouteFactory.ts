@@ -20,8 +20,10 @@ import type { TicketInvitationContentEmailProvider } from '../services/ticketInv
 import type { PostgresTicketClientSignInStore } from '../store/ticketClientSignInPostgresStore.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
 import type { TicketTarget } from '../store/ticketCommandStore.js';
+import type { TicketMessageReceipt, TicketOperationReceipt } from '../store/ticketCommandStore.js';
 import type { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketWorkflowError as WorkflowError } from '../ticketing/workflow.js';
+import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 
 export interface TicketClientPhaseFourRouteDependencies {
   sessionStore: TicketClientSessionStore;
@@ -31,6 +33,11 @@ export interface TicketClientPhaseFourRouteDependencies {
   readStore: TicketReadStore;
   identityProvider: TicketClientIdentityProvider;
   signInStore: PostgresTicketClientSignInStore;
+  messages: {
+    reply(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<TicketMessageReceipt>;
+    lookup(target: TicketTarget, subject: TicketSubject, operationId: string): Promise<TicketOperationReceipt | null>;
+  };
+  documents?: TicketDocumentsApplication;
   emailProvider: TicketInvitationContentEmailProvider;
   webOrigin: string;
   sessionPolicy: TicketClientSessionPolicy;
@@ -95,10 +102,11 @@ export function createTicketClientPhaseFourRouteBoundary(dependencies: TicketCli
     detail: reads.detail,
     async deliveryManifest(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string) { throw laterPhaseUnavailable(); },
     async deliveryContent(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string, _fileId: string) { throw laterPhaseUnavailable(); },
-    async conversation(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
-    async reply(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
+    conversation: reads.conversation,
+    reply: dependencies.messages.reply,
+    ...(dependencies.documents ? { documents: dependencies.documents } : {}),
     async execute(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
-    async lookup(_target: TicketTarget, _subject: TicketSubject, _operationId: string) { throw laterPhaseUnavailable(); },
+    lookup: dependencies.messages.lookup,
     async create(_contextId: string, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
     async lookupCreation(_contextId: string, _subject: TicketSubject, _operationId: string) { throw laterPhaseUnavailable(); },
   };

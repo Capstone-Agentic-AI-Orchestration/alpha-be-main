@@ -12,6 +12,8 @@ import type { PmTicketQueueItem } from '../ticketing/queueModels.js';
 import type { ClientTicketDetail, PublicTicketMessage } from '../ticketing/readModels.js';
 import type { TicketStatus } from '../ticketing/workflow.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
+import type { TicketDocumentsApplication } from './ticketDocumentController.js';
+import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
 import { route } from './asyncRoute.js';
 import {
   readTicketClientCookie, ticketClientCookieNames, ticketClientOriginAllowed,
@@ -39,6 +41,7 @@ export interface TicketClientApiApplication {
   deliveryContent(target: TicketTarget, subject: TicketSubject, deliveryId: string, fileId: string): Promise<TicketDeliveryContent>;
   conversation(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<TicketMessagePage<PublicTicketMessage>>;
   reply(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<Extract<TicketOperationReceipt, { messageId: string }>>;
+  documents?: TicketDocumentsApplication;
   execute(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<TicketOperationReceipt>;
   lookup(target: TicketTarget, subject: TicketSubject, operationId: string): Promise<TicketOperationReceipt | null>;
   create(contextId: string, subject: TicketSubject, input: unknown): Promise<TicketCreationReceipt>;
@@ -357,6 +360,42 @@ export function createTicketClientApiRouter(
     if (!ticketTarget) return res.status(404).json({ error: 'Ticket not found.' });
     return res.json(safeMessages(await application.conversation(ticketTarget, subject, serviceQueryInput(req.query))));
   }));
+
+  if (application.documents) {
+    router.get('/workspaces/:workspaceId/tickets/:ticketId/documents', route(async (req, res) => {
+      secureTicketDocumentResponse(res);
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (!subject) return;
+      const ticketTarget = target(req);
+      if (!ticketTarget) return res.status(404).json({ error: 'Ticket not found.' });
+      return res.json({ items: safeTicketDocuments(await application.documents!.list(ticketTarget, subject)) });
+    }));
+
+    router.post('/workspaces/:workspaceId/tickets/:ticketId/documents', route(async (req, res) => {
+      secureTicketDocumentResponse(res);
+      if (!available(res) || !allowedWriteOrigin(req, res)) return;
+      const subject = await authenticate(req, res, true);
+      if (!subject) return;
+      const ticketTarget = target(req);
+      const metadata = parseTicketDocumentMetadata(req);
+      if (!ticketTarget) return res.status(404).json({ error: 'Ticket not found.' });
+      if (!metadata || !Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Choose a supported document.' });
+      const saved = await application.documents!.upload(ticketTarget, subject, { ...metadata, bytes: req.body });
+      return res.json(safeTicketDocuments([saved])[0]);
+    }));
+
+    router.get('/workspaces/:workspaceId/tickets/:ticketId/documents/:documentId/content', route(async (req, res) => {
+      secureTicketDocumentResponse(res);
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (!subject) return;
+      const ticketTarget = target(req);
+      const documentId = req.params.documentId ?? '';
+      if (!ticketTarget || !opaqueTicketRequestValue(documentId)) return res.status(404).json({ error: 'Document not found.' });
+      sendTicketDocument(res, await application.documents!.download(ticketTarget, subject, documentId));
+    }));
+  }
 
   router.get('/workspaces/:workspaceId/tickets/:ticketId/deliveries/:deliveryId', route(async (req, res) => {
     if (!available(res)) return;

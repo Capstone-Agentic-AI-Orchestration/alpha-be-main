@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 
 import { IS_CLOUD } from '../config/env.js';
-import { relayToCloud } from './cloudRelay.js';
+import { relayToCloud, type RelayOptions } from './cloudRelay.js';
 import { requireWorkspaceCapability } from './workspaceContext.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
 
@@ -66,9 +66,9 @@ export function assignedWorkTicketSubject(req: Request, res: Response): TicketSu
  * GitHub-authenticated relay; it must never fall through to local SQLite or a
  * process-local ticket adapter. A desktop without a cloud address fails closed.
  */
-export async function relayPmTicketRequest(req: Request, res: Response): Promise<boolean> {
+export async function relayPmTicketRequest(req: Request, res: Response, options: RelayOptions = {}): Promise<boolean> {
   if (IS_CLOUD) return false;
-  if (await relayToCloud(req, res)) return true;
+  if (await relayToCloud(req, res, options)) return true;
   res.status(503).json({ error: 'Ticketing requires a configured Alpha cloud connection.' });
   return true;
 }

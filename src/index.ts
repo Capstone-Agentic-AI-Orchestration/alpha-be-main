@@ -181,6 +181,10 @@ app.use(cors({
  * genuine delivery fail verification. Only the webhook route reads this.
  */
 app.use(
+  express.raw({ type: 'application/octet-stream', limit: '10mb' }),
+);
+
+app.use(
   express.json({
     verify: (req, _res, buf) => {
       (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
@@ -256,7 +260,8 @@ app.use('/api', workspaceContext);
 // through the same path but never construct a local ticket database.
 app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
   ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED,
-    false, ticketClientPhaseFour?.pmInvitation ?? unavailableClientInvitation)
+    false, ticketClientPhaseFour?.pmInvitation ?? unavailableClientInvitation, Boolean(ticketClientPhaseFour),
+    ticketClientPhaseFour?.documents)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);

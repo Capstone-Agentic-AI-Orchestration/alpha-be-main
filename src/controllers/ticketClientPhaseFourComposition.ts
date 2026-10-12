@@ -7,6 +7,8 @@ import { createTicketClientInvitationDeliveryService } from '../services/ticketC
 import { startTicketClientInvitationDeliveryWorker } from '../services/ticketClientInvitationDeliveryWorker.js';
 import { createTicketClientAuthAdmission } from '../services/ticketClientAuthAdmission.js';
 import { createTicketClientPhaseFourRouteBoundary } from './ticketClientPhaseFourRouteFactory.js';
+import { PostgresTicketTriageStore } from '../store/ticketTriagePostgresStore.js';
+import { createTicketMessageService } from '../services/ticketMessageService.js';
 import { PostgresTicketClientActivationStore } from '../store/ticketClientActivationPostgresStore.js';
 import { PostgresTicketClientAuthRateLimitStore } from '../store/ticketClientAuthRateLimitPostgresStore.js';
 import { PostgresTicketClientInvitationDeliveryStore } from '../store/ticketClientInvitationDeliveryStore.js';
@@ -18,6 +20,13 @@ import { PostgresTicketReadStore } from '../store/ticketReadPostgresStore.js';
 import { createClientTicketInvitationSecretProtector } from '../ticketing/clientTicketSecrets.js';
 import type { TicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
 import type { TicketInvitationPolicy } from '../services/ticketInvitationService.js';
+import { createTicketDocumentService } from '../services/ticketDocumentService.js';
+import { SupabaseTicketDocumentObjectStore } from '../services/supabaseTicketDocumentObjectStore.js';
+import { PostgresTicketDocumentStore } from '../store/ticketDocumentPostgresStore.js';
+import type { TicketDocumentsApplication } from './ticketDocumentController.js';
+import { PostgresTicketCommunicationNotificationStore } from '../store/ticketCommunicationNotificationStore.js';
+import { createTicketCommunicationNotificationService } from '../services/ticketCommunicationNotificationService.js';
+import { startTicketCommunicationNotificationWorker } from '../services/ticketCommunicationNotificationWorker.js';
 
 const INVITATION_LIFETIME_MS = 60 * 60 * 1000;
 const CLIENT_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
@@ -29,6 +38,7 @@ export interface TicketClientPhaseFourComposition {
     policy: TicketInvitationPolicy;
     secretProtector: TicketInvitationSecretProtector;
   };
+  documents: TicketDocumentsApplication;
   startDeliveryWorker(onUnavailable: () => void): () => void;
 }
 
@@ -66,6 +76,14 @@ export function createTicketClientPhaseFourComposition(input: {
   const activationAdmission = createTicketClientAuthAdmission({
     store: rateStore, secret: input.sessionSecret, bucket: 'client_activation', maximumPerMinute: 8,
   });
+  const documents = createTicketDocumentService(
+    new PostgresTicketDocumentStore(input.database),
+    new SupabaseTicketDocumentObjectStore(input.supabaseUrl, input.supabaseServiceRoleKey),
+  );
+  const communicationDelivery = createTicketCommunicationNotificationService(
+    new PostgresTicketCommunicationNotificationStore(input.database), input.emailProvider, input.webOrigin,
+  );
+  const messages = createTicketMessageService(new PostgresTicketTriageStore(input.database, { communicationEnabled: true }));
 
   const router = createTicketClientPhaseFourRouteBoundary({
     sessionStore: new PostgresTicketClientSessionStore(input.database),
@@ -75,6 +93,8 @@ export function createTicketClientPhaseFourComposition(input: {
     readStore: new PostgresTicketReadStore(input.database),
     identityProvider,
     signInStore: new PostgresTicketClientSignInStore(input.database),
+    messages,
+    documents,
     emailProvider: input.emailProvider,
     onSignInDeliveryUnavailable: input.onSignInDeliveryUnavailable,
     webOrigin: input.webOrigin,
@@ -92,12 +112,16 @@ export function createTicketClientPhaseFourComposition(input: {
   );
 
   return {
-    router,
+    router, documents,
     pmInvitation: { enabled: true, policy: invitationPolicy, secretProtector: secrets.invitation },
     startDeliveryWorker(onUnavailable) {
-      return startTicketClientInvitationDeliveryWorker({
+      const stopInvitations = startTicketClientInvitationDeliveryWorker({
         isCloud: true, enabled: true, delivery, onUnavailable,
       });
+      const stopCommunications = startTicketCommunicationNotificationWorker({
+        isCloud: true, enabled: true, delivery: communicationDelivery, onUnavailable,
+      });
+      return () => { stopInvitations(); stopCommunications(); };
     },
   };
 }
