@@ -29,6 +29,8 @@ const actionValues = new Set([
   'handle_withdrawal', 'resolve_hold',
 ]);
 const requestedActionValues = new Set(['reply', 'agree_scope', 'review_result']);
+const invitationStateValues = new Set(['pending', 'expired', 'revoked', 'consumed']);
+const invitationDeliveryValues = new Set(['queued', 'sending', 'retrying', 'accepted_by_provider', 'failed', 'unknown']);
 const allowedQueryKeys = new Set(['limit', 'after', 'search', 'filter']);
 const terminalStatuses = new Set(['closed', 'declined', 'cancelled']);
 const validTimestamp = (value: unknown): value is string => typeof value === 'string'
@@ -73,10 +75,13 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
     || (value.writesAvailable && value.readOnly)
     || (!value.writesAvailable && value.requestedAction !== null)) throw new TicketReadInvariantError();
   const internal = value.internal;
+  const invitation = internal?.clientInvitation;
   if (!internal || !validTimestamp(internal.updatedAt)
     || (internal.actionOwner !== null && !['pm', 'client', 'developer'].includes(internal.actionOwner))
     || (internal.nextAction !== null && !actionValues.has(internal.nextAction))
     || (internal.projectId !== null && !opaqueTicketRequestValue(internal.projectId))
+    || (invitation !== undefined && invitation !== null && (!invitationStateValues.has(invitation.status)
+      || !invitationDeliveryValues.has(invitation.delivery) || !validTimestamp(invitation.expiresAt)))
     || typeof internal.clientAccessActive !== 'boolean') {
     throw new TicketReadInvariantError();
   }
@@ -98,6 +103,7 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
       nextAction: internal.nextAction,
       projectId: internal.projectId,
       clientAccessActive: internal.clientAccessActive,
+      clientInvitation: invitation ?? null,
     },
   };
 }

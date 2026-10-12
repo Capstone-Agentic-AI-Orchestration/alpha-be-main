@@ -23,13 +23,13 @@ import type { TicketSubject, TicketTarget } from './ticketCommandStore.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 
-const workspaceId = 'phase-five-e2e-workspace';
-const clientId = 'phase-five-e2e-client';
-const clientEmail = 'phase-five-e2e@example.test';
-const pm: TicketSubject = { kind: 'internal', userId: 'phase-five-e2e-pm',
-  authentication: { kind: 'verified_github_bearer', verificationId: 'phase-five-e2e-verification' } };
-const providerCredential = 'synthetic-phase-five-provider-credential';
-const sessionSecret = 'phase-five-e2e-session-secret-with-sufficient-entropy';
+const workspaceId = 'ticket-communication-e2e-workspace';
+const clientId = 'ticket-communication-e2e-client';
+const clientEmail = 'ticket-communication-e2e@example.test';
+const pm: TicketSubject = { kind: 'internal', userId: 'ticket-communication-e2e-pm',
+  authentication: { kind: 'verified_github_bearer', verificationId: 'ticket-communication-e2e-verification' } };
+const providerCredential = 'synthetic-ticket-communication-provider-credential';
+const sessionSecret = 'ticket-communication-e2e-session-secret-with-sufficient-entropy';
 
 let pg: PGlite;
 let db: TransactionalSql;
@@ -41,12 +41,12 @@ function inquiryService(target: TicketTarget, now: Date) {
       return { entryId: entry.id, rateSubjectKey: 'e'.repeat(64), issuedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + 60_000).toISOString() };
     },
-  }, { fingerprintKeys: [{ id: 'phase-five-e2e-key', secret: new Uint8Array(32).fill(33) }], maxRequestAgeMs: 60_000 },
+  }, { fingerprintKeys: [{ id: 'ticket-communication-e2e-key', secret: new Uint8Array(32).fill(33) }], maxRequestAgeMs: 60_000 },
   () => now, () => target.ticketId);
 }
 
 async function submitInquiry(target: TicketTarget, now: Date) {
-  await inquiryService(target, now).submit('phase-five-e2e-entry', {
+  await inquiryService(target, now).submit('ticket-communication-e2e-entry', {
     schemaVersion: 1, operationId: randomUUID(), fullName: 'Synthetic Client', email: clientEmail,
     company: null, title: `Synthetic inquiry ${target.ticketId}`,
     description: 'A synthetic end-to-end regression scenario. No production data or email is used.', requestedDeadline: null,
@@ -67,27 +67,27 @@ beforeAll(async () => {
   const sql = sqlFor(pg);
   db = { ...sql, transaction: work => pg.transaction(async tx => work(sqlFor(tx as unknown as PGlite))) };
   await db.query(`insert into public.workspaces(id,name,slug,status,settings_json)
-    values ($1,'Synthetic phase five E2E','phase-five-e2e','active','{"ticketing_write_mode":"enabled"}')`, [workspaceId]);
+    values ($1,'Synthetic ticket communication E2E','ticket-communication-e2e','active','{"ticketing_write_mode":"enabled"}')`, [workspaceId]);
   await db.query(`insert into public.workspace_members(id,workspace_id,user_id,role)
-    values ('phase-five-e2e-member',$1,$2,'pm')`, [workspaceId, pm.userId]);
+    values ('ticket-communication-e2e-member',$1,$2,'pm')`, [workspaceId, pm.userId]);
   await db.query(`insert into alpha_private.ticket_intake_entries
     (id,workspace_id,slug,company_label,published,write_mode,policy_version,per_source_max,per_entry_max,window_seconds)
-    values ('phase-five-e2e-entry',$1,'phase-five-e2e-entry','Synthetic',true,'enabled','v1',100,100,60)`, [workspaceId]);
+    values ('ticket-communication-e2e-entry',$1,'ticket-communication-e2e-entry','Synthetic',true,'enabled','v1',100,100,60)`, [workspaceId]);
 }, 60_000);
 
 afterAll(async () => { await pg?.close(); });
 
-describe('Phase 5 client and PM message/document flow', () => {
+describe('Client and PM message/document flow', () => {
   it('keeps conversations and files private to the activated ticket and sends generic client notices', async () => {
     // Keep incremented, deterministic message timestamps behind the real
     // notification worker clock so both durable events are immediately due.
     const now = new Date(Date.now() - 10_000);
-    const target = { workspaceId, ticketId: `phase-five-e2e-ticket-${++ticketNumber}` };
-    const unrelated = { workspaceId, ticketId: `phase-five-e2e-ticket-${++ticketNumber}` };
+    const target = { workspaceId, ticketId: `ticket-communication-e2e-ticket-${++ticketNumber}` };
+    const unrelated = { workspaceId, ticketId: `ticket-communication-e2e-ticket-${++ticketNumber}` };
     await submitInquiry(target, now);
     await submitInquiry(unrelated, now);
     await createTicketCommandService(new PostgresTicketTriageStore(db)).execute(target, pm, {
-      schemaVersion: 1, operationId: 'phase-five-pm-review', expectedVersion: 0, command: { type: 'review' },
+      schemaVersion: 1, operationId: 'ticket-communication-pm-review', expectedVersion: 0, command: { type: 'review' },
     });
 
     const invitations = createTicketInvitationService(new PostgresTicketInvitationStore(db),
@@ -123,16 +123,16 @@ describe('Phase 5 client and PM message/document flow', () => {
       return instant;
     });
     const clientReply = await messages.reply(target, client, {
-      schemaVersion: 1, operationId: 'phase-five-client-message', expectedVersion: await currentVersion(target),
+      schemaVersion: 1, operationId: 'ticket-communication-client-message', expectedVersion: await currentVersion(target),
       body: 'Synthetic client reply; private to this ticket.',
     });
-    await expect(messages.lookup(target, client, 'phase-five-client-message')).resolves.toEqual(clientReply);
+    await expect(messages.lookup(target, client, 'ticket-communication-client-message')).resolves.toEqual(clientReply);
     await messages.reply(target, pm, {
-      schemaVersion: 1, operationId: 'phase-five-pm-message', expectedVersion: await currentVersion(target),
+      schemaVersion: 1, operationId: 'ticket-communication-pm-message', expectedVersion: await currentVersion(target),
       body: 'Synthetic PM update; not included in the email notification.',
     });
     await messages.note(target, pm, {
-      schemaVersion: 1, operationId: 'phase-five-private-note', expectedVersion: await currentVersion(target),
+      schemaVersion: 1, operationId: 'ticket-communication-private-note', expectedVersion: await currentVersion(target),
       body: 'Synthetic PM-only note must never be visible to the client.',
     });
 
@@ -143,11 +143,11 @@ describe('Phase 5 client and PM message/document flow', () => {
     });
     const pmFile = Buffer.from('%PDF-1.7\nPM shared document\n');
     const shared = await documents.upload(target, pm, {
-      operationId: 'phase-five-pm-document', filename: 'private-brief.pdf', contentType: 'application/pdf', bytes: pmFile,
+      operationId: 'ticket-communication-pm-document', filename: 'private-brief.pdf', contentType: 'application/pdf', bytes: pmFile,
     });
     const clientFile = Buffer.from('client follow-up document\n');
     const uploaded = await documents.upload(target, client, {
-      operationId: 'phase-five-client-document', filename: 'client-note.txt', contentType: 'text/plain', bytes: clientFile,
+      operationId: 'ticket-communication-client-document', filename: 'client-note.txt', contentType: 'text/plain', bytes: clientFile,
     });
     expect(await documents.list(target, client)).toEqual(expect.arrayContaining([shared, uploaded]));
     expect(Array.from((await documents.download(target, client, shared.id)).bytes)).toEqual(Array.from(pmFile));
@@ -166,7 +166,7 @@ describe('Phase 5 client and PM message/document flow', () => {
     const sendContent = vi.fn(async (_to: string, _subject: string, _body: string, _key: string) => undefined);
     const notifications = createTicketCommunicationNotificationService(
       new PostgresTicketCommunicationNotificationStore(db),
-      { identity: 'phase-five-synthetic-provider', canSendTo: () => true, send: async () => undefined, sendContent },
+      { identity: 'ticket-communication-synthetic-provider', canSendTo: () => true, send: async () => undefined, sendContent },
       'https://tickets.example.test',
     );
     const queued = await db.query<{ notification_kind: string; status: string }>(

@@ -20,6 +20,9 @@ interface QueueDbRow {
   closed_at: Date | string | null;
   project_id: string | null;
   client_access_active: boolean | null;
+  invitation_status: string | null;
+  invitation_expires_at: Date | string | null;
+  invitation_delivery_status: string | null;
   cursor_found: boolean;
 }
 
@@ -89,6 +92,9 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 t.workflow_state, t.created_at, t.client_updated_at, t.internal_updated_at,
                 t.closed_at, t.project_id,
                 coalesce(sg.status = 'active' and cg.active, false) as client_access_active,
+                invitation.status as invitation_status,
+                invitation.expires_at as invitation_expires_at,
+                invitation.delivery_status as invitation_delivery_status,
                 case when $2 = 'pm' then t.internal_updated_at else t.client_updated_at end as sort_at
          from alpha_private.tickets t
          left join lateral (
@@ -104,6 +110,17 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
              and grant_row.client_user_id = t.client_user_id
            for share
          ) cg on true
+         left join lateral (
+           select i.status, i.expires_at, o.status as delivery_status
+           from alpha_private.ticket_invitations i
+           left join alpha_private.ticket_outbox_events o
+             on o.workspace_id=i.workspace_id and o.ticket_id=i.ticket_id
+            and o.event_type='ticket_invitation_requested'
+            and o.payload->>'activationVersion'='1' and o.payload->>'invitationId'=i.id
+           where i.workspace_id=t.workspace_id and i.ticket_id=t.id and t.source='public_inquiry' and $2='pm'
+           order by i.created_at desc, i.id desc
+           limit 1
+         ) invitation on true
          where t.workspace_id = $1
            and ($2 = 'pm' or (t.client_user_id = $3 and coalesce(sg.status = 'active' and cg.active, false)))
        ), filtered as (
@@ -223,9 +240,28 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
       ? { kind: 'pm' as const, userId: scope.principal.userId, workspaceId: scope.workspaceId, membershipActive: true, canManageTickets: true }
       : { kind: 'client' as const, userId: scope.principal.userId, workspaceId: scope.workspaceId, ticketId: row.ticket_id, grantActive: row.client_access_active === true };
 
+    let clientInvitation: TicketQueueRow['clientInvitation'] = null;
+    if (row.invitation_status !== null || row.invitation_expires_at !== null || row.invitation_delivery_status !== null) {
+      if (!row.invitation_status || row.invitation_expires_at === null
+        || !['pending', 'expired', 'revoked', 'consumed'].includes(row.invitation_status)) return invariant();
+      const delivery = row.invitation_delivery_status === 'pending' ? 'queued'
+        : row.invitation_delivery_status === 'leased' ? 'sending'
+          : row.invitation_delivery_status === 'retry' ? 'retrying'
+            : row.invitation_delivery_status === 'delivered' ? 'accepted_by_provider'
+              : row.invitation_delivery_status === 'dead' || row.invitation_delivery_status === 'discarded' ? 'failed'
+                : row.invitation_delivery_status === null ? 'unknown' : null;
+      if (!delivery) return invariant();
+      clientInvitation = {
+        status: row.invitation_status as NonNullable<TicketQueueRow['clientInvitation']>['status'],
+        delivery,
+        expiresAt: ticketSqlIso(row.invitation_expires_at),
+      };
+    }
+
     return {
       ticket: { state: projectedState, actor, mode: scope.mode },
       clientAccessActive: row.client_access_active === true,
+      clientInvitation,
       header: {
         workspaceId: row.workspace_id,
         ticketId: row.ticket_id,

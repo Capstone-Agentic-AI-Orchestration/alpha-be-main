@@ -6,7 +6,7 @@ import { TicketClientIdentityProvider } from '../services/ticketClientIdentityPr
 import { createTicketClientInvitationDeliveryService } from '../services/ticketClientInvitationDeliveryService.js';
 import { startTicketClientInvitationDeliveryWorker } from '../services/ticketClientInvitationDeliveryWorker.js';
 import { createTicketClientAuthAdmission } from '../services/ticketClientAuthAdmission.js';
-import { createTicketClientPhaseFourRouteBoundary } from './ticketClientPhaseFourRouteFactory.js';
+import { createTicketClientPortalRouteBoundary } from './ticketClientPortalRouteFactory.js';
 import { PostgresTicketTriageStore } from '../store/ticketTriagePostgresStore.js';
 import { createTicketMessageService } from '../services/ticketMessageService.js';
 import { PostgresTicketClientActivationStore } from '../store/ticketClientActivationPostgresStore.js';
@@ -31,7 +31,7 @@ import { startTicketCommunicationNotificationWorker } from '../services/ticketCo
 const INVITATION_LIFETIME_MS = 60 * 60 * 1000;
 const CLIENT_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 
-export interface TicketClientPhaseFourComposition {
+export interface TicketClientComposition {
   router: Router;
   pmInvitation: {
     enabled: true;
@@ -47,7 +47,7 @@ export interface TicketClientPhaseFourComposition {
  * server-only Supabase Auth/Resend credentials. Call only after validating the
  * rollout gates and exact HTTPS web origin; no browser receives service keys.
  */
-export function createTicketClientPhaseFourComposition(input: {
+export function createTicketClientComposition(input: {
   database: TransactionalSql;
   supabaseUrl: string;
   supabaseAnonKey: string;
@@ -56,7 +56,7 @@ export function createTicketClientPhaseFourComposition(input: {
   webOrigin: string;
   emailProvider: TicketInvitationContentEmailProvider;
   onSignInDeliveryUnavailable?: () => void;
-}): TicketClientPhaseFourComposition {
+}): TicketClientComposition {
   if (typeof input.emailProvider.sendContent !== 'function') {
     throw new Error('Client email delivery is not configured.');
   }
@@ -85,7 +85,7 @@ export function createTicketClientPhaseFourComposition(input: {
   );
   const messages = createTicketMessageService(new PostgresTicketTriageStore(input.database, { communicationEnabled: true }));
 
-  const router = createTicketClientPhaseFourRouteBoundary({
+  const router = createTicketClientPortalRouteBoundary({
     sessionStore: new PostgresTicketClientSessionStore(input.database),
     activationStore: new PostgresTicketClientActivationStore(input.database),
     workspaceStore: new PostgresTicketClientWorkspaceStore(input.database),

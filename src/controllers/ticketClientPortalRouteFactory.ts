@@ -25,7 +25,7 @@ import type { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketWorkflowError as WorkflowError } from '../ticketing/workflow.js';
 import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 
-export interface TicketClientPhaseFourRouteDependencies {
+export interface TicketClientPortalRouteDependencies {
   sessionStore: TicketClientSessionStore;
   activationStore: TicketClientActivationStore;
   workspaceStore: TicketClientWorkspaceStore;
@@ -47,12 +47,12 @@ export interface TicketClientPhaseFourRouteDependencies {
   onSignInDeliveryUnavailable?: () => void;
 }
 
-function laterPhaseUnavailable(): TicketWorkflowError {
-  return new WorkflowError(503, 'client_ticket_action_unavailable', 'This client ticket action is not enabled in this phase.');
+function workflowActionUnavailable(): TicketWorkflowError {
+  return new WorkflowError(503, 'client_ticket_action_unavailable', 'This client ticket action is not enabled.');
 }
 
-/** Phase 4 exposes client identity and scoped ticket reads only; all later writes stay closed. */
-export function createTicketClientPhaseFourRouteBoundary(dependencies: TicketClientPhaseFourRouteDependencies) {
+/** Exposes client identity and ticket-scoped communication while keeping unsupported workflow actions closed. */
+export function createTicketClientPortalRouteBoundary(dependencies: TicketClientPortalRouteDependencies) {
   const sessions = createTicketClientSessionService(
     dependencies.sessionStore, dependencies.identityProvider, dependencies.sessionPolicy,
   );
@@ -94,26 +94,26 @@ export function createTicketClientPhaseFourRouteBoundary(dependencies: TicketCli
     },
   };
 
-  const readOnlyApi: TicketClientApiApplication = {
+  const clientApi: TicketClientApiApplication = {
     authenticate: sessions.authenticate,
     listWorkspaces: workspaces.list,
-    async getIntakeContext() { throw laterPhaseUnavailable(); },
+    async getIntakeContext() { throw workflowActionUnavailable(); },
     list: queue.list,
     detail: reads.detail,
-    async deliveryManifest(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string) { throw laterPhaseUnavailable(); },
-    async deliveryContent(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string, _fileId: string) { throw laterPhaseUnavailable(); },
+    async deliveryManifest(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string) { throw workflowActionUnavailable(); },
+    async deliveryContent(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string, _fileId: string) { throw workflowActionUnavailable(); },
     conversation: reads.conversation,
     reply: dependencies.messages.reply,
     ...(dependencies.documents ? { documents: dependencies.documents } : {}),
-    async execute(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
+    async execute(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw workflowActionUnavailable(); },
     lookup: dependencies.messages.lookup,
-    async create(_contextId: string, _subject: TicketSubject, _input: unknown) { throw laterPhaseUnavailable(); },
-    async lookupCreation(_contextId: string, _subject: TicketSubject, _operationId: string) { throw laterPhaseUnavailable(); },
+    async create(_contextId: string, _subject: TicketSubject, _input: unknown) { throw workflowActionUnavailable(); },
+    async lookupCreation(_contextId: string, _subject: TicketSubject, _operationId: string) { throw workflowActionUnavailable(); },
   };
 
   return createTicketClientRouter({
     session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy, dependencies.sessionAdmission),
     activation: createTicketClientActivationRouter(activationApplication, dependencies.cookiePolicy, dependencies.activationAdmission),
-    api: createTicketClientApiRouter(readOnlyApi, dependencies.cookiePolicy),
+    api: createTicketClientApiRouter(clientApi, dependencies.cookiePolicy),
   });
 }

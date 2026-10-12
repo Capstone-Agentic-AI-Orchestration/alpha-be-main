@@ -23,6 +23,12 @@ export interface TicketQueueRow {
   ticket: LockedTicket;
   /** Fresh service/ticket grant for the designated client, including PM reads. */
   clientAccessActive: boolean;
+  /** PM-only, safe delivery summary. The client queue projection omits it. */
+  clientInvitation?: {
+    status: 'pending' | 'expired' | 'revoked' | 'consumed';
+    delivery: 'queued' | 'sending' | 'retrying' | 'accepted_by_provider' | 'failed' | 'unknown';
+    expiresAt: string;
+  } | null;
   header: Pick<TicketHeaderRow, 'workspaceId' | 'ticketId' | 'reference' | 'title' | 'createdAt' | 'clientUpdatedAt' | 'internalUpdatedAt' | 'closedAt'>;
 }
 export interface ClientTicketCounters { kind: 'client'; open: number; needsClient: number }

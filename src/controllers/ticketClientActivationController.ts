@@ -27,8 +27,8 @@ function requestRecord(body: unknown): Record<string, unknown> | null {
 /**
  * Redeems one invitation capability after the browser presents a one-time
  * identity-provider proof. It deliberately returns no workspace, ticket,
- * contact or provider identity fields. Mount only inside the gated Phase 4
- * client composition.
+ * contact or provider identity fields. Mount only inside the configured
+ * client-portal composition.
  */
 export function createTicketClientActivationRouter(
   application: TicketClientActivationApplication,

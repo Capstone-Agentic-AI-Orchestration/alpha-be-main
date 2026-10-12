@@ -48,7 +48,7 @@ import { startTicketAcknowledgmentDelivery } from './services/ticketAcknowledgme
 import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknowledgmentEmailProvider.js';
 import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
-import { createTicketClientPhaseFourComposition } from './controllers/ticketClientPhaseFourComposition.js';
+import { createTicketClientComposition } from './controllers/ticketClientComposition.js';
 import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
 
 const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
@@ -57,7 +57,7 @@ const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
 });
 
 const clientWebOrigin = resolveClientWebOrigin(CORS_ORIGIN, ALPHA_CLOUD_API);
-const ticketClientPhaseFour = (() => {
+const ticketClient = (() => {
   if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED) return null;
   const missing = clientAccessConfigurationProblems({
     webOrigin: clientWebOrigin, originAllowed: Boolean(clientWebOrigin && isAllowedOrigin(clientWebOrigin)),
@@ -71,7 +71,7 @@ const ticketClientPhaseFour = (() => {
     return null;
   }
   try {
-    return createTicketClientPhaseFourComposition({
+    return createTicketClientComposition({
       database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
       supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
       webOrigin: clientWebOrigin, emailProvider: ticketInvitationEmailProvider,
@@ -195,7 +195,7 @@ app.use(
 // Mount the browser-only client surface only when the cloud, ticketing gate,
 // exact web origin, and server-side Supabase/Resend configuration are valid.
 // Keep it ahead of internal token/workspace middleware; it never relays to desktop.
-app.use('/api/client', ticketClientPhaseFour?.router ?? createTicketClientUnavailableRouter());
+app.use('/api/client', ticketClient?.router ?? createTicketClientUnavailableRouter());
 
 // Anonymous inquiry URLs terminate at a separate fail-closed boundary. Do not
 // let a public request fall through to Alpha's internal token/session/workspace
@@ -260,8 +260,8 @@ app.use('/api', workspaceContext);
 // through the same path but never construct a local ticket database.
 app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
   ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED,
-    false, ticketClientPhaseFour?.pmInvitation ?? unavailableClientInvitation, Boolean(ticketClientPhaseFour),
-    ticketClientPhaseFour?.documents)
+    false, ticketClient?.pmInvitation ?? unavailableClientInvitation, Boolean(ticketClient),
+    ticketClient?.documents)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);
@@ -506,7 +506,7 @@ function onListening(): void {
       onUnavailable: () => logError('Ticket invitation email is unavailable; no client access was created. Check hosted Resend settings.'),
     });
     server.once('close', stopInvitationEmails);
-    const stopClientActivationEmails = ticketClientPhaseFour?.startDeliveryWorker(
+    const stopClientActivationEmails = ticketClient?.startDeliveryWorker(
       () => logError('Client activation email delivery is unavailable; no client access was granted. Check server-side Supabase Auth and Resend configuration.'),
     ) ?? (() => undefined);
     server.once('close', stopClientActivationEmails);

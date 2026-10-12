@@ -10,9 +10,9 @@ import { createTestDatabase, sqlFor } from './testDatabase.js';
 import type { TransactionalSql } from './database.js';
 import type { TicketSubject, TicketTarget } from './ticketCommandStore.js';
 
-const workspaceId = 'phase-five-docs-workspace';
-const pm: TicketSubject = { kind: 'internal', userId: 'phase-five-docs-pm',
-  authentication: { kind: 'verified_github_bearer', verificationId: 'phase-five-docs-test-session' } };
+const workspaceId = 'ticket-communication-docs-workspace';
+const pm: TicketSubject = { kind: 'internal', userId: 'ticket-communication-docs-pm',
+  authentication: { kind: 'verified_github_bearer', verificationId: 'ticket-communication-docs-test-session' } };
 const fixedNow = new Date('2026-10-12T08:00:00.000Z');
 
 let pg: PGlite;
@@ -32,15 +32,15 @@ function intake(ticketId: string) {
       return { entryId: entry.id, rateSubjectKey: 'd'.repeat(64), issuedAt: fixedNow.toISOString(),
         expiresAt: new Date(fixedNow.getTime() + 60_000).toISOString() };
     },
-  }, { fingerprintKeys: [{ id: 'phase-five-test-key', secret: new Uint8Array(32).fill(21) }], maxRequestAgeMs: 60_000 },
+  }, { fingerprintKeys: [{ id: 'ticket-communication-test-key', secret: new Uint8Array(32).fill(21) }], maxRequestAgeMs: 60_000 },
   () => fixedNow, () => ticketId);
 }
 
 async function submitTicket(): Promise<TicketTarget> {
-  const target = { workspaceId, ticketId: `phase-five-doc-ticket-${++ticketNumber}` };
-  await intake(target.ticketId).submit('phase-five-doc-entry', {
+  const target = { workspaceId, ticketId: `ticket-communication-doc-ticket-${++ticketNumber}` };
+  await intake(target.ticketId).submit('ticket-communication-doc-entry', {
     schemaVersion: 1, operationId: randomUUID(), fullName: 'Synthetic Client',
-    email: 'phase-five-client@example.test', company: null, title: 'Synthetic document request',
+    email: 'ticket-communication-client@example.test', company: null, title: 'Synthetic document request',
     description: 'A synthetic request used only by the PostgreSQL regression suite.', requestedDeadline: null,
   }, { origin: 'https://tickets.example.test', remoteAddress: '192.0.2.18' });
   return target;
@@ -51,39 +51,39 @@ beforeAll(async () => {
   const sql = sqlFor(pg);
   db = { ...sql, transaction: work => pg.transaction(async tx => work(sqlFor(tx as unknown as PGlite))) };
   await db.query(`insert into public.workspaces(id,name,slug,status,settings_json)
-    values ($1,'Synthetic phase five','phase-five-docs','active','{"ticketing_write_mode":"enabled"}')`, [workspaceId]);
+    values ($1,'Synthetic ticket communication','ticket-communication-docs','active','{"ticketing_write_mode":"enabled"}')`, [workspaceId]);
   await db.query(`insert into public.workspace_members(id,workspace_id,user_id,role)
-    values ('phase-five-docs-member',$1,$2,'pm')`, [workspaceId, pm.userId]);
+    values ('ticket-communication-docs-member',$1,$2,'pm')`, [workspaceId, pm.userId]);
   await db.query(`insert into alpha_private.ticket_intake_entries
     (id,workspace_id,slug,company_label,published,write_mode,policy_version,per_source_max,per_entry_max,window_seconds)
-    values ('phase-five-doc-entry',$1,'phase-five-doc-entry','Synthetic',true,'enabled','v1',100,100,60)`, [workspaceId]);
+    values ('ticket-communication-doc-entry',$1,'ticket-communication-doc-entry','Synthetic',true,'enabled','v1',100,100,60)`, [workspaceId]);
 }, 60_000);
 
 afterAll(async () => { await pg?.close(); objectBytes.clear(); });
 beforeEach(() => { objectBytes.clear(); putObject.mockClear(); getObject.mockClear(); });
 
-describe('Phase 5 private ticket documents on PostgreSQL', () => {
+describe('Private ticket documents on PostgreSQL', () => {
   it('keeps immutable versions, supports safe retries/downloads, and rejects cross-ticket or unauthenticated access', async () => {
     const first = await submitTicket();
     const second = await submitTicket();
     const documents = createTicketDocumentService(new PostgresTicketDocumentStore(db), {
       put: putObject, get: getObject,
     });
-    const firstBytes = Buffer.from('%PDF-1.7\nphase five document v1\n');
+    const firstBytes = Buffer.from('%PDF-1.7\nticket communication document v1\n');
     const original = await documents.upload(first, pm, {
-      operationId: 'phase-five-upload-v1', filename: 'brief.pdf', contentType: 'application/pdf', bytes: firstBytes,
+      operationId: 'ticket-communication-upload-v1', filename: 'brief.pdf', contentType: 'application/pdf', bytes: firstBytes,
     });
     expect(original).toMatchObject({ author: 'pm', version: 1, changeProposed: false, status: 'available' });
     expect(original).not.toHaveProperty('storagePath');
     expect(original).not.toHaveProperty('sha256');
     expect(await documents.upload(first, pm, {
-      operationId: 'phase-five-upload-v1', filename: 'brief.pdf', contentType: 'application/pdf', bytes: firstBytes,
+      operationId: 'ticket-communication-upload-v1', filename: 'brief.pdf', contentType: 'application/pdf', bytes: firstBytes,
     })).toEqual(original);
     expect(putObject).toHaveBeenCalledTimes(1);
 
-    const replacementBytes = Buffer.from('%PDF-1.7\nphase five document v2\n');
+    const replacementBytes = Buffer.from('%PDF-1.7\nticket communication document v2\n');
     const replacement = await documents.upload(first, pm, {
-      operationId: 'phase-five-upload-v2', replacesDocumentId: original.id,
+      operationId: 'ticket-communication-upload-v2', replacesDocumentId: original.id,
       filename: 'brief.pdf', contentType: 'application/pdf', bytes: replacementBytes,
     });
     expect(replacement).toMatchObject({ groupId: original.groupId, version: 2,
@@ -95,7 +95,7 @@ describe('Phase 5 private ticket documents on PostgreSQL', () => {
     expect(objectBytes.size).toBe(2);
 
     await expect(documents.upload(second, pm, {
-      operationId: 'phase-five-cross-ticket-replacement', replacesDocumentId: original.id,
+      operationId: 'ticket-communication-cross-ticket-replacement', replacesDocumentId: original.id,
       filename: 'brief.pdf', contentType: 'application/pdf', bytes: replacementBytes,
     })).rejects.toMatchObject({ status: 404 });
     await expect(documents.list(first, { kind: 'client', userId: 'uninvited-client', sessionId: 'no-session' }))
@@ -110,15 +110,15 @@ describe('Phase 5 private ticket documents on PostgreSQL', () => {
     const target = await submitTicket();
     const documents = createTicketDocumentService(new PostgresTicketDocumentStore(db), { put: putObject, get: getObject });
     await expect(documents.upload(target, pm, {
-      operationId: 'phase-five-html-spoof', filename: 'payload.pdf', contentType: 'application/pdf',
+      operationId: 'ticket-communication-html-spoof', filename: 'payload.pdf', contentType: 'application/pdf',
       bytes: Buffer.from('<html>not a PDF</html>'),
     })).rejects.toMatchObject({ status: 400 });
     await expect(documents.upload(target, pm, {
-      operationId: 'phase-five-path-traversal', filename: '../private.pdf', contentType: 'application/pdf',
+      operationId: 'ticket-communication-path-traversal', filename: '../private.pdf', contentType: 'application/pdf',
       bytes: Buffer.from('%PDF-1.7\ncontent'),
     })).rejects.toMatchObject({ status: 400 });
     await expect(documents.upload(target, pm, {
-      operationId: 'phase-five-too-large', filename: 'large.pdf', contentType: 'application/pdf',
+      operationId: 'ticket-communication-too-large', filename: 'large.pdf', contentType: 'application/pdf',
       bytes: Buffer.alloc(10 * 1024 * 1024 + 1, 1),
     })).rejects.toMatchObject({ status: 400 });
     expect(putObject).not.toHaveBeenCalled();

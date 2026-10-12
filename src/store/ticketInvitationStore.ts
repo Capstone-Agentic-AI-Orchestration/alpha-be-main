@@ -1,6 +1,7 @@
 import type { LockedTicket, TicketSubject, TicketTarget } from './ticketCommandStore.js';
 
 export type TicketInvitationStatus = 'pending' | 'expired' | 'revoked' | 'consumed';
+export type TicketInvitationOutboxStatus = 'pending' | 'retry' | 'leased' | 'delivered' | 'dead' | 'discarded';
 
 /** The invitation row contains no email; the recipient is resolved from the
  * private original inquiry only when the delivery worker processes the event. */
@@ -52,6 +53,8 @@ export interface TicketInvitationTransaction {
   loadInvitationContact(ticket: LockedTicket): Promise<TicketInvitationContact | null>;
   /** Lock the current invitation for this exact ticket, including terminal history if present. */
   lockLatestInvitation(target: TicketTarget): Promise<TicketInvitationRecord | null>;
+  /** Read the matching terminal/retry state without exposing provider or recipient data. */
+  loadInvitationOutboxStatus(target: TicketTarget, invitationId: string): Promise<TicketInvitationOutboxStatus | null>;
   /** Pending -> expired compare-and-set; false means the transaction must abort. */
   expireInvitation(target: TicketTarget, invitationId: string, occurredAt: string): Promise<boolean>;
   /** Enforce one pending invitation per ticket with a database uniqueness constraint. */

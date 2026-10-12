@@ -7,13 +7,16 @@ import { PostgresTicketReadStore } from '../store/ticketReadPostgresStore.js';
 import type { TransactionalSql } from '../store/database.js';
 import { createTicketQueueRouter } from './ticketQueueController.js';
 import { createTicketReadRouter } from './ticketReadController.js';
-import { relayPmTicketRequest } from './ticketRequestAuth.js';
+import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
+import { PostgresTicketAuthorization } from '../store/ticketPostgresAuthorization.js';
 import { PostgresTicketTriageStore } from '../store/ticketTriagePostgresStore.js';
 import { createTicketCommandService } from '../services/ticketCommandService.js';
 import { createTicketMessageService } from '../services/ticketMessageService.js';
 import { createTicketCommandRouter } from './ticketCommandController.js';
 import { createTicketMessageRouter } from './ticketMessageController.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
+import { TicketReadInvariantError } from '../ticketing/readModels.js';
+import { route } from './asyncRoute.js';
 import { createTicketInvitationEmailRouter } from './ticketInvitationEmailController.js';
 import { PostgresTicketInvitationEmailStore } from '../store/ticketInvitationEmailPostgresStore.js';
 import { createTicketInvitationService, type TicketInvitationPolicy } from '../services/ticketInvitationService.js';
@@ -26,8 +29,8 @@ import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 /**
  * Production composition for the existing PM Tickets page.
  * Queue/detail and ticket actions use the cloud's durable Postgres authority.
- * Phase 4 adds only PM-issued client invitations; desktop processes relay to
- * cloud and never construct a local ticket store.
+ * PM-issued client invitations are delivered by the cloud; desktop processes
+ * relay to cloud and never construct a local ticket store.
  */
 export function createTicketPmReadRouteBoundary(
   db: TransactionalSql,
@@ -41,6 +44,52 @@ export function createTicketPmReadRouteBoundary(
   const router = Router({ caseSensitive: true, strict: true });
   const queue = createTicketQueueService(new PostgresTicketQueueStore(db));
   const reads = createTicketReadService(new PostgresTicketReadStore(db));
+
+  // The client entry page requires an explicit workspace code. Give PMs that
+  // code from the published database entry rather than assuming it matches a
+  // workspace slug or hardcoding a client URL in the desktop app.
+  router.get('/inquiry-code', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (await relayRequest(req, res)) return;
+    const workspace = req.workspace;
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    if (!workspace || !opaqueTicketRequestValue(workspace.workspaceId)) throw new TicketReadInvariantError();
+
+    const result = await db.transaction(async sql => {
+      const scope = await new PostgresTicketAuthorization(sql).lockQueueScope(workspace.workspaceId, subject);
+      if (!scope || scope.principal.kind !== 'pm') {
+        throw new TicketWorkflowError(404, 'ticket_intake_code_unavailable', 'No published inquiry code is available in this workspace.');
+      }
+      const { rows } = await sql.query<{
+        slug: string; entry_write_mode: string; workspace_write_mode: string | null;
+      }>(
+        `select e.slug, e.write_mode as entry_write_mode,
+                w.settings_json->>'ticketing_write_mode' as workspace_write_mode
+           from alpha_private.ticket_intake_entries e
+           join public.workspaces w on w.id=e.workspace_id and w.status='active'
+          where e.workspace_id=$1 and e.published
+          order by e.created_at,e.id
+          limit 2`,
+        [workspace.workspaceId],
+      );
+      if (rows.length === 0) {
+        throw new TicketWorkflowError(404, 'ticket_intake_code_unavailable', 'No published inquiry code is available in this workspace.');
+      }
+      if (rows.length !== 1) {
+        throw new TicketWorkflowError(409, 'ticket_intake_code_ambiguous', 'This workspace has multiple published inquiry codes. Ask an administrator to review the intake configuration.');
+      }
+      const row = rows[0];
+      if (!row || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(row.slug)) throw new TicketReadInvariantError();
+      return {
+        code: row.slug,
+        submissionEnabled: row.entry_write_mode === 'enabled' && row.workspace_write_mode === 'enabled',
+      };
+    });
+    return res.json(result);
+  }));
 
   router.use(createTicketQueueRouter(queue, relayRequest));
   router.use(createTicketReadRouter({ ...reads,

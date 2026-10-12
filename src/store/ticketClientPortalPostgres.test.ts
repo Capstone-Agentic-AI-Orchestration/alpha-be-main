@@ -30,22 +30,22 @@ import { createTestDatabase, sqlFor } from './testDatabase.js';
 import type { TransactionalSql } from './database.js';
 import type { TicketSubject, TicketTarget } from './ticketCommandStore.js';
 
-const workspaceId = 'phase-four-workspace';
-const pmId = 'phase-four-pm';
+const workspaceId = 'client-portal-workspace';
+const pmId = 'client-portal-pm';
 const clientId = '00000000-0000-4000-8000-000000000004';
 const providerCredential = 'synthetic-verified-provider-credential';
-const clientEmail = 'phase-four-client@example.test';
+const clientEmail = 'client-portal-client@example.test';
 const webOrigin = 'https://tickets.example.test';
 const now = new Date();
-const firstTarget: TicketTarget = { workspaceId, ticketId: 'phase-four-ticket-1' };
-const secondTarget: TicketTarget = { workspaceId, ticketId: 'phase-four-ticket-2' };
+const firstTarget: TicketTarget = { workspaceId, ticketId: 'client-portal-ticket-1' };
+const secondTarget: TicketTarget = { workspaceId, ticketId: 'client-portal-ticket-2' };
 const pm: TicketSubject = {
   kind: 'internal', userId: pmId,
-  authentication: { kind: 'verified_github_bearer', verificationId: 'phase-four-test-session' },
+  authentication: { kind: 'verified_github_bearer', verificationId: 'client-portal-test-session' },
 };
 const verifiedIdentity = { userId: clientId, email: clientEmail, emailVerified: true };
-const providerTokenHash = 'provider-token-hash-for-phase-four';
-const sessionSecret = 'phase-four-test-session-secret-with-sufficient-entropy';
+const providerTokenHash = 'provider-token-hash-for-client-portal';
+const sessionSecret = 'client-portal-test-session-secret-with-sufficient-entropy';
 
 let pg: PGlite;
 let db: TransactionalSql;
@@ -62,12 +62,12 @@ function intake(ticketId: string) {
         expiresAt: new Date(issuedAt.getTime() + 60_000).toISOString(),
       };
     },
-  }, { fingerprintKeys: [{ id: 'phase-four-key', secret: new Uint8Array(32).fill(17) }], maxRequestAgeMs: 60_000 },
+  }, { fingerprintKeys: [{ id: 'client-portal-key', secret: new Uint8Array(32).fill(17) }], maxRequestAgeMs: 60_000 },
   () => now, () => ticketId);
 }
 
 async function submitInquiry(target: TicketTarget, email: string, operationId: string) {
-  await intake(target.ticketId).submit('phase-four-entry', {
+  await intake(target.ticketId).submit('client-portal-entry', {
     schemaVersion: 1, operationId, fullName: 'Synthetic Client', email,
     company: null, title: `Synthetic inquiry ${target.ticketId}`,
     description: `Private test description for ${target.ticketId}.`, requestedDeadline: null,
@@ -86,12 +86,12 @@ beforeEach(async () => {
   const sql = sqlFor(pg);
   db = { ...sql, transaction: work => pg.transaction(async tx => work(sqlFor(tx as unknown as PGlite))) };
   await db.query(`insert into public.workspaces(id,name,slug,status,settings_json) values
-    ($1,'Synthetic phase four','phase-four-workspace','active','{"ticketing_write_mode":"enabled"}')`, [workspaceId]);
+    ($1,'Synthetic client portal','client-portal-workspace','active','{"ticketing_write_mode":"enabled"}')`, [workspaceId]);
   await db.query(`insert into public.workspace_members(id,workspace_id,user_id,role) values
-    ('phase-four-pm-member',$1,$2,'pm')`, [workspaceId, pmId]);
+    ('client-portal-pm-member',$1,$2,'pm')`, [workspaceId, pmId]);
   await db.query(`insert into alpha_private.ticket_intake_entries
     (id,workspace_id,slug,company_label,published,write_mode,policy_version,per_source_max,per_entry_max,window_seconds)
-    values ('phase-four-entry',$1,'phase-four-entry','Synthetic',true,'enabled','v1',20,20,60)`, [workspaceId]);
+    values ('client-portal-entry',$1,'client-portal-entry','Synthetic',true,'enabled','v1',20,20,60)`, [workspaceId]);
 }, 60_000);
 
 afterEach(async () => { vi.restoreAllMocks(); vi.doUnmock('../config/env.js'); vi.resetModules(); await pg?.close(); });
@@ -127,7 +127,7 @@ function invokeClientRoute(router: Router, method: string, routePath: string, in
   });
 }
 
-describe('Phase 4 invitation-to-client-ticket flow on PostgreSQL', () => {
+describe('Client invitation-to-ticket flow on PostgreSQL', () => {
   it('issues, emails, activates, signs in, and exposes only the explicitly granted ticket', async () => {
     await submitInquiry(firstTarget, clientEmail, 'd15921fb-f001-4b9b-94c3-8f2b8f431001');
     await submitInquiry(secondTarget, 'another-contact@example.test', 'd15921fb-f001-4b9b-94c3-8f2b8f431002');
@@ -143,7 +143,7 @@ describe('Phase 4 invitation-to-client-ticket flow on PostgreSQL', () => {
     const secrets = createClientTicketInvitationSecretProtector(sessionSecret);
     const invitations = createTicketInvitationService(
       new PostgresTicketInvitationStore(db), { lifetimeMs: 60 * 60 * 1000 }, secrets.invitation,
-      () => now, () => 'phase-four-invitation-1',
+      () => now, () => 'client-portal-invitation-1',
     );
     const invitation = await invitations.issue(firstTarget, pm);
     expect(invitation).toMatchObject({ ticketId: firstTarget.ticketId, alreadyPending: false });
@@ -152,7 +152,7 @@ describe('Phase 4 invitation-to-client-ticket flow on PostgreSQL', () => {
 
     const sent: Array<{ recipient: string; subject: string; body: string; idempotencyKey: string }> = [];
     const emailProvider: TicketInvitationContentEmailProvider = {
-      identity: 'phase-four-test-provider',
+      identity: 'client-portal-test-provider',
       async send() {},
       async sendContent(recipient, subject, body, idempotencyKey) {
         sent.push({ recipient, subject, body, idempotencyKey });
@@ -299,7 +299,7 @@ describe('Phase 4 invitation-to-client-ticket flow on PostgreSQL', () => {
     const secrets = createClientTicketInvitationSecretProtector(sessionSecret);
     const invitations = createTicketInvitationService(
       new PostgresTicketInvitationStore(db), { lifetimeMs: 60 * 60 * 1000 }, secrets.invitation,
-      () => now, () => 'phase-four-invitation-2',
+      () => now, () => 'client-portal-invitation-2',
     );
     const invitation = await invitations.issue(firstTarget, pm);
     const activation = createTicketClientActivationService(new PostgresTicketClientActivationStore(db), {
@@ -339,7 +339,7 @@ describe('Phase 4 invitation-to-client-ticket flow on PostgreSQL', () => {
     } as unknown as TicketClientIdentityProvider;
     const sent: string[] = [];
     const emailProvider: TicketInvitationContentEmailProvider = {
-      identity: 'phase-four-test-provider', async send() {},
+      identity: 'client-portal-test-provider', async send() {},
       async sendContent(recipient) { sent.push(recipient); },
     };
     const signIn = createTicketClientSignInService(
@@ -377,7 +377,7 @@ describe('Phase 4 invitation-to-client-ticket flow on PostgreSQL', () => {
     vi.doMock('../config/env.js', async importOriginal => ({
       ...await importOriginal<typeof import('../config/env.js')>(), IS_CLOUD: true, IS_DESKTOP: false,
     }));
-    const { createTicketClientPhaseFourComposition: compose } = await import('../controllers/ticketClientPhaseFourComposition.js');
+    const { createTicketClientComposition: compose } = await import('../controllers/ticketClientComposition.js');
     // Replace only the provider network calls used by the fresh composition.
     const { TicketClientIdentityProvider: Provider } = await import('../services/ticketClientIdentityProvider.js');
     vi.spyOn(Provider.prototype, 'generateEmailLink').mockImplementation(async (_email, type) => ({ userId: clientId, tokenHash: providerTokenHash, type }));

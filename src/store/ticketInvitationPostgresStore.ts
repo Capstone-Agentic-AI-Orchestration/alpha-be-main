@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { TicketInvitationRecord, TicketInvitationStore, TicketInvitationTransaction,
-  TicketInvitationAudit, TicketInvitationSignal } from './ticketInvitationStore.js';
+  TicketInvitationAudit, TicketInvitationSignal, TicketInvitationOutboxStatus } from './ticketInvitationStore.js';
 import type { TransactionalSql, Sql } from './database.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import type { TicketSubject, TicketTarget } from './ticketCommandStore.js';
@@ -70,6 +70,22 @@ export class PostgresTicketInvitationStore implements TicketInvitationStore {
           status: row.status as TicketInvitationRecord['status'],
           createdAt: iso(row.created_at), expiresAt: iso(row.expires_at),
         };
+      },
+      async loadInvitationOutboxStatus(target, invitationId) {
+        const { rows } = await sql.query<{ status: string }>(
+          `select status
+             from alpha_private.ticket_outbox_events
+            where workspace_id=$1 and ticket_id=$2 and event_type='ticket_invitation_requested'
+              and payload->>'activationVersion'='1' and payload->>'invitationId'=$3
+            order by created_at desc,id desc limit 1`,
+          [target.workspaceId, target.ticketId, invitationId],
+        );
+        const status = rows[0]?.status;
+        if (status === undefined) return null;
+        if (!['pending', 'retry', 'leased', 'delivered', 'dead', 'discarded'].includes(status)) {
+          throw new TicketReadInvariantError();
+        }
+        return status as TicketInvitationOutboxStatus;
       },
       async expireInvitation(target, invitationId, _occurredAt) {
         const { rows } = await sql.query<{ id: string }>(

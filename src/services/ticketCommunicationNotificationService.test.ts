@@ -19,12 +19,12 @@ function store(overrides: Partial<TicketCommunicationNotificationStore> = {}) {
   } satisfies TicketCommunicationNotificationStore;
 }
 
-describe('Phase 5 client update email notifications', () => {
+describe('Client ticket update email notifications', () => {
   it('sends a generic portal notification without ticket or message content', async () => {
     const queue = store();
     const sendContent = vi.fn(async (_recipient: string, _subject: string, _text: string, _key: string) => undefined);
     const service = createTicketCommunicationNotificationService(queue, {
-      identity: 'phase-five-test-provider', canSendTo: () => true, send: async () => undefined, sendContent,
+      identity: 'ticket-communication-test-provider', canSendTo: () => true, send: async () => undefined, sendContent,
     }, 'https://tickets.example.test');
 
     await expect(service.deliverNext()).resolves.toBe('delivered');
@@ -43,7 +43,7 @@ describe('Phase 5 client update email notifications', () => {
   it('retries transient provider failures and discards recipients outside the configured sender policy', async () => {
     const retryQueue = store();
     const failingService = createTicketCommunicationNotificationService(retryQueue, {
-      identity: 'phase-five-test-provider', canSendTo: () => true, send: async () => undefined,
+      identity: 'ticket-communication-test-provider', canSendTo: () => true, send: async () => undefined,
       async sendContent() { throw new Error('synthetic transient provider failure'); },
     }, 'https://tickets.example.test');
     await expect(failingService.deliverNext()).resolves.toBe('retry');
@@ -53,7 +53,7 @@ describe('Phase 5 client update email notifications', () => {
     const restrictedQueue = store();
     const sendContent = vi.fn(async () => undefined);
     const restrictedService = createTicketCommunicationNotificationService(restrictedQueue, {
-      identity: 'phase-five-test-provider', canSendTo: () => false,
+      identity: 'ticket-communication-test-provider', canSendTo: () => false,
       send: async () => undefined, sendContent,
     }, 'https://tickets.example.test');
     await expect(restrictedService.deliverNext()).resolves.toBe('discarded');

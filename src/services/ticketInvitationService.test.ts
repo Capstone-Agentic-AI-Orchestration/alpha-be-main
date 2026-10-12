@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { TicketInvitationRecord, TicketInvitationStore } from '../store/ticketInvitationStore.js';
+import type { TicketInvitationOutboxStatus, TicketInvitationRecord, TicketInvitationStore } from '../store/ticketInvitationStore.js';
 import type { LockedTicket, TicketSubject, TicketTarget } from '../store/ticketCommandStore.js';
 import { createTicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
 import { newTicketWorkflow } from '../ticketing/workflow.js';
@@ -16,6 +16,7 @@ const protector = createTicketInvitationSecretProtector('test-key', new Map([['t
 function fixture(options: {
   contact?: typeof contact | null;
   latest?: TicketInvitationRecord | null;
+  deliveryStatus?: TicketInvitationOutboxStatus | null;
   actor?: LockedTicket['actor'];
   state?: LockedTicket['state'];
   mode?: LockedTicket['mode'];
@@ -40,6 +41,7 @@ function fixture(options: {
     lockAuthorizedTicket: vi.fn(async () => { trace.push('authorize'); return ticket; }),
     loadInvitationContact: vi.fn(async () => { trace.push('contact'); return options.contact === undefined ? contact : options.contact; }),
     lockLatestInvitation: vi.fn(async () => { trace.push('latest'); return options.latest ?? null; }),
+    loadInvitationOutboxStatus: vi.fn(async () => { trace.push('delivery'); return options.deliveryStatus === undefined ? 'pending' : options.deliveryStatus; }),
     expireInvitation: vi.fn(async () => { trace.push('expire'); return options.expireResult ?? true; }),
     insertInvitation: vi.fn(async (record: TicketInvitationRecord) => { trace.push('insert'); inserted.push(record); }),
     appendInvitationAudit: vi.fn(async (audit: unknown) => { trace.push('audit'); audits.push(audit); }),
@@ -136,9 +138,29 @@ describe('PM client-invitation application service', () => {
       invitationId: pending.id, ticketId: target.ticketId, expiresAt: pending.expiresAt, alreadyPending: true,
     });
 
+    expect(f.tx.loadInvitationOutboxStatus).toHaveBeenCalledWith(target, pending.id);
     expect(f.tx.insertInvitation).not.toHaveBeenCalled();
     expect(f.tx.appendInvitationAudit).not.toHaveBeenCalled();
     expect(f.tx.enqueueInvitationSignal).not.toHaveBeenCalled();
+  });
+
+  it('expires a pending invitation whose email delivery is terminally failed before issuing a fresh one', async () => {
+    const pending: TicketInvitationRecord = {
+      id: 'invitation-undeliverable', ...target, contactBindingId: contact.bindingId,
+      secretHash: 'c'.repeat(64), status: 'pending', createdAt: '2026-10-08T11:00:00.000Z',
+      expiresAt: '2026-10-09T11:00:00.000Z',
+    };
+    const f = fixture({ latest: pending, deliveryStatus: 'dead' });
+
+    const receipt = await f.service.issue(target, pm);
+
+    expect(receipt).toMatchObject({ invitationId: 'invitation-new', alreadyPending: false });
+    expect(f.trace).toEqual(['authorize', 'contact', 'latest', 'delivery', 'expire', 'audit', 'insert', 'audit', 'signal']);
+    expect(f.tx.expireInvitation).toHaveBeenCalledWith(target, pending.id, now.toISOString());
+    expect(f.audits[0]).toEqual({
+      target, invitationId: pending.id, actorId: pm.userId, type: 'invitation_expired', occurredAt: now.toISOString(),
+    });
+    expect(f.tx.enqueueInvitationSignal).toHaveBeenCalledOnce();
   });
 
   it('expires an old pending invitation before issuing a replacement', async () => {

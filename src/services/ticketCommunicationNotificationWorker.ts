@@ -2,7 +2,7 @@ import type { TicketCommunicationDeliveryResult } from './ticketCommunicationNot
 
 type DeliveryService = { deliverNext(): Promise<TicketCommunicationDeliveryResult> };
 
-/** Cloud-only poller for Phase 5 client message/document notices. */
+/** Cloud-only poller for client message/document notices. */
 export function startTicketCommunicationNotificationWorker(config: {
   isCloud: boolean;
   enabled: boolean;
