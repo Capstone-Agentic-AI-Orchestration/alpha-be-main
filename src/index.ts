@@ -49,7 +49,7 @@ import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknow
 import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
 import { createTicketClientPhaseFourComposition } from './controllers/ticketClientPhaseFourComposition.js';
-import { resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
+import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
 
 const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
   apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
@@ -59,14 +59,12 @@ const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
 const clientWebOrigin = resolveClientWebOrigin(CORS_ORIGIN, ALPHA_CLOUD_API);
 const ticketClientPhaseFour = (() => {
   if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED) return null;
-  const missing: string[] = [];
-  if (!clientWebOrigin || !isAllowedOrigin(clientWebOrigin)) missing.push('one exact HTTPS browser origin in CORS_ORIGIN');
-  if (!SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!SUPABASE_ANON_KEY) missing.push('SUPABASE_ANON_KEY');
-  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('server-only SUPABASE_SERVICE_ROLE_KEY');
-  if (!ticketInvitationEmailProvider || typeof ticketInvitationEmailProvider.sendContent !== 'function') {
-    missing.push('valid server-side Resend sender settings');
-  }
+  const missing = clientAccessConfigurationProblems({
+    webOrigin: clientWebOrigin, originAllowed: Boolean(clientWebOrigin && isAllowedOrigin(clientWebOrigin)),
+    supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
+    supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
+    emailConfigured: typeof ticketInvitationEmailProvider?.sendContent === 'function',
+  });
   if (missing.length || !clientWebOrigin || !ticketInvitationEmailProvider) {
     // Setting names only: never log credentials, client details or provider bodies.
     logError(`Client portal unavailable: configure ${missing.join(', ')}.`);

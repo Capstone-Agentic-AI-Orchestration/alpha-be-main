@@ -31,6 +31,8 @@ export function createTicketClientSignInService(
       const userId = await store.findActiveClientUserId(email);
       if (!userId) return { accepted: true };
       try {
+        // A restricted sender must not consume/replace a provider link it cannot deliver.
+        if (emailProvider.canSendTo && !emailProvider.canSendTo(email)) throw new Error();
         const generated = await identityProvider.generateEmailLink(email, 'magiclink');
         if (generated.userId !== userId || generated.type !== 'magiclink') throw new Error();
         const link = new URL('/', origin.origin);

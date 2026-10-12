@@ -38,7 +38,7 @@ interface DeliveryDbRow {
 interface RequestDbRow {
   workspace_id: string; ticket_id: string; source: string; project_preference: string;
   preferred_project_id: string | null; requested_project_label: string | null; requested_deadline: string | null;
-  full_name: string | null; email: string | null; company: string | null;
+  full_name: string | null; email: string | null; company: string | null; email_verified: boolean | null;
 }
 interface RelatedDbRow {
   workspace_id: string; ticket_id: string; reference: string; title: string;
@@ -172,8 +172,8 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
     }
 
     const contactColumns = actor.kind === 'pm'
-      ? 'c.full_name, c.email, c.company'
-      : 'null::text as full_name, null::text as email, null::text as company';
+      ? 'c.full_name, c.email, c.company, c.email_verified'
+      : 'null::text as full_name, null::text as email, null::text as company, null::boolean as email_verified';
     const { rows: requestRows } = await this.sql.query<RequestDbRow>(
       `select r.workspace_id, r.ticket_id, r.source, r.project_preference, r.preferred_project_id,
               r.requested_project_label, r.requested_deadline, ${contactColumns}
@@ -195,7 +195,8 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
       requestedProjectLabel: requestRow.requested_project_label,
       requestedDeadline: requestRow.requested_deadline,
       contact: actor.kind === 'pm' && requestRow.full_name !== null && requestRow.email !== null
-        ? { fullName: requestRow.full_name, email: requestRow.email, company: requestRow.company }
+        ? { fullName: requestRow.full_name, email: requestRow.email, company: requestRow.company,
+          emailVerified: asBoolean(requestRow.email_verified) }
         : null,
     } : null;
 

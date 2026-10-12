@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveClientWebOrigin } from './clientWebOrigin.js';
+import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './clientWebOrigin.js';
 
 const api = 'https://alpha-api.onrender.com/api';
 
@@ -48,5 +48,38 @@ describe('client web origin resolution', () => {
       .toBeNull();
     expect(resolveClientWebOrigin('https://alpha-fe.vercel.app', 'http://alpha-api.onrender.com/api'))
       .toBeNull();
+  });
+});
+
+describe('client access startup diagnostics', () => {
+  const configured = {
+    webOrigin: 'https://alpha-fe-main.vercel.app', originAllowed: true,
+    supabaseUrl: 'https://project.supabase.co', supabaseAnonKey: 'synthetic-anon',
+    supabaseServiceRoleKey: 'synthetic-service-secret', sessionSecret: 'synthetic-session-secret-with-at-least-32-characters',
+    emailConfigured: true,
+  };
+
+  it('accepts the existing hosted configuration without new settings', () => {
+    expect(clientAccessConfigurationProblems(configured)).toEqual([]);
+  });
+
+  it('reports setting names, never credentials, for missing or invalid setup', () => {
+    const problems = clientAccessConfigurationProblems({ ...configured, webOrigin: null, originAllowed: false,
+      supabaseUrl: 'https://secret:password@project.supabase.co', supabaseAnonKey: ' ',
+      supabaseServiceRoleKey: '', sessionSecret: 'short-secret', emailConfigured: false });
+    expect(problems).toHaveLength(6);
+    expect(problems.join(',')).toContain('CORS_ORIGIN');
+    expect(problems.join(',')).toContain('SUPABASE_SERVICE_ROLE_KEY');
+    expect(problems.join(',')).toContain('ALPHA_SESSION_SECRET');
+    for (const secret of ['password', 'short-secret', 'secret:']) expect(problems.join(',')).not.toContain(secret);
+  });
+
+  it.each(['http://project.supabase.co', 'not-a-url', 'https://project.supabase.co/path', 'https://project.supabase.co?key=secret'])
+    ('diagnoses invalid Supabase URL %s before constructing client auth', supabaseUrl => {
+      expect(clientAccessConfigurationProblems({ ...configured, supabaseUrl })).toEqual(['valid HTTPS SUPABASE_URL']);
+    });
+
+  it('does not recommend rotating the existing shared secret', () => {
+    expect(clientAccessConfigurationProblems({ ...configured, sessionSecret: '' }).join(',')).toContain('do not rotate');
   });
 });

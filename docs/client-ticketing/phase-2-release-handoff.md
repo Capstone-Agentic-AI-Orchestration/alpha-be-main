@@ -48,13 +48,14 @@ Four additive Phase 2 migrations are included for source/history review:
 1. `20261009075644_ticketing_inquiry_pm_queue_core.sql`
 2. `20261009075718_ticketing_inquiry_pm_queue_fk_indexes.sql`
 3. `20261009090100_ticketing_pm_read_support_tables.sql`
-4. `20261009110000_ticketing_triage_operation_receipts.sql`
+4. `20261009095034_ticketing_triage_operation_receipts.sql`
 
-The first three versions are recorded in live migration history. The operation
-receipt table also exists, but version `20261009110000` was not returned by the
-history check; its source/history must be reconciled by the database maintainer
-before rollout. Do not blindly reapply the entire migration directory or use a
-schema reset. Older 0016/0017 baseline differences
+The operation-receipt source version above matches live migration history in the
+read-only 12 October 2026 audit. The older `20261009110000` reference in this document
+was incorrect; do not create or replay that version. Client activation/session
+and auth-rate tables are separately recorded under `20261009224231` and
+`20261009225249`. No migration was applied by this audit. Do not blindly reapply
+the entire migration directory or use a schema reset. Older 0016/0017 baseline differences
 are not authorization to change unrelated live tables. Rollback disables the
 feature/entry switches, leaving additive schema and ticket history intact.
 

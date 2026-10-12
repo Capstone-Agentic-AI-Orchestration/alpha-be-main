@@ -118,8 +118,12 @@ export class PostgresTicketClientActivationStore implements TicketClientActivati
         return rows.length === 1;
       },
       async bindTicketClient(target, expectedVersion, clientUserId) {
+        // Called only after the activation service verifies the provider email
+        // against the locked original contact. Persist both facts together;
+        // sending an invitation or acknowledgment never verifies a contact.
         const { rows } = await sql.query<{ id: string }>(
-          `update alpha_private.tickets
+          `with bound_ticket as (
+            update alpha_private.tickets
               set client_user_id=$4,
                   version=version+1,
                   workflow_state=jsonb_set(
@@ -128,7 +132,15 @@ export class PostgresTicketClientActivationStore implements TicketClientActivati
                   client_updated_at=now(),internal_updated_at=now()
             where workspace_id=$1 and id=$2 and version=$3 and status='under_review'
               and client_user_id is null and source='public_inquiry'
-            returning id`,
+            returning id,workspace_id,contact_id
+          )
+          update alpha_private.ticket_contacts c set email_verified=true
+            from bound_ticket t
+            join alpha_private.ticket_requests r
+              on r.workspace_id=t.workspace_id and r.ticket_id=t.id
+              and r.contact_id=t.contact_id and r.source='public_inquiry'
+           where c.workspace_id=t.workspace_id and c.id=t.contact_id
+           returning c.id`,
           [target.workspaceId, target.ticketId, expectedVersion, clientUserId],
         );
         return rows.length === 1;

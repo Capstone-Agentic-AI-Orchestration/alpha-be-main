@@ -35,3 +35,26 @@ export function resolveClientWebOrigin(corsOrigins: string, cloudApi = ''): stri
   if (apiOrigin) candidates.delete(apiOrigin);
   return candidates.size === 1 ? [...candidates][0] : null;
 }
+
+/** Server-log diagnostics only: never return credentials or expose this through a public API. */
+export function clientAccessConfigurationProblems(config: {
+  webOrigin: string | null;
+  originAllowed: boolean;
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  supabaseServiceRoleKey: string;
+  sessionSecret: string;
+  emailConfigured: boolean;
+}): string[] {
+  const problems: string[] = [];
+  if (!config.webOrigin || !config.originAllowed) problems.push('one exact HTTPS browser origin in CORS_ORIGIN');
+  try {
+    const url = new URL(config.supabaseUrl);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error();
+  } catch { problems.push('valid HTTPS SUPABASE_URL'); }
+  if (!config.supabaseAnonKey.trim()) problems.push('SUPABASE_ANON_KEY');
+  if (!config.supabaseServiceRoleKey.trim()) problems.push('server-only SUPABASE_SERVICE_ROLE_KEY');
+  if (config.sessionSecret.length < 32) problems.push('existing ALPHA_SESSION_SECRET of at least 32 characters (do not rotate it to troubleshoot)');
+  if (!config.emailConfigured) problems.push('valid server-side Resend sender settings');
+  return problems;
+}
