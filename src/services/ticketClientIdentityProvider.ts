@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 
 import type { VerifiedClientIdentity } from '../ticketing/clientActivation.js';
 import type { TicketClientIdentityVerifier } from './ticketClientActivationService.js';
@@ -24,7 +25,10 @@ export class TicketClientIdentityProvider implements TicketClientIdentityVerifie
     if (!/^https:\/\//.test(url) || !anonKey.trim() || !serviceRoleKey.trim()) {
       throw new Error('Client identity provider is not configured.');
     }
-    const authOptions = { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } };
+    const authOptions = {
+      auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+      realtime: { transport: WebSocket as any },
+    };
     this.admin = createClient(url, serviceRoleKey, authOptions);
     this.verifier = createClient(url, anonKey, authOptions);
   }

@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 
 import type { TicketDocumentObjectStore } from '../store/ticketDocumentStore.js';
 import { MAX_TICKET_DOCUMENT_BYTES, TicketDocumentStorageError } from './ticketDocumentService.js';
@@ -13,6 +14,7 @@ export class SupabaseTicketDocumentObjectStore implements TicketDocumentObjectSt
     if (!/^https:\/\//.test(url) || !serviceRoleKey.trim()) throw new Error('Private ticket document storage is not configured.');
     this.client = createClient(url, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+      realtime: { transport: WebSocket as any },
     });
   }
 
