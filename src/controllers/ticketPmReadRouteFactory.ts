@@ -10,6 +10,9 @@ import { createTicketReadRouter } from './ticketReadController.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 import { PostgresTicketAuthorization } from '../store/ticketPostgresAuthorization.js';
 import { PostgresTicketTriageStore } from '../store/ticketTriagePostgresStore.js';
+import { PostgresTicketProjectManagementStore } from '../store/ticketProjectManagementPostgresStore.js';
+import { createTicketProjectManagementService } from '../services/ticketProjectManagementService.js';
+import { createTicketProjectManagementRouter } from './ticketProjectManagementController.js';
 import { createTicketCommandService } from '../services/ticketCommandService.js';
 import { createTicketMessageService } from '../services/ticketMessageService.js';
 import { createTicketCommandRouter } from './ticketCommandController.js';
@@ -99,6 +102,9 @@ export function createTicketPmReadRouteBoundary(
     },
   }, relayRequest));
   if (triageEnabled) {
+    router.use(createTicketProjectManagementRouter(
+      createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)), relayRequest,
+    ));
     const store = new PostgresTicketTriageStore(db, { communicationEnabled });
     const commands = createTicketCommandService(store);
     const messages = createTicketMessageService(store);

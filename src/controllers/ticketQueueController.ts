@@ -76,13 +76,22 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
     || (!value.writesAvailable && value.requestedAction !== null)) throw new TicketReadInvariantError();
   const internal = value.internal;
   const invitation = internal?.clientInvitation;
+  const clientGroup = internal?.clientGroup;
   if (!internal || !validTimestamp(internal.updatedAt)
     || (internal.actionOwner !== null && !['pm', 'client', 'developer'].includes(internal.actionOwner))
     || (internal.nextAction !== null && !actionValues.has(internal.nextAction))
     || (internal.projectId !== null && !opaqueTicketRequestValue(internal.projectId))
     || (invitation !== undefined && invitation !== null && (!invitationStateValues.has(invitation.status)
       || !invitationDeliveryValues.has(invitation.delivery) || !validTimestamp(invitation.expiresAt)))
-    || typeof internal.clientAccessActive !== 'boolean') {
+    || typeof internal.clientAccessActive !== 'boolean'
+    || (clientGroup !== undefined && (!clientGroup || !opaqueTicketRequestValue(clientGroup.key)
+      || typeof clientGroup.displayName !== 'string' || !clientGroup.displayName.trim()
+      || clientGroup.displayName.trim() !== clientGroup.displayName || clientGroup.displayName.length > 200
+      || typeof clientGroup.acceptsNewRequests !== 'boolean' || typeof clientGroup.accessActive !== 'boolean'))
+    || (internal.projectName !== undefined && internal.projectName !== null
+      && (typeof internal.projectName !== 'string' || !internal.projectName.trim()
+        || internal.projectName.trim() !== internal.projectName || internal.projectName.length > 200))
+    || (internal.projectName !== undefined && ((internal.projectId === null) !== (internal.projectName === null)))) {
     throw new TicketReadInvariantError();
   }
   // Explicit allowlist: never serialize a store/query row from the service.
@@ -104,6 +113,11 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
       projectId: internal.projectId,
       clientAccessActive: internal.clientAccessActive,
       clientInvitation: invitation ?? null,
+      ...(clientGroup ? { clientGroup: {
+        key: clientGroup.key, displayName: clientGroup.displayName,
+        acceptsNewRequests: clientGroup.acceptsNewRequests, accessActive: clientGroup.accessActive,
+      } } : {}),
+      ...(internal.projectName !== undefined ? { projectName: internal.projectName } : {}),
     },
   };
 }

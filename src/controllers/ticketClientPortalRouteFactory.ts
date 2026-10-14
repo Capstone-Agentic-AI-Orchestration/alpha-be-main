@@ -4,11 +4,15 @@ import { createTicketClientSessionService } from '../services/ticketClientSessio
 import { createTicketClientActivationService } from '../services/ticketClientActivationService.js';
 import { createTicketClientSignInService } from '../services/ticketClientSignInService.js';
 import { createTicketClientWorkspaceService } from '../services/ticketClientWorkspaceService.js';
+import { createTicketClientIntakeContextService } from '../services/ticketClientIntakeContextService.js';
+import { createTicketCreationService } from '../services/ticketCreationService.js';
 import { createTicketQueueService } from '../services/ticketQueueService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
 import type { TicketClientActivationStore } from '../store/ticketClientActivationStore.js';
 import type { TicketClientSessionStore } from '../store/ticketClientSessionStore.js';
 import type { TicketClientWorkspaceStore } from '../store/ticketClientWorkspaceStore.js';
+import type { TicketClientIntakeContextStore } from '../store/ticketClientIntakeContextStore.js';
+import type { TicketCreationStore } from '../store/ticketCreationStore.js';
 import type { TicketQueueStore } from '../store/ticketQueueStore.js';
 import type { TicketReadStore } from '../store/ticketReadStore.js';
 import type { TicketClientSessionAdmission, TicketClientSessionCookiePolicy } from './ticketClientSessionController.js';
@@ -29,6 +33,8 @@ export interface TicketClientPortalRouteDependencies {
   sessionStore: TicketClientSessionStore;
   activationStore: TicketClientActivationStore;
   workspaceStore: TicketClientWorkspaceStore;
+  intakeContextStore: TicketClientIntakeContextStore;
+  creationStore: TicketCreationStore;
   queueStore: TicketQueueStore;
   readStore: TicketReadStore;
   identityProvider: TicketClientIdentityProvider;
@@ -64,6 +70,8 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
     dependencies.onSignInDeliveryUnavailable,
   );
   const workspaces = createTicketClientWorkspaceService(dependencies.workspaceStore);
+  const intakeContext = createTicketClientIntakeContextService(dependencies.intakeContextStore);
+  const creation = createTicketCreationService(dependencies.creationStore);
   const queue = createTicketQueueService(dependencies.queueStore);
   const reads = createTicketReadService(dependencies.readStore);
 
@@ -97,7 +105,7 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
   const clientApi: TicketClientApiApplication = {
     authenticate: sessions.authenticate,
     listWorkspaces: workspaces.list,
-    async getIntakeContext() { throw workflowActionUnavailable(); },
+    getIntakeContext: intakeContext.get,
     list: queue.list,
     detail: reads.detail,
     async deliveryManifest(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string) { throw workflowActionUnavailable(); },
@@ -107,8 +115,8 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
     ...(dependencies.documents ? { documents: dependencies.documents } : {}),
     async execute(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw workflowActionUnavailable(); },
     lookup: dependencies.messages.lookup,
-    async create(_contextId: string, _subject: TicketSubject, _input: unknown) { throw workflowActionUnavailable(); },
-    async lookupCreation(_contextId: string, _subject: TicketSubject, _operationId: string) { throw workflowActionUnavailable(); },
+    create: creation.create,
+    lookupCreation: creation.lookup,
   };
 
   return createTicketClientRouter({

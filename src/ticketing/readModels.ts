@@ -43,6 +43,8 @@ export interface PmTicketDetail extends ClientTicketDetail {
   internal: {
     updatedAt: string;
     projectId: string | null;
+    projectName: string | null;
+    projectClientVisible: boolean;
     requiredIssueIds: string[];
     actionOwner: LockedTicket['state']['actionOwner'];
     nextAction: NextAction;
@@ -150,7 +152,10 @@ export function projectPmTicketDetail(ticket: LockedTicket, rows: TicketDetailRo
   return {
     ...projectClientTicketDetail(ticket, rows),
     internal: {
-      updatedAt: rows.header.internalUpdatedAt, projectId: state.projectId, requiredIssueIds: [...state.requiredIssueIds],
+      updatedAt: rows.header.internalUpdatedAt, projectId: state.projectId,
+      projectName: rows.header.sharedProject?.displayName ?? null,
+      projectClientVisible: rows.header.sharedProject?.clientVisible ?? false,
+      requiredIssueIds: [...state.requiredIssueIds],
       actionOwner: state.actionOwner, nextAction: state.nextAction, authorizedScopeVersionId: state.authorizedScopeVersionId,
       correctionRequestedFor: state.correctionRequestedFor, withdrawalRequested: state.withdrawalRequested,
       closureReason: state.closureReason,

@@ -1,37 +1,17 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 
 import { createTicketCreationService } from '../services/ticketCreationService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
-import { createSupabaseTestDatabase } from './testDatabase.js';
-import { fromPool, type Sql, type TransactionalSql } from './database.js';
+import { newTicketWorkflow } from '../ticketing/workflow.js';
+import { createTestDatabase, sqlFor } from './testDatabase.js';
+import type { Sql, TransactionalSql } from './database.js';
 import { PostgresTicketCreationStore, ticketClientProjectOptionId } from './ticketCreationPostgresStore.js';
 import { PostgresTicketReadStore } from './ticketReadPostgresStore.js';
 import type { TicketSubject } from './ticketCommandStore.js';
-
-const staging = resolve(__dirname, '../../supabase-staging');
-const baseline = readFileSync(resolve(staging, 'supabase/migrations/20261007154549_live_control_plane_baseline.sql'), 'utf8');
-const ticketSchema = readFileSync(resolve(staging, 'supabase/migrations/20261008061941_client_ticketing_private_store.sql'), 'utf8');
-const ticketIndexes = readFileSync(resolve(staging, 'supabase/migrations/20261008063017_client_ticketing_fk_indexes.sql'), 'utf8');
 let local: PGlite;
 let db: TransactionalSql;
-
-function transactionalSql(database: PGlite): TransactionalSql {
-  const query = async (text: string, params: unknown[] = []) => {
-    const command = text.trim().toUpperCase();
-    if (command === 'BEGIN' || command === 'COMMIT' || command === 'ROLLBACK') {
-      await database.exec(command);
-      return { rows: [], command };
-    }
-    const result = await database.query(text, params);
-    return { rows: result.rows, command: command.split(/\s+/, 1)[0] };
-  };
-  const pool = { query, connect: async () => ({ query, release: () => undefined }) };
-  return fromPool(pool as unknown as Parameters<typeof fromPool>[0]);
-}
 
 function makeClient(workspaceId: string) {
   const sessionId = createHash('sha256').update(`session:${workspaceId}`).digest('hex');
@@ -64,16 +44,24 @@ async function seedClient(workspaceId: string, options: {
     [sessionId, client.userId, csrfHash, created, expires],
   );
   if (options.project) {
+    const projectId = `internal-project:${workspaceId}`;
     await db.query(
       `insert into public.projects (id, workspace_id, name, key)
-       values ($1, $2, 'Internal project name', $3)`,
-      [`internal-project:${workspaceId}`, workspaceId, `P-${workspaceId}`],
+       values ($1, $2, 'Internal project name', $3)`, [projectId, workspaceId, `P-${workspaceId}`],
     );
     await db.query(
-      `insert into alpha_private.ticket_client_project_access
-         (workspace_id, client_user_id, project_id, display_name, active, client_visible)
-       values ($1, $2, $3, 'Client-safe project name', true, true)`,
-      [workspaceId, client.userId, `internal-project:${workspaceId}`],
+      `insert into alpha_private.tickets
+         (id,workspace_id,reference,title,description,client_safe_company_label,source,status,version,workflow_state,
+          client_user_id,project_id,project_display_name,project_client_visible,created_at,client_updated_at,internal_updated_at)
+       values ($1,$2,$3,'Existing request','Existing ticket body','Synthetic Client','authenticated_client','received',0,
+          $4::jsonb,$5,$6,'Client-safe project name',true,now(),now(),now())`,
+      [`existing-project-request:${workspaceId}`, workspaceId, `REF-${workspaceId}`,
+        JSON.stringify({ ...newTicketWorkflow(`existing-project-request:${workspaceId}`, workspaceId, client.userId), projectId }),
+        client.userId, projectId],
+    );
+    await db.query(
+      `insert into alpha_private.ticket_client_grants(workspace_id,ticket_id,client_user_id,active)
+       values ($1,$2,$3,true)`, [workspaceId, `existing-project-request:${workspaceId}`, client.userId],
     );
   }
   return { client, contextId, projectId: `internal-project:${workspaceId}` };
@@ -92,26 +80,13 @@ function createInput(operationId: string, override: Record<string, unknown> = {}
 }
 
 beforeAll(async () => {
-  local = await createSupabaseTestDatabase();
-  await local.exec('begin');
-  try {
-    await local.exec(baseline);
-    await local.exec(ticketSchema);
-    await local.exec(ticketIndexes);
-    // This preserved test snapshot predates the client_user_id column
-    // name; align its ephemeral PGlite schema with the deployed live migration.
-    await local.exec(`ALTER TABLE alpha_private.ticket_client_sessions
-      RENAME COLUMN provider_user_id TO client_user_id`);
-    await local.exec('commit');
-  } catch (error) {
-    await local.exec('rollback');
-    throw error;
-  }
-  db = transactionalSql(local);
+  local = await createTestDatabase();
+  const sql = sqlFor(local);
+  db = { ...sql, transaction: work => local.transaction(async tx => work(sqlFor(tx as unknown as PGlite))) };
 });
 afterAll(async () => { await local?.close(); });
 
-describe('PostgresTicketCreationStore against the reviewed local schema', () => {
+describe('PostgresTicketCreationStore against the main migration schema', () => {
   it('creates one authorized Received ticket and keeps the project choice as a private preference', async () => {
     const workspaceId = 'create-pg-workspace';
     const { client, contextId, projectId } = await seedClient(workspaceId, { project: true });
@@ -130,7 +105,7 @@ describe('PostgresTicketCreationStore against the reviewed local schema', () => 
 
     const { rows: ticketRows } = await db.query<{
       client_user_id: string; project_id: string | null; status: string; workflow_state: Record<string, unknown>;
-    }>(`select client_user_id, project_id, status, workflow_state from alpha_private.tickets where workspace_id = $1`, [workspaceId]);
+    }>(`select client_user_id, project_id, status, workflow_state from alpha_private.tickets where workspace_id = $1 and id = $2`, [workspaceId, receipt.ticketId]);
     expect(ticketRows).toEqual([{
       client_user_id: client.userId, project_id: null, status: 'received',
       workflow_state: expect.objectContaining({ clientId: client.userId, projectId: null, status: 'received' }),
@@ -155,7 +130,7 @@ describe('PostgresTicketCreationStore against the reviewed local schema', () => 
          (select count(*)::int from public.projects where workspace_id = $1) as projects,
          (select count(*)::int from public.issues where workspace_id = $1) as issues`, [workspaceId],
     );
-    expect(counts[0]).toEqual({ grants: 1, create_operations: 1, generic_operations: 0, audits: 1, signals: 1, projects: 1, issues: 0 });
+    expect(counts[0]).toEqual({ grants: 2, create_operations: 1, generic_operations: 0, audits: 1, signals: 1, projects: 1, issues: 0 });
 
     const read = createTicketReadService(new PostgresTicketReadStore(db));
     const detail = await read.detail({ workspaceId, ticketId: receipt.ticketId }, client);
@@ -179,6 +154,9 @@ describe('PostgresTicketCreationStore against the reviewed local schema', () => 
     await db.query(`update alpha_private.ticket_client_sessions set revoked_at = now() where session_id_hash = $1`, [client.sessionId]);
     await expect(service.create(contextId, client, request)).rejects.toMatchObject({ status: 404 });
     await db.query(`update alpha_private.ticket_client_sessions set revoked_at = null where session_id_hash = $1`, [client.sessionId]);
+    await db.query(`update alpha_private.ticket_service_grants set revoked_at = now() where id = $1`, [contextId]);
+    await expect(service.create(contextId, client, request)).rejects.toMatchObject({ status: 404 });
+    await db.query(`update alpha_private.ticket_service_grants set revoked_at = null where id = $1`, [contextId]);
     await db.query(`update alpha_private.ticket_service_grants set status = 'revoked' where id = $1`, [contextId]);
     await expect(service.create(contextId, client, request)).rejects.toMatchObject({ status: 404 });
 
@@ -235,7 +213,7 @@ describe('PostgresTicketCreationStore against the reviewed local schema', () => 
     const workspaceId = 'create-pg-option-workspace';
     const { client, contextId, projectId } = await seedClient(workspaceId, { project: true });
     await db.query(
-      `update alpha_private.ticket_client_project_access set client_visible = false
+      `update alpha_private.tickets set project_client_visible = false
        where workspace_id = $1 and project_id = $2`, [workspaceId, projectId],
     );
     const service = createService(new PostgresTicketCreationStore(db));
@@ -246,6 +224,6 @@ describe('PostgresTicketCreationStore against the reviewed local schema', () => 
     const { rows } = await db.query<{ count: number }>(
       `select count(*)::int as count from alpha_private.tickets where workspace_id = $1`, [workspaceId],
     );
-    expect(rows[0].count).toBe(0);
+    expect(rows[0].count).toBe(1); // The pre-seeded, existing project ticket remains untouched.
   });
 });

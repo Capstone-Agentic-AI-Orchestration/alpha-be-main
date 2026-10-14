@@ -19,7 +19,12 @@ interface QueueDbRow {
   internal_updated_at: Date | string | null;
   closed_at: Date | string | null;
   project_id: string | null;
+  project_display_name: string | null;
   client_access_active: boolean | null;
+  client_accepts_new_requests: boolean | null;
+  client_service_active: boolean | null;
+  client_group_key: string | null;
+  client_group_name: string | null;
   invitation_status: string | null;
   invitation_expires_at: Date | string | null;
   invitation_delivery_status: string | null;
@@ -91,25 +96,54 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
          select t.workspace_id, t.id as ticket_id, t.reference, t.title, t.status, t.version,
                 t.workflow_state, t.created_at, t.client_updated_at, t.internal_updated_at,
                 t.closed_at, t.project_id,
-                coalesce(sg.status = 'active' and cg.active, false) as client_access_active,
+                case when $2='pm' then t.project_display_name else null end as project_display_name,
+                coalesce(sg.status = 'active' and sg.revoked_at is null and cg.active and cg.revoked_at is null, false) as client_access_active,
+                case when $2='pm' and t.client_user_id is not null
+                  then coalesce(sg.status='active' and sg.revoked_at is null and sg.accepts_new_requests,false) else false end as client_accepts_new_requests,
+                case when $2='pm' and t.client_user_id is not null
+                  then coalesce(sg.status='active' and sg.revoked_at is null,false) else false end as client_service_active,
+                case when $2='pm' and t.client_user_id is not null then 'client:' || t.client_user_id
+                     when $2='pm' then 'ticket:' || t.id else null end as client_group_key,
+                case when $2<>'pm' then null
+                  when t.client_user_id is null then coalesce(nullif(btrim(unverified_contact.full_name),''),'Unverified inquiry')
+                  else coalesce(nullif(btrim(verified_contact.full_name),''), nullif(btrim(verified_contact.company),''),
+                    nullif(nullif(btrim(sg.display_name),''),'Client portal'), 'Client account') end as client_group_name,
                 invitation.status as invitation_status,
                 invitation.expires_at as invitation_expires_at,
                 invitation.delivery_status as invitation_delivery_status,
                 case when $2 = 'pm' then t.internal_updated_at else t.client_updated_at end as sort_at
          from alpha_private.tickets t
          left join lateral (
-           select grant_row.status
+           select grant_row.status, grant_row.revoked_at, grant_row.accepts_new_requests, grant_row.display_name
            from alpha_private.ticket_service_grants grant_row
-           where grant_row.workspace_id = t.workspace_id and grant_row.client_user_id = t.client_user_id
+        where grant_row.workspace_id = t.workspace_id and grant_row.client_user_id = t.client_user_id
            for share
          ) sg on true
          left join lateral (
-           select grant_row.active
+           select grant_row.active, grant_row.revoked_at
            from alpha_private.ticket_client_grants grant_row
            where grant_row.workspace_id = t.workspace_id and grant_row.ticket_id = t.id
              and grant_row.client_user_id = t.client_user_id
            for share
          ) cg on true
+         left join lateral (
+           select contact.full_name
+           from alpha_private.ticket_contacts contact
+           where $2='pm' and t.client_user_id is null
+             and contact.workspace_id=t.workspace_id and contact.id=t.contact_id
+           limit 1
+         ) unverified_contact on true
+         left join lateral (
+           select contact.full_name, contact.company
+           from alpha_private.tickets linked_ticket
+           join alpha_private.ticket_contacts contact
+             on contact.workspace_id=linked_ticket.workspace_id and contact.id=linked_ticket.contact_id
+           where $2='pm' and t.client_user_id is not null
+             and linked_ticket.workspace_id=t.workspace_id and linked_ticket.client_user_id=t.client_user_id
+             and contact.email_verified
+           order by linked_ticket.created_at, linked_ticket.id collate "C"
+           limit 1
+         ) verified_contact on true
          left join lateral (
            select i.status, i.expires_at, o.status as delivery_status
            from alpha_private.ticket_invitations i
@@ -122,10 +156,11 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
            limit 1
          ) invitation on true
          where t.workspace_id = $1
-           and ($2 = 'pm' or (t.client_user_id = $3 and coalesce(sg.status = 'active' and cg.active, false)))
+           and ($2 = 'pm' or (t.client_user_id = $3 and coalesce(
+             sg.status = 'active' and sg.revoked_at is null and cg.active and cg.revoked_at is null, false)))
        ), filtered as (
          select b.* from base b
-         where ($4 = '' or position(lower($4) in lower(b.reference || ' ' || b.title)) > 0)
+         where ($4 = '' or position(lower($4) in lower(b.reference || ' ' || b.title || ' ' || coalesce(b.client_group_name,''))) > 0)
            and (${predicate})
        ), cursor_row as (
          select sort_at, ticket_id from filtered where ticket_id = $8
@@ -258,10 +293,26 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
       };
     }
 
+    const pmClientGroup = scope.principal.kind === 'pm' ? (() => {
+      if (typeof row.client_group_key !== 'string' || !row.client_group_key.trim()
+        || typeof row.client_group_name !== 'string' || !row.client_group_name.trim()
+        || typeof row.client_accepts_new_requests !== 'boolean') return invariant();
+      if ((row.project_id === null) !== (row.project_display_name === null)
+        || (row.project_display_name !== null && (!row.project_display_name.trim() || row.project_display_name.length > 200))) return invariant();
+      return {
+        key: row.client_group_key,
+        displayName: row.client_group_name,
+        acceptsNewRequests: row.client_accepts_new_requests,
+        accessActive: row.client_service_active === true,
+      };
+    })() : undefined;
+
     return {
       ticket: { state: projectedState, actor, mode: scope.mode },
       clientAccessActive: row.client_access_active === true,
       clientInvitation,
+      ...(pmClientGroup ? { pmClientGroup } : {}),
+      ...(scope.principal.kind === 'pm' ? { pmProjectName: row.project_display_name } : {}),
       header: {
         workspaceId: row.workspace_id,
         ticketId: row.ticket_id,

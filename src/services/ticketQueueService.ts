@@ -39,7 +39,8 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
           const row = rows[i]; const previous = rows[i - 1];
           if (ids.has(row.ticket.state.id) || row.ticket.state.id === page.after
             || !matchesTicketQueueFilter(row, page.filter, month)
-            || !`${row.header.reference} ${row.header.title}`.toLowerCase().includes(page.search.toLowerCase())
+            || !`${row.header.reference} ${row.header.title} ${scope.principal.kind === 'pm' ? row.pmClientGroup?.displayName ?? '' : ''}`
+              .toLowerCase().includes(page.search.toLowerCase())
             || (previous && (queueSortTime(scope, previous) < queueSortTime(scope, row)
               || (queueSortTime(scope, previous) === queueSortTime(scope, row) && previous.ticket.state.id <= row.ticket.state.id)))) {
             throw new TicketReadInvariantError();

@@ -186,12 +186,14 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && new Set(a).size === a.length && new Set(b).size === b.length && a.every(value => b.includes(value));
 }
 function assertProject(state: TicketWorkflow, projectId: string, facts: TicketFacts): void {
+  if (state.projectId && state.projectId !== projectId) {
+    conflict('ticket_project_conflict', 'A ticket cannot silently move to another project.');
+  }
   const project = facts.project;
   if (!project || project.id !== projectId || project.workspaceId !== state.workspaceId
     || !project.creatorActive || !project.nonProductionSafe) {
     conflict('ticket_project_ineligible', 'The project is not ready for authorized ticket work.');
   }
-  if (state.projectId && state.projectId !== projectId) conflict('ticket_project_conflict', 'A ticket cannot silently move to another project.');
 }
 function assertIssues(state: TicketWorkflow, ids: readonly string[], projectId: string, scopeVersionId: string, facts: TicketFacts, passed: boolean, executionIds: readonly string[] = passed ? [] : ids): TicketIssueEvidence[] {
   const issues = facts.issues;
@@ -353,7 +355,7 @@ export function decideTicketCommand(
       // A PM's ordinary update is not automatically a request for client action.
       break;
     case 'propose_scope':
-      if (state.authorizedScopeVersionId || state.projectId || state.requiredIssueIds.length > 0) {
+      if (state.authorizedScopeVersionId || state.requiredIssueIds.length > 0) {
         conflict('scope_change_requires_linked_ticket', 'New or changed work after authorization must use a linked ticket. Existing work is unchanged.');
       }
       requireStatus(state, ['under_review', 'awaiting_client']);

@@ -15,6 +15,8 @@ import { PostgresTicketClientInvitationDeliveryStore } from '../store/ticketClie
 import { PostgresTicketClientSessionStore } from '../store/ticketClientSessionPostgresStore.js';
 import { PostgresTicketClientSignInStore } from '../store/ticketClientSignInPostgresStore.js';
 import { PostgresTicketClientWorkspaceStore } from '../store/ticketClientWorkspacePostgresStore.js';
+import { PostgresTicketClientIntakeContextStore } from '../store/ticketClientIntakeContextPostgresStore.js';
+import { PostgresTicketCreationStore } from '../store/ticketCreationPostgresStore.js';
 import { PostgresTicketQueueStore } from '../store/ticketQueuePostgresStore.js';
 import { PostgresTicketReadStore } from '../store/ticketReadPostgresStore.js';
 import { createClientTicketInvitationSecretProtector } from '../ticketing/clientTicketSecrets.js';
@@ -89,6 +91,8 @@ export function createTicketClientComposition(input: {
     sessionStore: new PostgresTicketClientSessionStore(input.database),
     activationStore: new PostgresTicketClientActivationStore(input.database),
     workspaceStore: new PostgresTicketClientWorkspaceStore(input.database),
+    intakeContextStore: new PostgresTicketClientIntakeContextStore(input.database),
+    creationStore: new PostgresTicketCreationStore(input.database),
     queueStore: new PostgresTicketQueueStore(input.database),
     readStore: new PostgresTicketReadStore(input.database),
     identityProvider,
