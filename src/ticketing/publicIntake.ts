@@ -1,6 +1,6 @@
 /** Public intake failures carry no provider/driver/request contents. */
 export type PublicTicketIntakeFailure = 'entry_unavailable' | 'writes_disabled' | 'not_verified'
-  | 'rate_limited' | 'operation_conflict' | 'outcome_unknown' | 'unavailable';
+  | 'rate_limited' | 'operation_conflict' | 'outcome_unknown' | 'invalid_request' | 'unavailable';
 const failures = {
   entry_unavailable: { status: 404, error: 'This inquiry entry is unavailable.' },
   writes_disabled: { status: 503, error: 'Inquiry submission is unavailable right now.' },
@@ -8,6 +8,7 @@ const failures = {
   rate_limited: { status: 429, error: 'Too many submissions. Please try again later.' },
   operation_conflict: { status: 409, error: 'This submission ID was already used for different content. Start a new submission for different work.' },
   outcome_unknown: { status: 409, error: 'The submission outcome is uncertain. Retry using the same submission ID.' },
+  invalid_request: { status: 400, error: 'Check the inquiry fields and try again.' },
   unavailable: { status: 503, error: 'Inquiry submission is unavailable right now.' },
 } as const;
 export class PublicTicketIntakeError extends Error {

@@ -159,6 +159,24 @@
       "remote_sql_md5": null,
       "review": "not_recorded",
       "notes": "Not in recorded ledger; read-only to_regclass confirmed hosting_audit absent."
+    },
+    {
+      "local_file": "20261016120000_ticket_central_client_intake.sql",
+      "local_sha256": "b8e8ab6c27bd7fa06f91435be63fcf198935b2159ee8499efa7ed091b591f6c1",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "New additive central PM-intake migration; not applied or recorded in the live database."
+    },
+    {
+      "local_file": "20261016130000_ticket_client_password_credentials.sql",
+      "local_sha256": "56908572fdcca81726bce8d8a7692af831934f707d587a664c1772637ad9fc13",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "New additive password-setup marker migration; not applied or recorded in the live database."
     }
   ]
 }

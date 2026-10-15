@@ -28,8 +28,16 @@ export class PostgresTicketClientAccountStore {
 
   async hasPassword(userId: string): Promise<boolean> {
     const { rows } = await this.db.query<{ configured: boolean }>(
-      `select coalesce(encrypted_password,'')<>'' as configured from auth.users where id::text=$1`, [userId]);
+      `select exists(select 1 from alpha_private.ticket_client_password_credentials where client_user_id=$1) as configured`, [userId]);
     return rows[0]?.configured === true;
+  }
+
+  async markPasswordConfigured(userId: string): Promise<void> {
+    if (typeof userId !== 'string' || !userId.trim() || userId.length > 200 || userId.trim() !== userId) {
+      throw new Error('Client password marker is invalid.');
+    }
+    await this.db.query(`insert into alpha_private.ticket_client_password_credentials(client_user_id)
+      values ($1) on conflict (client_user_id) do nothing`, [userId]);
   }
 
   async create(setup: ClientAccountSetup): Promise<void> {

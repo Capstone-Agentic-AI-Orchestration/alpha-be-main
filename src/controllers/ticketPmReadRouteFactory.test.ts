@@ -44,6 +44,7 @@ describe('PM read-only ticket route composition', () => {
     expect(triage).toContain('/:ticketId/commands');
     expect(triage).toContain('/operations/:operationId');
     expect(triage).toContain('/:ticketId/invitations');
+    expect(triage.indexOf('/intakes')).toBeLessThan(triage.indexOf('/:ticketId'));
     expect(triage).not.toContain('/:ticketId/scope');
     expect(db.query).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();

@@ -118,7 +118,7 @@ export function createTicketPublicIntakeService(
       try { return await submit(slug, input, request); }
       catch (error) {
         if (error instanceof PublicTicketIntakeError) throw error;
-        if (error instanceof TicketWorkflowError && error.code === 'invalid_ticket_intake') throw new TicketWorkflowError(400, 'invalid_ticket_intake', 'This ticket request is invalid.');
+        if (error instanceof TicketWorkflowError && error.code === 'invalid_ticket_intake') throw new PublicTicketIntakeError('invalid_request');
         if (isTransactionOutcomeUnknown(error)) throw new PublicTicketIntakeError('outcome_unknown');
         // No cause/payload is attached: public adapters must not reach the
         // generic API handler's driver/body logging and raw error messages.

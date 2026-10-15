@@ -1,10 +1,16 @@
 import { Router, type Response } from 'express';
+import { createHmac } from 'node:crypto';
 
+import { ALPHA_ORG, ALPHA_SESSION_SECRET, isAllowedOrigin } from '../config/env.js';
 import { createTicketQueueService } from '../services/ticketQueueService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
 import { PostgresTicketQueueStore } from '../store/ticketQueuePostgresStore.js';
 import { PostgresTicketReadStore } from '../store/ticketReadPostgresStore.js';
 import type { TransactionalSql } from '../store/database.js';
+import { createTicketCentralIntakeService } from '../services/ticketCentralIntakeService.js';
+import { createTicketIntakeOriginRateGuard } from '../services/ticketIntakeOriginRateGuard.js';
+import { PostgresTicketCentralIntakeStore } from '../store/ticketCentralIntakePostgresStore.js';
+import { createTicketCentralIntakeRouter } from './ticketCentralIntakeController.js';
 import { createTicketQueueRouter } from './ticketQueueController.js';
 import { createTicketReadRouter } from './ticketReadController.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
@@ -93,6 +99,19 @@ export function createTicketPmReadRouteBoundary(
     });
     return res.json(result);
   }));
+
+  // Register this exact collection route before `/:ticketId`; otherwise the
+  // existing detail reader can consume "intakes" as a ticket ID.
+  if (triageEnabled) {
+    const centralKey = (domain: string) => createHmac('sha256', ALPHA_SESSION_SECRET).update(domain).digest();
+    const centralIntake = createTicketCentralIntakeService({
+      store: new PostgresTicketCentralIntakeStore(db), organizationKey: ALPHA_ORG,
+      guard: createTicketIntakeOriginRateGuard({ rateKey: centralKey('alpha-ticket-central-intake-rate-v1'), originAllowed: isAllowedOrigin }),
+      fingerprintKeys: [{ id: 'central-session-derived-v1', secret: centralKey('alpha-ticket-central-intake-dedupe-v1') }],
+      maxRequestAgeMs: 300_000,
+    });
+    router.use(createTicketCentralIntakeRouter(centralIntake, relayRequest));
+  }
 
   router.use(createTicketQueueRouter(queue, relayRequest));
   router.use(createTicketReadRouter({ ...reads,

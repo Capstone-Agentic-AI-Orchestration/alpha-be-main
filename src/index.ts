@@ -202,7 +202,8 @@ app.use('/api/client', ticketClient?.router ?? createTicketClientUnavailableRout
 // middleware while the origin/rate guard and published intake are not configured.
 app.use('/api/public/ticket-intakes', IS_CLOUD && ALPHA_TICKETING_TRIAGE_ENABLED
   ? createTicketPublicIntakeCloudRouter(database(), { sessionSecret: ALPHA_SESSION_SECRET,
-      originAllowed: isAllowedOrigin, acknowledgmentsEnabled: ALPHA_TICKETING_ACK_EMAIL_ENABLED })
+      organizationKey: ALPHA_ORG, originAllowed: isAllowedOrigin,
+      acknowledgmentsEnabled: ALPHA_TICKETING_ACK_EMAIL_ENABLED })
   : createTicketPublicIntakeUnavailableRouter());
 
 /**
