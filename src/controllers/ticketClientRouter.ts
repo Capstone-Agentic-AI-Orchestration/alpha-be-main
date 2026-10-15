@@ -1,6 +1,7 @@
 import { Router, type Response } from 'express';
 
 export interface TicketClientRouters {
+  account?: Router;
   session: Router;
   activation: Router;
   api: Router;
@@ -14,6 +15,7 @@ export interface TicketClientRouters {
  */
 export function createTicketClientRouter(routers: TicketClientRouters): Router {
   const router = Router({ caseSensitive: true, strict: true });
+  if (routers.account) router.use(routers.account);
   router.use(routers.session);
   router.use(routers.activation);
   router.use(routers.api);

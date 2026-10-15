@@ -28,6 +28,9 @@ import type { TicketMessageReceipt, TicketOperationReceipt } from '../store/tick
 import type { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketWorkflowError as WorkflowError } from '../ticketing/workflow.js';
 import type { TicketDocumentsApplication } from './ticketDocumentController.js';
+import { createTicketClientAccountService } from '../services/ticketClientAccountService.js';
+import { createTicketClientAccountRouter } from './ticketClientAccountController.js';
+import type { PostgresTicketClientAccountStore } from '../store/ticketClientAccountPostgresStore.js';
 
 export interface TicketClientPortalRouteDependencies {
   sessionStore: TicketClientSessionStore;
@@ -51,6 +54,8 @@ export interface TicketClientPortalRouteDependencies {
   sessionAdmission: TicketClientSessionAdmission;
   activationAdmission: TicketClientSessionAdmission;
   onSignInDeliveryUnavailable?: () => void;
+  accountStore?: PostgresTicketClientAccountStore;
+  accountSecret?: string;
 }
 
 function workflowActionUnavailable(): TicketWorkflowError {
@@ -120,6 +125,15 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
   };
 
   return createTicketClientRouter({
+    ...(dependencies.accountStore && dependencies.accountSecret ? {
+      account: createTicketClientAccountRouter(createTicketClientAccountService({
+        store: dependencies.accountStore, signInStore: dependencies.signInStore,
+        activationStore: dependencies.activationStore, provider: dependencies.identityProvider,
+        sessions, activate: activation.activate, emailProvider: dependencies.emailProvider,
+        webOrigin: dependencies.webOrigin, secret: dependencies.accountSecret,
+        onDeliveryUnavailable: dependencies.onSignInDeliveryUnavailable,
+      }), dependencies.cookiePolicy, dependencies.activationAdmission),
+    } : {}),
     session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy, dependencies.sessionAdmission),
     activation: createTicketClientActivationRouter(activationApplication, dependencies.cookiePolicy, dependencies.activationAdmission),
     api: createTicketClientApiRouter(clientApi, dependencies.cookiePolicy),

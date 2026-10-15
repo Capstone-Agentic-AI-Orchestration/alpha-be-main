@@ -6,10 +6,10 @@ export class PostgresTicketClientSignInStore {
 
   async findActiveClientUserId(email: string): Promise<string | null> {
     const { rows } = await this.db.query<{ client_user_id: string }>(
-      `select u.id as client_user_id
+      `select u.id::text as client_user_id
          from auth.users u
          join alpha_private.ticket_service_grants sg
-           on sg.client_user_id=u.id and sg.status='active' and sg.revoked_at is null
+           on sg.client_user_id=u.id::text and sg.status='active' and sg.revoked_at is null
          join public.workspaces w on w.id=sg.workspace_id and w.status='active'
          join alpha_private.ticket_client_grants cg
            on cg.workspace_id=sg.workspace_id and cg.client_user_id=sg.client_user_id

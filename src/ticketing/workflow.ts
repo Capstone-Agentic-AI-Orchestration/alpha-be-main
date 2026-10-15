@@ -115,7 +115,7 @@ export type TicketCommandEnvelope = z.infer<typeof envelopeSchema>;
 export type TicketCommand = TicketCommandEnvelope['command'];
 
 export class TicketWorkflowError extends Error {
-  constructor(readonly status: 400 | 403 | 404 | 409 | 503, readonly code: string, message: string) {
+  constructor(readonly status: 400 | 401 | 403 | 404 | 409 | 503, readonly code: string, message: string) {
     super(message);
     this.name = 'TicketWorkflowError';
   }

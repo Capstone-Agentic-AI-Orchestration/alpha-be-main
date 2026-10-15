@@ -14,6 +14,7 @@ import { PostgresTicketClientAuthRateLimitStore } from '../store/ticketClientAut
 import { PostgresTicketClientInvitationDeliveryStore } from '../store/ticketClientInvitationDeliveryStore.js';
 import { PostgresTicketClientSessionStore } from '../store/ticketClientSessionPostgresStore.js';
 import { PostgresTicketClientSignInStore } from '../store/ticketClientSignInPostgresStore.js';
+import { PostgresTicketClientAccountStore } from '../store/ticketClientAccountPostgresStore.js';
 import { PostgresTicketClientWorkspaceStore } from '../store/ticketClientWorkspacePostgresStore.js';
 import { PostgresTicketClientIntakeContextStore } from '../store/ticketClientIntakeContextPostgresStore.js';
 import { PostgresTicketCreationStore } from '../store/ticketCreationPostgresStore.js';
@@ -97,6 +98,8 @@ export function createTicketClientComposition(input: {
     readStore: new PostgresTicketReadStore(input.database),
     identityProvider,
     signInStore: new PostgresTicketClientSignInStore(input.database),
+    accountStore: new PostgresTicketClientAccountStore(input.database),
+    accountSecret: input.sessionSecret,
     messages,
     documents,
     emailProvider: input.emailProvider,
