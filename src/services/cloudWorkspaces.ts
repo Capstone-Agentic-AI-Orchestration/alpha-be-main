@@ -26,6 +26,8 @@ export function usesCloudDirectory(): boolean {
 export interface CloudAnswer<T = unknown> {
   status: number;
   body: T;
+  contentType?: string;
+  contentDisposition?: string;
 }
 
 /**
@@ -37,21 +39,30 @@ const ACTION_TIMEOUT_MS = 90_000;
 
 export async function cloudRequest<T = unknown>(
   path: string,
-  init: { method?: string; body?: unknown; workspaceId?: string; timeoutMs?: number; headers?: Record<string, string> } = {}
+  init: { method?: string; body?: unknown; rawBody?: Uint8Array; responseType?: 'json' | 'bytes';
+    workspaceId?: string; timeoutMs?: number; headers?: Record<string, string> } = {}
 ): Promise<CloudAnswer<T>> {
   const token = await tokenForThisRequest();
   const res = await fetch(`${ALPHA_CLOUD_API}${path}`, {
     method: init.method ?? 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
+      Accept: init.responseType === 'bytes' ? 'application/octet-stream' : 'application/json',
       ...(init.workspaceId ? { 'X-Workspace-Id': init.workspaceId } : {}),
       ...(init.headers ?? {}),
-      ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' })
+      ...(init.rawBody ? { 'Content-Type': 'application/octet-stream' }
+        : init.body === undefined ? {} : { 'Content-Type': 'application/json' })
     },
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    body: init.rawBody ? Buffer.from(init.rawBody)
+      : init.body === undefined ? undefined : JSON.stringify(init.body),
     signal: AbortSignal.timeout(init.timeoutMs ?? ACTION_TIMEOUT_MS)
   });
+  if (init.responseType === 'bytes' && res.ok) {
+    const body = new Uint8Array(await res.arrayBuffer()) as T;
+    return { status: res.status, body,
+      ...(res.headers.get('Content-Type') ? { contentType: res.headers.get('Content-Type')! } : {}),
+      ...(res.headers.get('Content-Disposition') ? { contentDisposition: res.headers.get('Content-Disposition')! } : {}) };
+  }
   const body = (await res.json().catch(() => null)) as T;
   return { status: res.status, body };
 }

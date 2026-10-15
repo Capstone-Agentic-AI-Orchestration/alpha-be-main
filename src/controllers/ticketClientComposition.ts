@@ -6,29 +6,41 @@ import { TicketClientIdentityProvider } from '../services/ticketClientIdentityPr
 import { createTicketClientInvitationDeliveryService } from '../services/ticketClientInvitationDeliveryService.js';
 import { startTicketClientInvitationDeliveryWorker } from '../services/ticketClientInvitationDeliveryWorker.js';
 import { createTicketClientAuthAdmission } from '../services/ticketClientAuthAdmission.js';
-import { createTicketClientPhaseFourRouteBoundary } from './ticketClientPhaseFourRouteFactory.js';
+import { createTicketClientPortalRouteBoundary } from './ticketClientPortalRouteFactory.js';
+import { PostgresTicketTriageStore } from '../store/ticketTriagePostgresStore.js';
+import { createTicketMessageService } from '../services/ticketMessageService.js';
 import { PostgresTicketClientActivationStore } from '../store/ticketClientActivationPostgresStore.js';
 import { PostgresTicketClientAuthRateLimitStore } from '../store/ticketClientAuthRateLimitPostgresStore.js';
 import { PostgresTicketClientInvitationDeliveryStore } from '../store/ticketClientInvitationDeliveryStore.js';
 import { PostgresTicketClientSessionStore } from '../store/ticketClientSessionPostgresStore.js';
 import { PostgresTicketClientSignInStore } from '../store/ticketClientSignInPostgresStore.js';
 import { PostgresTicketClientWorkspaceStore } from '../store/ticketClientWorkspacePostgresStore.js';
+import { PostgresTicketClientIntakeContextStore } from '../store/ticketClientIntakeContextPostgresStore.js';
+import { PostgresTicketCreationStore } from '../store/ticketCreationPostgresStore.js';
 import { PostgresTicketQueueStore } from '../store/ticketQueuePostgresStore.js';
 import { PostgresTicketReadStore } from '../store/ticketReadPostgresStore.js';
 import { createClientTicketInvitationSecretProtector } from '../ticketing/clientTicketSecrets.js';
 import type { TicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
 import type { TicketInvitationPolicy } from '../services/ticketInvitationService.js';
+import { createTicketDocumentService } from '../services/ticketDocumentService.js';
+import { SupabaseTicketDocumentObjectStore } from '../services/supabaseTicketDocumentObjectStore.js';
+import { PostgresTicketDocumentStore } from '../store/ticketDocumentPostgresStore.js';
+import type { TicketDocumentsApplication } from './ticketDocumentController.js';
+import { PostgresTicketCommunicationNotificationStore } from '../store/ticketCommunicationNotificationStore.js';
+import { createTicketCommunicationNotificationService } from '../services/ticketCommunicationNotificationService.js';
+import { startTicketCommunicationNotificationWorker } from '../services/ticketCommunicationNotificationWorker.js';
 
 const INVITATION_LIFETIME_MS = 60 * 60 * 1000;
 const CLIENT_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 
-export interface TicketClientPhaseFourComposition {
+export interface TicketClientComposition {
   router: Router;
   pmInvitation: {
     enabled: true;
     policy: TicketInvitationPolicy;
     secretProtector: TicketInvitationSecretProtector;
   };
+  documents: TicketDocumentsApplication;
   startDeliveryWorker(onUnavailable: () => void): () => void;
 }
 
@@ -37,7 +49,7 @@ export interface TicketClientPhaseFourComposition {
  * server-only Supabase Auth/Resend credentials. Call only after validating the
  * rollout gates and exact HTTPS web origin; no browser receives service keys.
  */
-export function createTicketClientPhaseFourComposition(input: {
+export function createTicketClientComposition(input: {
   database: TransactionalSql;
   supabaseUrl: string;
   supabaseAnonKey: string;
@@ -46,7 +58,7 @@ export function createTicketClientPhaseFourComposition(input: {
   webOrigin: string;
   emailProvider: TicketInvitationContentEmailProvider;
   onSignInDeliveryUnavailable?: () => void;
-}): TicketClientPhaseFourComposition {
+}): TicketClientComposition {
   if (typeof input.emailProvider.sendContent !== 'function') {
     throw new Error('Client email delivery is not configured.');
   }
@@ -66,15 +78,27 @@ export function createTicketClientPhaseFourComposition(input: {
   const activationAdmission = createTicketClientAuthAdmission({
     store: rateStore, secret: input.sessionSecret, bucket: 'client_activation', maximumPerMinute: 8,
   });
+  const documents = createTicketDocumentService(
+    new PostgresTicketDocumentStore(input.database),
+    new SupabaseTicketDocumentObjectStore(input.supabaseUrl, input.supabaseServiceRoleKey),
+  );
+  const communicationDelivery = createTicketCommunicationNotificationService(
+    new PostgresTicketCommunicationNotificationStore(input.database), input.emailProvider, input.webOrigin,
+  );
+  const messages = createTicketMessageService(new PostgresTicketTriageStore(input.database, { communicationEnabled: true }));
 
-  const router = createTicketClientPhaseFourRouteBoundary({
+  const router = createTicketClientPortalRouteBoundary({
     sessionStore: new PostgresTicketClientSessionStore(input.database),
     activationStore: new PostgresTicketClientActivationStore(input.database),
     workspaceStore: new PostgresTicketClientWorkspaceStore(input.database),
+    intakeContextStore: new PostgresTicketClientIntakeContextStore(input.database),
+    creationStore: new PostgresTicketCreationStore(input.database),
     queueStore: new PostgresTicketQueueStore(input.database),
     readStore: new PostgresTicketReadStore(input.database),
     identityProvider,
     signInStore: new PostgresTicketClientSignInStore(input.database),
+    messages,
+    documents,
     emailProvider: input.emailProvider,
     onSignInDeliveryUnavailable: input.onSignInDeliveryUnavailable,
     webOrigin: input.webOrigin,
@@ -92,12 +116,16 @@ export function createTicketClientPhaseFourComposition(input: {
   );
 
   return {
-    router,
+    router, documents,
     pmInvitation: { enabled: true, policy: invitationPolicy, secretProtector: secrets.invitation },
     startDeliveryWorker(onUnavailable) {
-      return startTicketClientInvitationDeliveryWorker({
+      const stopInvitations = startTicketClientInvitationDeliveryWorker({
         isCloud: true, enabled: true, delivery, onUnavailable,
       });
+      const stopCommunications = startTicketCommunicationNotificationWorker({
+        isCloud: true, enabled: true, delivery: communicationDelivery, onUnavailable,
+      });
+      return () => { stopInvitations(); stopCommunications(); };
     },
   };
 }

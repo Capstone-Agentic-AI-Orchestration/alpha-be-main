@@ -139,7 +139,20 @@ describe('authorized queue and minimal counters', () => {
   });
   it('PM output adds only mapped internal handoff fields', async () => {
     const f = fixture(); f.add(row('a')); const result = await f.service.list(workspace, pm);
-    expect(result.items[0]).toMatchObject({ internal: { updatedAt, actionOwner: 'pm', nextAction: 'review_ticket', projectId: null } });
+    expect(result.items[0]).toMatchObject({ internal: { updatedAt, actionOwner: 'pm', nextAction: 'review_ticket', projectId: null, clientInvitation: null } });
+  });
+  it('shows persisted invitation delivery only in the PM projection, never the client queue', async () => {
+    const f = fixture();
+    const item = row('invitation');
+    item.clientInvitation = { status: 'pending', delivery: 'failed', expiresAt: '2026-10-09T00:00:00.000Z' };
+    f.add(item);
+
+    const pmResult = await f.service.list(workspace, pm);
+    const clientResult = await f.service.list(workspace, client);
+
+    expect(pmResult.items[0]).toMatchObject({ internal: { clientInvitation: item.clientInvitation } });
+    expect(clientResult.items[0]).not.toHaveProperty('internal');
+    expect(clientResult.items[0]).not.toHaveProperty('clientInvitation');
   });
   it('private note clocks reorder PM view but leave client order, content and counters unchanged', async () => {
     const f = fixture(); f.add(row('a'), row('b')); const before = await f.service.list(workspace, client);

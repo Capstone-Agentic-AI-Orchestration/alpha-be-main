@@ -23,6 +23,17 @@ export interface TicketQueueRow {
   ticket: LockedTicket;
   /** Fresh service/ticket grant for the designated client, including PM reads. */
   clientAccessActive: boolean;
+  /** PM-only, safe delivery summary. The client queue projection omits it. */
+  clientInvitation?: {
+    status: 'pending' | 'expired' | 'revoked' | 'consumed';
+    delivery: 'queued' | 'sending' | 'retrying' | 'accepted_by_provider' | 'failed' | 'unknown';
+    expiresAt: string;
+  } | null;
+  /** PM-only identity grouping. Public inquiries without a verified client ID
+   * use a ticket-specific key, never an email-derived key. */
+  pmClientGroup?: { key: string; displayName: string; acceptsNewRequests: boolean; accessActive: boolean };
+  /** PM-only project label. Never included in a client queue projection. */
+  pmProjectName?: string | null;
   header: Pick<TicketHeaderRow, 'workspaceId' | 'ticketId' | 'reference' | 'title' | 'createdAt' | 'clientUpdatedAt' | 'internalUpdatedAt' | 'closedAt'>;
 }
 export interface ClientTicketCounters { kind: 'client'; open: number; needsClient: number }

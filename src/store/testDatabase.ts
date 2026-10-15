@@ -38,6 +38,16 @@ const SUPABASE_STUBS = `
   create role authenticated nologin;
   create role service_role nologin;
 
+  /* Supabase Storage bucket metadata used by additive bucket migrations. */
+  create schema if not exists storage;
+  create table storage.buckets (
+    id text primary key,
+    name text not null,
+    public boolean not null default false,
+    file_size_limit bigint,
+    allowed_mime_types text[]
+  );
+
   create schema if not exists realtime;
   create table realtime.messages (
     topic text not null,

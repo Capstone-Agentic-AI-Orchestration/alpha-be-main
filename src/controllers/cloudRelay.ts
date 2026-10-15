@@ -12,6 +12,10 @@ export interface RelayOptions {
   path?: string;
   /** Defaults to this request's body on a write, and none on a GET or DELETE. */
   body?: unknown;
+  /** Raw bytes are reserved for the bounded, authenticated ticket-document upload path. */
+  rawBody?: Uint8Array;
+  /** Binary responses are reserved for authenticated ticket-document downloads. */
+  responseType?: 'json' | 'bytes';
   /** Runs after a success, for the routes whose result this machine keeps a copy of. */
   mirror?: (body: any) => unknown;
   timeoutMs?: number;
@@ -45,14 +49,27 @@ export async function relayToCloud(req: Request, res: Response, options: RelayOp
       body:
         options.body !== undefined
           ? options.body
-          : method === 'GET' || method === 'DELETE'
+          : options.rawBody !== undefined || method === 'GET' || method === 'DELETE'
             ? undefined
             : req.body,
+      ...(options.rawBody !== undefined ? { rawBody: options.rawBody } : {}),
+      ...(options.responseType ? { responseType: options.responseType } : {}),
       workspaceId: options.workspaceId ?? req.workspace?.workspaceId,
       ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
       ...(options.headers ? { headers: options.headers } : {})
     });
     if (answer.status < 300 && options.mirror) await options.mirror(answer.body);
+    if (options.responseType === 'bytes' && answer.status < 300) {
+      if (!(answer.body instanceof Uint8Array)) {
+        res.status(502).json({ error: 'The Alpha cloud returned an invalid document.' });
+        return true;
+      }
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', answer.body.byteLength);
+      res.setHeader('Content-Disposition', 'attachment; filename="ticket-document"');
+      res.status(answer.status).end(Buffer.from(answer.body));
+      return true;
+    }
     res.status(answer.status).json(answer.body);
   } catch (err: any) {
     res.status(502).json({ error: `Could not reach the Alpha cloud: ${err?.message ?? err}` });

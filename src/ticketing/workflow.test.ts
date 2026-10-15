@@ -86,6 +86,21 @@ describe('one ticket from inquiry to completion', () => {
     expect(startWork()).toMatchObject({ status: 'in_progress', authorizedScopeVersionId: 'scope-a', projectId: 'project-a', requiredIssueIds: ['issue-a', 'issue-b'] });
   });
 
+  it('allows PM project organization before scope agreement and requires work to stay in that project', () => {
+    const state = newTicketWorkflow('ticket-a', 'workspace-a', 'client-a');
+    state.projectId = 'project-a';
+    const reviewed = decide(state, { type: 'review' }).state;
+    const proposed = decide(reviewed, { type: 'propose_scope', scopeVersionId: 'scope-a' }).state;
+    const agreed = decide(proposed, { type: 'agree_scope', scopeVersionId: 'scope-a' }, client).state;
+    const facts = startableEvidence();
+    expect(decide(agreed, {
+      type: 'authorize_work', scopeVersionId: 'scope-a', projectId: 'project-a', issueIds: ['issue-a', 'issue-b'],
+    }, pm, facts).state).toMatchObject({ projectId: 'project-a', status: 'in_progress' });
+    expectRefusal(() => decide(agreed, {
+      type: 'authorize_work', scopeVersionId: 'scope-a', projectId: 'project-b', issueIds: ['issue-a', 'issue-b'],
+    }, pm, facts), 409, 'ticket_project_conflict');
+  });
+
   it.each(['in_progress', 'agent_running', 'review', 'done'] as const)(
     'refuses initial authorization when a linked Issue is already %s', status => {
       const facts = startableEvidence();

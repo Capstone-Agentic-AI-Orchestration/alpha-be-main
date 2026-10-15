@@ -29,6 +29,8 @@ const actionValues = new Set([
   'handle_withdrawal', 'resolve_hold',
 ]);
 const requestedActionValues = new Set(['reply', 'agree_scope', 'review_result']);
+const invitationStateValues = new Set(['pending', 'expired', 'revoked', 'consumed']);
+const invitationDeliveryValues = new Set(['queued', 'sending', 'retrying', 'accepted_by_provider', 'failed', 'unknown']);
 const allowedQueryKeys = new Set(['limit', 'after', 'search', 'filter']);
 const terminalStatuses = new Set(['closed', 'declined', 'cancelled']);
 const validTimestamp = (value: unknown): value is string => typeof value === 'string'
@@ -73,11 +75,23 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
     || (value.writesAvailable && value.readOnly)
     || (!value.writesAvailable && value.requestedAction !== null)) throw new TicketReadInvariantError();
   const internal = value.internal;
+  const invitation = internal?.clientInvitation;
+  const clientGroup = internal?.clientGroup;
   if (!internal || !validTimestamp(internal.updatedAt)
     || (internal.actionOwner !== null && !['pm', 'client', 'developer'].includes(internal.actionOwner))
     || (internal.nextAction !== null && !actionValues.has(internal.nextAction))
     || (internal.projectId !== null && !opaqueTicketRequestValue(internal.projectId))
-    || typeof internal.clientAccessActive !== 'boolean') {
+    || (invitation !== undefined && invitation !== null && (!invitationStateValues.has(invitation.status)
+      || !invitationDeliveryValues.has(invitation.delivery) || !validTimestamp(invitation.expiresAt)))
+    || typeof internal.clientAccessActive !== 'boolean'
+    || (clientGroup !== undefined && (!clientGroup || !opaqueTicketRequestValue(clientGroup.key)
+      || typeof clientGroup.displayName !== 'string' || !clientGroup.displayName.trim()
+      || clientGroup.displayName.trim() !== clientGroup.displayName || clientGroup.displayName.length > 200
+      || typeof clientGroup.acceptsNewRequests !== 'boolean' || typeof clientGroup.accessActive !== 'boolean'))
+    || (internal.projectName !== undefined && internal.projectName !== null
+      && (typeof internal.projectName !== 'string' || !internal.projectName.trim()
+        || internal.projectName.trim() !== internal.projectName || internal.projectName.length > 200))
+    || (internal.projectName !== undefined && ((internal.projectId === null) !== (internal.projectName === null)))) {
     throw new TicketReadInvariantError();
   }
   // Explicit allowlist: never serialize a store/query row from the service.
@@ -98,6 +112,12 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
       nextAction: internal.nextAction,
       projectId: internal.projectId,
       clientAccessActive: internal.clientAccessActive,
+      clientInvitation: invitation ?? null,
+      ...(clientGroup ? { clientGroup: {
+        key: clientGroup.key, displayName: clientGroup.displayName,
+        acceptsNewRequests: clientGroup.acceptsNewRequests, accessActive: clientGroup.accessActive,
+      } } : {}),
+      ...(internal.projectName !== undefined ? { projectName: internal.projectName } : {}),
     },
   };
 }

@@ -64,6 +64,11 @@ function safeDetail(value: PmTicketDetail): PmTicketDetail {
     || (value.sharedProjectName !== null && !requiredText(value.sharedProjectName, 200))
     || !value.internal || !date(value.internal.updatedAt)
     || (value.internal.projectId !== null && !opaqueTicketRequestValue(value.internal.projectId))
+    || (value.internal.projectName !== null && (!requiredText(value.internal.projectName, 200)
+      || !value.internal.projectName.trim() || value.internal.projectName.trim() !== value.internal.projectName))
+    || typeof value.internal.projectClientVisible !== 'boolean'
+    || ((value.internal.projectId === null) !== (value.internal.projectName === null))
+    || (value.internal.projectId === null && value.internal.projectClientVisible)
     || !Array.isArray(value.internal.requiredIssueIds)
     || value.internal.requiredIssueIds.some(id => !opaqueTicketRequestValue(id))
     || (value.internal.scopeVersion !== null && (!opaqueTicketRequestValue(value.internal.scopeVersion.id)
@@ -123,6 +128,7 @@ function safeDetail(value: PmTicketDetail): PmTicketDetail {
     sharedProjectName: value.sharedProjectName, relatedTicket, scope, delivery, request,
     internal: {
       updatedAt: value.internal.updatedAt, projectId: value.internal.projectId,
+      projectName: value.internal.projectName, projectClientVisible: value.internal.projectClientVisible,
       requiredIssueIds: [...value.internal.requiredIssueIds], actionOwner: value.internal.actionOwner,
       nextAction: value.internal.nextAction, authorizedScopeVersionId: value.internal.authorizedScopeVersionId,
       correctionRequestedFor: value.internal.correctionRequestedFor,

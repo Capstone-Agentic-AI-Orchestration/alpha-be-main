@@ -114,7 +114,7 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
         and s.revoked_at is null and s.created_at <= now() and s.expires_at > now()
        join alpha_private.ticket_service_grants sg
          on sg.id = $1 and sg.workspace_id = w.id and sg.client_user_id = s.client_user_id
-        and sg.status = 'active'
+        and sg.status = 'active' and sg.revoked_at is null
        where w.status = 'active'
        for share of w, s, sg`,
       [contextId, subject.sessionId, subject.userId],
@@ -155,19 +155,43 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
     this.requireExactContext(context);
     if (!/^[a-f0-9]{64}$/.test(optionId)) return null;
     const { rows } = await this.sql.query<ProjectOptionDbRow>(
-      `select access.project_id, access.display_name
-       from alpha_private.ticket_client_project_access access
+      `select distinct on (ticket.project_id collate "C") ticket.project_id,
+              coalesce(nullif(btrim(ticket.project_display_name),''), project.name) as display_name
+       from alpha_private.tickets ticket
+       join alpha_private.ticket_client_grants grant_row
+         on grant_row.workspace_id=ticket.workspace_id and grant_row.ticket_id=ticket.id
+        and grant_row.client_user_id=ticket.client_user_id and grant_row.active and grant_row.revoked_at is null
        join public.projects project
-         on project.workspace_id = access.workspace_id and project.id = access.project_id
-       where access.workspace_id = $1 and access.client_user_id = $2
-         and access.active and access.client_visible
-       order by access.project_id collate "C"
+         on project.workspace_id=ticket.workspace_id and project.id=ticket.project_id
+       where ticket.workspace_id=$1 and ticket.client_user_id=$2
+         and ticket.project_id is not null and ticket.project_client_visible
+       order by ticket.project_id collate "C", ticket.client_updated_at desc, ticket.id collate "C" desc
        limit 1001
-       for share of access, project`,
+      `,
       [context.workspaceId, context.clientId],
     );
     if (rows.length > 1000) return invalid();
-    const match = rows.find(row => ticketClientProjectOptionId(context.workspaceId, context.clientId, row.project_id) === optionId);
+    const candidate = rows.find(row => ticketClientProjectOptionId(context.workspaceId, context.clientId, row.project_id) === optionId);
+    if (!candidate || !text(candidate.project_id)) return null;
+    // Recheck and lock the exact currently visible project option before it is
+    // used to create a ticket. The discovery query above is not authority.
+    const { rows: currentRows } = await this.sql.query<ProjectOptionDbRow>(
+      `select ticket.project_id,
+              coalesce(nullif(btrim(ticket.project_display_name),''), project.name) as display_name
+         from alpha_private.tickets ticket
+         join alpha_private.ticket_client_grants grant_row
+           on grant_row.workspace_id=ticket.workspace_id and grant_row.ticket_id=ticket.id
+          and grant_row.client_user_id=ticket.client_user_id and grant_row.active and grant_row.revoked_at is null
+         join public.projects project
+           on project.workspace_id=ticket.workspace_id and project.id=ticket.project_id
+        where ticket.workspace_id=$1 and ticket.client_user_id=$2 and ticket.project_id=$3
+          and ticket.project_client_visible
+        order by ticket.client_updated_at desc, ticket.id collate "C" desc
+        limit 1
+        for share of ticket, grant_row, project`,
+      [context.workspaceId, context.clientId, candidate.project_id],
+    );
+    const match = currentRows[0];
     if (!match || !text(match.project_id) || !text(match.display_name)) return null;
     const option: SharedTicketProjectOption = {
       id: optionId, workspaceId: context.workspaceId, clientId: context.clientId,

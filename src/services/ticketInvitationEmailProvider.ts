@@ -25,7 +25,7 @@ export interface TicketInvitationEmailProvider {
   send(recipient: string, idempotencyKey: string): Promise<void>;
 }
 
-/** Provider interface required by the Phase 4 activation and sign-in emails. */
+/** Provider interface used by client invitations, activation, and sign-in emails. */
 export interface TicketInvitationContentEmailProvider extends TicketInvitationEmailProvider {
   /** Dynamic, server-authored email; never accepts browser HTML. */
   sendContent(recipient: string, subject: string, text: string, idempotencyKey: string): Promise<void>;

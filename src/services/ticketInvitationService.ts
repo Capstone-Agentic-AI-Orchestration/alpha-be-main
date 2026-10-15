@@ -94,13 +94,28 @@ export function createTicketInvitationService(
             if (latest.contactBindingId !== contact.bindingId) {
               workflowError(409, 'ticket_invitation_contact_changed', 'The inquiry contact changed. Review it before issuing another invitation.');
             }
-            return { invitationId: latest.id, ticketId: target.ticketId, expiresAt: latest.expiresAt, alreadyPending: true };
-          }
-          if (latest.status === 'pending') {
+            const deliveryStatus = await tx.loadInvitationOutboxStatus(target, latest.id);
+            if (deliveryStatus === null) {
+              workflowError(503, 'ticket_invitation_unavailable', 'The current invitation delivery state could not be confirmed.');
+            }
+            if (deliveryStatus !== 'dead' && deliveryStatus !== 'discarded') {
+              return { invitationId: latest.id, ticketId: target.ticketId, expiresAt: latest.expiresAt, alreadyPending: true };
+            }
+            // A terminally failed outbox event has discarded its protected
+            // token and can never be delivered again. Expire that pending link
+            // before issuing a fresh token/outbox event on this explicit PM action.
             if (!await tx.expireInvitation(target, latest.id, createdAt)) {
               workflowError(409, 'ticket_version_conflict', 'The invitation changed. Refresh and try again.');
             }
             await tx.appendInvitationAudit({ target, invitationId: latest.id, actorId: ticket.actor.userId, type: 'invitation_expired', occurredAt: createdAt });
+          }
+          if (latest.status === 'pending') {
+            if (Date.parse(latest.expiresAt) <= createdMs && !await tx.expireInvitation(target, latest.id, createdAt)) {
+              workflowError(409, 'ticket_version_conflict', 'The invitation changed. Refresh and try again.');
+            }
+            if (Date.parse(latest.expiresAt) <= createdMs) {
+              await tx.appendInvitationAudit({ target, invitationId: latest.id, actorId: ticket.actor.userId, type: 'invitation_expired', occurredAt: createdAt });
+            }
           }
         }
 

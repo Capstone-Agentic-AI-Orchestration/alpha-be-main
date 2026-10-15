@@ -12,7 +12,7 @@ export interface TicketInvitationApplication {
 
 /**
  * PM-only invitation transport. Mount behind the existing cloud GitHub-session
- * and workspace middleware, inside the gated Phase 4 composition. It deliberately
+ * and workspace middleware, inside the configured client composition. It deliberately
  * accepts no recipient, role, workspace, or workflow fields from the request body.
  */
 export function createTicketInvitationRouter(application: TicketInvitationApplication): Router {

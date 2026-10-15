@@ -5,12 +5,15 @@ import type { TransactionalSql } from './database.js';
 import { PostgresTicketTriageStore } from './ticketTriagePostgresStore.js';
 import { PostgresTicketPublicIntakeStore } from './ticketPublicIntakePostgresStore.js';
 import { PostgresTicketQueueStore } from './ticketQueuePostgresStore.js';
+import { PostgresTicketInvitationStore } from './ticketInvitationPostgresStore.js';
 import { PostgresTicketReadStore } from './ticketReadPostgresStore.js';
 import { createTicketPublicIntakeService } from '../services/ticketPublicIntakeService.js';
 import { createTicketCommandService } from '../services/ticketCommandService.js';
 import { createTicketMessageService } from '../services/ticketMessageService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
 import { createTicketQueueService } from '../services/ticketQueueService.js';
+import { createTicketInvitationService } from '../services/ticketInvitationService.js';
+import { createTicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 
 let pg: PGlite;
@@ -21,14 +24,14 @@ const inquiry = { schemaVersion: 1, operationId: '2e695cb4-b9bf-4dd1-8a81-3d1667
   email: 'synthetic@example.invalid', company: null, title: 'Synthetic inquiry', description: 'Test the durable Phase 2 workflow.', requestedDeadline: null };
 const request = { origin: 'https://tickets.example.invalid', remoteAddress: '127.0.0.1' };
 
-function intake() {
+function intake(entryId = 'triage-entry', ticketId = target.ticketId) {
   return createTicketPublicIntakeService(new PostgresTicketPublicIntakeStore(db), {
     async admitRequest(entry) {
       const instant = new Date();
       return { entryId: entry.id, rateSubjectKey: 'a'.repeat(64),
         issuedAt: instant.toISOString(), expiresAt: new Date(instant.getTime() + 60000).toISOString() };
     },
-  }, { fingerprintKeys: [{ id: 'test', secret: new Uint8Array(32).fill(7) }], maxRequestAgeMs: 60000 }, undefined, () => target.ticketId);
+  }, { fingerprintKeys: [{ id: 'test', secret: new Uint8Array(32).fill(7) }], maxRequestAgeMs: 60000 }, undefined, () => ticketId);
 }
 const command = (operationId: string, expectedVersion: number, decision: object) => ({ schemaVersion: 1, operationId, expectedVersion, command: decision });
 const commands = () => createTicketCommandService(new PostgresTicketTriageStore(db));
@@ -61,6 +64,49 @@ describe('Phase 2 durable inquiry and PM triage', () => {
     expect(queue.items[0].id).toBe(target.ticketId);
     expect(queue.items[0].status).toBe('received');
   });
+  it('shows persisted PM invitation delivery and safely reissues after terminal provider failure', async () => {
+    const inviteTarget = { workspaceId: 'invitation-workspace', ticketId: 'invitation-ticket' };
+    await db.query(`insert into public.workspaces(id,name,slug,settings_json) values
+      ('invitation-workspace','Invitation test','invitation-workspace','{"ticketing_write_mode":"enabled"}')`);
+    await db.query(`insert into public.workspace_members(id,workspace_id,user_id,role) values
+      ('invitation-pm-member','invitation-workspace','triage-pm','pm')`);
+    await db.query(`insert into alpha_private.ticket_intake_entries
+      (id,workspace_id,slug,company_label,published,write_mode,policy_version,per_source_max,per_entry_max,window_seconds)
+      values ('invitation-entry','invitation-workspace','invitation-code','Invitation test',true,'enabled','v1',100,100,60)`);
+    await intake('invitation-entry', inviteTarget.ticketId)
+      .submit('invitation-code', { ...inquiry, operationId: '18d0a8ea-36bd-4d15-b99f-1a64a6004389' }, request);
+    await createTicketCommandService(new PostgresTicketTriageStore(db)).execute(inviteTarget, pm,
+      command('invitation-review', 0, { type: 'review' }));
+
+    const invitationSecrets = createTicketInvitationSecretProtector('test-key', new Map([['test-key', new Uint8Array(32).fill(11)]]));
+    let invitationNow = new Date('2026-10-08T12:00:00.000Z');
+    const invitations = createTicketInvitationService(new PostgresTicketInvitationStore(db),
+      { lifetimeMs: 60 * 60 * 1000 }, invitationSecrets, () => invitationNow);
+    await invitations.issue(inviteTarget, pm);
+    const list = () => createTicketQueueService(new PostgresTicketQueueStore(db),
+      () => new Date('2026-10-08T12:00:00.000Z')).list(inviteTarget.workspaceId, pm);
+
+    expect((await list()).items[0]).toMatchObject({
+      internal: { clientInvitation: { status: 'pending', delivery: 'queued' } },
+    });
+    await db.query(`update alpha_private.ticket_outbox_events
+      set status='dead',failure_code='provider_failure',payload=payload-'protectedToken'
+      where workspace_id=$1 and ticket_id=$2 and event_type='ticket_invitation_requested'
+        and payload->>'activationVersion'='1'`, [inviteTarget.workspaceId, inviteTarget.ticketId]);
+    expect((await list()).items[0]).toMatchObject({
+      internal: { clientInvitation: { status: 'pending', delivery: 'failed' } },
+    });
+
+    invitationNow = new Date('2026-10-08T12:00:01.000Z');
+    const replacement = await invitations.issue(inviteTarget, pm);
+    expect(replacement.alreadyPending).toBe(false);
+    expect((await list()).items[0]).toMatchObject({
+      internal: { clientInvitation: { status: 'pending', delivery: 'queued' } },
+    });
+    expect((await db.query<{ status: string }>(`select status from alpha_private.ticket_invitations
+      where workspace_id=$1 and ticket_id=$2 order by created_at,id`, [inviteTarget.workspaceId, inviteTarget.ticketId])).rows
+      .map(row => row.status)).toEqual(['expired', 'pending']);
+  });
   it('denies developers, foreign workspace and absent client authority', async () => {
     const input = command('forbidden', 0, { type: 'review' });
     await expect(commands().execute(target, { ...pm, userId: 'triage-dev' }, input)).rejects.toMatchObject({ status: 404 });
@@ -84,7 +130,9 @@ describe('Phase 2 durable inquiry and PM triage', () => {
     expect((await reads.notes(target, pm)).items).toHaveLength(1);
     expect((await reads.conversation(target, pm)).items).toEqual([]);
     expect((await db.query('select client_updated_at,version from alpha_private.tickets')).rows[0]).toEqual(before);
-    expect((await db.query<{ count: number }>('select count(*)::int as count from alpha_private.ticket_outbox_events')).rows[0].count).toBe(2);
+    expect((await db.query<{ count: number }>(
+      'select count(*)::int as count from alpha_private.ticket_outbox_events where workspace_id=$1', [target.workspaceId],
+    )).rows[0].count).toBe(2);
   });
   it('rejects stale versions, missing decline reasons and future commands without mutation', async () => {
     await expect(commands().execute(target, pm, command('stale', 0, { type: 'decline', reason: 'Reason' }))).rejects.toMatchObject({ code: 'ticket_version_conflict' });
