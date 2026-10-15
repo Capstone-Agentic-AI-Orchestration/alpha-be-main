@@ -21,7 +21,7 @@ export class TicketClientIdentityProvider implements TicketClientIdentityVerifie
   private readonly admin;
   private readonly verifier;
 
-  constructor(url: string, anonKey: string, serviceRoleKey: string) {
+  constructor(private readonly url: string, private readonly anonKey: string, serviceRoleKey: string) {
     if (!/^https:\/\//.test(url) || !anonKey.trim() || !serviceRoleKey.trim()) {
       throw new Error('Client identity provider is not configured.');
     }
@@ -58,10 +58,45 @@ export class TicketClientIdentityProvider implements TicketClientIdentityVerifie
     };
   }
 
-  async verifyEmailLink(tokenHash: string, type: ClientEmailLinkType): Promise<{ credential: string; identity: VerifiedClientIdentity } | null> {
-    if (!/^[A-Za-z0-9_-]{20,256}$/.test(tokenHash) || !['invite', 'magiclink'].includes(type)) return null;
+  private requestClient() {
+    return createClient(this.url, this.anonKey, {
+      auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+      realtime: { transport: WebSocket as any },
+    });
+  }
+
+  async signInWithPassword(email: string, password: string): Promise<{ credential: string; identity: VerifiedClientIdentity } | null> {
+    const { data, error } = await this.requestClient().auth.signInWithPassword({ email, password });
+    if (error && (error.status === undefined || error.status >= 500)) throw new Error('Client authentication is unavailable.');
+    if (error || !data.session?.access_token) return null;
+    const credential = data.session.access_token;
+    const identity = await this.verifyCredential(credential);
+    return identity ? { credential, identity } : null;
+  }
+
+  /** Called only after the account application verifies a one-time setup/recovery proof. */
+  async setPassword(credential: string, password: string): Promise<void> {
+    const identity = await this.verifyCredential(credential);
+    if (!identity?.emailVerified) throw new Error('Password setup is unavailable.');
+    const { data, error } = await this.admin.auth.admin.updateUserById(identity.userId, { password });
+    if (error || data.user?.id !== identity.userId || data.user.email?.toLowerCase() !== identity.email?.toLowerCase()) {
+      throw new Error('Password setup is unavailable.');
+    }
+  }
+
+  async generateRecoveryLink(email: string): Promise<{ userId: string; tokenHash: string }> {
+    const { data, error } = await this.admin.auth.admin.generateLink({ type: 'recovery', email });
+    if (error || !data.user?.id || !data.properties?.hashed_token || data.properties.verification_type !== 'recovery') {
+      throw new Error('Password recovery is unavailable.');
+    }
+    return { userId: data.user.id, tokenHash: data.properties.hashed_token };
+  }
+
+  async verifyEmailLink(tokenHash: string, type: ClientEmailLinkType | 'recovery'): Promise<{ credential: string; identity: VerifiedClientIdentity } | null> {
+    if (!/^[A-Za-z0-9_-]{20,256}$/.test(tokenHash) || !['invite', 'magiclink', 'recovery'].includes(type)) return null;
     try {
-      const { data, error } = await this.verifier.auth.verifyOtp({ token_hash: tokenHash, type });
+      // OTP verification changes provider session state; isolate it per request.
+      const { data, error } = await this.requestClient().auth.verifyOtp({ token_hash: tokenHash, type });
       const credential = data.session?.access_token;
       if (error || typeof credential !== 'string' || !credential || credential.length > 8192) return null;
       const identity = await this.verifyCredential(credential);

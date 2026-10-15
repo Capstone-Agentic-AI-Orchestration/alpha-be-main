@@ -121,6 +121,7 @@ describe('authorized ticket detail reads', () => {
       updatedAt: privateTime, projectId: 'project-a', requiredIssueIds: ['issue-a'], actionOwner: 'pm', nextAction: 'review_ticket',
       authorizedScopeVersionId: null, correctionRequestedFor: null, withdrawalRequested: false, closureReason: null,
       scopeVersion: null, deliveryAssessment: null, request: null,
+      projectName: null, projectClientVisible: false,
     });
     if ('internal' in result) result.internal.requiredIssueIds.push('mutation');
     expect(f.state.requiredIssueIds).toEqual(['issue-a']);

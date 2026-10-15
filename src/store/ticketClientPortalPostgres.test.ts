@@ -309,7 +309,7 @@ describe('Client invitation-to-ticket flow on PostgreSQL', () => {
     // This test covers the returning-sign-in eligibility lookup, so create the
     // provider-owned auth.users row as Supabase Auth would after link creation.
     await db.query(`create table if not exists auth.users (
-      id text primary key, email text not null, email_confirmed_at timestamptz
+      id uuid primary key, email text not null, email_confirmed_at timestamptz
     )`);
     await db.query(`insert into auth.users(id,email,email_confirmed_at) values ($1,$2,$3)`,
       [clientId, clientEmail, now.toISOString()]);
@@ -366,7 +366,7 @@ describe('Client invitation-to-ticket flow on PostgreSQL', () => {
     await submitInquiry(firstTarget, clientEmail, 'd15921fb-f001-4b9b-94c3-8f2b8f431004');
     await submitInquiry(secondTarget, 'other-client@example.test', 'd15921fb-f001-4b9b-94c3-8f2b8f431005');
     await reviewInquiry(firstTarget);
-    await db.query(`create table if not exists auth.users (id text primary key, email text not null, email_confirmed_at timestamptz)`);
+    await db.query(`create table if not exists auth.users (id uuid primary key, email text not null, email_confirmed_at timestamptz)`);
     await db.query(`insert into auth.users(id,email,email_confirmed_at) values ($1,$2,now())`, [clientId, clientEmail]);
 
     const consumedProofs = new Set<string>();
