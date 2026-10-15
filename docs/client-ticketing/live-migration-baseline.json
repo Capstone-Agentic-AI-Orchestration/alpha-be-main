@@ -161,22 +161,22 @@
       "notes": "Not in recorded ledger; read-only to_regclass confirmed hosting_audit absent."
     },
     {
-      "local_file": "20261016120000_ticket_central_client_intake.sql",
+      "local_file": "20261015212437_ticket_central_client_intake.sql",
       "local_sha256": "b8e8ab6c27bd7fa06f91435be63fcf198935b2159ee8499efa7ed091b591f6c1",
-      "remote_version": null,
-      "remote_name": null,
-      "remote_sql_md5": null,
-      "review": "not_recorded",
-      "notes": "New additive central PM-intake migration; not applied or recorded in the live database."
+      "remote_version": "20261015212437",
+      "remote_name": "ticket_central_client_intake",
+      "remote_sql_md5": "d559c08252bdf5d2bcf5b36f58aef52f",
+      "review": "exact_normalized_sql",
+      "notes": "Applied after the historical snapshot; normalized local SQL matches the recorded migration in the shared-live project."
     },
     {
-      "local_file": "20261016130000_ticket_client_password_credentials.sql",
+      "local_file": "20261015212441_ticket_client_password_credentials.sql",
       "local_sha256": "56908572fdcca81726bce8d8a7692af831934f707d587a664c1772637ad9fc13",
-      "remote_version": null,
-      "remote_name": null,
-      "remote_sql_md5": null,
-      "review": "not_recorded",
-      "notes": "New additive password-setup marker migration; not applied or recorded in the live database."
+      "remote_version": "20261015212441",
+      "remote_name": "ticket_client_password_credentials",
+      "remote_sql_md5": "3fa1db8a6810e31081611e5798b8827a",
+      "review": "exact_normalized_sql",
+      "notes": "Applied after the historical snapshot; normalized local SQL matches the recorded migration in the shared-live project."
     }
   ]
 }
