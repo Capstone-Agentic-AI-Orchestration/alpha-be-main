@@ -180,3 +180,35 @@ describe('the cloud store leaves machine-local details behind', () => {
     expect(rows[0].row).not.toContain('password');
   });
 });
+
+describe('SQLite project ownership is one write', () => {
+  async function ownedStore() {
+    const store = await openSqlite();
+    const { sqliteService } = await import('../services/sqliteService.js');
+    const { SqliteWorkspaceDirectory } = await import('./sqliteWorkspaceDirectory.js');
+    // Test-only access to the disposable database: exercise the real relation and rollback.
+    const db = (sqliteService as any).db;
+    new SqliteWorkspaceDirectory(db, WS);
+    return { store, db };
+  }
+
+  it('reloads a project with the squad relationship it created', async () => {
+    const { store, db } = await ownedStore();
+    const project = await store.create(WS, { id: 'owned-project', key: 'OWN', name: 'Squad project', leadSquadId: 'squad-delivery' });
+    expect((await store.get(WS, project.id))?.leadSquadId).toBe('squad-delivery');
+    expect(db.prepare('SELECT relationship, status FROM workspace_squad_projects WHERE project_id = ?').get(project.id)).toEqual({ relationship: 'owned', status: 'active' });
+    await store.update(WS, project.id, { leadSquadId: 'squad-next', leadAgentId: '' });
+    expect((await store.get(WS, project.id))?.leadSquadId).toBe('squad-next');
+    expect(db.prepare("SELECT COUNT(*) AS count FROM workspace_squad_projects WHERE project_id = ? AND relationship = 'owned' AND status = 'active'").get(project.id).count).toBe(1);
+    await store.update(WS, project.id, { leadAgentId: 'agent-research', leadSquadId: '' });
+    expect((await store.get(WS, project.id))?.leadAgentId).toBe('agent-research');
+    expect((await store.get(WS, project.id))?.leadSquadId).toBeUndefined();
+  });
+
+  it('rolls back the project if its ownership relationship cannot be saved', async () => {
+    const { store, db } = await ownedStore();
+    db.exec("CREATE TRIGGER reject_project_owner BEFORE INSERT ON workspace_squad_projects BEGIN SELECT RAISE(ABORT, 'Assignment failed'); END");
+    await expect(store.create(WS, { id: 'failed-project', key: 'FAIL', name: 'Failed project', leadSquadId: 'squad-delivery' })).rejects.toThrow('Assignment failed');
+    expect(await store.get(WS, 'failed-project')).toBeNull();
+  });
+});

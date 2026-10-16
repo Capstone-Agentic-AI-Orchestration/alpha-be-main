@@ -354,6 +354,13 @@ export class SupabaseService {
     try {
       const { error } = await this.client.from('projects').upsert(projectRow(currentWorkspaceId(), project));
       if (error) throw error;
+      if (project.leadSquadId) {
+        const { error: assignmentError } = await this.client.from('workspace_squad_projects').upsert({
+          id: `squad-project-${project.id}-${project.leadSquadId}`, workspace_id: currentWorkspaceId(), squad_id: project.leadSquadId,
+          project_id: project.id, relationship: 'owned', status: 'active'
+        }, { onConflict: 'workspace_id,squad_id,project_id' });
+        if (assignmentError) throw assignmentError;
+      }
     } catch (err: any) {
       this.reportFailure(`share project ${project.key}`, err);
     }

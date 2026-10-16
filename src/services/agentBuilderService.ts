@@ -73,9 +73,10 @@ export class AgentBuilderError extends Error {
 export async function sendBuilderMessage(params: {
   sessionId: string;
   runtimeId: string;
+  modelName: string;
   message: string;
 }): Promise<BuilderTurnResult> {
-  const { sessionId, runtimeId, message } = params;
+  const { sessionId, runtimeId, modelName, message } = params;
 
   if (!sessionId?.trim()) throw new AgentBuilderError('sessionId is required');
   if (!message?.trim()) throw new AgentBuilderError('message is required');
@@ -85,15 +86,17 @@ export async function sendBuilderMessage(params: {
     throw new AgentBuilderError(`Unknown runtime "${runtimeId}". Scan for runtimes first.`);
   }
 
-  // The builder is a conversation, not a build step — it reasons about the
-  // draft and never touches the repository, so any detected runtime will do.
-  // Its own model choice is the runtime's first, independent of whatever model
-  // it ends up recommending for the agent being designed.
-  const modelName = (runtime.models ?? [])[0] ?? '';
+  if (!['Anthropic', 'OpenAI', 'Antigravity', 'Google Gemini', 'OpenCode'].includes(runtime.provider)) {
+    throw new AgentBuilderError('This runtime does not support the conversational builder. Choose a supported CLI runtime.');
+  }
+  if (runtime.status !== 'online') throw new AgentBuilderError('The builder runtime is unavailable. Connect it on the Runtimes page first.');
+  if (!modelName || !runtime.models?.includes(modelName)) {
+    throw new AgentBuilderError('Choose an available builder model. Refresh the runtime catalog if it has changed.');
+  }
   // The builder's persona is a constant in this file, never a persona file, so
   // it cannot change mid-session and needs no hash comparison.
-  const priorSession =
-    sqliteService.getThreadSession(sessionId, BUILDER_AGENT_ID)?.cliSessionId ?? null;
+  const sessionKey = `${BUILDER_AGENT_ID}:${runtimeId}:${modelName}`;
+  const priorSession = sqliteService.getThreadSession(sessionId, sessionKey)?.cliSessionId ?? null;
 
   const turn = await runCliTurn({
     runId: `builder-${Date.now()}`,
@@ -107,7 +110,7 @@ export async function sendBuilderMessage(params: {
   });
 
   if (turn.sessionId) {
-    sqliteService.setThreadSession(sessionId, BUILDER_AGENT_ID, turn.sessionId);
+    sqliteService.setThreadSession(sessionId, sessionKey, turn.sessionId);
   }
 
   if (turn.failureKind) {

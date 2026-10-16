@@ -261,6 +261,8 @@ export interface Project {
   leadType: 'member' | 'agent';
   leadName: string;
   leadAgentId?: string;
+  /** Derived from the active owned squad-project relationship. */
+  leadSquadId?: string;
   resources: ProjectResource[];
   /**
    * GitHub organization every repository for this project is created under.

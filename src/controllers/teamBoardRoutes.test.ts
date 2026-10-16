@@ -246,7 +246,7 @@ describe('the roster on a team’s desktop', () => {
     const { app } = await startApi();
     shared = [];
 
-    const project = (await call(app, 'POST', '/api/projects', { name: 'Payments', key: 'PAY' })).body;
+    const project = (await call(app, 'POST', '/api/projects', { name: 'Payments', key: 'PAY', leadAgentId: 'agent-research' })).body;
     expect(shared).toEqual([`project ${project.id}`]);
 
     await call(app, 'PUT', `/api/projects/${project.id}`, { name: 'Payments v2' });
@@ -336,7 +336,7 @@ describe('a conversation on a team’s desktop', () => {
 describe('a card made on a team’s desktop', () => {
   async function withProject(app: express.Express) {
     role = 'pm'; // projects are started by a project manager
-    return (await call(app, 'POST', '/api/projects', { id: 'gh-repo-100', name: 'checkout', key: 'CHK', resources: REPO })).body;
+    return (await call(app, 'POST', '/api/projects', { id: 'gh-repo-100', name: 'checkout', key: 'CHK', resources: REPO, leadAgentId: 'agent-research' })).body;
   }
 
   /** One issue, one id, whichever copy of the board meets it first. */

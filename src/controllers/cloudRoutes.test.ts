@@ -215,7 +215,7 @@ describe('the cloud, without SQLite', () => {
   it('loads a project room from cloud stores without opening desktop SQLite', async () => {
     session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
-    const created = await call(app, 'POST', '/api/projects', { name: 'Room project', key: 'ROOM' });
+    const created = await createOwnedProject(app, { name: 'Room project', key: 'ROOM' });
     expect(created.status).toBe(201);
 
     const room = await call(app, 'GET', `/api/projects/${created.body.id}/live-build-room`);
@@ -337,7 +337,7 @@ describe('a workspace other than the default', () => {
   it('keeps its projects reachable after a restart', async () => {
     await sideWorkspace();
     session = { login: 'PM1', role: 'pm' };
-    const created = await call(await startCloudApi(), 'POST', '/api/projects', { name: 'Side project', key: 'SIDE' }, SIDE);
+    const created = await createOwnedProject(await startCloudApi(), { name: 'Side project', key: 'SIDE' }, SIDE);
     expect(created.status).toBe(201);
 
     // A fresh process: nothing survives but Postgres.
@@ -349,7 +349,7 @@ describe('a workspace other than the default', () => {
   it('is not reachable from another workspace', async () => {
     await sideWorkspace();
     session = { login: 'PM1', role: 'pm' };
-    const created = (await call(await startCloudApi(), 'POST', '/api/projects', { name: 'Side project', key: 'SIDE' }, SIDE)).body;
+    const created = (await createOwnedProject(await startCloudApi(), { name: 'Side project', key: 'SIDE' }, SIDE)).body;
 
     session = { login: 'Admin1', role: 'admin' };
     const admin = await startCloudApi();
@@ -365,7 +365,7 @@ describe('build steps', () => {
   async function projectAsAdmin() {
     session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
-    const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const project = (await createOwnedProject(app, { name: 'Checkout', key: 'CHK' })).body;
     return { app, project };
   }
 
@@ -405,7 +405,7 @@ describe('build steps', () => {
   /** Ids come from the client, and the key is global. */
   it('refuse an id another project’s step already has', async () => {
     const { app, project } = await projectAsAdmin();
-    const other = (await call(app, 'POST', '/api/projects', { name: 'Other', key: 'OTH' })).body;
+    const other = (await createOwnedProject(app, { name: 'Other', key: 'OTH' })).body;
     await call(app, 'PUT', `/api/projects/${other.id}/build-steps`, { steps: steps('plan') });
 
     const res = await call(app, 'PUT', `/api/projects/${project.id}/build-steps`, { steps: steps('plan') });
@@ -443,7 +443,7 @@ describe('approving a run on the web', () => {
   it('merges the pull request through GitHub’s API', async () => {
     session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
-    const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const project = (await createOwnedProject(app, { name: 'Checkout', key: 'CHK' })).body;
     const issue = (await call(app, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id })).body;
 
     const { PostgresRunStore } = await import('../store/postgresRunStore.js');
@@ -465,5 +465,53 @@ describe('approving a run on the web', () => {
       'DELETE /repos/acme/checkout/git/refs/heads/alpha%2Ffix-cart'
     ]);
     expect(githubCalls[1].body).toEqual({ merge_method: 'squash' });
+  });
+});
+
+// Project-creation fixtures state the required execution owner explicitly.
+async function createOwnedProject(app: express.Express, input: Record<string, unknown>, headers: Record<string, string> = {}) {
+  await call(app, 'GET', '/api/agents', undefined, headers);
+  const { agentStore } = await import('../store/stores.js');
+  const workspaceId = headers['X-Workspace-Id'] || 'ws-default';
+  await agentStore().ensureOfficial(workspaceId);
+  return call(app, 'POST', '/api/projects', { ...input, leadAgentId: 'agent-research' }, headers);
+}
+
+describe('required project execution ownership', () => {
+  beforeEach(() => { session = { login: 'PM1', role: 'pm' }; });
+  it('rejects missing and ambiguous owners without creating a project', async () => {
+    const app = await startCloudApi();
+    expect((await call(app, 'POST', '/api/projects', { name: 'Unassigned', key: 'UNA' })).status).toBe(400);
+    expect((await call(app, 'POST', '/api/projects', { name: 'Two owners', key: 'TWO', leadAgentId: 'a', leadSquadId: 's' })).status).toBe(400);
+    expect((await db.query('select id from projects')).rows).toEqual([]);
+  });
+  it('refuses an owner from another workspace', async () => {
+    const app = await startCloudApi();
+    expect((await call(app, 'POST', '/api/projects', { name: 'Foreign owner', key: 'FOR', leadAgentId: 'missing' })).status).toBe(400);
+    expect((await db.query('select id from projects')).rows).toEqual([]);
+  });
+  it('creates and reloads a squad-owned project with its active relationship', async () => {
+    const app = await startCloudApi();
+    await call(app, 'GET', '/api/agents');
+    await db.query(`insert into squads (id, workspace_id, name, topology, mission) values ('squad-execution', 'ws-default', 'Delivery squad', 'sequential', 'Deliver')`);
+    const created = await call(app, 'POST', '/api/projects', { name: 'Squad work', key: 'SQW', leadSquadId: 'squad-execution' });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ status: 'planned', leadSquadId: 'squad-execution', leadName: 'Delivery squad' });
+    const { projectStore } = await import('../store/stores.js');
+    expect(await projectStore().get('ws-default', created.body.id)).toMatchObject({ leadSquadId: 'squad-execution' });
+    expect((await db.query(`select relationship, status from workspace_squad_projects where project_id = $1`, [created.body.id])).rows).toEqual([{ relationship: 'owned', status: 'active' }]);
+    const { agentStore } = await import('../store/stores.js');
+    await agentStore().ensureOfficial('ws-default');
+    const switched = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadAgentId: 'agent-research', leadSquadId: '' });
+    expect(switched.status).toBe(200);
+    expect(switched.body.leadAgentId).toBe('agent-research');
+    expect(switched.body.leadSquadId).toBeUndefined();
+    expect((await db.query<{ relationship: string }>(`select relationship from workspace_squad_projects where project_id = $1`, [created.body.id])).rows[0].relationship).toBe('assigned');
+    await db.query(`insert into squads (id, workspace_id, name, topology, mission) values ('squad-next', 'ws-default', 'Next squad', 'sequential', 'Deliver')`);
+    const next = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadAgentId: '', leadSquadId: 'squad-next' });
+    expect(next.status).toBe(200);
+    expect(next.body.leadSquadId).toBe('squad-next');
+    expect((await projectStore().get('ws-default', created.body.id))?.leadSquadId).toBe('squad-next');
+
   });
 });
