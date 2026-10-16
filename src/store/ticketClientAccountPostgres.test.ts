@@ -138,6 +138,19 @@ describe('client password account workflow on PostgreSQL', () => {
     expect((await db.query(`select protected_proof from alpha_private.ticket_client_account_setups`)).rows).toEqual([{ protected_proof: null }]);
   }, 60000);
 
+  it('lets an invited identity choose its password even when Supabase has a provider-side password hash', async () => {
+    await db.query(`update auth.users set encrypted_password='provider-generated-hash' where id=$1`, [userId]);
+    await db.query(`insert into alpha_private.ticket_service_grants
+      (id,workspace_id,client_user_id,status,display_name) values ('legacy-client-grant',$1,$2,'active','Legacy client')`, [workspaceId, userId]);
+    const setup = await app.begin(await invite());
+    expect(setup.action).toBe('set_password');
+    await expect(app.finish(setup.token, setup.csrf, { password: initialPassword })).resolves.toHaveProperty('sessionCookieValue');
+    expect(currentPassword).toBe(initialPassword);
+    expect(provider.setPassword).toHaveBeenCalledOnce();
+    expect((await db.query(`select client_user_id from alpha_private.ticket_client_password_credentials`)).rows)
+      .toEqual([{ client_user_id: userId }]);
+  }, 60000);
+
   it('does not admit unknown accounts or a wrong password', async () => {
     await expect(app.signIn({ email, password: initialPassword })).rejects.toMatchObject({ status: 401 });
     expect(provider.signInWithPassword).not.toHaveBeenCalled();

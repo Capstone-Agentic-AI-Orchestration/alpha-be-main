@@ -80,24 +80,28 @@ export function createTicketClientAccountService(input: {
   async function completeSetup(setup: ClientAccountSetup, suppliedPassword: string) {
     const saved = proofSchema.parse(protector.open(setup.protectedProof, context(setup)));
     let identity = await input.provider.verifyCredential(saved.credential);
+    let passwordAlreadySet = false;
     if (!identity) {
       // A successful provider password update may invalidate the original proof
       // before its response arrives. Only the same account's password can resume.
       const refreshed = await authenticatePassword(setup, suppliedPassword);
       identity = refreshed.identity;
       saved.credential = refreshed.credential;
+      passwordAlreadySet = setup.action !== 'sign_in';
     }
     assertIdentity(identity, setup);
     if (!saved.invitationToken && await input.signInStore.findActiveClientUserId(setup.email) !== setup.userId) throw unavailable();
-    const existingPassword = await input.store.hasPassword(setup.userId);
-    if (setup.action === 'sign_in' || (setup.action === 'set_password' && existingPassword)) {
+    if (setup.action === 'sign_in') {
       saved.credential = (await authenticatePassword(setup, suppliedPassword)).credential;
     } else {
       if (await needsActivation(saved, setup)) await checkInvitation(saved.invitationToken!, identity);
       // Revoke Alpha's independent cookies too, not just provider sessions.
       await input.store.revokeSessions(setup.userId);
-      await input.provider.setPassword(saved.credential, suppliedPassword);
-      saved.credential = (await authenticatePassword(setup, suppliedPassword)).credential;
+      if (!passwordAlreadySet) {
+        await input.provider.setPassword(saved.credential, suppliedPassword);
+        saved.credential = (await authenticatePassword(setup, suppliedPassword)).credential;
+      }
+      await input.store.markPasswordConfigured(setup.userId);
     }
     if (await needsActivation(saved, setup)) {
       await input.activate({ invitationToken: saved.invitationToken, providerCredential: saved.credential });
@@ -133,8 +137,11 @@ export function createTicketClientAccountService(input: {
       const target = proof.invitationToken ? await checkInvitation(proof.invitationToken, identity) : null;
       if (!target && (proof.providerTokenType === 'invite'
         || await input.signInStore.findActiveClientUserId(normalized) !== identity.userId)) throw unavailable();
+      // Supabase's hash may be generated during invitation. Only Alpha's
+      // private marker proves that this client completed password setup.
+      const hasClientPassword = await input.store.hasPassword(identity.userId);
       const action: ClientAccountSetup['action'] = proof.providerTokenType === 'recovery' ? 'reset_password'
-        : await input.store.hasPassword(identity.userId) ? 'sign_in' : 'set_password';
+        : hasClientPassword ? 'sign_in' : 'set_password';
       const token = randomBytes(32).toString('base64url');
       const csrf = randomBytes(32).toString('base64url');
       const setup: ClientAccountSetup = { idHash: hash('setup', token), csrfHash: hash('csrf', csrf),

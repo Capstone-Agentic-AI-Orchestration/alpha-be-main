@@ -23,7 +23,7 @@ export interface PublicTicketIntakeGuard {
    * and must never be treated as identity or a substitute for the durable rate
    * budgets. Missing request context/configuration fails closed.
    */
-  admitRequest(entry: PublishedTicketIntakeEntry, request: PublicTicketIntakeRequestContext): Promise<PublicTicketIntakeAdmission | null>;
+  admitRequest(entry: Pick<PublishedTicketIntakeEntry, 'id'>, request: PublicTicketIntakeRequestContext): Promise<PublicTicketIntakeAdmission | null>;
 }
 export interface PublicTicketIntakeOperationKey { workspaceId: string; entryId: string; operationId: string }
 export interface SavedPublicTicketIntakeOperation {
