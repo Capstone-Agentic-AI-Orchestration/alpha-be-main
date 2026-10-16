@@ -6,13 +6,16 @@ import { RuntimeCatalogSource, RuntimeEngine } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
 import { enrichRuntimeUpdates } from './runtimeUpdateService.js';
 import { logInfo } from '../utils/logger.js';
+import { reconcileDetectedRuntimes } from './runtimeReconciliation.js';
 import {
   findClaude,
   findCodex,
   findAntigravity,
   findGemini,
   findOpenCode,
-  findLMStudio
+  findLMStudio,
+  findOllama,
+  hasLMStudioInstallation
 } from './runtimeDiscovery.js';
 
 /**
@@ -450,23 +453,11 @@ export class RuntimeService {
       await timed('local', () => this.detectLMStudio())
     ];
 
-    const previousById = new Map(sqliteService.getRuntimes().map(runtime => [runtime.id, runtime]));
-    const runtimes = detectedRuntimes.map(runtime => {
-      const previous = previousById.get(runtime.id);
-      const catalogFailed = !runtime.models.length && !runtime.catalogFetchedAt;
-      const preserveCatalog = catalogFailed && Boolean(previous?.models.length);
-      return {
-        ...runtime,
-        // User preference, if already persisted, wins over detector defaults.
-        isDefault: previous?.isDefault ?? runtime.isDefault,
-        ...(preserveCatalog ? {
-          models: previous!.models,
-          catalogSource: 'cache' as const,
-          catalogFetchedAt: previous!.catalogFetchedAt,
-          catalogStale: true
-        } : {})
-      };
-    });
+    const installedLocalIds = new Set<string>();
+    if (findOllama()) installedLocalIds.add('ollama');
+    if (hasLMStudioInstallation()) installedLocalIds.add('lmstudio');
+    const runtimes = reconcileDetectedRuntimes(detectedRuntimes, sqliteService.getRuntimes(), installedLocalIds);
+    sqliteService.removeUndetectedLocalRuntimes(['ollama', 'lmstudio'].filter(id => !runtimes.some(runtime => runtime.id === id)));
 
     const enriched = await enrichRuntimeUpdates(runtimes);
     sqliteService.saveRuntimes(enriched);
@@ -514,6 +505,8 @@ export class RuntimeService {
     }
 
     const previous = sqliteService.getRuntimes().find(runtime => runtime.id === id);
+    const localMissing = id === 'ollama' ? !findOllama() : id === 'lmstudio' ? !hasLMStudioInstallation() : false;
+    if (localMissing && !engine.catalogFetchedAt && !previous?.catalogFetchedAt) throw new Error('This local runtime has not been detected. Run a full host scan first.');
     const preserveCatalog = !engine.models.length && !engine.catalogFetchedAt && Boolean(previous?.models.length);
     const runtime: RuntimeEngine = {
       ...(previous || { id }),

@@ -248,6 +248,17 @@ describe.each(backends)('the issue store ($name)', backend => {
     expect(updated!.assignedAgentId).toBeUndefined();
   });
 
+  it('clears both assignment types after an explicit unassign', async () => {
+    const stores = await backend.open();
+    const projectId = await withProject(stores);
+    await stores.seedSquad('squad-clear');
+    const issue = await stores.issues.create(WS, { title: 'Clear ownership', projectId, assignedSquadId: 'squad-clear' });
+    await stores.issues.update(WS, issue.id, { assignedAgentId: undefined, assignedSquadId: undefined });
+    const read = await stores.issues.get(WS, issue.id);
+    expect(read!.assignedAgentId).toBeFalsy();
+    expect(read!.assignedSquadId).toBeFalsy();
+  });
+
   it('deletes an issue and its comments, once', async () => {
     const stores = await backend.open();
     const projectId = await withProject(stores);

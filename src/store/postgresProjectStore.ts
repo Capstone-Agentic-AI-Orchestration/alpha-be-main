@@ -29,7 +29,7 @@ export class PostgresProjectStore implements ProjectStore {
 
   async list(workspaceId: string): Promise<Project[]> {
     const { rows } = await this.sql.query<ProjectRow>(
-      'select * from projects where workspace_id = $1 order by created_at desc',
+      `select p.*, (select squad_id from workspace_squad_projects a where a.workspace_id = p.workspace_id and a.project_id = p.id and a.relationship = 'owned' and a.status = 'active' order by a.created_at limit 1) as lead_squad_id from projects p where p.workspace_id = $1 order by p.created_at desc`,
       [workspaceId]
     );
     return rows.map(toProject);
@@ -37,7 +37,7 @@ export class PostgresProjectStore implements ProjectStore {
 
   async get(workspaceId: string, id: string): Promise<Project | null> {
     const { rows } = await this.sql.query<ProjectRow>(
-      'select * from projects where workspace_id = $1 and id = $2',
+      `select p.*, (select squad_id from workspace_squad_projects a where a.workspace_id = p.workspace_id and a.project_id = p.id and a.relationship = 'owned' and a.status = 'active' order by a.created_at limit 1) as lead_squad_id from projects p where p.workspace_id = $1 and p.id = $2`,
       [workspaceId, id]
     );
     return rows[0] ? toProject(rows[0]) : null;
@@ -46,11 +46,15 @@ export class PostgresProjectStore implements ProjectStore {
   async create(workspaceId: string, input: Partial<Project>): Promise<Project> {
     const project = withProjectDefaults(input);
     const { rows } = await this.sql.query<ProjectRow>(
-      `insert into projects
+      `with created as (insert into projects
          (id, workspace_id, name, key, description, color, icon, status, priority,
           start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, created_at)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-       returning *`,
+       returning *), assigned as (
+         insert into workspace_squad_projects (id, workspace_id, squad_id, project_id, relationship, status)
+         select 'squad-project-' || id || '-' || $19::text, workspace_id, $19::text, id, 'owned', 'active' from created where $19::text is not null
+         returning id
+       ) select created.*, $19::text as lead_squad_id from created`,
       [
         project.id,
         workspaceId,
@@ -69,7 +73,8 @@ export class PostgresProjectStore implements ProjectStore {
         JSON.stringify(shareable(project.resources)),
         project.githubOrg ?? null,
         project.createdBy ?? null,
-        date(project.createdAt)
+        date(project.createdAt),
+        project.leadSquadId || null
       ]
     );
     return toProject(rows[0]);
@@ -81,12 +86,22 @@ export class PostgresProjectStore implements ProjectStore {
 
     const merged = { ...existing, ...updates };
     const { rows } = await this.sql.query<ProjectRow>(
-      `update projects set
+      `with updated as (update projects set
          name = $3, key = $4, description = $5, color = $6, icon = $7, status = $8, priority = $9,
          start_date = $10, target_date = $11, lead_type = $12, lead_name = $13, lead_agent_id = $14,
          resources = $15, github_org = $16
        where workspace_id = $1 and id = $2
-       returning *`,
+       returning *), demoted as (
+         update workspace_squad_projects set relationship = 'assigned', updated_at = now()
+         where workspace_id = $1 and project_id = $2 and relationship = 'owned'
+           and ($17::text is null or squad_id <> $17) and exists(select 1 from updated)
+         returning id
+       ), new_owner as (
+         insert into workspace_squad_projects (id, workspace_id, squad_id, project_id, relationship, status)
+         select 'squad-project-' || id || '-' || $17::text, workspace_id, $17::text, id, 'owned', 'active' from updated where $17::text is not null
+         on conflict (workspace_id, squad_id, project_id) do update set relationship = 'owned', status = 'active', updated_at = now()
+         returning id
+       ) select updated.*, $17::text as lead_squad_id from updated`,
       [
         workspaceId,
         id,
@@ -101,9 +116,10 @@ export class PostgresProjectStore implements ProjectStore {
         date(merged.targetDate),
         merged.leadType,
         merged.leadName,
-        merged.leadAgentId ?? null,
+        merged.leadAgentId || null,
         JSON.stringify(shareable(merged.resources)),
-        merged.githubOrg ?? null
+        merged.githubOrg ?? null,
+        merged.leadSquadId || null
       ]
     );
     return rows[0] ? toProject(rows[0]) : null;
@@ -264,6 +280,7 @@ export interface ProjectRow {
   target_date: Timestamp;
   lead_type: string | null;
   lead_name: string | null;
+  lead_squad_id?: string | null;
   lead_agent_id: string | null;
   resources: ProjectResource[] | null;
   github_org: string | null;
@@ -332,6 +349,7 @@ export function toProject(row: ProjectRow): Project {
     leadType: (row.lead_type ?? 'agent') as Project['leadType'],
     leadName: row.lead_name ?? '',
     leadAgentId: row.lead_agent_id ?? undefined,
+    leadSquadId: row.lead_squad_id ?? undefined,
     // `jsonb` arrives parsed from `pg` and from PGlite alike.
     resources: row.resources ?? [],
     githubOrg: row.github_org ?? undefined,

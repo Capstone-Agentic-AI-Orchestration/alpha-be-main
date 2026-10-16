@@ -169,6 +169,19 @@ export class SQLiteService {
         added_at TEXT NOT NULL
       );
 
+      /* Project creation can precede opening the workspace directory. */
+      CREATE TABLE IF NOT EXISTS workspace_squad_projects (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        squad_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        relationship TEXT NOT NULL DEFAULT 'assigned',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(workspace_id, squad_id, project_id)
+      );
+
       /*
        * Where a project's code is on THIS machine.
        *
@@ -692,6 +705,7 @@ export class SQLiteService {
        * per-project values resolves everything from the daemon's environment.
        */
       ['projects', 'env_vars TEXT'],
+      ['workspace_squad_projects', "relationship TEXT NOT NULL DEFAULT 'assigned'"],
       /**
        * Who created an issue.
        *
@@ -1340,7 +1354,10 @@ export class SQLiteService {
   }
 
   getProjects(): Project[] {
-    const rows = this.db.prepare('SELECT * FROM projects WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
+    const rows = this.db.prepare(`SELECT p.*,
+      (SELECT squad_id FROM workspace_squad_projects a WHERE a.workspace_id = p.workspace_id AND a.project_id = p.id
+       AND a.relationship = 'owned' AND a.status = 'active' ORDER BY a.created_at LIMIT 1) AS lead_squad_id
+      FROM projects p WHERE workspace_id = ? ORDER BY created_at DESC`).all(this.workspaceId()) as any[];
     return rows.map(r => ({
       ...r,
       startDate: r.start_date,
@@ -1348,6 +1365,7 @@ export class SQLiteService {
       leadType: r.lead_type,
       leadName: r.lead_name,
       leadAgentId: r.lead_agent_id,
+      leadSquadId: r.lead_squad_id || undefined,
       resources: JSON.parse(r.resources || '[]'),
       githubOrg: r.github_org || undefined,
       createdBy: r.created_by || undefined,
@@ -1370,66 +1388,82 @@ export class SQLiteService {
    * the client should not have to know the id format to create a row.
    */
   createProject(p: Partial<Project>): Project {
-    const now = new Date().toISOString();
-    const complete: Project = {
-      ...p,
-      id: p.id || `proj-${Date.now()}`,
-      name: p.name || 'Untitled Project',
-      key: p.key || `P${Date.now().toString().slice(-4)}`,
-      description: p.description ?? '',
-      color: p.color || '#6366f1',
-      icon: p.icon || '📁',
-      status: p.status || 'in_progress',
-      priority: p.priority || 'medium',
-      targetDate: p.targetDate || '',
-      createdAt: p.createdAt || now
-    } as Project;
+    return this.db.transaction(() => {
+      const now = new Date().toISOString();
+      const complete: Project = {
+        ...p,
+        id: p.id || `proj-${Date.now()}`,
+        name: p.name || 'Untitled Project',
+        key: p.key || `P${Date.now().toString().slice(-4)}`,
+        description: p.description ?? '',
+        color: p.color || '#6366f1',
+        icon: p.icon || '📁',
+        status: p.status || 'in_progress',
+        priority: p.priority || 'medium',
+        targetDate: p.targetDate || '',
+        createdAt: p.createdAt || now
+      } as Project;
 
-    const stmt = this.db.prepare(`
-      INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, env_vars, created_at)
-      VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdBy, @envVars, @createdAt)
-    `);
-    stmt.run({
-      ...complete,
-      workspaceId: this.workspaceId(),
-      startDate: complete.startDate || now,
-      targetDate: complete.targetDate || null,
-      leadType: complete.leadType || 'agent',
-      leadName: complete.leadName || '',
-      leadAgentId: complete.leadAgentId || null,
-      resources: JSON.stringify(complete.resources || []),
-      githubOrg: complete.githubOrg || null,
-      createdBy: complete.createdBy || null,
-      envVars: JSON.stringify(complete.envVars || []),
-      createdAt: complete.createdAt || now
-    });
+      const stmt = this.db.prepare(`
+        INSERT INTO projects (id, workspace_id, name, key, description, color, icon, status, priority, start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, env_vars, created_at)
+        VALUES (@id, @workspaceId, @name, @key, @description, @color, @icon, @status, @priority, @startDate, @targetDate, @leadType, @leadName, @leadAgentId, @resources, @githubOrg, @createdBy, @envVars, @createdAt)
+      `);
+      stmt.run({
+        ...complete,
+        workspaceId: this.workspaceId(),
+        startDate: complete.startDate || now,
+        targetDate: complete.targetDate || null,
+        leadType: complete.leadType || 'agent',
+        leadName: complete.leadName || '',
+        leadAgentId: complete.leadAgentId || null,
+        resources: JSON.stringify(complete.resources || []),
+        githubOrg: complete.githubOrg || null,
+        createdBy: complete.createdBy || null,
+        envVars: JSON.stringify(complete.envVars || []),
+        createdAt: complete.createdAt || now
+      });
 
-    // The completed row, not the caller's partial — it now carries the id and
-    // defaults the caller did not send, which is what the client needs back.
-    return complete;
+      // The completed row, not the caller's partial — it now carries the id and
+      // defaults the caller did not send, which is what the client needs back.
+      if (p.leadSquadId) {
+        this.db.prepare(`INSERT INTO workspace_squad_projects (id, workspace_id, squad_id, project_id, relationship, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'owned', 'active', ?, ?)`).run(`squad-project-${randomUUID()}`, this.workspaceId(), p.leadSquadId, complete.id, now, now);
+      }
+      return complete;
+    })();
   }
 
   updateProject(id: string, updates: Partial<Project>): Project | null {
-    const existing = this.getProjects().find(p => p.id === id);
-    if (!existing) return null;
-    const merged = { ...existing, ...updates };
-    const stmt = this.db.prepare(`
-      UPDATE projects SET
-        name = @name, key = @key, description = @description, color = @color, icon = @icon,
-        status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
-        lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
-        github_org = @githubOrg, created_by = @createdBy, env_vars = @envVars
-      WHERE id = @id AND workspace_id = @workspaceId
-    `);
-    stmt.run({
-      ...merged,
-      workspaceId: this.workspaceId(),
-      resources: JSON.stringify(merged.resources || []),
-      githubOrg: merged.githubOrg || null,
-      createdBy: merged.createdBy || null,
-      envVars: JSON.stringify(merged.envVars || [])
-    });
-    return merged;
+    return this.db.transaction(() => {
+      const existing = this.getProjects().find(p => p.id === id);
+      if (!existing) return null;
+      const merged = { ...existing, ...updates };
+      const stmt = this.db.prepare(`
+        UPDATE projects SET
+          name = @name, key = @key, description = @description, color = @color, icon = @icon,
+          status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
+          lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
+          github_org = @githubOrg, created_by = @createdBy, env_vars = @envVars
+        WHERE id = @id AND workspace_id = @workspaceId
+      `);
+      stmt.run({
+        ...merged,
+        workspaceId: this.workspaceId(),
+        leadAgentId: merged.leadAgentId || null,
+        resources: JSON.stringify(merged.resources || []),
+        githubOrg: merged.githubOrg || null,
+        createdBy: merged.createdBy || null,
+        envVars: JSON.stringify(merged.envVars || [])
+      });
+      if (Object.prototype.hasOwnProperty.call(updates, 'leadAgentId') || Object.prototype.hasOwnProperty.call(updates, 'leadSquadId')) {
+        const now = new Date().toISOString();
+        this.db.prepare("UPDATE workspace_squad_projects SET relationship = 'assigned', updated_at = ? WHERE workspace_id = ? AND project_id = ? AND relationship = 'owned' AND (? IS NULL OR squad_id <> ?)").run(now, this.workspaceId(), id, merged.leadSquadId || null, merged.leadSquadId || null);
+        if (merged.leadSquadId) this.db.prepare(`INSERT INTO workspace_squad_projects (id, workspace_id, squad_id, project_id, relationship, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'owned', 'active', ?, ?)
+          ON CONFLICT(workspace_id, squad_id, project_id) DO UPDATE SET relationship = 'owned', status = 'active', updated_at = excluded.updated_at`).run(`squad-project-${randomUUID()}`, this.workspaceId(), merged.leadSquadId, id, now, now);
+      }
+      return merged;
+    })();
   }
 
   deleteProject(id: string): boolean {
@@ -2376,6 +2410,11 @@ export class SQLiteService {
       updateError: r.update_error || undefined,
       updateSource: r.update_source || undefined
     }));
+  }
+
+  removeUndetectedLocalRuntimes(ids: string[]) {
+    const remove = this.db.prepare("DELETE FROM runtimes WHERE id = ? AND id IN ('ollama', 'lmstudio')");
+    this.db.transaction(() => { for (const id of ids) remove.run(id); })();
   }
 
   saveRuntimes(runtimes: RuntimeEngine[]) {

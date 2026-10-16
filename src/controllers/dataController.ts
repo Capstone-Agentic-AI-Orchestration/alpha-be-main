@@ -291,8 +291,18 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
    * and that name is what puts a project in the workspace's catalogue.
    */
   const { createdBy: _claimed, ...input } = req.body ?? {};
-  const project = await projectStore().create(req.workspace!.workspaceId, {
+  const workspaceId = req.workspace!.workspaceId;
+  if (!String(input.name ?? '').trim()) return res.status(400).json({ error: 'Project name is required.' });
+  if (!!input.leadAgentId === !!input.leadSquadId) return res.status(400).json({ error: 'Choose one agent or squad to own execution for this project.' });
+  const ownerId = input.leadAgentId || input.leadSquadId;
+  if (typeof ownerId !== 'string') return res.status(400).json({ error: 'Choose a valid execution owner.' });
+  const owner = input.leadAgentId ? await agentStore().get(workspaceId, ownerId) : await squadStore().get(workspaceId, ownerId);
+  if (!owner || ('isArchived' in owner && owner.isArchived)) return res.status(400).json({ error: 'The execution owner is no longer available in this workspace.' });
+  const project = await projectStore().create(workspaceId, {
     ...input,
+    leadType: 'agent',
+    leadName: owner.name,
+    status: 'planned',
     createdBy: req.workspace!.userId
   });
   workspaceRegistry.bind('projects', project.id, req.workspace!.workspaceId);
@@ -435,7 +445,18 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
   }
 
   // Who created it is not something an edit can change.
-  const { createdBy: _owner, ...changes } = req.body ?? {};
+  const { createdBy: _owner, leadName: _leadName, leadType: _leadType, ...changes } = req.body ?? {};
+  if (Object.prototype.hasOwnProperty.call(changes, 'leadAgentId') || Object.prototype.hasOwnProperty.call(changes, 'leadSquadId')) {
+    if (!!changes.leadAgentId === !!changes.leadSquadId) return res.status(400).json({ error: 'Choose one agent or squad to own execution for this project.' });
+    const ownerId = changes.leadAgentId || changes.leadSquadId;
+    if (typeof ownerId !== 'string') return res.status(400).json({ error: 'Choose a valid execution owner.' });
+    const owner = changes.leadAgentId ? await agentStore().get(req.workspace!.workspaceId, ownerId) : await squadStore().get(req.workspace!.workspaceId, ownerId);
+    if (!owner || ('isArchived' in owner && owner.isArchived)) return res.status(400).json({ error: 'The execution owner is no longer available in this workspace.' });
+    changes.leadAgentId = changes.leadAgentId || '';
+    changes.leadSquadId = changes.leadSquadId || '';
+    changes.leadName = owner.name;
+    changes.leadType = 'agent';
+  }
   const updated = await projectStore().update(req.workspace!.workspaceId, req.params.id, changes);
   if (!updated) return res.status(404).json({ error: 'Project not found' });
   void supabaseService.shareProject(updated);
@@ -725,6 +746,7 @@ dataRouter.post('/agents/builder/message', desktopOnly, async (req: Request, res
     const result = await sendBuilderMessage({
       sessionId: String(req.body?.sessionId ?? ''),
       runtimeId: String(req.body?.runtimeId ?? ''),
+      modelName: String(req.body?.modelName ?? ''),
       message: String(req.body?.message ?? '')
     });
     res.json(result);
@@ -900,6 +922,13 @@ dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   if (!before) return res.status(404).json({ error: 'Issue not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
+  // Empty strings are explicit clears from the owner selector; normalize before either store writes foreign keys.
+  for (const field of ['assignedAgentId', 'assignedSquadId']) {
+    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, field) && !req.body[field]) req.body[field] = undefined;
+  }
+  if (req.body?.assignedAgentId && req.body?.assignedSquadId) return res.status(400).json({ error: 'Choose one agent or squad as the issue owner.' });
+  if (req.body?.assignedAgentId && !(await agentStore().get(req.workspace!.workspaceId, req.body.assignedAgentId))) return res.status(400).json({ error: 'The selected agent is unavailable in this workspace.' });
+  if (req.body?.assignedSquadId && !(await squadStore().get(req.workspace!.workspaceId, req.body.assignedSquadId))) return res.status(400).json({ error: 'The selected squad is unavailable in this workspace.' });
   const transitionError = await statusTransitionError(req.workspace!.workspaceId, before, req.body?.status);
   if (transitionError) {
     const status = isIssueStatus(req.body?.status) ? 409 : 400;

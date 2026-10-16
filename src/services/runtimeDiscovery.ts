@@ -34,6 +34,24 @@ function findOnPath(binaryName: string): string | null {
   return null;
 }
 
+/** Return installation evidence, not a fallback command that may not exist. */
+export function findOllama(): string | null {
+  const candidates = [process.env.OLLAMA_PATH, findOnPath('ollama'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
+    '/usr/local/bin/ollama', '/opt/homebrew/bin/ollama', '/usr/bin/ollama',
+    '/Applications/Ollama.app/Contents/Resources/ollama'];
+  return candidates.find((candidate): candidate is string => !!candidate && fs.existsSync(candidate)) ?? null;
+}
+
+export function hasLMStudioInstallation(): boolean {
+  const candidates = [findLMStudio(),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'LM Studio', 'LM Studio.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'LM-Studio', 'LM Studio.exe'),
+    path.join(process.env.ProgramFiles || '', 'LM Studio', 'LM Studio.exe'),
+    '/Applications/LM Studio.app/Contents/MacOS/LM Studio'];
+  return candidates.some(candidate => fs.existsSync(candidate));
+}
+
 /**
  * Find a binary in a versioned per-user installation directory.
  *
