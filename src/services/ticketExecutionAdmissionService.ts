@@ -28,7 +28,7 @@ function assertOwner(target: TicketIssueTarget, userId: string, issue: LockedTic
   } else {
     const snapshot = issue.snapshot;
     invariant(snapshot.workspaceId === target.workspaceId && snapshot.issue.workspaceId === target.workspaceId
-      && snapshot.issue.id === target.issueId && snapshot.issue.assignedDeveloperId === userId
+      && snapshot.issue.id === target.issueId && snapshot.developerProjectAccessActive === true
       && snapshot.ticket.workspaceId === target.workspaceId && snapshot.ticket.state.workspaceId === target.workspaceId
       && snapshot.ticket.id === snapshot.ticket.state.id && snapshot.issue.ticketId === snapshot.ticket.id
       && snapshot.project.workspaceId === target.workspaceId && snapshot.project.id === snapshot.issue.projectId
@@ -65,7 +65,7 @@ export function createTicketExecutionAdmissionService(store: TicketExecutionAdmi
   now: () => Date = () => new Date(), nextId: () => string = randomUUID) {
   async function authorize(tx: TicketExecutionAdmissionTransaction, target: TicketIssueTarget, subject: TicketSubject) {
     if (!validTarget(target) || subject?.kind !== 'internal' || !opaque.safeParse(subject.userId).success) throw missing();
-    const issue = await tx.lockAssignedIssue(target, subject);
+    const issue = await tx.lockAuthorizedIssue(target, subject);
     if (!issue) throw missing();
     assertOwner(target, subject.userId, issue);
     return issue;

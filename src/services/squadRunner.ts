@@ -5,6 +5,7 @@ import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Squad, SquadRun } from '../models/index.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
+import type { TicketExecutionHandle } from './ticketExecutionRelay.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -54,6 +55,7 @@ export class SquadRunError extends Error {}
 export class SquadRunner {
   /** Squad runs waiting on a member, keyed by the run id currently executing. */
   private awaiting = new Map<string, string>();
+  private ticketExecutions = new Map<string, TicketExecutionHandle>();
   private wired = false;
 
   /**
@@ -80,6 +82,8 @@ export class SquadRunner {
   async startSquadRun(params: {
     squadId: string;
     issueId: string;
+    id?: string;
+    ticketExecution?: TicketExecutionHandle;
     plan?: string[];
     mission?: string;
   }): Promise<SquadRun> {
@@ -115,15 +119,17 @@ export class SquadRunner {
     // The squad is the issue's execution owner. Member runs below carry the
     // individual agent identity, but must not replace this assignment when the
     // issue is refreshed by the project execution monitor.
-    sqliteService.updateIssue(issue.id, {
-      assignedSquadId: squad.id,
-      assignedAgentId: undefined,
-      status: 'agent_running'
-    });
+    if (!params.ticketExecution) {
+      sqliteService.updateIssue(issue.id, {
+        assignedSquadId: squad.id,
+        assignedAgentId: undefined,
+        status: 'agent_running'
+      });
+    }
 
     const now = new Date().toISOString();
     const squadRun: SquadRun = {
-      id: `squadrun-${Date.now()}`,
+      id: params.id ?? `squadrun-${Date.now()}`,
       squadId: squad.id,
       issueId: issue.id,
       projectId: issue.projectId,
@@ -137,6 +143,7 @@ export class SquadRunner {
       createdAt: now,
       updatedAt: now
     };
+    if (params.ticketExecution) this.ticketExecutions.set(squadRun.id, params.ticketExecution);
     sqliteService.saveSquadRun(squadRun);
 
     logInfo(
@@ -148,6 +155,7 @@ export class SquadRunner {
   }
 
   private async startMember(squadRun: SquadRun, index: number) {
+    const ticketExecution = this.ticketExecutions.get(squadRun.id);
     const run = await runnerService.startRun({
       issueId: squadRun.issueId,
       agentId: squadRun.memberAgentIds[index],
@@ -157,7 +165,8 @@ export class SquadRunner {
         order: index,
         branchName: squadRun.branchName,
         handoff: this.buildHandoff(squadRun, index)
-      }
+      },
+      ...(ticketExecution ? { ticketExecution: { ...ticketExecution, memberOrder: index } } : {})
     });
 
     this.awaiting.set(run.id, squadRun.id);
@@ -229,6 +238,7 @@ export class SquadRunner {
       });
       logInfo(`Squad run ${squadRun.id} stopped: ${reason}`);
       runnerService.emit('squad_run_failed', sqliteService.getSquadRun(squadRun.id));
+      this.ticketExecutions.delete(squadRun.id);
       return;
     }
 
@@ -256,6 +266,7 @@ export class SquadRunner {
 
       logInfo(`Squad run ${squadRun.id} complete: ${runs.length} member(s), ${tokens} tokens`);
       runnerService.emit('squad_run_completed', sqliteService.getSquadRun(squadRun.id));
+      this.ticketExecutions.delete(squadRun.id);
       return;
     }
 

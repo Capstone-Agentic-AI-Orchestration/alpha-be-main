@@ -19,6 +19,7 @@ async function setup() {
       return { kind: 'authenticated', subject };
     }),
     listWorkspaces: vi.fn(async () => [{ workspaceId: 'workspace-a', displayName: 'Client workspace', privateMetadata: 'secret' }]),
+    workflowCapabilities: vi.fn(() => ({ phaseWorkflowEnabled: true })),
     getIntakeContext: vi.fn(async () => ({
       intakeContextId: 'context-a', canCreate: true,
       sharedProjects: [{ optionId: 'option-a', displayName: 'Shared project', privateProjectId: 'secret' }],
@@ -83,6 +84,7 @@ describe('client ticket API contract boundary', () => {
 
     expect(routes).toEqual([
       'GET /workspaces',
+      'GET /workflow-capabilities',
       'GET /workspaces/:workspaceId/intake-context',
       'GET /workspaces/:workspaceId/tickets',
       'GET /tickets/operations/:operationId',
@@ -95,6 +97,16 @@ describe('client ticket API contract boundary', () => {
       'POST /workspaces/:workspaceId/tickets/:ticketId/messages',
       'POST /workspaces/:workspaceId/tickets/:ticketId/commands',
     ]);
+  });
+
+  it('exposes only the rollout capability required to gate newer portal actions', async () => {
+    const f = await setup();
+    const result = await f.invoke('GET', '/workflow-capabilities');
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ phaseWorkflowEnabled: true });
+    expect(f.app.workflowCapabilities).toHaveBeenCalledOnce();
+    expect(f.app.authenticate).not.toHaveBeenCalled();
   });
 
   it('projects only public workspace and project-option fields for the intake form', async () => {

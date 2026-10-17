@@ -15,12 +15,13 @@ Application-only changes; Supabase/Auth/mail/storage integration stays last.
 
 1. Review the request and propose scope. The client agrees to that exact version.
 2. Select **Link agreed work** within ticket detail.
-3. Choose an existing workspace project and unstarted Issues with human assignees.
-   Missing projects/Issues still use the existing creation/assignment screens;
+3. Choose an existing project in the PM's workspace and its unstarted Issues.
+   Ticket-linked Issues are not assigned to a named developer: any active
+   developer with access to that project may claim the work. Missing projects/Issues still use the existing creation screens;
    return and refresh the selector. Draft work is not yet an authorized handoff.
 4. Confirm the selected Issues cover the agreed scope; authorize once.
 5. The backend rechecks current access, scope, project ownership/safety, Issue
-   status, assignment, bindings, active runs and exact revisions. Client-provided
+   status, workspace/project developer access, bindings, active runs and exact revisions. Client-provided
    selection IDs do not prove permission or eligibility.
 6. Private Issue links, ticket transition, audit, change signal and saved operation
    commit together. Any failure rolls them all back. A lost response keeps the

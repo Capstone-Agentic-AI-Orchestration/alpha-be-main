@@ -22,9 +22,10 @@ function snapshot(overrides: Partial<TicketDeveloperContextSnapshot> = {}): Tick
   });
   return {
     workspaceId: 'ws-1',
+    developerProjectAccessActive: true,
     issue: {
       id: 'issue-1', workspaceId: 'ws-1', projectId: 'project-1', ticketId: 'ticket-1',
-      assignedDeveloperId: 'dev-1', assignmentActive: true, revisionId: 'revision-1', initialRevisionId: 'revision-1', status: 'todo',
+      revisionId: 'revision-1', initialRevisionId: 'revision-1', status: 'todo',
     },
     project: { id: 'project-1', workspaceId: 'ws-1', nonProductionSafe: true },
     ticket: { id: 'ticket-1', workspaceId: 'ws-1', reference: 'TCK-101', state },
@@ -42,7 +43,7 @@ function fixture(read: TicketDeveloperContextSnapshot | null) {
   const store: TicketDeveloperContextStore = {
     transaction: <T>(work: (tx: TicketDeveloperContextTransaction) => Promise<T>) => {
       transaction();
-      return work({ loadAssignedWorkContext: async () => read });
+      return work({ loadAuthorizedWorkContext: async () => read });
     },
   };
   return { store, transaction, service: createTicketDeveloperContextService(store) };
@@ -108,7 +109,7 @@ describe('ticket developer work context', () => {
     const value = snapshot(); value.ticket.state.status = status;
     await expect(fixture(value).service.read('ws-1', 'issue-1', subject)).rejects.toMatchObject({ code: 'ticket_work_not_authorized' });
   });
-  it('returns only the assigned issue and its current approved brief', async () => {
+  it('returns only the authorized issue and its current approved brief', async () => {
     const { service, transaction } = fixture(snapshot());
 
     await expect(service.read('ws-1', 'issue-1', subject)).resolves.toEqual({
@@ -118,13 +119,13 @@ describe('ticket developer work context', () => {
     expect(transaction).toHaveBeenCalledTimes(1);
   });
 
-  it('does not reveal an unassigned or absent issue', async () => {
+  it('does not reveal an inaccessible or absent issue', async () => {
     const { service } = fixture(null);
     await expect(service.read('ws-1', 'issue-1', subject)).rejects.toMatchObject({ status: 404, code: 'ticket_not_found' });
   });
 
-  it('treats a store snapshot naming a different assignee as corrupt evidence', async () => {
-    const value = snapshot({ issue: { ...snapshot().issue, assignedDeveloperId: 'dev-2' } });
+  it('treats a store snapshot without current project access as corrupt evidence', async () => {
+    const value = snapshot({ developerProjectAccessActive: false });
     const { service } = fixture(value);
     await expect(service.read('ws-1', 'issue-1', subject)).rejects.toBeInstanceOf(TicketReadInvariantError);
   });

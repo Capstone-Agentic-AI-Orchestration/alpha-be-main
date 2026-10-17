@@ -11,7 +11,7 @@ import { createSupabaseTestDatabase } from '../store/testDatabase.js';
 const manifest = JSON.parse(readFileSync(resolve(__dirname, '../../supabase-staging/baseline-manifest.json'), 'utf8')) as {
   localFile: string; sha256: string; normalizedRemoteMd5: string; targetProject: string; sourceProject: string;
 };
-const source = readFileSync(resolve(__dirname, '../../supabase-staging', manifest.localFile), 'utf8');
+const source = readFileSync(resolve(__dirname, '../../supabase-staging', manifest.localFile), 'utf8').replaceAll('\r\n', '\n');
 const catalogQuery = readFileSync(resolve(__dirname, '../../supabase-staging/catalog.sql'), 'utf8');
 const expectedCatalog = JSON.parse(readFileSync(resolve(__dirname, '../../supabase-staging/live-catalog.json'), 'utf8')) as {
   objects: { kind: string; name: string; fingerprint: string }[];

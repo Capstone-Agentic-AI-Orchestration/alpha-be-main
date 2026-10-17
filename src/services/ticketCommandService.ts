@@ -51,7 +51,8 @@ export function createTicketCommandService(
         };
         if (envelope.command.type === 'authorize_work') {
           // decideTicketCommand has validated the exact manifest, workspace,
-          // project, agreed scope, assignees, revision IDs and startable state.
+          // project, agreed scope, revision IDs and startable state. A ticket
+          // Issue is not tied to one named developer; project access governs claims.
           // Persist those links with the decision, never as a separate API write.
           await tx.insertWorkBindings(facts.issues!.map(issue => ({
             workspaceId: ticket.state.workspaceId, ticketId: ticket.state.id,

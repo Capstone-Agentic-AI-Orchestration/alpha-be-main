@@ -15,7 +15,7 @@ const execution = {
 function issue(id: string, revisionId: string, status: TicketIssueEvidence['status'] = 'done'): TicketIssueEvidence {
   return {
     id, revisionId, ticketId: 'ticket-a', workspaceId: 'workspace-a', projectId: 'project-a', scopeVersionId: 'scope-a',
-    status, hasActiveRun: false, assignedDeveloperActive: true, requiredReviewsPassed: status === 'done',
+    status, hasActiveRun: false, requiredReviewsPassed: status === 'done',
   };
 }
 function evidence(): TicketFacts {
@@ -190,21 +190,16 @@ describe('review failures and changed work', () => {
     expectRefusal(() => decide(feedback, { type: 'agree_scope', scopeVersionId: 'scope-a' }, client), 409, 'scope_already_agreed');
   });
 
-  it.each(['request_fixes', 'authorize_correction'] as const)('allows %s for one Issue when an unrelated finished Issue’s developer has left', type => {
+  it.each(['request_fixes', 'authorize_correction'] as const)('allows %s for selected project Issues without named Issue assignees', type => {
     const state = type === 'request_fixes' ? startWork()
       : decide(ready(), { type: 'request_correction', deliveryId: 'delivery-a', messageId: 'message-a' }, client, { ...evidence(), message: message(client) }).state;
-    const facts = evidence(); facts.issues = [{ ...issue('issue-a', 'revision-a'), assignedDeveloperActive: false }, issue('issue-b', 'revision-b')];
+    const facts = evidence(); facts.issues = [issue('issue-a', 'revision-a'), issue('issue-b', 'revision-b')];
     const command = type === 'request_fixes' ? { type, issueIds: ['issue-b'], reason: 'Correct this result' }
       : { type, deliveryId: 'delivery-a', issueIds: ['issue-b'], reason: 'Correct the agreed behavior described by the client.' };
     const decision = decide(state, command, pm, facts);
     expect(decision.reopenIssueIds).toEqual(['issue-b']);
     expect(decision.state.requiredIssueIds).toEqual(['issue-a', 'issue-b']);
     expect(facts.issues[0].status).toBe('done');
-  });
-
-  it('still requires an active developer on the affected correction Issue', () => {
-    const facts = evidence(); facts.issues = [issue('issue-a', 'revision-a'), { ...issue('issue-b', 'revision-b'), assignedDeveloperActive: false }];
-    expectRefusal(() => decide(startWork(), { type: 'request_fixes', issueIds: ['issue-b'], reason: 'Correct this result' }, pm, facts), 409, 'ticket_manifest_conflict');
   });
 
   it('triages client feedback before reopening only the affected Issue', () => {
@@ -458,8 +453,8 @@ describe('evidence and snapshot integrity', () => {
     expectRefusal(() => decide(shared, { type: 'accept_delivery', deliveryId: 'delivery-a' }, client, facts), 409, 'delivery_not_current');
   });
 
-  it('does not prevent a client reviewing finished work merely because its developer left', () => {
-    const facts = completedEvidence(); facts.issues = facts.issues!.map(item => ({ ...item, assignedDeveloperActive: false }));
+  it('allows client review of finished work without retaining named developer assignment evidence', () => {
+    const facts = completedEvidence();
     facts.project = { ...facts.project!, creatorActive: false };
     expect(decide(ready(), { type: 'accept_delivery', deliveryId: 'delivery-a' }, client, facts).state.delivery?.acceptedByClientId).toBe(client.userId);
     expectRefusal(() => decide(startWork(), { type: 'share_delivery', deliveryId: 'delivery-a' }, pm, facts), 409, 'ticket_project_ineligible');

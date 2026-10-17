@@ -21,7 +21,7 @@ const statuses = new Set<IssueStatus>(['todo', 'in_progress', 'agent_running']);
 function invariant(value: unknown): asserts value { if (!value) throw new TicketReadInvariantError(); }
 
 /**
- * Project only the minimum approved work brief for the assigned developer.
+ * Project only the minimum approved work brief for a developer with project access.
  * This is read context, not execution authorization. Every run start/retry must
  * independently recheck the live ticket/scope/Issue gate in its own transaction.
  */
@@ -41,7 +41,7 @@ export function projectDeveloperTicketContext(
     && ticket.workspaceId === workspaceId && ticket.id === state.id
     && scope.workspaceId === workspaceId && scope.ticketId === state.id
     && scope.id === state.scopeVersionId
-    && issue.assignedDeveloperId === userId && issue.assignmentActive === true
+    && snapshot.developerProjectAccessActive === true
     && statuses.has(issue.status)
     && Number.isSafeInteger(state.version) && state.version >= 0
     && Array.isArray(state.requiredIssueIds)

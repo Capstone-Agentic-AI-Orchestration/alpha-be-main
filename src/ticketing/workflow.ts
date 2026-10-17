@@ -64,7 +64,6 @@ export interface TicketIssueEvidence {
    * authoritative run state, not merely the Issue's display status.
    */
   hasActiveRun: boolean;
-  assignedDeveloperActive: boolean;
   requiredReviewsPassed: boolean;
 }
 
@@ -195,7 +194,7 @@ function assertProject(state: TicketWorkflow, projectId: string, facts: TicketFa
     conflict('ticket_project_ineligible', 'The project is not ready for authorized ticket work.');
   }
 }
-function assertIssues(state: TicketWorkflow, ids: readonly string[], projectId: string, scopeVersionId: string, facts: TicketFacts, passed: boolean, executionIds: readonly string[] = passed ? [] : ids): TicketIssueEvidence[] {
+function assertIssues(state: TicketWorkflow, ids: readonly string[], projectId: string, scopeVersionId: string, facts: TicketFacts, passed: boolean): TicketIssueEvidence[] {
   const issues = facts.issues;
   if (!issues || !ids.length || !sameSet(ids, issues.map(issue => issue.id))) {
     conflict('ticket_manifest_incomplete', 'The required Issue manifest is missing or has changed.');
@@ -203,8 +202,7 @@ function assertIssues(state: TicketWorkflow, ids: readonly string[], projectId: 
   const revisions = new Set<string>();
   for (const issue of issues) {
     if (issue.ticketId !== state.id || issue.workspaceId !== state.workspaceId || issue.projectId !== projectId
-      || issue.scopeVersionId !== scopeVersionId || !issue.revisionId || revisions.has(issue.revisionId)
-      || (executionIds.includes(issue.id) && !issue.assignedDeveloperActive)) {
+      || issue.scopeVersionId !== scopeVersionId || !issue.revisionId || revisions.has(issue.revisionId)) {
       conflict('ticket_manifest_conflict', 'An Issue does not match this ticket’s approved work.');
     }
     revisions.add(issue.revisionId);
@@ -219,14 +217,14 @@ function assertIssuesStartable(issues: readonly TicketIssueEvidence[]): void {
     conflict('ticket_issue_not_startable', 'New ticket work must use Issues that have not started or completed.');
   }
 }
-function assertAuthorizedWork(state: TicketWorkflow, facts: TicketFacts, passed: boolean, needsExecutionSafety = true, executionIds?: readonly string[]): TicketIssueEvidence[] {
+function assertAuthorizedWork(state: TicketWorkflow, facts: TicketFacts, passed: boolean, needsExecutionSafety = true): TicketIssueEvidence[] {
   assertClientAvailable(state, facts);
   if (!state.scopeVersionId || state.agreedScopeVersionId !== state.scopeVersionId
     || state.authorizedScopeVersionId !== state.scopeVersionId || !state.projectId) {
     conflict('work_not_authorized', 'Current scope agreement and PM work authorization are required.');
   }
   if (needsExecutionSafety) assertProject(state, state.projectId, facts);
-  return assertIssues(state, state.requiredIssueIds, state.projectId, state.scopeVersionId, facts, passed, executionIds);
+  return assertIssues(state, state.requiredIssueIds, state.projectId, state.scopeVersionId, facts, passed);
 }
 function assertDeliveryPointer(state: TicketWorkflow, deliveryId: string, facts: TicketFacts, shared: boolean): TicketDelivery {
   const current = state.delivery;
@@ -317,9 +315,9 @@ export function decideTicketCommand(
   const action = (owner: ActionOwner, name: NextAction) => { next.actionOwner = owner; next.nextAction = name; };
   const correction = (ids: string[]) => {
     if (!ids.every(issueId => state.requiredIssueIds.includes(issueId))) conflict('correction_outside_manifest', 'Corrections must belong to this ticket’s agreed work.');
-    // Keep the full ownership/revision manifest, but only reopen/reassign affected
-    // work. A former assignee of an unrelated finished Issue is not a blocker.
-    const work = assertAuthorizedWork(state, facts, false, true, ids);
+    // Keep the full ownership/revision manifest, but only reopen affected work.
+    // Ticket-linked Issues are claimable by any developer authorized for the project.
+    const work = assertAuthorizedWork(state, facts, false, true);
     if (work.some(issue => ids.includes(issue.id)
       && ((issue.status !== 'review' && issue.status !== 'done') || issue.hasActiveRun !== false))) {
       conflict('ticket_correction_not_ready', 'Return only reviewed or completed Issues with no active run. Already queued work must not be restarted.');

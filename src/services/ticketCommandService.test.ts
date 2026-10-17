@@ -164,7 +164,7 @@ function evidence(): TicketFacts {
     issues: ['a', 'b'].map(suffix => ({
       id: `issue-${suffix}`, revisionId: `revision-${suffix}`, ticketId: target.ticketId,
       workspaceId: target.workspaceId, projectId: 'project-a', scopeVersionId: 'scope-a',
-      status: 'todo' as const, hasActiveRun: false, assignedDeveloperActive: true, requiredReviewsPassed: false,
+      status: 'todo' as const, hasActiveRun: false, requiredReviewsPassed: false,
     })),
     delivery: { id: 'delivery-a', scopeVersionId: 'scope-a', pinnedAssetId: 'asset-a', immutable: true, issueRevisionIds: ['revision-a', 'revision-b'] },
     workStopped: true,
@@ -239,13 +239,12 @@ describe('ticket command transaction service', () => {
     expect(f.data).toEqual(before);
   });
 
-  it.each(['wrong-workspace', 'wrong-project', 'wrong-scope', 'missing-developer', 'active-run', 'already-started'])('rejects %s before inserting any work links', async mismatch => {
+  it.each(['wrong-workspace', 'wrong-project', 'wrong-scope', 'active-run', 'already-started'])('rejects %s before inserting any work links', async mismatch => {
     const f = fixture(); await agreed(f);
     const item = f.control.facts.issues![0];
     if (mismatch === 'wrong-workspace') item.workspaceId = 'other-workspace';
     if (mismatch === 'wrong-project') item.projectId = 'other-project';
     if (mismatch === 'wrong-scope') item.scopeVersionId = 'other-scope';
-    if (mismatch === 'missing-developer') item.assignedDeveloperActive = false;
     if (mismatch === 'active-run') item.hasActiveRun = true;
     if (mismatch === 'already-started') item.status = 'agent_running';
     f.control.calls = [];

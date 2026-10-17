@@ -16,10 +16,15 @@ function unavailable(): never {
 export class PostgresTicketTriageStore implements TicketMessageStore {
   constructor(private readonly db: TransactionalSql, private readonly options: { communicationEnabled?: boolean } = {}) {}
   transaction<T>(work: (tx: TicketMessageTransaction) => Promise<T>): Promise<T> {
-    return this.db.transaction(async sql => {
+    return this.db.transaction(async sql => work(createTicketTriageTransaction(sql, this.options)));
+  }
+}
+
+/** Shared transaction primitives for communication and the complete lifecycle. */
+export function createTicketTriageTransaction(sql: Sql, options: { communicationEnabled?: boolean } = {}): TicketMessageTransaction {
       const authorization = new PostgresTicketAuthorization(sql);
       let locked: LockedTicket | null = null;
-      const communicationEnabled = this.options.communicationEnabled === true;
+      const communicationEnabled = options.communicationEnabled === true;
       function requireKey(key: TicketOperationKey): void {
         if (!locked || key.workspaceId !== locked.state.workspaceId || key.ticketId !== locked.state.id
           || key.actorId !== locked.actor.userId
@@ -182,9 +187,7 @@ export class PostgresTicketTriageStore implements TicketMessageStore {
         async insertWorkBindings() { return unavailable(); },
         async reopenIssues() { return unavailable(); },
       };
-      return work(tx);
-    });
-  }
+      return tx;
 }
 
 async function appendAudit(sql: Sql, key: TicketOperationKey, type: string, at: string, metadata: object) {

@@ -11,7 +11,7 @@ import { downloadRouter } from './controllers/downloadController.js';
 import { seedDefaultWorkspace, workspaceRouter } from './controllers/workspaceController.js';
 import { workspaceContext } from './controllers/workspaceContext.js';
 import { sessionContext } from './controllers/sessionContext.js';
-import { runRouter } from './controllers/runController.js';
+import { runRouter, setRunTicketLifecycleRuntime } from './controllers/runController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
@@ -40,7 +40,7 @@ import { createTicketPmReadRouteBoundary } from './controllers/ticketPmReadRoute
 import { createTicketUnavailableRouter } from './controllers/ticketUnavailableRouter.js';
 import { createTicketClientUnavailableRouter } from './controllers/ticketClientUnavailableRouter.js';
 import { createTicketPublicIntakeUnavailableRouter } from './controllers/ticketPublicIntakeUnavailableRouter.js';
-import { ALPHA_TICKETING_TRIAGE_ENABLED, SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, ALPHA_CLOUD_API } from './config/env.js';
+import { ALPHA_TICKETING_TRIAGE_ENABLED, ALPHA_TICKETING_WORKFLOW_ENABLED, SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, ALPHA_CLOUD_API } from './config/env.js';
 import { createTicketPublicIntakeCloudRouter } from './controllers/ticketPublicIntakeCloudRouter.js';
 import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, TICKET_ACK_EMAIL_PROVIDER, BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME } from './config/env.js';
 import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
@@ -50,6 +50,9 @@ import { createTicketInvitationEmailProvider } from './services/ticketInvitation
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
 import { createTicketClientComposition } from './controllers/ticketClientComposition.js';
 import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
+import { createTicketLifecycleRuntime } from './services/ticketLifecycleRuntime.js';
+import { createTicketExecutionRouter } from './controllers/ticketExecutionController.js';
+import { createTicketIssueCompletionRouter } from './controllers/ticketIssueCompletionController.js';
 
 const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
   apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
@@ -57,6 +60,9 @@ const ticketInvitationEmailProvider = createTicketInvitationEmailProvider({
 });
 
 const clientWebOrigin = resolveClientWebOrigin(CORS_ORIGIN, ALPHA_CLOUD_API);
+const ticketLifecycle = IS_CLOUD && ALPHA_TICKETING_TRIAGE_ENABLED
+  ? createTicketLifecycleRuntime(database(), ALPHA_TICKETING_WORKFLOW_ENABLED) : null;
+setRunTicketLifecycleRuntime(ticketLifecycle);
 const ticketClient = (() => {
   if (!IS_CLOUD || !ALPHA_TICKETING_TRIAGE_ENABLED) return null;
   const missing = clientAccessConfigurationProblems({
@@ -75,6 +81,7 @@ const ticketClient = (() => {
       database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
       supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
       webOrigin: clientWebOrigin, emailProvider: ticketInvitationEmailProvider,
+      workflow: ticketLifecycle ?? undefined,
       onSignInDeliveryUnavailable: () => logError('Client sign-in email delivery failed. Check server-side Supabase Auth and Resend configuration.'),
     });
   } catch {
@@ -256,13 +263,17 @@ app.use('/api', (req, res, next) => {
  */
 app.use('/api', sessionContext);
 app.use('/api', workspaceContext);
+app.use('/api', createTicketIssueCompletionRouter(ticketLifecycle));
+app.use('/api/ticket-work', IS_CLOUD
+  ? createTicketExecutionRouter(database(), ticketLifecycle)
+  : createTicketUnavailableRouter());
 // Tickets lives inside the existing PM portal. Optional Phase 2 triage uses
 // durable cloud adapters; future features remain isolated. Desktop requests relay
 // through the same path but never construct a local ticket database.
 app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
   ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED,
     false, ticketClient?.pmInvitation ?? unavailableClientInvitation, Boolean(ticketClient),
-    ticketClient?.documents)
+    ticketClient?.documents, ticketLifecycle ?? undefined)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);

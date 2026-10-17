@@ -31,6 +31,7 @@ import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 import { createTicketClientAccountService } from '../services/ticketClientAccountService.js';
 import { createTicketClientAccountRouter } from './ticketClientAccountController.js';
 import type { PostgresTicketClientAccountStore } from '../store/ticketClientAccountPostgresStore.js';
+import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
 
 export interface TicketClientPortalRouteDependencies {
   sessionStore: TicketClientSessionStore;
@@ -56,6 +57,7 @@ export interface TicketClientPortalRouteDependencies {
   onSignInDeliveryUnavailable?: () => void;
   accountStore?: PostgresTicketClientAccountStore;
   accountSecret?: string;
+  workflow?: TicketLifecycleRuntime;
 }
 
 function workflowActionUnavailable(): TicketWorkflowError {
@@ -113,12 +115,22 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
     getIntakeContext: intakeContext.get,
     list: queue.list,
     detail: reads.detail,
-    async deliveryManifest(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string) { throw workflowActionUnavailable(); },
-    async deliveryContent(_target: TicketTarget, _subject: TicketSubject, _deliveryId: string, _fileId: string) { throw workflowActionUnavailable(); },
+    async deliveryManifest(target: TicketTarget, subject: TicketSubject, deliveryId: string) {
+      if (!dependencies.workflow?.enabled) throw workflowActionUnavailable();
+      return dependencies.workflow.deliveries.manifest(target, subject, deliveryId);
+    },
+    async deliveryContent(target: TicketTarget, subject: TicketSubject, deliveryId: string, fileId: string) {
+      if (!dependencies.workflow?.enabled) throw workflowActionUnavailable();
+      return dependencies.workflow.deliveries.content(target, subject, deliveryId, fileId);
+    },
     conversation: reads.conversation,
     reply: dependencies.messages.reply,
     ...(dependencies.documents ? { documents: dependencies.documents } : {}),
-    async execute(_target: TicketTarget, _subject: TicketSubject, _input: unknown) { throw workflowActionUnavailable(); },
+    async execute(target: TicketTarget, subject: TicketSubject, input: unknown) {
+      if (!dependencies.workflow?.enabled) throw workflowActionUnavailable();
+      return dependencies.workflow.commands.execute(target, subject, input);
+    },
+    workflowCapabilities() { return { phaseWorkflowEnabled: dependencies.workflow?.enabled === true }; },
     lookup: dependencies.messages.lookup,
     create: creation.create,
     lookupCreation: creation.lookup,

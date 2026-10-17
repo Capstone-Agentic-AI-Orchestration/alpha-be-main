@@ -30,6 +30,7 @@ interface TicketQueuePage {
 /** Application services remain injected; this transport does not create a DB
  * adapter or rely on the PM/desktop GitHub session middleware. */
 export interface TicketClientApiApplication {
+  workflowCapabilities(): { phaseWorkflowEnabled: boolean };
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
   listWorkspaces(subject: TicketSubject): Promise<Array<{ workspaceId: string; displayName: string }>>;
   getIntakeContext(workspaceId: string, subject: TicketSubject): Promise<{
@@ -276,6 +277,13 @@ export function createTicketClientApiRouter(
       return { workspaceId: item.workspaceId, displayName: item.displayName };
     });
     return res.json({ items: safeItems });
+  }));
+
+  router.get('/workflow-capabilities', route(async (req, res) => {
+    if (!available(res)) return;
+    const result = application.workflowCapabilities();
+    if (!result || typeof result.phaseWorkflowEnabled !== 'boolean') throw new TicketReadInvariantError();
+    return res.json(result);
   }));
 
   router.get('/workspaces/:workspaceId/intake-context', route(async (req, res) => {
