@@ -3,8 +3,10 @@ import { runnerService } from './runnerService.js';
 import { totalTokens } from './runUsage.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Squad, SquadRun } from '../models/index.js';
-import { addCommentAndShare } from './boardWriteThrough.js';
+import { addCommentAndShare, updateIssueAndPush } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
+import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
+import { workspaceRegistry } from './workspaceRegistry.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -53,7 +55,7 @@ export class SquadRunError extends Error {}
 
 export class SquadRunner {
   /** Squad runs waiting on a member, keyed by the run id currently executing. */
-  private awaiting = new Map<string, string>();
+  private awaiting = new Map<string, { squadRunId: string; workspaceId: string }>();
   private wired = false;
 
   /**
@@ -82,6 +84,21 @@ export class SquadRunner {
     issueId: string;
     plan?: string[];
     mission?: string;
+    workspaceId?: string;
+    /** Ordered project steps first; unmentioned squad members follow in squad order. */
+    memberAgentIds?: string[];
+  }): Promise<SquadRun> {
+    const workspaceId = params.workspaceId ?? currentWorkspaceId();
+    return runWithWorkspace(workspaceId, () => this.startInWorkspace({ ...params, workspaceId }));
+  }
+
+  private async startInWorkspace(params: {
+    squadId: string;
+    issueId: string;
+    plan?: string[];
+    mission?: string;
+    workspaceId: string;
+    memberAgentIds?: string[];
   }): Promise<SquadRun> {
     this.wire();
 
@@ -98,7 +115,10 @@ export class SquadRunner {
     const issue = sqliteService.getIssues().find(i => i.id === params.issueId);
     if (!issue) throw new SquadRunError(`Issue not found: ${params.issueId}`);
 
-    const members = orderedMembers(squad);
+    const configuredOrder = orderedMembers(squad);
+    const requestedOrder = [...new Set(params.memberAgentIds ?? [])]
+      .filter(id => configuredOrder.includes(id));
+    const members = [...requestedOrder, ...configuredOrder.filter(id => !requestedOrder.includes(id))];
     if (!members.length) {
       throw new SquadRunError(`"${squad.name}" has no member agents, so there is nobody to run.`);
     }
@@ -138,29 +158,54 @@ export class SquadRunner {
       updatedAt: now
     };
     sqliteService.saveSquadRun(squadRun);
+    workspaceRegistry.bind('squad_runs', squadRun.id, params.workspaceId);
 
     logInfo(
       `Squad "${squad.name}" starting on ${issue.identifier}: ${members.length} member(s), branch ${squadRun.branchName}`
     );
 
-    await this.startMember(squadRun, 0);
+    try {
+      await this.startMember(squadRun, 0, params.workspaceId);
+    } catch (error) {
+      const reason = `Could not start ${nameFor(members[0])}: ${error instanceof Error ? error.message : String(error)}`;
+      const stopped: SquadRun = {
+        ...squadRun,
+        status: 'failed',
+        stoppedReason: reason,
+        updatedAt: new Date().toISOString()
+      };
+      sqliteService.saveSquadRun(stopped);
+      updateIssueAndPush(issue.id, { status: 'in_progress' });
+      addCommentAndShare({
+        id: `comm-${squadRun.id}-stopped`,
+        issueId: squadRun.issueId,
+        authorType: 'system',
+        authorName: 'Alpha Squad Runner',
+        content: `Squad run stopped before its first agent started. ${reason} The issue is ready to retry.`,
+        createdAt: stopped.updatedAt
+      });
+      runnerService.emit('squad_run_failed', stopped);
+      throw error;
+    }
     return sqliteService.getSquadRun(squadRun.id) ?? squadRun;
   }
 
-  private async startMember(squadRun: SquadRun, index: number) {
-    const run = await runnerService.startRun({
+  private async startMember(squadRun: SquadRun, index: number, workspaceId: string) {
+    const run = await runWithWorkspace(workspaceId, () => runnerService.startRun({
       issueId: squadRun.issueId,
       agentId: squadRun.memberAgentIds[index],
       plan: squadRun.plan,
+      workspaceId,
       squad: {
         squadRunId: squadRun.id,
         order: index,
         branchName: squadRun.branchName,
         handoff: this.buildHandoff(squadRun, index)
       }
-    });
+    }));
 
-    this.awaiting.set(run.id, squadRun.id);
+    workspaceRegistry.bind('prototype_runs', run.id, workspaceId);
+    this.awaiting.set(run.id, { squadRunId: squadRun.id, workspaceId });
     sqliteService.saveSquadRun({
       ...squadRun,
       currentMemberIndex: index,
@@ -204,9 +249,18 @@ export class SquadRunner {
    * branch and every commit up to the failure intact for a person to inspect.
    */
   private async advance(finished: PrototypeRun, succeeded: boolean) {
-    const squadRunId = this.awaiting.get(finished.id);
+    const waiting = this.awaiting.get(finished.id);
     this.awaiting.delete(finished.id);
-    if (!squadRunId) return;
+    if (!waiting) return;
+    return runWithWorkspace(waiting.workspaceId, () => this.advanceInWorkspace(finished, succeeded, waiting));
+  }
+
+  private async advanceInWorkspace(
+    finished: PrototypeRun,
+    succeeded: boolean,
+    waiting: { squadRunId: string; workspaceId: string }
+  ) {
+    const squadRunId = waiting.squadRunId;
 
     const squadRun = sqliteService.getSquadRun(squadRunId);
     if (!squadRun || squadRun.status !== 'running') return;
@@ -260,7 +314,7 @@ export class SquadRunner {
     }
 
     logInfo(`Squad run ${squadRun.id}: ${who} done, starting member ${next + 1}/${total}`);
-    await this.startMember({ ...squadRun, updatedAt: now }, next);
+    await this.startMember({ ...squadRun, updatedAt: now }, next, waiting.workspaceId);
   }
 
   /**

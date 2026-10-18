@@ -620,7 +620,7 @@ export interface ChatMessage {
   content: string;
   thinkingProcess?: string;
   toolsExecuted?: ToolExecutionRecord[];
-  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call';
+  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build';
   agentCallId?: string;
   squadId?: string;
   operationMode?: AgentCallMode;

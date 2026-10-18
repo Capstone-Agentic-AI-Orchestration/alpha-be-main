@@ -18,6 +18,12 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
   }
 }
 
+/** Detect user work that a run's git add/commit could otherwise absorb. */
+export async function isGitWorkingTreeClean(cwd: string): Promise<boolean> {
+  const { stdout } = await execFileAsync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd });
+  return stdout.trim().length === 0;
+}
+
 export async function getCurrentBranch(cwd: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
