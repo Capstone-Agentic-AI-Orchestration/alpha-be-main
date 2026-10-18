@@ -425,6 +425,7 @@ agentCallService.on('agent_call.activity', (data) => broadcast({ type: 'agent_ca
 runnerService.on('squad_member_started', (data) => broadcast({ type: 'squad_member_started', payload: data }));
 runnerService.on('squad_run_completed', (data) => broadcast({ type: 'squad_run_completed', payload: data }));
 runnerService.on('squad_run_failed', (data) => broadcast({ type: 'squad_run_failed', payload: data }));
+runnerService.on('squad_run_cancelled', (data) => broadcast({ type: 'squad_run_cancelled', payload: data }));
 
 // Subscribe chat events to WebSocket broadcast
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));

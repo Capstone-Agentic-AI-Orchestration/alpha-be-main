@@ -189,6 +189,20 @@ describe('RunnerService workspace ownership lifetime', () => {
     expect(processes).toHaveLength(1); await exit(0, 1, 'cancelled');
     await vi.waitFor(() => expect(processes).toHaveLength(2)); expect(rows.get(a.id).status).toBe('cancelled'); await exit(1);
   });
+  it('stops a sequential squad without starting its next member', async () => {
+    work('squad-cancel-issue');
+    const squadRunner = new (await import('./squadRunner.js')).SquadRunner();
+    const squadRun = await squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'squad-cancel-issue' });
+
+    await vi.waitFor(() => expect(processes).toHaveLength(1));
+    const stopped = await squadRunner.cancelSquadRun(squadRun.id);
+
+    expect(stopped).toMatchObject({ status: 'cancelled', stoppedReason: 'Build stopped by the user.' });
+    expect(squads.get(squadRun.id).status).toBe('cancelled');
+    expect([...rows.values()].filter(value => value.squadRunId === squadRun.id).map(value => value.status))
+      .toEqual(['cancelled']);
+    expect(processes).toHaveLength(1);
+  });
   it('skips a queued cancelled run without spawning it', async () => {
     await work('a').start(); const b = await work('b').start();
     await vi.waitFor(() => expect(processes).toHaveLength(1)); await runner.cancelRun(b.id); await exit(0);

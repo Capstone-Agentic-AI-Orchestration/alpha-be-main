@@ -63,7 +63,20 @@ export class SquadRunner {
   private awaiting = new Map<string, { squadRunId: string; workspaceId: string }>();
   /** Local-only paths: never published with the shared squad-run record. */
   private runWorkspaces = new Map<string, { repositoryDir: string; workingDir: string }>();
+  /** Serialize finish and cancellation transitions so a stop cannot race a handoff. */
+  private transitionQueues = new Map<string, Promise<unknown>>();
   private wired = false;
+
+  private serializeTransition<T>(squadRunId: string, transition: () => Promise<T>): Promise<T> {
+    const previous = this.transitionQueues.get(squadRunId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(transition);
+    this.transitionQueues.set(squadRunId, current);
+    current.then(
+      () => { if (this.transitionQueues.get(squadRunId) === current) this.transitionQueues.delete(squadRunId); },
+      () => { if (this.transitionQueues.get(squadRunId) === current) this.transitionQueues.delete(squadRunId); }
+    );
+    return current;
+  }
 
   /** Keep the local runner authoritative while publishing the room's parent run to the shared board. */
   private async persistSquadRun(run: SquadRun, workspaceId: string): Promise<void> {
@@ -109,6 +122,47 @@ export class SquadRunner {
   }): Promise<SquadRun> {
     const workspaceId = params.workspaceId ?? currentWorkspaceId();
     return runWithWorkspace(workspaceId, () => this.startInWorkspace({ ...params, workspaceId }));
+  }
+
+  /** Stop the current member and close the parent run before a queued handoff can start. */
+  async cancelSquadRun(squadRunId: string, workspaceId = currentWorkspaceId()): Promise<SquadRun> {
+    return this.serializeTransition(squadRunId, () => runWithWorkspace(workspaceId, async () => {
+      const squadRun = sqliteService.getSquadRun(squadRunId);
+      if (!squadRun) throw new SquadRunError(`Squad run not found: ${squadRunId}`);
+      if (squadRun.status !== 'running') {
+        throw new SquadRunError(`Squad run is ${squadRun.status}, not cancellable.`);
+      }
+
+      const now = new Date().toISOString();
+      const cancelled: SquadRun = {
+        ...squadRun,
+        status: 'cancelled',
+        stoppedReason: 'Build stopped by the user.',
+        updatedAt: now
+      };
+
+      // Persist the parent first. A member's cancellation event then sees a
+      // terminal parent and cannot advance the squad to its next agent.
+      await this.persistSquadRun(cancelled, workspaceId);
+
+      const activeMember = sqliteService.getRunsForSquadRun(squadRunId)
+        .find(run => run.status === 'queued' || run.status === 'running');
+      if (activeMember) await runnerService.cancelRun(activeMember.id);
+
+      updateIssueAndPush(squadRun.issueId, { status: 'in_progress' });
+      addCommentAndShare({
+        id: `comm-${squadRun.id}-cancelled`,
+        issueId: squadRun.issueId,
+        authorType: 'system',
+        authorName: 'Alpha Squad Runner',
+        content: `Build stopped by the user. Work already completed remains on \`${squadRun.branchName}\` for review.`,
+        createdAt: now
+      });
+
+      const result = sqliteService.getSquadRun(squadRunId) ?? cancelled;
+      runnerService.emit('squad_run_cancelled', result);
+      return result;
+    }));
   }
 
   private async startInWorkspace(params: {
@@ -313,9 +367,12 @@ export class SquadRunner {
    */
   private async advance(finished: PrototypeRun, succeeded: boolean) {
     const waiting = this.awaiting.get(finished.id);
-    this.awaiting.delete(finished.id);
     if (!waiting) return;
-    return runWithWorkspace(waiting.workspaceId, () => this.advanceInWorkspace(finished, succeeded, waiting));
+    return this.serializeTransition(waiting.squadRunId, async () => {
+      if (this.awaiting.get(finished.id) !== waiting) return;
+      this.awaiting.delete(finished.id);
+      return runWithWorkspace(waiting.workspaceId, () => this.advanceInWorkspace(finished, succeeded, waiting));
+    });
   }
 
   private async advanceInWorkspace(
