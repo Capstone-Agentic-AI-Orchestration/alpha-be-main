@@ -96,6 +96,8 @@ export interface Agent {
   phase?: AgentPhase;
   /** True only for Alpha's built-in, idempotently seeded role instances. */
   isSeeded?: boolean;
+  /** Links workspace-local copies whose profile is synchronized across workspaces. */
+  sharedKey?: string;
   createdAt: string;
 }
 

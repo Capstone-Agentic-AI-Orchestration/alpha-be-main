@@ -49,9 +49,18 @@ import {
   requireWorkspaceCapability
 } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
 
 export const dataRouter = Router();
+
+async function publishSharedAgentCopies(agent: Agent, workspaceIds: string[]): Promise<void> {
+  if (!agent.sharedKey) return;
+  await Promise.all([...new Set(workspaceIds)].map(workspaceId => runWithWorkspace(workspaceId, async () => {
+    const copy = (await agentStore().list(workspaceId)).find(candidate => candidate.sharedKey === agent.sharedKey);
+    if (copy) await supabaseService.shareAgent(copy);
+  })));
+}
 
 /**
  * Who Alpha thinks you are.
@@ -558,10 +567,35 @@ function withFileOverlay(agent: Agent, runtimes = machineRuntimes()) {
 
 dataRouter.get('/agents', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
+  await agentStore().ensureOfficial(req.workspace!.workspaceId);
   // Runtimes read once for the whole roster, not once per agent.
   const runtimes = machineRuntimes();
   const agents = await agentStore().list(req.workspace!.workspaceId);
+  void Promise.all(agents.filter(agent => agent.sharedKey).map(agent => supabaseService.shareAgent(agent)));
   res.json(agents.map(a => withFileOverlay(a, runtimes)));
+}));
+
+dataRouter.post('/agents/:id/share', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
+  if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
+  const workspaces = await workspaceRegistry.listForUser(req.workspace!.userId);
+  const agent = await agentStore().share(
+    req.workspace!.workspaceId,
+    req.params.id,
+    workspaces.map(workspace => workspace.id)
+  );
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  await publishSharedAgentCopies(agent, workspaces.map(workspace => workspace.id));
+  res.json(withFileOverlay(agent));
+}));
+
+dataRouter.delete('/agents/:id/share', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
+  if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
+  const agent = await agentStore().unshare(req.workspace!.workspaceId, req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  void supabaseService.shareAgent(agent);
+  res.json(withFileOverlay(agent));
 }));
 
 dataRouter.post('/agents', route(async (req: Request, res: Response) => {
@@ -593,7 +627,12 @@ dataRouter.put('/agents/:id', route(async (req: Request, res: Response) => {
 
   const updated = await agentStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Agent not found' });
-  void supabaseService.shareAgent(updated);
+  if (updated.sharedKey) {
+    const workspaces = await workspaceRegistry.listForUser(req.workspace!.userId);
+    await publishSharedAgentCopies(updated, workspaces.map(workspace => workspace.id));
+  } else {
+    void supabaseService.shareAgent(updated);
+  }
   // Merged, like the list: a field the file owns must not appear to have taken
   // the value that was just written to the database.
   res.json(withFileOverlay(updated));

@@ -1,4 +1,5 @@
 import type { Agent, Squad } from '../models/index.js';
+import { createHash, randomUUID } from 'node:crypto';
 import { agentFromOfficialTemplate, OFFICIAL_AGENT_TEMPLATES } from '../services/officialAgentTemplates.js';
 import type { Sql } from './database.js';
 import { withoutMachineConfig, type AgentStore, type SquadStore } from './agentStore.js';
@@ -122,6 +123,34 @@ export class PostgresAgentStore implements AgentStore {
         merged.isSeeded ?? false
       ]
     );
+    if (existing.sharedKey) {
+      const { rows: sharedRows } = await this.sql.query<{ shared_key: string | null }>(
+        'select shared_key from agents where workspace_id = $1 and id = $2',
+        [workspaceId, id]
+      );
+      const sharedKey = sharedRows[0]?.shared_key;
+      if (sharedKey) {
+        await this.sql.query(
+          `update agents set
+             name = $2, role = $3, avatar = $4, color = $5, description = $6,
+             owner = $7, is_mine = $8, model_provider = $9, model_name = $10,
+             reasoning_effort = $11, system_prompt = $12, autonomy_level = $13,
+             temperature = $14, skills = $15, concurrency_limit = $16,
+             is_archived = $17, allowed_users = $18, template_key = $19,
+             template_version = $20, phase = $21, is_seeded = $22
+           where shared_key = $1`,
+          [
+            sharedKey, merged.name, merged.role, merged.avatar, merged.color, merged.description,
+            merged.owner, merged.isMine ?? true, merged.modelProvider, merged.modelName,
+            merged.reasoningEffort ?? null, merged.systemPrompt ?? '', merged.autonomyLevel,
+            merged.temperature ?? 0.7, JSON.stringify(merged.skills ?? []),
+            merged.concurrencyLimit ?? 2, merged.isArchived ?? false, merged.allowedUsers ?? null,
+            merged.templateKey ?? null, merged.templateVersion ?? null, merged.phase ?? null,
+            merged.isSeeded ?? false
+          ]
+        );
+      }
+    }
     return rows[0] ? toAgent(rows[0]) : null;
   }
 
@@ -131,6 +160,45 @@ export class PostgresAgentStore implements AgentStore {
       id
     ]);
     return rows.length > 0;
+  }
+
+  async share(workspaceId: string, id: string, workspaceIds: string[]): Promise<Agent | null> {
+    const { rows } = await this.sql.query<AgentRow & { shared_key: string | null }>(
+      'select * from agents where workspace_id = $1 and id = $2', [workspaceId, id]
+    );
+    const source = rows[0];
+    if (!source) return null;
+    const sharedKey = source.shared_key ?? `shared-${randomUUID()}`;
+    await this.sql.query('update agents set shared_key = $3 where workspace_id = $1 and id = $2', [workspaceId, id, sharedKey]);
+    for (const targetWorkspaceId of new Set([workspaceId, ...workspaceIds])) {
+      if (targetWorkspaceId === workspaceId) continue;
+      if (source.template_key) {
+        const { rows: templateRows } = await this.sql.query<{ id: string }>(
+          'select id from agents where workspace_id = $1 and template_key = $2',
+          [targetWorkspaceId, source.template_key]
+        );
+        if (templateRows[0]) {
+          await this.sql.query(
+            'update agents set shared_key = $3 where workspace_id = $1 and id = $2',
+            [targetWorkspaceId, templateRows[0].id, sharedKey]
+          );
+          continue;
+        }
+      }
+      await this.copySharedAgent(source.id, targetWorkspaceId, sharedKey);
+    }
+    return this.get(workspaceId, id);
+  }
+
+  async unshare(workspaceId: string, id: string): Promise<Agent | null> {
+    const { rows } = await this.sql.query<{ shared_key: string | null; template_key: string | null }>(
+      'select shared_key, template_key from agents where workspace_id = $1 and id = $2', [workspaceId, id]
+    );
+    const key = rows[0]?.template_key ? null : rows[0]?.shared_key;
+    if (key) {
+      await this.sql.query('update agents set shared_key = null where workspace_id = $1 and id = $2', [workspaceId, id]);
+    }
+    return this.get(workspaceId, id);
   }
 
   /**
@@ -145,15 +213,50 @@ export class PostgresAgentStore implements AgentStore {
     const now = new Date().toISOString();
     for (const template of OFFICIAL_AGENT_TEMPLATES) {
       const agent = withoutMachineConfig(agentFromOfficialTemplate(template, now));
+      const sharedKey = `official:${template.key}`;
+      const { rows: present } = await this.sql.query<{ id: string }>(
+        'select id from agents where workspace_id = $1 and template_key = $2', [workspaceId, template.key]
+      );
+      if (present[0]) {
+        await this.sql.query(
+          'update agents set shared_key = $3 where workspace_id = $1 and id = $2',
+          [workspaceId, present[0].id, sharedKey]
+        );
+        const { rows: sharedCopy } = await this.sql.query<{ id: string }>(
+          'select id from agents where shared_key = $1 and workspace_id <> $2 order by created_at asc limit 1',
+          [sharedKey, workspaceId]
+        );
+        if (sharedCopy[0]) await this.syncSharedProfile(sharedCopy[0].id, workspaceId, present[0].id);
+        continue;
+      }
+      const { rows: sharedTemplate } = await this.sql.query<{ id: string }>(
+        'select id from agents where shared_key = $1 order by created_at asc limit 1', [sharedKey]
+      );
+      if (sharedTemplate[0]) {
+        await this.copySharedAgent(sharedTemplate[0].id, workspaceId, sharedKey);
+        continue;
+      }
+      const { rows: idCollision } = await this.sql.query<{ id: string }>(
+        'select id from agents where id = $1', [agent.id]
+      );
+      if (idCollision.length) {
+        const digest = createHash('sha256').update(`${workspaceId}:${template.key}`).digest('hex').slice(0, 16);
+        const baseId = `agent-${template.key}-${digest}`;
+        agent.id = baseId;
+        let suffix = 2;
+        while ((await this.sql.query('select 1 from agents where id = $1', [agent.id])).rows.length) {
+          agent.id = `${baseId}-${suffix++}`;
+        }
+      }
       await this.sql.query(
         `insert into agents
            (id, workspace_id, name, role, avatar, color, description, owner, is_mine,
             model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature,
             skills, mcp_servers, concurrency_limit, is_archived, allowed_users,
-            template_key, template_version, phase, is_seeded, created_at)
+            template_key, template_version, phase, is_seeded, created_at, shared_key)
          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                 $16, $17, $18, $19, $20, $21, $22, $23, true, $24)
-         on conflict do nothing`,
+                 $16, $17, $18, $19, $20, $21, $22, $23, true, $24, $25)
+         on conflict (workspace_id, template_key) where template_key is not null do nothing`,
         [
           agent.id,
           workspaceId,
@@ -178,10 +281,54 @@ export class PostgresAgentStore implements AgentStore {
           agent.templateKey ?? null,
           agent.templateVersion ?? null,
           agent.phase ?? null,
-          now
+          now,
+          sharedKey
         ]
       );
     }
+  }
+
+  async syncShared(workspaceId: string, workspaceIds: string[]): Promise<void> {
+    if (!workspaceIds.includes(workspaceId)) return;
+    const { rows: shared } = await this.sql.query<{ id: string; shared_key: string }>(
+      `select distinct on (a.shared_key) a.id, a.shared_key
+       from agents a
+       where a.shared_key is not null and a.template_key is null and a.workspace_id = any($1::text[])
+       order by a.shared_key, a.created_at asc`,
+      [workspaceIds]
+    );
+    for (const agent of shared) await this.copySharedAgent(agent.id, workspaceId, agent.shared_key);
+  }
+
+  private async copySharedAgent(sourceId: string, workspaceId: string, sharedKey: string): Promise<void> {
+    const id = `agent-shared-${randomUUID()}`;
+    await this.sql.query(
+      `insert into agents
+         (id, workspace_id, name, role, avatar, color, description, owner, is_mine,
+          model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature,
+          skills, mcp_servers, concurrency_limit, is_archived, allowed_users,
+          template_key, template_version, phase, is_seeded, created_at, shared_key)
+       select $1, $2, name, role, avatar, color, description, owner, is_mine,
+          model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature,
+          skills, '[]'::jsonb, concurrency_limit, is_archived, allowed_users,
+          template_key, template_version, phase, is_seeded, created_at, $3
+       from agents where id = $4
+       on conflict (workspace_id, shared_key) where shared_key is not null do nothing`,
+      [id, workspaceId, sharedKey, sourceId]
+    );
+  }
+
+  private async syncSharedProfile(sourceId: string, targetWorkspaceId: string, targetId: string): Promise<void> {
+    const { rows } = await this.sql.query<AgentRow>('select * from agents where id = $1', [sourceId]);
+    if (!rows[0]) return;
+    const source = toAgent(rows[0]);
+    const {
+      mcpServers: _mcpServers,
+      envVars: _envVars,
+      customCliArgs: _customCliArgs,
+      ...profile
+    } = source;
+    await this.update(targetWorkspaceId, targetId, profile);
   }
 }
 
@@ -288,6 +435,7 @@ export interface AgentRow {
   template_version: number | null;
   phase: string | null;
   is_seeded: boolean | null;
+  shared_key: string | null;
   created_at: Date | string;
 }
 
@@ -335,6 +483,7 @@ export function toAgent(row: AgentRow): Agent {
     templateVersion: row.template_version ?? undefined,
     phase: (row.phase ?? undefined) as Agent['phase'],
     isSeeded: row.is_seeded ?? false,
+    sharedKey: row.shared_key ?? undefined,
     // Machine-local, and never stored here; see the class comment.
     customCliArgs: '',
     envVars: [],
@@ -377,6 +526,7 @@ export function agentRow(workspaceId: string, agent: Agent): Record<string, unkn
     template_version: shared.templateVersion ?? null,
     phase: shared.phase ?? null,
     is_seeded: shared.isSeeded ?? false,
+    shared_key: shared.sharedKey ?? null,
     created_at: shared.createdAt || new Date().toISOString()
   };
 }
