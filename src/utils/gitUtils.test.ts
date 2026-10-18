@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createBranchFrom, remoteHasDevBranch } from './gitUtils.js';
+import { addDetachedWorktree, createBranch, createBranchFrom, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
 
 /**
  * Where an agent's branch starts, against real git: a bare "remote" and a
@@ -75,6 +75,31 @@ describe('the branch an agent starts from', () => {
     expect(git(clone, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('agent/reviewer/shop-1-0001');
     expect(git(clone, 'rev-parse', 'HEAD')).toBe(git(clone, 'rev-parse', 'origin/dev'));
     expect(fs.existsSync(path.join(clone, 'dev.txt'))).toBe(true);
+  });
+
+  it('runs in an isolated worktree without changing a dirty source checkout', async () => {
+    const clone = path.join(root, 'source');
+    fs.mkdirSync(clone, { recursive: true });
+    git(clone, 'init', '--initial-branch', 'main');
+    fs.writeFileSync(path.join(clone, 'README.md'), 'source\n');
+    git(clone, 'add', '-A');
+    git(clone, 'commit', '-m', 'first');
+    const sourceBranch = git(clone, 'rev-parse', '--abbrev-ref', 'HEAD');
+    fs.writeFileSync(path.join(clone, 'my-unsaved-work.txt'), 'keep this local\n');
+    const sourceStatus = git(clone, 'status', '--porcelain', '--untracked-files=all');
+    const workingDir = path.join(root, 'isolated-run');
+
+    await addDetachedWorktree(clone, workingDir);
+    await createBranch(workingDir, 'agent/build/test-0001');
+    fs.writeFileSync(path.join(workingDir, 'agent-output.txt'), 'build output\n');
+
+    expect(git(clone, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(sourceBranch);
+    expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe(sourceStatus);
+    expect(fs.existsSync(path.join(clone, 'my-unsaved-work.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(workingDir, 'agent-output.txt'))).toBe(true);
+
+    await removeDetachedWorktree(clone, workingDir);
+    expect(fs.existsSync(workingDir)).toBe(false);
   });
 
   it('refuses an unsafe branch name before running git', async () => {

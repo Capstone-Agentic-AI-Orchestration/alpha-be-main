@@ -322,46 +322,52 @@ export class SupabaseService {
    * `chat_messages` to the owner, with no project-manager bypass. What
    * oversight sees is the work -- runs, stages, patches -- not the prompts.
    */
-  async shareThread(thread: ChatThread): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
-    const login = knownIdentity()?.login;
-    if (!login) return;
+  async shareThread(thread: ChatThread, workspaceId = currentWorkspaceId(), ownerId = knownIdentity()?.login): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client || !ownerId) return false;
     try {
-      const { error } = await this.client.from('chat_threads').upsert(threadRow(currentWorkspaceId(), login, thread));
+      const { error } = await this.client.from('chat_threads').upsert(threadRow(workspaceId, ownerId, thread));
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`share conversation ${thread.id}`, err);
+      return false;
     }
   }
 
-  async shareMessage(message: ChatMessage): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async shareMessage(message: ChatMessage, _workspaceId = currentWorkspaceId()): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
     try {
       const { error } = await this.client.from('chat_messages').upsert(messageRow(message));
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`share message in ${message.threadId}`, err);
+      return false;
     }
   }
 
   /** Its messages go with it, by the schema's `on delete cascade`. */
-  async unshareThread(threadId: string): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async unshareThread(threadId: string, _workspaceId = currentWorkspaceId()): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
     try {
       const { error } = await this.client.from('chat_threads').delete().eq('id', threadId);
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`remove conversation ${threadId}`, err);
+      return false;
     }
   }
 
-  async unshareMessages(threadId: string): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async unshareMessages(threadId: string, _workspaceId = currentWorkspaceId()): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
     try {
       const { error } = await this.client.from('chat_messages').delete().eq('thread_id', threadId);
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`clear conversation ${threadId}`, err);
+      return false;
     }
   }
 

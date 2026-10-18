@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 /**
@@ -16,6 +18,35 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Add a clean, detached worktree at the repository's current commit.
+ *
+ * The run creates its own branch after the workspace is prepared. Starting
+ * detached keeps the user's checkout and any uncommitted files untouched,
+ * while still sharing the repository's object store and remote configuration.
+ */
+export async function addDetachedWorktree(repositoryDir: string, worktreeDir: string): Promise<void> {
+  const destination = path.resolve(worktreeDir);
+  if (fs.existsSync(destination)) {
+    throw new Error(`The isolated build folder already exists: ${destination}`);
+  }
+  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+  await execFileAsync('git', ['worktree', 'add', '--detach', destination, 'HEAD'], {
+    cwd: repositoryDir,
+    timeout: 120_000
+  });
+}
+
+/** Remove only a worktree path previously allocated under the managed run root. */
+export async function removeDetachedWorktree(repositoryDir: string, worktreeDir: string): Promise<void> {
+  const destination = path.resolve(worktreeDir);
+  if (!fs.existsSync(destination)) return;
+  await execFileAsync('git', ['worktree', 'remove', '--force', destination], {
+    cwd: repositoryDir,
+    timeout: 120_000
+  });
 }
 
 /** Detect user work that a run's git add/commit could otherwise absorb. */

@@ -11,6 +11,7 @@ import type { Project, ProjectResource, ProjectResourceHosting } from '../../mod
 import { parseRepoRef, reposForProject } from '../githubIssueMapping.js';
 import { githubApi, GitHubApiError } from '../githubApi.js';
 import { logError, logInfo } from '../../utils/logger.js';
+import { assertSafeBranchName } from '../../utils/gitUtils.js';
 import {
   createRenderClient,
   RenderApiError,
@@ -65,6 +66,28 @@ export interface HostingStatus {
   }>;
   envVars: Array<{ key: string; value: string | null; scope: string; managedByAlpha: boolean }>;
   github: { secrets: string[]; variables: Array<{ name: string; value: string }> };
+}
+
+/** Latest preview deployment for the exact branch produced by a build. */
+export interface BuildBranchPreview {
+  repo: string;
+  branch: string;
+  platform: HostingPlatform | null;
+  state: 'ready' | 'building' | 'failed' | 'waiting' | 'unsupported' | 'unavailable';
+  url: string | null;
+  deployStatus: string | null;
+  ci: {
+    state: 'not_run' | 'running' | 'passed' | 'failed' | 'unknown';
+    commitSha: string | null;
+    checksUrl: string | null;
+    checks: Array<{
+      name: string;
+      state: 'queued' | 'running' | 'passed' | 'failed' | 'skipped' | 'unknown';
+      url: string | null;
+    }>;
+    error?: string;
+  };
+  error?: string;
 }
 
 export interface HostingContext {
@@ -932,6 +955,157 @@ export async function getHostingStatus(ctx: HostingContext): Promise<HostingStat
     return statusFromVercelRecord(ctx.repo, { platform: 'vercel', vercel: { projectId: project.id } }, partner, client, ctx.repo.split('/')[1]);
   } catch (err: any) {
     return { repo: ctx.repo, role, platform, configured: true, state: 'failed', error: err?.message ?? String(err), partner, environments: [], envVars: [], github: { secrets: [], variables: [] } };
+  }
+}
+
+function emptyBranchCi(repo: string, branch: string): BuildBranchPreview['ci'] {
+  return {
+    state: 'not_run',
+    commitSha: null,
+    checksUrl: `https://github.com/${repo}/actions?query=${encodeURIComponent(`branch:${branch}`)}`,
+    checks: []
+  };
+}
+
+/** Read CI checks attached to the exact commit at a build branch. */
+async function branchCiStatus(repo: string, branch: string): Promise<BuildBranchPreview['ci']> {
+  const empty = emptyBranchCi(repo, branch);
+  try {
+    const commit = await githubApi().get<{ sha?: string }>(
+      `/repos/${repo}/commits/${encodeURIComponent(branch)}`
+    );
+    if (!commit.sha) {
+      return { ...empty, state: 'unknown', error: 'GitHub did not return a commit for this branch.' };
+    }
+
+    const [runsResult, statusesResult] = await Promise.allSettled([
+      githubApi().get<{ check_runs?: Array<Record<string, any>> }>(
+        `/repos/${repo}/commits/${commit.sha}/check-runs?per_page=100`
+      ),
+      githubApi().get<{ statuses?: Array<Record<string, any>> }>(
+        `/repos/${repo}/commits/${commit.sha}/status`
+      )
+    ]);
+    const available = runsResult.status === 'fulfilled' || statusesResult.status === 'fulfilled';
+    if (!available) {
+      const error = runsResult.status === 'rejected' ? runsResult.reason :
+        statusesResult.status === 'rejected' ? statusesResult.reason : undefined;
+      return {
+        ...empty,
+        state: 'unknown',
+        commitSha: commit.sha,
+        error: error instanceof Error ? error.message : 'GitHub checks could not be read.'
+      };
+    }
+
+    const checks: BuildBranchPreview['ci']['checks'] = [];
+    if (runsResult.status === 'fulfilled') {
+      for (const item of runsResult.value.check_runs ?? []) {
+        const status = String(item.status ?? '').toLowerCase();
+        const conclusion = String(item.conclusion ?? '').toLowerCase();
+        const state: BuildBranchPreview['ci']['checks'][number]['state'] =
+          ['queued', 'waiting', 'pending', 'requested'].includes(status) ? 'queued' :
+            status === 'in_progress' ? 'running' :
+              status === 'completed' && ['success', 'neutral', 'skipped'].includes(conclusion) ? 'passed' :
+                status === 'completed' && ['failure', 'cancelled', 'timed_out', 'action_required', 'stale'].includes(conclusion) ? 'failed' : 'unknown';
+        checks.push({
+          name: String(item.name ?? 'GitHub check'),
+          state,
+          url: httpsUrl(item.html_url ?? item.details_url)
+        });
+      }
+    }
+    if (statusesResult.status === 'fulfilled') {
+      for (const item of statusesResult.value.statuses ?? []) {
+        const state = String(item.state ?? '').toLowerCase();
+        checks.push({
+          name: String(item.context ?? 'Commit status'),
+          state: state === 'pending' ? 'queued' : state === 'success' ? 'passed' :
+            ['failure', 'error'].includes(state) ? 'failed' : 'unknown',
+          url: httpsUrl(item.target_url)
+        });
+      }
+    }
+
+    const state: BuildBranchPreview['ci']['state'] = checks.length === 0 ? 'not_run' :
+      checks.some(check => check.state === 'queued' || check.state === 'running') ? 'running' :
+        checks.some(check => check.state === 'failed') ? 'failed' :
+          checks.some(check => check.state === 'unknown') ? 'unknown' : 'passed';
+    return { ...empty, state, commitSha: commit.sha, checks };
+  } catch (error) {
+    if (error instanceof GitHubApiError && error.status === 404) return empty;
+    return {
+      ...empty,
+      state: 'unknown',
+      error: error instanceof Error ? error.message : 'GitHub checks could not be read.'
+    };
+  }
+}
+
+/**
+ * Read the provider's latest preview for a build branch.
+ *
+ * Vercel creates preview deployments for Git branches. Render's configured
+ * services currently track only the project's dev/uat/main environments, so
+ * Alpha reports that boundary instead of presenting an unrelated environment
+ * URL as this build's preview.
+ */
+export async function getBuildBranchPreview(ctx: HostingContext, branch: string): Promise<BuildBranchPreview> {
+  let platform: HostingPlatform | null = null;
+  let ci = emptyBranchCi(ctx.repo, branch);
+  const unavailable = (state: BuildBranchPreview['state'], error?: string): BuildBranchPreview => ({
+    repo: ctx.repo,
+    branch,
+    platform,
+    state,
+    url: null,
+    deployStatus: null,
+    ci,
+    ...(error ? { error } : {})
+  });
+
+  try {
+    assertSafeBranchName(branch);
+  } catch {
+    return unavailable('unavailable', 'The build branch name is not valid.');
+  }
+  ci = await branchCiStatus(ctx.repo, branch);
+  const stack = resolveStack(ctx);
+  if (!stack) return unavailable('unavailable', `Could not identify the hosting provider for ${ctx.repo}.`);
+  platform = platformForStack(stack);
+  if (platform !== 'vercel') {
+    return unavailable('unsupported', 'Run-branch previews are not available for this hosting provider yet.');
+  }
+  if (!hostingConfigured().vercel) {
+    return unavailable('unavailable', 'Vercel is not configured on the Alpha server.');
+  }
+
+  try {
+    const client = vercelClient();
+    if (!client) return unavailable('unavailable', 'Vercel is not configured on the Alpha server.');
+    const project = await client.findProjectByName(ctx.repo.split('/')[1]);
+    if (!project) {
+      return unavailable('waiting', 'Set up preview hosting for this repository to publish a build preview.');
+    }
+    if (!project.link?.repo || linkedRepo(project).toLowerCase() !== ctx.repo.toLowerCase()) {
+      return unavailable('unavailable', 'The Vercel project with this name is linked to a different repository.');
+    }
+    const deployment = await client.latestDeployment(project.id, { branch });
+    if (!deployment) return unavailable('waiting', `Vercel has not created a preview for ${branch} yet.`);
+    const deployStatus = deployment.readyState ?? deployment.state ?? null;
+    const ready = Boolean(deployStatus && /^(ready|live)$/i.test(deployStatus));
+    const failed = Boolean(deployStatus && /^(error|failed|canceled|cancelled)$/i.test(deployStatus));
+    return {
+      repo: ctx.repo,
+      branch,
+      platform: 'vercel',
+      state: ready ? 'ready' : failed ? 'failed' : 'building',
+      url: httpsUrl(deployment.url),
+      deployStatus,
+      ci
+    };
+  } catch (error) {
+    return unavailable('unavailable', error instanceof Error ? error.message : 'Could not read the Vercel preview.');
   }
 }
 

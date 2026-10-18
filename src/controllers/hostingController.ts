@@ -5,6 +5,7 @@ import { githubApi, GitHubApiError } from '../services/githubApi.js';
 import { reposForProject } from '../services/githubIssueMapping.js';
 import {
   getHostingStatus,
+  getBuildBranchPreview,
   hostingHintsFor,
   platformForStack,
   roleForStack,
@@ -144,7 +145,7 @@ function hasBody(op: { method: string }): boolean {
 
 interface Operation {
   /** Appended to `/hosting/:owner/:name` and to `/projects/:id/repos/:owner/:name/hosting`. */
-  suffix: '' | '/previews' | '/health' | '/logs' | '/env';
+  suffix: '' | '/previews' | '/branch-preview' | '/health' | '/logs' | '/env';
   method: 'get' | 'post' | 'put' | 'delete';
   access: Access;
   /** When the capability depends on the request (which environment a variable change is for). */
@@ -188,6 +189,27 @@ const OPERATIONS: Operation[] = [
     access: 'read',
     run: async ctx => previewsFor(await getHostingStatus(ctx)),
     offline: (repo, hints) => previewsFor(noCloud(repo, hints.stack, hints.partner))
+  },
+  {
+    suffix: '/branch-preview',
+    method: 'get',
+    access: 'read',
+    run: (ctx, req) => getBuildBranchPreview(ctx, text(req.query.branch) ?? ''),
+    offline: (repo, _hints, req) => ({
+      repo,
+      branch: text(req.query.branch) ?? '',
+      platform: null,
+      state: 'unavailable',
+      url: null,
+      deployStatus: null,
+      ci: {
+        state: 'unknown',
+        commitSha: null,
+        checksUrl: `https://github.com/${repo}/actions?query=${encodeURIComponent(`branch:${text(req.query.branch) ?? ''}`)}`,
+        checks: []
+      },
+      error: NO_CLOUD
+    })
   },
   {
     suffix: '/health',

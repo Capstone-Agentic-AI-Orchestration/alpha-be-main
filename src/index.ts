@@ -25,6 +25,7 @@ import { agentCallRouter } from './controllers/agentCallController.js';
 import { agentCallService } from './services/agentCallService.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
+import { flushChatSyncOutbox, startChatSyncRetryLoop } from './services/chatSyncService.js';
 import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
@@ -549,6 +550,9 @@ function onListening(): void {
     .then(identity => {
       const claimed = sqliteService.claimUnownedThreads(identity.login);
       if (claimed > 0) logInfo(`Claimed ${claimed} conversation(s) for ${identity.login}.`);
+      const stopChatSync = startChatSyncRetryLoop();
+      server.once('close', stopChatSync);
+      void flushChatSyncOutbox();
     })
     .catch(err => logError('Could not claim unowned conversations:', err));
 

@@ -14,8 +14,35 @@ import {
 } from '../services/chatWriteThrough.js';
 import { desktopOnly } from './desktopOnly.js';
 import { isProjectBuildRequest } from '../services/projectBuildIntent.js';
+import { IS_CLOUD } from '../config/env.js';
+import { supabaseService } from '../services/supabaseService.js';
+import { retryChatSync } from '../services/chatSyncService.js';
 
 export const chatRouter = Router();
+
+/** Sync health for the current owner's local chat outbox. */
+chatRouter.get('/chat/sync/status', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  if (IS_CLOUD) return res.json({ enabled: false, state: 'shared', pending: 0, failed: 0 });
+  const threadId = typeof req.query.threadId === 'string' ? req.query.threadId : undefined;
+  if (threadId && !requireEntityWorkspace(req, res, 'chat_threads', threadId)) return;
+  const status = sqliteService.getChatSyncStatus(req.workspace!.workspaceId, req.workspace!.userId, threadId);
+  const enabled = supabaseService.sharesBoard();
+  res.json({
+    enabled,
+    state: !enabled ? 'local_only' : status.failed ? 'failed' : status.pending ? 'syncing' : 'synced',
+    ...status
+  });
+}));
+
+/** Explicitly retry this owner's queued chat changes after a visible sync error. */
+chatRouter.post('/chat/sync/retry', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId : undefined;
+  if (threadId && !requireEntityWorkspace(req, res, 'chat_threads', threadId)) return;
+  const queued = retryChatSync(req.workspace!.workspaceId, req.workspace!.userId, threadId);
+  res.json({ queued });
+}));
 
 /**
  * The caller's own conversations, and only those.

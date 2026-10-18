@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import type { Project, ProjectBuildStep, Squad } from '../models/index.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { issueStore, projectStore, squadStore } from '../store/stores.js';
-import { isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { isGitRepo } from '../utils/gitUtils.js';
 import { agentReadiness } from './agentReadiness.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { cloneAndBindProject } from './projectBindings.js';
@@ -162,18 +162,9 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     if (!(await isGitRepo(checkout.dir))) {
       return blocked('The selected project folder is not a Git checkout. Attach or clone the repository before starting a build.', project, repository);
     }
-    try {
-      if (!(await isGitWorkingTreeClean(checkout.dir))) {
-        return blocked('This repository has uncommitted changes. Commit or stash them before starting a build so agent commits do not include your existing work.', project, repository);
-      }
-    } catch {
-      return blocked('Alpha could not verify the repository’s Git status. Check repository permissions and try again.', project, repository);
-    }
-    try {
-      await fs.promises.access(checkout.dir, fs.constants.W_OK);
-    } catch {
-      return blocked('The selected repository is not writable by the local build runner. Check its folder permissions, then try again.', project, repository);
-    }
+    // Do not block on a dirty source checkout. The squad runner creates a
+    // private Git worktree for this build so user edits stay in the source
+    // directory and cannot be swept into an agent commit.
     allowAttachedWorkspace(checkout, project.name);
 
     const assignments = await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id);
@@ -295,7 +286,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       `User request: ${content.trim().replace(/^\/build\s*/i, '')}`,
       ...(enabledPlan.length ? ['Follow the project’s ordered build sequence:', ...enabledPlan] : []),
       'This is a real repository build. Create or update the required project files on the assigned branch; do not answer with a standalone code snippet.',
-      'Preserve unrelated changes already in the working tree. Inspect the repository before editing and follow its established stack and conventions.',
+      'Work only in this build’s isolated worktree. Do not overwrite or include unrelated user changes from the source checkout. Inspect the repository before editing and follow its established stack and conventions.',
       'Before handing work to the next agent, commit your completed changes and leave a concise, factual handoff.',
       'The final agent must run the available relevant checks, report their actual results, and summarize changed files and remaining limitations.'
     ];
@@ -307,6 +298,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
         plan,
         mission: content.trim().replace(/^\/build\s*/i, ''),
         workspaceId,
+        baseWorkspaceDir: checkout.dir,
         memberAgentIds: stepAgentIds
       });
       workspaceRegistry.bind('squad_runs', squadRun.id, workspaceId);

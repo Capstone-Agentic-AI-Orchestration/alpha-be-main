@@ -43,6 +43,8 @@ export interface StartRunParams {
   squad?: SquadMemberContext;
   /** The workspace the run was started in; the run's hosting tools act in it. */
   workspaceId?: string;
+  /** Internal run-scoped worktree; routes must never accept this from a request body. */
+  workingDir?: string;
 }
 
 export interface SquadMemberContext {
@@ -102,10 +104,17 @@ export class RunnerService extends EventEmitter {
       );
     }
 
-    const cwd = workspace.dir;
+    const cwd = params.workingDir ? path.resolve(params.workingDir) : workspace.dir;
 
     if (!fs.existsSync(cwd)) {
       throw new Error(`Working copy for "${project.name}" is missing from disk: ${cwd}`);
+    }
+
+    if (params.workingDir && !sqliteService.isPathAllowed(cwd)) {
+      throw new Error('The isolated build folder is outside Alpha’s approved workspace area.');
+    }
+    if (!(await isGitRepo(cwd))) {
+      throw new Error(`The selected build folder for "${project.name}" is not a Git checkout.`);
     }
 
     allowAttachedWorkspace(workspace, project.name);

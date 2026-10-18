@@ -271,6 +271,16 @@ describe('on a desktop', () => {
     ]);
   });
 
+  it('forwards the exact build branch to the hosting provider preview lookup', async () => {
+    const { app, calls } = await startApi({ role: 'dev' });
+
+    await call(app, 'GET', `${projectRoute}/branch-preview?branch=build%2Fcalculator-1`);
+
+    expect(calls.map(c => c.path)).toEqual([
+      `/hosting/${ORG}/shop-fe/branch-preview?stack=react&partner=${encodeURIComponent(`${ORG}/shop-be`)}&branch=build%2Fcalculator-1`
+    ]);
+  });
+
   it('forwards a log query with its window and filters, and nothing it does not know', async () => {
     const { app, calls } = await startApi({ role: 'dev' });
 

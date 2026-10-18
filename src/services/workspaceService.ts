@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 import { IS_CLOUD, WORKSPACES_DIR } from '../config/env.js';
 import { sqliteService } from './sqliteService.js';
@@ -88,6 +89,20 @@ export function projectRepoPath(projectKey: string, repoName: string): string {
   assertSegment(projectKey, 'project key');
   assertSegment(repoName, 'repository name');
   return path.join(WORKSPACES_DIR, projectKey, repoName);
+}
+
+/**
+ * A deterministic, private workspace for one project build.
+ *
+ * The directory is derived from opaque IDs rather than project or repository
+ * names, so concurrent builds never share a checkout and untrusted text never
+ * becomes a path segment.
+ */
+export function projectRunWorkspacePath(projectId: string, runId: string): string {
+  if (!projectId || !runId) throw new Error('A project and run id are required for an isolated build workspace.');
+  const projectKey = crypto.createHash('sha256').update(projectId).digest('hex').slice(0, 20);
+  const runKey = crypto.createHash('sha256').update(runId).digest('hex').slice(0, 24);
+  return path.join(ensureWorkspacesRoot(), '_runs', projectKey, runKey);
 }
 
 /** True when the directory exists and holds a git repository. */
