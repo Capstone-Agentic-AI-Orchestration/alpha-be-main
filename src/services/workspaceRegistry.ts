@@ -389,7 +389,8 @@ class WorkspaceRegistry {
    * per-project assignment is not needed on top, and developers are not
    * scoped to a subset. What still separates people is their role's
    * capabilities (a developer cannot set up hosting or change production),
-   * and private things stay private (chats are the owner's; squads are).
+   * chats remain owner-scoped, and squad changes remain owner-scoped even
+   * though the workspace squad catalogue is shared.
    *
    * Clients are external, so they stay assignment-scoped: a client reaches
    * only projects they are assigned to, and an empty assignment set is
@@ -433,7 +434,16 @@ class WorkspaceRegistry {
 
   canAccessSquad(context: WorkspaceContext, squadId: string): boolean {
     if (!this.inWorkspace(context, 'squads', squadId)) return false;
-    if (context.role === 'pm' || context.role === 'admin') return true;
+    // The catalogue is shared across internal workspace members. Squad
+    // ownership is enforced separately by canManageSquad; hiding a colleague's
+    // squad made it impossible to reuse one across projects.
+    return context.role !== 'client';
+  }
+
+  canManageSquad(context: WorkspaceContext, squadId: string): boolean {
+    if (!this.inWorkspace(context, 'squads', squadId)) return false;
+    if (!this.can(context.role, 'squad.manage')) return false;
+    if (context.role === 'admin') return true;
     return context.access.squadOwners.get(squadId) === context.userId;
   }
 
@@ -458,8 +468,8 @@ class WorkspaceRegistry {
   /**
    * Squads that are both assigned to a project and visible to this caller.
    * Project assignment is a separate relationship from squad ownership: a
-   * reusable squad may serve several projects, while a developer still only
-   * sees squads they own and projects they are assigned to.
+   * reusable workspace squad may serve several projects, while a developer
+   * still only sees projects they are assigned to.
    */
   projectSquadIdsFor(context: WorkspaceContext, projectId: string): string[] {
     if (!this.canAccessProject(context, projectId)) return [];

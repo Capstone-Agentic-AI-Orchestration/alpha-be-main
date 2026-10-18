@@ -45,6 +45,7 @@ import {
   requireDiscoverableProject,
   requireEntityWorkspace,
   requireProjectWorkspace,
+  requireSquadManagement,
   requireSquadWorkspace,
   requireWorkspaceCapability
 } from './workspaceContext.js';
@@ -1117,6 +1118,7 @@ dataRouter.post('/squads', route(async (req: Request, res: Response) => {
 dataRouter.put('/squads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
+  if (!requireSquadManagement(req, res, req.params.id)) return;
   if (req.body?.name !== undefined && !String(req.body.name).trim()) {
     return res.status(400).json({ error: 'name cannot be empty' });
   }
@@ -1133,6 +1135,7 @@ dataRouter.put('/squads/:id', route(async (req: Request, res: Response) => {
 dataRouter.delete('/squads/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
+  if (!requireSquadManagement(req, res, req.params.id)) return;
   const deleted = await squadStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) {
     await workspaceRegistry.unbind('squads', req.params.id);
@@ -1152,7 +1155,9 @@ dataRouter.get('/squads/:id/projects', route(async (req: Request, res: Response)
 }));
 
 dataRouter.put('/squads/:id/projects/:projectId', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
+  // Project access controls reuse of a shared squad; it does not transfer
+  // ownership of the squad's roster or mission.
+  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
   const relationship = req.body?.relationship === 'owned' ? 'owned' : 'assigned';
@@ -1165,7 +1170,7 @@ dataRouter.put('/squads/:id/projects/:projectId', route(async (req: Request, res
 }));
 
 dataRouter.delete('/squads/:id/projects/:projectId', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
+  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
   if (!requireSquadWorkspace(req, res, req.params.id)) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
   const removed = await workspaceRegistry.removeSquadProject(
