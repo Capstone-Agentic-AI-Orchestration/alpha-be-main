@@ -50,6 +50,10 @@ const squadRun: SquadRun = {
   status: 'running',
   mission: 'Build the cart',
   plan: ['Implement', 'Verify'],
+  memberAssignments: [
+    { agentId: 'agent-1', stageLabel: 'API implementation', phase: 'implementation', instructions: 'Implement only the cart API.' },
+    { agentId: 'agent-2', stageLabel: 'Validation', phase: 'validation', instructions: 'Verify the cart behavior.' }
+  ],
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString()
 };
@@ -150,13 +154,18 @@ describe('the squad run sync payload', () => {
       current_member_index: number;
       member_agent_ids: string[];
       plan: string[];
-    }>(`select workspace_id, owner_id, current_member_index, member_agent_ids, plan from squad_runs where id='squad-run-1'`);
+      member_assignments: unknown[];
+    }>(`select workspace_id, owner_id, current_member_index, member_agent_ids, plan, member_assignments from squad_runs where id='squad-run-1'`);
     expect(stored.rows[0]).toMatchObject({
       workspace_id: 'ws1',
       owner_id: 'Lloyd1020',
       current_member_index: 1,
       member_agent_ids: ['agent-1', 'agent-2'],
-      plan: ['Implement', 'Verify']
+      plan: ['Implement', 'Verify'],
+      member_assignments: [
+        { agentId: 'agent-1', stageLabel: 'API implementation', phase: 'implementation', instructions: 'Implement only the cart API.' },
+        { agentId: 'agent-2', stageLabel: 'Validation', phase: 'validation', instructions: 'Verify the cart behavior.' }
+      ]
     });
   });
 });

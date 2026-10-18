@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
-import type { Project, ProjectBuildStep, Squad } from '../models/index.js';
+import type { Project, ProjectBuildStep, Squad, SquadMemberAssignment } from '../models/index.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { issueStore, projectStore, squadStore } from '../store/stores.js';
 import { isGitRepo } from '../utils/gitUtils.js';
@@ -12,7 +12,7 @@ import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceServ
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
-import { isSupportedTopology, squadRunner } from './squadRunner.js';
+import { isSupportedTopology, orderedMembers, squadRunner } from './squadRunner.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
 import { supabaseService } from './supabaseService.js';
 export { isProjectBuildRequest } from './projectBuildIntent.js';
@@ -60,6 +60,58 @@ function issueTitle(content: string): string {
 
 function repositoryOptions(project: Project): string[] {
   return reposForProject(project);
+}
+
+function buildStepInstructions(phase: ProjectBuildStep['phase'], label: string): string {
+  const scope = `Complete only the “${label}” step.`;
+  switch (phase) {
+    case 'requirements':
+      return `${scope} Turn the user's request and existing repository behavior into clear, testable requirements. Record assumptions and unresolved questions for the next agent. Do not begin implementation.`;
+    case 'architecture':
+      return `${scope} Define the relevant components, interfaces, and decisions for the requested change. Leave a concise design handoff; do not implement later stages.`;
+    case 'database':
+      return `${scope} Make only the required data-layer changes and focused migration or schema checks. Preserve compatibility and leave the next agent a handoff.`;
+    case 'validation':
+      return `${scope} Verify the implemented behavior against the request and run relevant checks. Report evidence and concrete failures; do not redo the implementation.`;
+    case 'review':
+      return `${scope} Review the changes already on the branch for defects, security issues, and convention problems. Report findings with evidence; do not take over implementation.`;
+    case 'delivery':
+      return `${scope} Check repository and CI readiness and report blockers. Do not merge, publish a release, or deploy without an explicit user request.`;
+    case 'implementation':
+    default:
+      return `${scope} Implement only the feature slice named by this step, building on prior commits. Leave other agents' stages to them.`;
+  }
+}
+
+function assignmentsForBuildSteps(
+  steps: ProjectBuildStep[],
+  executionOrder: string[]
+): SquadMemberAssignment[] {
+  if (!steps.length || !executionOrder.length) return [];
+  const assignments = new Map<string, SquadMemberAssignment>();
+
+  steps.forEach((step, index) => {
+    const agentId = step.agentId && executionOrder.includes(step.agentId)
+      ? step.agentId
+      : executionOrder[index % executionOrder.length];
+    const instruction = `(${step.phase}) ${buildStepInstructions(step.phase, step.label)}`;
+    const existing = assignments.get(agentId);
+    assignments.set(agentId, existing
+      ? {
+          agentId,
+          stageLabel: `${existing.stageLabel} · ${step.label}`,
+          phase: existing.phase === step.phase ? step.phase : undefined,
+          instructions: `${existing.instructions}\n- ${instruction}`
+        }
+      : {
+          agentId,
+          stageLabel: step.label,
+          phase: step.phase,
+          instructions: instruction
+        });
+  });
+
+  return [...assignments.values()];
 }
 
 function selectSquad(
@@ -222,7 +274,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
         content.trim().replace(/^\/build\s*/i, ''),
         '',
         'Build expectations:',
-        '- Implement the requested behavior in the project repository, not as a code snippet in chat.',
+        '- Complete your assigned build stage in the project repository; do not answer with a standalone code snippet in chat.',
         '- Follow the repository’s existing conventions and preserve unrelated user changes.',
         '- Run the applicable repository checks and report their real results.',
         '- Summarize changed files, verification, and anything that still needs attention.',
@@ -277,18 +329,17 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       };
     }
 
-    const enabledPlan = orderedSteps.map((step, index) => {
-      const agentName = step.agentId ? agents.find(agent => agent.id === step.agentId)?.name : undefined;
-      return `${index + 1}. ${step.label} (${step.phase})${agentName ? ` — ${agentName}` : ''}`;
-    });
+    const executionOrder = [...new Set([
+      ...stepAgentIds,
+      ...orderedMembers(squad)
+    ])];
+    const memberAssignments = assignmentsForBuildSteps(orderedSteps, executionOrder);
     const plan = [
-      `Implement the complete project change requested in issue ${issue.identifier}.`,
-      `User request: ${content.trim().replace(/^\/build\s*/i, '')}`,
-      ...(enabledPlan.length ? ['Follow the project’s ordered build sequence:', ...enabledPlan] : []),
-      'This is a real repository build. Create or update the required project files on the assigned branch; do not answer with a standalone code snippet.',
-      'Work only in this build’s isolated worktree. Do not overwrite or include unrelated user changes from the source checkout. Inspect the repository before editing and follow its established stack and conventions.',
-      'Before handing work to the next agent, commit your completed changes and leave a concise, factual handoff.',
-      'The final agent must run the available relevant checks, report their actual results, and summarize changed files and remaining limitations.'
+      `Shared project goal: ${content.trim().replace(/^\/build\s*/i, '')}`,
+      `Target issue: ${issue.identifier} — ${issue.title}`,
+      'This is a repository build in an isolated worktree. Preserve unrelated user changes and follow the repository’s existing stack and conventions.',
+      'Each agent receives its own stage assignment. Follow your assigned stage and persona; do not repeat or take over other agents’ work.',
+      'Before your stage ends, leave a concise, factual handoff describing what you completed, important decisions, checks actually run, and what the next agent should do.'
     ];
 
     try {
@@ -299,7 +350,8 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
         mission: content.trim().replace(/^\/build\s*/i, ''),
         workspaceId,
         baseWorkspaceDir: checkout.dir,
-        memberAgentIds: stepAgentIds
+        memberAgentIds: stepAgentIds,
+        memberAssignments
       });
       workspaceRegistry.bind('squad_runs', squadRun.id, workspaceId);
       const runs = sqliteService.getRunsForSquadRun(squadRun.id);

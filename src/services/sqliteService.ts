@@ -99,6 +99,7 @@ function squadRunFromRow(r: any): SquadRun {
     status: r.status,
     mission: r.mission,
     plan: JSON.parse(r.plan || '[]'),
+    memberAssignments: parseJson(r.member_assignments, []),
     stoppedReason: r.stopped_reason ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at
@@ -825,6 +826,7 @@ export class SQLiteService {
         status               TEXT NOT NULL,
         mission              TEXT NOT NULL DEFAULT '',
         plan                 TEXT NOT NULL DEFAULT '[]',
+        member_assignments   TEXT NOT NULL DEFAULT '[]',
         stopped_reason       TEXT,
         created_at           TEXT NOT NULL,
         updated_at           TEXT NOT NULL
@@ -839,6 +841,12 @@ export class SQLiteService {
 
     try {
       this.db.exec("ALTER TABLE squad_runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'ws-default'");
+    } catch {
+      // Already present.
+    }
+
+    try {
+      this.db.exec("ALTER TABLE squad_runs ADD COLUMN member_assignments TEXT NOT NULL DEFAULT '[]'");
     } catch {
       // Already present.
     }
@@ -2323,15 +2331,16 @@ export class SQLiteService {
     this.db.prepare(`
       INSERT OR REPLACE INTO squad_runs
         (id, workspace_id, squad_id, issue_id, project_id, branch_name, member_agent_ids,
-         current_member_index, status, mission, plan, stopped_reason, created_at, updated_at)
+         current_member_index, status, mission, plan, member_assignments, stopped_reason, created_at, updated_at)
       VALUES
         (@id, @workspaceId, @squadId, @issueId, @projectId, @branchName, @memberAgentIds,
-         @currentMemberIndex, @status, @mission, @plan, @stoppedReason, @createdAt, @updatedAt)
+         @currentMemberIndex, @status, @mission, @plan, @memberAssignments, @stoppedReason, @createdAt, @updatedAt)
     `).run({
       ...run,
       workspaceId: this.workspaceId(),
       memberAgentIds: JSON.stringify(run.memberAgentIds || []),
       plan: JSON.stringify(run.plan || []),
+      memberAssignments: JSON.stringify(run.memberAssignments || []),
       stoppedReason: run.stoppedReason ?? null
     });
     return run;

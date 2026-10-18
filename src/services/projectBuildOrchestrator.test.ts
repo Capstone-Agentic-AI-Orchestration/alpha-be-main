@@ -12,8 +12,8 @@ const agents = [
   { id: 'agent-2', name: 'Frontend Builder', isArchived: false }
 ];
 const steps = [
-  { id: 'step-1', position: 1, enabled: true, label: 'Plan', phase: 'Planning', squadId: 'squad-1', agentId: 'agent-1' },
-  { id: 'step-2', position: 2, enabled: true, label: 'Build interface', phase: 'Implementation', squadId: 'squad-1', agentId: 'agent-2' }
+  { id: 'step-1', position: 1, enabled: true, label: 'Plan acceptance criteria', phase: 'requirements', agentId: 'agent-1' },
+  { id: 'step-2', position: 2, enabled: true, label: 'Build calculator interface', phase: 'implementation', agentId: 'agent-2' }
 ];
 
 let checkoutDir: string;
@@ -82,7 +82,11 @@ async function load() {
       bind: vi.fn()
     }
   }));
-  vi.doMock('./squadRunner.js', () => ({ isSupportedTopology: () => true, squadRunner: { startSquadRun } }));
+  vi.doMock('./squadRunner.js', () => ({
+    isSupportedTopology: () => true,
+    orderedMembers: (squad: any) => squad.memberAgentIds,
+    squadRunner: { startSquadRun }
+  }));
   vi.doMock('../services/agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready', detail: 'Ready' }) }));
   vi.doMock('../services/githubIssueMapping.js', () => ({ reposForProject: () => repositoryList }));
   vi.doMock('./sqliteService.js', () => ({
@@ -129,13 +133,30 @@ describe('project builds triggered from chat', () => {
     expect(retry).toMatchObject({ status: 'in_progress', repository: selectedRepo, issueIdentifier: 'CALC-1' });
     expect(issueRows).toHaveLength(1);
     expect(issueRows[0]).toMatchObject({ projectId: project.id, githubRepo: selectedRepo, createdBy: 'user-1' });
-    expect(issueRows[0].description).toContain('not as a code snippet in chat');
+    expect(issueRows[0].description).toContain('Complete your assigned build stage in the project repository');
     expect(startSquadRun).toHaveBeenCalledTimes(1);
     expect(startSquadRun).toHaveBeenCalledWith(expect.objectContaining({
       squadId: 'squad-1',
       issueId: issueRows[0].id,
       baseWorkspaceDir: checkoutDir,
-      memberAgentIds: ['agent-1', 'agent-2']
+      memberAgentIds: ['agent-1', 'agent-2'],
+      memberAssignments: [
+        expect.objectContaining({
+          agentId: 'agent-1',
+          stageLabel: 'Plan acceptance criteria',
+          phase: 'requirements',
+          instructions: expect.stringContaining('Do not begin implementation')
+        }),
+        expect.objectContaining({
+          agentId: 'agent-2',
+          stageLabel: 'Build calculator interface',
+          phase: 'implementation',
+          instructions: expect.stringContaining('Implement only the feature slice')
+        })
+      ]
     }));
+    const squadCall = startSquadRun.mock.calls[0][0];
+    expect(squadCall.plan.join('\n')).not.toContain('Implement the complete project change');
+    expect(squadCall.plan.join('\n')).not.toContain('final agent must run');
   });
 });

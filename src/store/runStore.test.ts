@@ -162,13 +162,18 @@ describe.each(backends)('the run store ($name)', backend => {
 
   it('groups a squad run with its members, in the order they work', async () => {
     const runs = await backend.open();
-    await runs.saveSquadRun(WS, aSquadRun(), OWNER);
+    const memberAssignments = [
+      { agentId: 'agent-architect', stageLabel: 'Technical design', phase: 'architecture' as const, instructions: 'Record a design; do not implement.' },
+      { agentId: 'agent-developer', stageLabel: 'Implementation', phase: 'implementation' as const, instructions: 'Implement the assigned feature slice.' }
+    ];
+    await runs.saveSquadRun(WS, aSquadRun(WS, { memberAssignments }), OWNER);
     await runs.save(WS, aRun(WS, { id: 'run-second', squadRunId: 'squad-run-1', squadOrder: 2 }), OWNER);
     await runs.save(WS, aRun(WS, { id: 'run-first', squadRunId: 'squad-run-1', squadOrder: 1 }), OWNER);
 
     expect(await runs.getSquadRun(WS, 'squad-run-1')).toMatchObject({
       branchName: 'alpha/fix-cart',
-      mission: 'Fix the cart'
+      mission: 'Fix the cart',
+      memberAssignments
     });
     expect((await runs.runsForSquadRun(WS, 'squad-run-1')).map(run => run.id)).toEqual(['run-first', 'run-second']);
   });

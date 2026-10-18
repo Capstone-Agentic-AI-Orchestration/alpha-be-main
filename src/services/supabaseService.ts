@@ -132,6 +132,7 @@ export function squadRunToCloudRow(
     status: run.status,
     mission: run.mission ?? '',
     plan: run.plan ?? [],
+    member_assignments: run.memberAssignments ?? [],
     stopped_reason: run.stoppedReason ?? null,
     created_at: run.createdAt || new Date().toISOString(),
     updated_at: run.updatedAt || new Date().toISOString()
