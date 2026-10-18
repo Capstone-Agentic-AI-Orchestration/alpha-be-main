@@ -54,6 +54,7 @@ beforeEach(async () => {
   createBranch = vi.fn(async () => undefined);
   diff = vi.fn(async () => ({ changedFiles: 0, insertions: 0, deletions: 0 }));
   vi.doMock('./sqliteService.js', () => ({ sqliteService: sql }));
+  vi.doMock('./workspaceRegistry.js', () => ({ workspaceRegistry: { bind: vi.fn() } }));
   vi.doMock('./processManager.js', () => ({ processManager: { spawnProcess: spawn,
     killProcess: vi.fn(async () => undefined), isRunActive: () => true } }));
   vi.doMock('./supabaseService.js', () => ({ supabaseService: { isConfigured: () => false } }));

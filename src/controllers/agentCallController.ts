@@ -8,6 +8,7 @@ import { sqliteService } from '../services/sqliteService.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { agentCallService } from '../services/agentCallService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
+import { isGitRepo } from '../utils/gitUtils.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { reposForProject } from '../services/githubIssueMapping.js';
 import { agentStore, projectStore, squadStore } from '../store/stores.js';
@@ -187,10 +188,12 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
   const hasWorkingCopy = Boolean(workspace && fs.existsSync(workspace.dir));
   // Each repository's own answer, so a pair with only one half here says so.
   const repos = reposForProject(project);
-  const onMachine = repos.filter(repo => {
+  const repositories = await Promise.all(repos.map(async repo => {
     const found = resolveProjectWorkspace(project, repo);
-    return Boolean(found && fs.existsSync(found.dir));
-  }).length;
+    const connected = Boolean(found && fs.existsSync(found.dir) && await isGitRepo(found.dir));
+    return { repo, connected };
+  }));
+  const onMachine = repositories.filter(repository => repository.connected).length;
   res.json({
     project: {
       id: project.id,
@@ -200,6 +203,7 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
       workingCopy: hasWorkingCopy
         ? { status: 'connected', managed: workspace?.managed ?? false, repositories: repos.length, onMachine }
         : { status: 'not_connected', managed: false, repositories: repos.length, onMachine },
+      repositories,
       assignedSquadNames: visibleSquads.map(squad => squad.name)
     },
     squads: visibleSquads,

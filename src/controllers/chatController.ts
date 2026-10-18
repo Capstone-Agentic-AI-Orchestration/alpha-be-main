@@ -13,6 +13,7 @@ import {
   shareThread
 } from '../services/chatWriteThrough.js';
 import { desktopOnly } from './desktopOnly.js';
+import { isProjectBuildRequest } from '../services/projectBuildIntent.js';
 
 export const chatRouter = Router();
 
@@ -224,9 +225,19 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
-    const { threadId, content, senderName, targetAgentId, targetSquadId } = req.body;
-    if (!threadId || !content) {
+    if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, projectId, intent, clientMessageId } = req.body;
+    if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
+    }
+    if (projectId !== undefined && projectId !== null && typeof projectId !== 'string') {
+      return res.status(400).json({ error: 'projectId must be a string or omitted' });
+    }
+    if (intent !== undefined && !['auto', 'build', 'ask'].includes(intent)) {
+      return res.status(400).json({ error: 'intent must be auto, build, or ask' });
+    }
+    if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || !clientMessageId.trim() || clientMessageId.length > 200)) {
+      return res.status(400).json({ error: 'clientMessageId must be a non-empty string of at most 200 characters' });
     }
     if (
       (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') ||
@@ -237,14 +248,40 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (targetAgentId && targetSquadId) {
       return res.status(400).json({ error: 'Choose an agent or a squad, not both' });
     }
+    if (repository !== undefined && repository !== null && typeof repository !== 'string') {
+      return res.status(400).json({ error: 'repository must be a repository name or omitted' });
+    }
+
+    const existingThread = sqliteService.getChatThreads().find(thread => thread.id === threadId);
+    if (existingThread && existingThread.ownerId !== req.workspace!.userId) {
+      return res.status(404).json({ error: 'Conversation not found.' });
+    }
+    if (existingThread?.projectId && projectId && existingThread.projectId !== projectId) {
+      return res.status(409).json({ error: 'This conversation is already attached to another project.' });
+    }
+    const scopedProjectId = existingThread?.projectId ?? projectId ?? undefined;
+    if (scopedProjectId && !requireProjectWorkspace(req, res, scopedProjectId)) return;
+    if (existingThread && !existingThread.projectId && scopedProjectId) {
+      const scopedThread = sqliteService.setChatThreadProject(threadId, scopedProjectId);
+      if (!scopedThread) return res.status(404).json({ error: 'Conversation not found.' });
+      shareThread(scopedThread);
+    }
+
+    const buildRequested = intent === 'build' || (intent !== 'ask' && isProjectBuildRequest(content));
+    const buildRequest = req.workspace!.role !== 'client' && buildRequested
+      ? { context: req.workspace!, repository: typeof repository === 'string' ? repository : undefined }
+      : undefined;
     const result = await chatService.sendMessage({
       threadId,
       content,
       senderName,
       targetAgentId,
       targetSquadId,
+      projectId: scopedProjectId,
+      clientMessageId,
       workspaceId: req.workspace!.workspaceId,
-      userId: req.workspace!.userId
+      userId: req.workspace!.userId,
+      buildRequest
     });
     res.status(201).json(result);
   } catch (err: any) {

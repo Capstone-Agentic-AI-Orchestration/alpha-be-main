@@ -140,7 +140,9 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'agent.read',
     // A PM staffs the agents used by the projects they initiate.
     'agent.manage',
+    'agent.run',
     'squad.read',
+    'squad.run',
     'chat.read',
     'chat.write',
     'deployment.read',
