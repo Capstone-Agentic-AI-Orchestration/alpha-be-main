@@ -25,7 +25,7 @@ import { saveChatMessageAndShare, createThreadAndShare } from './chatWriteThroug
 import { agentCallService } from './agentCallService.js';
 import { randomUUID } from 'node:crypto';
 import type { WorkspaceContext } from './workspaceRegistry.js';
-import { startProjectBuild, type ProjectBuildStartResult } from './projectBuildOrchestrator.js';
+import { startProjectBuildBatch, type ProjectBuildStartResult } from './projectBuildOrchestrator.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -49,7 +49,7 @@ export interface SendMessageParams {
   /** Caller's role in that workspace, for role-gated chat behaviour. */
   workspaceRole?: WorkspaceRole;
   /** A clear project implementation request, routed through the real runner. */
-  buildRequest?: { context: WorkspaceContext; repository?: string };
+  buildRequest?: { context: WorkspaceContext; repository?: string; repositories?: string[] };
 }
 
 /**
@@ -147,6 +147,7 @@ export interface SendMessageResult {
    */
   agentMessages: ChatMessage[];
   build?: ProjectBuildStartResult;
+  builds?: ProjectBuildStartResult[];
 }
 
 /**
@@ -277,39 +278,51 @@ export class ChatService extends EventEmitter {
         : undefined;
       if (existingBuildReply) return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
 
-      let build: ProjectBuildStartResult;
-      try {
-        build = await startProjectBuild({
-          context: params.buildRequest.context,
-          projectId: thread.projectId,
-          requestedRepository: params.buildRequest.repository,
-          threadId,
-          messageId: userMessage.id,
-          content
-        });
-      } catch (error) {
-        build = {
-          status: 'blocked',
-          projectId: thread.projectId,
-          reason: error instanceof Error ? error.message : 'The build could not be prepared.'
-        };
-      }
-
-      const summary = build.status === 'blocked'
-        ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
-        : [
-            build.status === 'queued' ? `**Build queued · ${build.issueIdentifier}**`
-              : build.status === 'in_progress' ? `**Build already in progress · ${build.issueIdentifier}**`
-                : build.status === 'awaiting_review' ? `**Build ready for review · ${build.issueIdentifier}**`
-                  : build.status === 'failed' ? `**Build stopped · ${build.issueIdentifier}**`
-                    : `**Build started · ${build.issueIdentifier}**`,
-            build.reason,
-            build.projectName ? `**Project:** ${build.projectName}` : undefined,
-            build.repository ? `**Repository:** ${build.repository}` : undefined,
-            build.squadName ? `**Agent sequence:** ${build.squadName}` : undefined,
-            build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-            'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
-          ].filter(Boolean).join('\n\n');
+      const repositories = [...new Set((params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []))
+        .map(repository => repository.trim()).filter(Boolean))];
+      const builds = await startProjectBuildBatch({
+        context: params.buildRequest.context,
+        projectId: thread.projectId,
+        threadId,
+        messageId: userMessage.id,
+        content,
+        repositories
+      });
+      const build = builds[0];
+      const statusText = (result: ProjectBuildStartResult) => result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
+        : result.status === 'in_progress' ? `Build already in progress · ${result.issueIdentifier}`
+          : result.status === 'awaiting_review' ? `Build ready for review · ${result.issueIdentifier}`
+            : result.status === 'failed' ? `Build stopped · ${result.issueIdentifier}`
+              : result.status === 'blocked' ? 'Build not started'
+                : `Build started · ${result.issueIdentifier}`;
+      const summary = builds.length > 1 && builds.every(result => result.status === 'blocked')
+        ? [
+            '**Build not started for any repository.**',
+            ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
+            'Review the project setup, then try the build again.'
+          ].join('\n\n')
+        : builds.length > 1
+        ? [
+            `**Build requested for ${builds.length} repositories**`,
+            ...builds.map(result => [
+              `**${result.repository ?? 'Repository'} · ${statusText(result)}**`,
+              result.reason,
+              result.squadName ? `Agent sequence: ${result.squadName}` : undefined,
+              result.branchName ? `Working branch: ${result.branchName}` : undefined
+            ].filter(Boolean).join(' · ')),
+            'Open the Live Build Room and choose a build to follow its agents, handoffs, changed files, and verification.'
+          ].join('\n\n')
+        : build.status === 'blocked'
+          ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
+          : [
+              `**${statusText(build)}**`,
+              build.reason,
+              build.projectName ? `**Project:** ${build.projectName}` : undefined,
+              build.repository ? `**Repository:** ${build.repository}` : undefined,
+              build.squadName ? `**Agent sequence:** ${build.squadName}` : undefined,
+              build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
+              'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
+            ].filter(Boolean).join('\n\n');
       const reply: ChatMessage = {
         id: `${messageId}-build`,
         threadId,
@@ -321,7 +334,7 @@ export class ChatService extends EventEmitter {
       };
       saveChatMessageAndShare(reply);
       this.emit('chat_message', reply);
-      return { userMessage, agentMessage: reply, agentMessages: [reply], build };
+      return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
     }
 
     /**

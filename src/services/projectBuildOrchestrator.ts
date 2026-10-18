@@ -146,6 +146,31 @@ export function startProjectBuild(input: StartProjectBuildInput): Promise<Projec
   return pending;
 }
 
+/** Start one independent, idempotent squad build for each selected repository. */
+export function startProjectBuildBatch(
+  input: Omit<StartProjectBuildInput, 'requestedRepository'> & { repositories?: string[] }
+): Promise<ProjectBuildStartResult[]> {
+  const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
+  const targets: Array<string | undefined> = repositories.length ? repositories : [undefined];
+  return Promise.all(targets.map(async repository => {
+    try {
+      const result = await startProjectBuild({
+        ...input,
+        messageId: targets.length > 1 ? `${input.messageId}:repo:${repository}` : input.messageId,
+        requestedRepository: repository
+      });
+      return { ...result, repository: result.repository ?? repository };
+    } catch (error) {
+      return {
+        status: 'blocked' as const,
+        projectId: input.projectId,
+        repository,
+        reason: error instanceof Error ? error.message : 'The build could not be prepared.'
+      };
+    }
+  }));
+}
+
 async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<ProjectBuildStartResult> {
   const { context, projectId, threadId, messageId, content } = input;
   if (context.role === 'client') return blocked('Project builds are available to the internal project team.');
@@ -166,6 +191,9 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     const requested = input.requestedRepository?.trim();
     if (requested && !repos.some(repo => repo.toLowerCase() === requested.toLowerCase())) {
       return blocked(`“${requested}” is not a repository attached to ${project.name}. Choose one of this project’s repositories.`, project);
+    }
+    if (!requested && repos.length > 1) {
+      return blocked(`Choose one or more repositories to build: ${repos.join(', ')}.`, project);
     }
 
     let repository = requested || undefined;
