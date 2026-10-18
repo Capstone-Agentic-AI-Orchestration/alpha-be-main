@@ -806,7 +806,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     }),
     eligible: true,
     canRun: Boolean(selectedSquad) && workspaceRegistry.can(req.workspace!.role, 'squad.run'),
-    canManage: workspaceRegistry.can(req.workspace!.role, 'squad.manage'),
+    canManage: Boolean(selectedSquad && workspaceRegistry.canManageSquad(req.workspace!, selectedSquad.id)),
     status: selectedRun?.status ?? 'idle',
     summary: {
       totalAgents: agentCards.length,

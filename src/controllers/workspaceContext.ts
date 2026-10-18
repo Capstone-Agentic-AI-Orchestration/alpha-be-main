@@ -207,7 +207,7 @@ export function requireDiscoverableProject(
   return true;
 }
 
-/** A squad is visible only to its owner or to workspace roles with broad squad visibility. */
+/** A squad is visible to internal members of its workspace. */
 export function requireSquadWorkspace(
   req: Request,
   res: Response,
@@ -215,6 +215,19 @@ export function requireSquadWorkspace(
 ): boolean {
   if (!req.workspace || !workspaceRegistry.canAccessSquad(req.workspace, squadId)) {
     res.status(404).json({ error: 'Squad not found in the active workspace.' });
+    return false;
+  }
+  return true;
+}
+
+/** Editing a shared squad stays with its owner or a workspace administrator. */
+export function requireSquadManagement(
+  req: Request,
+  res: Response,
+  squadId: string
+): boolean {
+  if (!req.workspace || !workspaceRegistry.canManageSquad(req.workspace, squadId)) {
+    res.status(403).json({ error: 'Only the squad owner or a workspace administrator can change this squad.' });
     return false;
   }
   return true;
