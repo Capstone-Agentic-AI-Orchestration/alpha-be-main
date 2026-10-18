@@ -118,6 +118,21 @@ chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res:
 
   if (projectId && !requireProjectWorkspace(req, res, projectId)) return;
 
+  const workspaceId = req.workspace!.workspaceId;
+  const ownerId = req.workspace!.userId;
+  const ownThreads = await chatStore().listThreads(workspaceId, ownerId);
+  const current = ownThreads.find(thread => thread.id === req.params.id);
+  if (!current) return res.status(404).json({ error: 'Thread not found' });
+
+  if ((current.projectId ?? null) !== (projectId ?? null)) {
+    const messages = await chatStore().messages(workspaceId, req.params.id, ownerId);
+    if (messages?.length) {
+      return res.status(409).json({
+        error: 'This conversation already has messages. Start a new conversation to switch projects; the existing chat will stay saved.'
+      });
+    }
+  }
+
   const updated = sqliteService.setChatThreadProject(req.params.id, projectId);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
   shareThread(updated);

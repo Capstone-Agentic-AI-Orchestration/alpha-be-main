@@ -7,6 +7,7 @@ import { addCommentAndShare, updateIssueAndPush } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
 import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
+import { supabaseService } from './supabaseService.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -57,6 +58,14 @@ export class SquadRunner {
   /** Squad runs waiting on a member, keyed by the run id currently executing. */
   private awaiting = new Map<string, { squadRunId: string; workspaceId: string }>();
   private wired = false;
+
+  /** Keep the local runner authoritative while publishing the room's parent run to the shared board. */
+  private async persistSquadRun(run: SquadRun, workspaceId: string): Promise<void> {
+    sqliteService.saveSquadRun(run);
+    if (supabaseService.isConfigured()) {
+      await supabaseService.saveSquadRunToCloud(run, workspaceId);
+    }
+  }
 
   /**
    * Advance a squad when the member it was waiting on finishes.
@@ -157,7 +166,7 @@ export class SquadRunner {
       createdAt: now,
       updatedAt: now
     };
-    sqliteService.saveSquadRun(squadRun);
+    await this.persistSquadRun(squadRun, params.workspaceId);
     workspaceRegistry.bind('squad_runs', squadRun.id, params.workspaceId);
 
     logInfo(
@@ -174,7 +183,7 @@ export class SquadRunner {
         stoppedReason: reason,
         updatedAt: new Date().toISOString()
       };
-      sqliteService.saveSquadRun(stopped);
+      await this.persistSquadRun(stopped, params.workspaceId);
       updateIssueAndPush(issue.id, { status: 'in_progress' });
       addCommentAndShare({
         id: `comm-${squadRun.id}-stopped`,
@@ -206,11 +215,11 @@ export class SquadRunner {
 
     workspaceRegistry.bind('prototype_runs', run.id, workspaceId);
     this.awaiting.set(run.id, { squadRunId: squadRun.id, workspaceId });
-    sqliteService.saveSquadRun({
+    await this.persistSquadRun({
       ...squadRun,
       currentMemberIndex: index,
       updatedAt: new Date().toISOString()
-    });
+    }, workspaceId);
 
     /**
      * The handoff, as an event.
@@ -272,7 +281,7 @@ export class SquadRunner {
 
     if (!succeeded) {
       const reason = `${who} did not finish (${finished.status}). Stopped at member ${position} of ${total}.`;
-      sqliteService.saveSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now });
+      await this.persistSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now }, waiting.workspaceId);
       addCommentAndShare({
         id: `comm-${squadRun.id}-stopped`,
         issueId: squadRun.issueId,
@@ -289,7 +298,7 @@ export class SquadRunner {
     const next = position;
 
     if (next >= total) {
-      sqliteService.saveSquadRun({ ...squadRun, status: 'awaiting_approval', updatedAt: now });
+      await this.persistSquadRun({ ...squadRun, status: 'awaiting_approval', updatedAt: now }, waiting.workspaceId);
 
       const runs = sqliteService.getRunsForSquadRun(squadRun.id);
       const tokens = runs.reduce((sum, r) => sum + (totalTokens(r.usage) ?? 0), 0);
