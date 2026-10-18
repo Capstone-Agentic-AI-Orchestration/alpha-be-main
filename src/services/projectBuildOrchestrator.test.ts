@@ -27,21 +27,23 @@ async function load() {
   issueRows = [];
   squadRuns = [];
   createdIssue = vi.fn(async (_workspaceId: string, input: any) => {
+    const issueNumber = issueRows.length + 1;
     const issue = {
       ...input,
-      identifier: 'CALC-1',
+      identifier: `CALC-${issueNumber}`,
       createdAt: '2026-10-18T00:00:00.000Z'
     };
     issueRows.push(issue);
     return issue;
   });
   startSquadRun = vi.fn(async (input: any) => {
+    const runNumber = squadRuns.length + 1;
     const run = {
-      id: 'squad-run-1',
+      id: `squad-run-${runNumber}`,
       squadId: input.squadId,
       issueId: input.issueId,
       projectId: project.id,
-      branchName: 'build/CALC-1',
+      branchName: `build/CALC-${runNumber}`,
       memberAgentIds: input.memberAgentIds,
       currentMemberIndex: 0,
       status: 'running',
@@ -158,5 +160,47 @@ describe('project builds triggered from chat', () => {
     const squadCall = startSquadRun.mock.calls[0][0];
     expect(squadCall.plan.join('\n')).not.toContain('Implement the complete project change');
     expect(squadCall.plan.join('\n')).not.toContain('final agent must run');
+  });
+
+  it('starts and deduplicates separate sequential builds for every selected repository', async () => {
+    const service = await load();
+    const input = {
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.',
+      repositories: [selectedRepo, 'acme/shop-be']
+    };
+
+    const first = await service.startProjectBuildBatch(input);
+    const retry = await service.startProjectBuildBatch(input);
+
+    expect(first).toMatchObject([
+      { status: 'started', repository: selectedRepo, issueIdentifier: 'CALC-1', branchName: 'build/CALC-1' },
+      { status: 'started', repository: 'acme/shop-be', issueIdentifier: 'CALC-2', branchName: 'build/CALC-2' }
+    ]);
+    expect(retry).toMatchObject([
+      { status: 'in_progress', repository: selectedRepo, issueIdentifier: 'CALC-1' },
+      { status: 'in_progress', repository: 'acme/shop-be', issueIdentifier: 'CALC-2' }
+    ]);
+    expect(issueRows).toHaveLength(2);
+    expect(issueRows.map(issue => issue.githubRepo)).toEqual([selectedRepo, 'acme/shop-be']);
+    expect(startSquadRun).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not guess a single repository when a multi-repo build has no selection', async () => {
+    const service = await load();
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.'
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: 'Choose one or more repositories to build: acme/shop-fe, acme/shop-be.' });
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(startSquadRun).not.toHaveBeenCalled();
   });
 });

@@ -268,7 +268,7 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, projectId, intent, clientMessageId } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -293,6 +293,12 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (repository !== undefined && repository !== null && typeof repository !== 'string') {
       return res.status(400).json({ error: 'repository must be a repository name or omitted' });
     }
+    if (repositories !== undefined && (!Array.isArray(repositories) || repositories.length > 30 || repositories.some((item: unknown) => typeof item !== 'string' || !item.trim()))) {
+      return res.status(400).json({ error: 'repositories must be a list of up to 30 repository names' });
+    }
+    const requestedRepositories = Array.isArray(repositories)
+      ? [...new Set(repositories.map((item: string) => item.trim()))]
+      : typeof repository === 'string' && repository.trim() ? [repository.trim()] : undefined;
 
     const existingThread = sqliteService.getChatThreads().find(thread => thread.id === threadId);
     if (existingThread && existingThread.ownerId !== req.workspace!.userId) {
@@ -311,7 +317,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
 
     const buildRequested = intent === 'build' || (intent !== 'ask' && isProjectBuildRequest(content));
     const buildRequest = req.workspace!.role !== 'client' && buildRequested
-      ? { context: req.workspace!, repository: typeof repository === 'string' ? repository : undefined }
+      ? { context: req.workspace!, repositories: requestedRepositories }
       : undefined;
     const result = await chatService.sendMessage({
       threadId,

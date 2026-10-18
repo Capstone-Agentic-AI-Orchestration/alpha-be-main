@@ -387,7 +387,21 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     .filter(run => run.projectId === project.id && projectSquadIds.has(run.squadId))
     .filter(run => workspaceRegistry.canAccessSquad(req.workspace!, run.squadId))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-  const squadRun = squadRuns.find(run => run.status === 'running' || run.status === 'awaiting_approval') ?? squadRuns[0];
+  const requestedRunId = typeof req.query.runId === 'string' ? req.query.runId : undefined;
+  const requestedRun = requestedRunId ? squadRuns.find(run => run.id === requestedRunId) : undefined;
+  const squadRun = requestedRun ?? squadRuns.find(run => run.status === 'running' || run.status === 'awaiting_approval') ?? squadRuns[0];
+  const buildRuns = squadRuns.slice(0, 40).map(run => {
+    const issue = issues.find(item => item.id === run.issueId && item.projectId === project.id);
+    return {
+      id: run.id,
+      status: run.status,
+      issueIdentifier: issue?.identifier,
+      issueTitle: issue?.title,
+      repository: issue?.githubRepo,
+      branchName: run.branchName,
+      updatedAt: run.updatedAt
+    };
+  });
   const selectedSquad = squads.find(squad => squad.id === squadRun?.squadId) ?? squads[0];
   const selectedRun = squadRun && squadRun.squadId === selectedSquad?.id ? squadRun : undefined;
   const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
@@ -813,6 +827,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     canRun: Boolean(selectedSquad) && workspaceRegistry.can(req.workspace!.role, 'squad.run'),
     canManage: Boolean(selectedSquad && workspaceRegistry.canManageSquad(req.workspace!, selectedSquad.id)),
     status: selectedRun?.status ?? 'idle',
+    buildRuns,
     summary: {
       totalAgents: agentCards.length,
       completed,
