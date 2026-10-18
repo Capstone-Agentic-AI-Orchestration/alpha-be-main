@@ -180,9 +180,9 @@ describe.each(backends)('the workspace directory ($name)', backend => {
   });
 
   /**
-   * One owner per squad. Ownership is what lets a developer see a squad at
-   * all, so a second owner row would be a second answer to that question --
-   * which is why Postgres's key had to be corrected in 0008.
+   * One owner per squad. Ownership determines who may change a shared squad,
+   * so a second owner row would make edit rights ambiguous -- which is why
+   * Postgres's key had to be corrected in 0008.
    */
   it('replaces a squad owner rather than adding one', async () => {
     const directory = await backend.open();

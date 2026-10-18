@@ -2,9 +2,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 
 import { createTestDatabase } from '../store/testDatabase.js';
-import { runToCloudRow } from './supabaseService.js';
+import { runToCloudRow, squadRunToCloudRow } from './supabaseService.js';
 import { projectRow } from '../store/postgresProjectStore.js';
-import type { Project, PrototypeRun } from '../models/index.js';
+import type { Project, PrototypeRun, SquadRun } from '../models/index.js';
 
 /**
  * Whether what the desktop sends is what the cloud table accepts.
@@ -38,6 +38,25 @@ const run: PrototypeRun = {
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString()
 } as PrototypeRun;
+
+const squadRun: SquadRun = {
+  id: 'squad-run-1',
+  squadId: 'squad-core',
+  issueId: 'i1',
+  projectId: 'p1',
+  branchName: 'squad/core/EC-1-1234',
+  memberAgentIds: ['agent-1', 'agent-2'],
+  currentMemberIndex: 1,
+  status: 'running',
+  mission: 'Build the cart',
+  plan: ['Implement', 'Verify'],
+  memberAssignments: [
+    { agentId: 'agent-1', stageLabel: 'API implementation', phase: 'implementation', instructions: 'Implement only the cart API.' },
+    { agentId: 'agent-2', stageLabel: 'Validation', phase: 'validation', instructions: 'Verify the cart behavior.' }
+  ],
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString()
+};
 
 beforeAll(async () => {
   // RLS is not the subject here -- `rlsPolicies.test.ts` covers that -- so this
@@ -121,6 +140,33 @@ describe('the run sync payload', () => {
     );
     expect(stored.rows[0].plan).toEqual(['step one']);
     expect(stored.rows[0].stages).toEqual([{ name: 'build' }]);
+  });
+});
+
+describe('the squad run sync payload', () => {
+  it('inserts the sequencer state into the real squad_runs table', async () => {
+    const payload = squadRunToCloudRow(squadRun, 'ws1', 'Lloyd1020');
+    await expect(insertRow(payload, 'squad_runs')).resolves.toBeTruthy();
+
+    const stored = await db.query<{
+      workspace_id: string;
+      owner_id: string;
+      current_member_index: number;
+      member_agent_ids: string[];
+      plan: string[];
+      member_assignments: unknown[];
+    }>(`select workspace_id, owner_id, current_member_index, member_agent_ids, plan, member_assignments from squad_runs where id='squad-run-1'`);
+    expect(stored.rows[0]).toMatchObject({
+      workspace_id: 'ws1',
+      owner_id: 'Lloyd1020',
+      current_member_index: 1,
+      member_agent_ids: ['agent-1', 'agent-2'],
+      plan: ['Implement', 'Verify'],
+      member_assignments: [
+        { agentId: 'agent-1', stageLabel: 'API implementation', phase: 'implementation', instructions: 'Implement only the cart API.' },
+        { agentId: 'agent-2', stageLabel: 'Validation', phase: 'validation', instructions: 'Verify the cart behavior.' }
+      ]
+    });
   });
 });
 

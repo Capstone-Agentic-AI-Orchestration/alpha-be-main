@@ -10,6 +10,7 @@ import {
   type HostingContext
 } from './hostingService.js';
 import { redactLogLines } from './redactLogs.js';
+import { assertSafeBranchName } from '../../utils/gitUtils.js';
 
 /**
  * One page of a hosted branch's logs: a backend's Render service, or the
@@ -24,7 +25,7 @@ import { redactLogLines } from './redactLogs.js';
 const RENDER_FILTERS: LogFilterKey[] = ['level', 'type', 'text', 'instance'];
 const VERCEL_FILTERS: LogFilterKey[] = ['level', 'type', 'text'];
 
-const BRANCHES: readonly HostingBranch[] = ['main', 'uat', 'dev'];
+const PIPELINE_BRANCHES: readonly HostingBranch[] = ['main', 'uat', 'dev'];
 
 function unavailable(reason: string, filters: LogFilterKey[] = []): DeploymentLogsResponse {
   return { source: 'unavailable', reason, logs: [], hasMore: false, next: null, filters };
@@ -35,7 +36,7 @@ export async function getHostingLogs(
   branch: string | undefined,
   query: DeploymentLogsQuery
 ): Promise<DeploymentLogsResponse> {
-  if (!branch || !BRANCHES.includes(branch as HostingBranch)) {
+  if (!branch) {
     return unavailable('Choose a branch: main, uat or dev.');
   }
   const stack = resolveStack(ctx);
@@ -43,6 +44,9 @@ export async function getHostingLogs(
   const repoName = ctx.repo.split('/')[1];
 
   if (platformForStack(stack) === 'render') {
+    if (!PIPELINE_BRANCHES.includes(branch as HostingBranch)) {
+      return unavailable('Run-branch logs are not available for Render previews.', RENDER_FILTERS);
+    }
     const client = renderClient();
     if (!client) return unavailable('Render is not configured on this server.', RENDER_FILTERS);
     if (branch === 'dev') return unavailable('Backends are hosted for main and uat only.', RENDER_FILTERS);
@@ -68,8 +72,19 @@ export async function getHostingLogs(
   const client = vercelClient();
   if (!client) return unavailable('Vercel is not configured on this server.', VERCEL_FILTERS);
   try {
+    assertSafeBranchName(branch);
+  } catch {
+    return unavailable('The requested branch name is not valid.', VERCEL_FILTERS);
+  }
+  try {
     const project = await client.findProjectByName(repoName);
     if (!project) return unavailable(`${ctx.repo} is not hosted yet.`, VERCEL_FILTERS);
+    const linkedRepo = project.link?.repo?.includes('/') || !project.link?.org
+      ? project.link?.repo ?? ''
+      : `${project.link.org}/${project.link.repo}`;
+    if (!linkedRepo || linkedRepo.toLowerCase() !== ctx.repo.toLowerCase()) {
+      return unavailable('The Vercel project with this name is linked to a different repository.', VERCEL_FILTERS);
+    }
     const [page, vars] = await Promise.all([
       client.queryLogs(project.id, branch === 'main' ? { production: true } : { branch }, {
         type: query.type,

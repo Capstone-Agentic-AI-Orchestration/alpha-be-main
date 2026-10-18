@@ -23,6 +23,9 @@ import { workspaceRegistry, WorkspaceRole } from './workspaceRegistry.js';
 import { RUNS_DIR } from '../config/env.js';
 import { saveChatMessageAndShare, createThreadAndShare } from './chatWriteThrough.js';
 import { agentCallService } from './agentCallService.js';
+import { randomUUID } from 'node:crypto';
+import type { WorkspaceContext } from './workspaceRegistry.js';
+import { startProjectBuildBatch, type ProjectBuildStartResult } from './projectBuildOrchestrator.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -31,6 +34,10 @@ export interface SendMessageParams {
   /** Explicit target from the chat picker. Null clears a persisted target. */
   targetAgentId?: string | null;
   targetSquadId?: string | null;
+  /** Project attached to a thread being created by its first message. */
+  projectId?: string;
+  /** Stable client id, reused when a transport retry repeats the same send. */
+  clientMessageId?: string;
   /**
    * Workspace the message belongs to. Optional: requests that go through
    * runWithWorkspace already carry it ambiently via currentWorkspaceId().
@@ -41,6 +48,8 @@ export interface SendMessageParams {
   userId?: string;
   /** Caller's role in that workspace, for role-gated chat behaviour. */
   workspaceRole?: WorkspaceRole;
+  /** A clear project implementation request, routed through the real runner. */
+  buildRequest?: { context: WorkspaceContext; repository?: string; repositories?: string[] };
 }
 
 /**
@@ -137,6 +146,8 @@ export interface SendMessageResult {
    * before it said.
    */
   agentMessages: ChatMessage[];
+  build?: ProjectBuildStartResult;
+  builds?: ProjectBuildStartResult[];
 }
 
 /**
@@ -239,21 +250,92 @@ export class ChatService extends EventEmitter {
         agentIds: [],
         targetAgentId: params.targetAgentId ?? undefined,
         targetSquadId: params.targetSquadId ?? undefined,
+        projectId: params.projectId,
         createdAt: now
       });
       if (workspaceId) workspaceRegistry.bind('chat_threads', threadId, workspaceId);
     }
 
     // 1. Save user message
-    const userMessage: ChatMessage = {
-      id: `msg-${Date.now()}-user`,
+    const messageId = params.clientMessageId?.trim() || `msg-${Date.now()}-${randomUUID()}-user`;
+    const existingUserMessage = sqliteService.getChatMessages(threadId).find(message => message.id === messageId);
+    if (existingUserMessage && (existingUserMessage.senderType !== 'user' || existingUserMessage.content !== content)) {
+      throw new Error('This message id already belongs to a different conversation message.');
+    }
+    const userMessage: ChatMessage = existingUserMessage ?? {
+      id: messageId,
       threadId,
       senderType: 'user',
       senderName,
       content,
       timestamp: now
     };
-    saveChatMessageAndShare(userMessage);
+    if (!existingUserMessage) saveChatMessageAndShare(userMessage);
+
+    if (params.buildRequest) {
+      const existingBuildReply = existingUserMessage
+        ? sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`)
+        : undefined;
+      if (existingBuildReply) return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
+
+      const repositories = [...new Set((params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []))
+        .map(repository => repository.trim()).filter(Boolean))];
+      const builds = await startProjectBuildBatch({
+        context: params.buildRequest.context,
+        projectId: thread.projectId,
+        threadId,
+        messageId: userMessage.id,
+        content,
+        repositories
+      });
+      const build = builds[0];
+      const statusText = (result: ProjectBuildStartResult) => result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
+        : result.status === 'in_progress' ? `Build already in progress · ${result.issueIdentifier}`
+          : result.status === 'awaiting_review' ? `Build ready for review · ${result.issueIdentifier}`
+            : result.status === 'failed' ? `Build stopped · ${result.issueIdentifier}`
+              : result.status === 'blocked' ? 'Build not started'
+                : `Build started · ${result.issueIdentifier}`;
+      const summary = builds.length > 1 && builds.every(result => result.status === 'blocked')
+        ? [
+            '**Build not started for any repository.**',
+            ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
+            'Review the project setup, then try the build again.'
+          ].join('\n\n')
+        : builds.length > 1
+        ? [
+            `**Build requested for ${builds.length} repositories**`,
+            ...builds.map(result => [
+              `**${result.repository ?? 'Repository'} · ${statusText(result)}**`,
+              result.reason,
+              result.squadName ? `Agent sequence: ${result.squadName}` : undefined,
+              result.branchName ? `Working branch: ${result.branchName}` : undefined
+            ].filter(Boolean).join(' · ')),
+            'Open the Live Build Room and choose a build to follow its agents, handoffs, changed files, and verification.'
+          ].join('\n\n')
+        : build.status === 'blocked'
+          ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
+          : [
+              `**${statusText(build)}**`,
+              build.reason,
+              build.projectName ? `**Project:** ${build.projectName}` : undefined,
+              build.repository ? `**Repository:** ${build.repository}` : undefined,
+              build.squadName ? `**Agent sequence:** ${build.squadName}` : undefined,
+              build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
+              'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
+            ].filter(Boolean).join('\n\n');
+      const reply: ChatMessage = {
+        id: `${messageId}-build`,
+        threadId,
+        senderType: 'agent',
+        senderName: 'Alpha Orchestrator',
+        content: summary,
+        messageType: 'build',
+        timestamp: new Date().toISOString()
+      };
+      saveChatMessageAndShare(reply);
+      this.emit('chat_message', reply);
+      return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
+    }
 
     /**
      * 2. Resolve who is being addressed — and only from THIS message.
@@ -408,7 +490,7 @@ export class ChatService extends EventEmitter {
   private async generateDefaultReply(prompt: string, threadId: string, workspaceId?: string): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
-      id: `msg-${Date.now()}-alpha`,
+      id: `msg-${Date.now()}-${randomUUID()}-alpha`,
       threadId,
       senderType: 'agent' as const,
       senderName: DEFAULT_ASSISTANT.name,

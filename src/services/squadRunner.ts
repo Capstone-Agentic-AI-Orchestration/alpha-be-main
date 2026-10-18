@@ -1,11 +1,18 @@
+import { randomUUID } from 'node:crypto';
 import { sqliteService } from './sqliteService.js';
 import { runnerService } from './runnerService.js';
+import { resolveAgent } from './personaService.js';
 import { totalTokens } from './runUsage.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, Squad, SquadRun } from '../models/index.js';
-import { addCommentAndShare } from './boardWriteThrough.js';
+import { Agent, BuildStepPhase, PrototypeRun, Squad, SquadMemberAssignment, SquadRun } from '../models/index.js';
+import { addCommentAndShare, updateIssueAndPush } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
 import type { TicketExecutionHandle } from './ticketExecutionRelay.js';
+import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
+import { workspaceRegistry } from './workspaceRegistry.js';
+import { supabaseService } from './supabaseService.js';
+import { addDetachedWorktree, removeDetachedWorktree } from '../utils/gitUtils.js';
+import { projectRunWorkspacePath } from './workspaceService.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -54,9 +61,32 @@ export class SquadRunError extends Error {}
 
 export class SquadRunner {
   /** Squad runs waiting on a member, keyed by the run id currently executing. */
-  private awaiting = new Map<string, string>();
+  private awaiting = new Map<string, { squadRunId: string; workspaceId: string }>();
   private ticketExecutions = new Map<string, TicketExecutionHandle>();
+  /** Local-only paths: never published with the shared squad-run record. */
+  private runWorkspaces = new Map<string, { repositoryDir: string; workingDir: string }>();
+  /** Serialize finish and cancellation transitions so a stop cannot race a handoff. */
+  private transitionQueues = new Map<string, Promise<unknown>>();
   private wired = false;
+
+  private serializeTransition<T>(squadRunId: string, transition: () => Promise<T>): Promise<T> {
+    const previous = this.transitionQueues.get(squadRunId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(transition);
+    this.transitionQueues.set(squadRunId, current);
+    current.then(
+      () => { if (this.transitionQueues.get(squadRunId) === current) this.transitionQueues.delete(squadRunId); },
+      () => { if (this.transitionQueues.get(squadRunId) === current) this.transitionQueues.delete(squadRunId); }
+    );
+    return current;
+  }
+
+  /** Keep the local runner authoritative while publishing the room's parent run to the shared board. */
+  private async persistSquadRun(run: SquadRun, workspaceId: string): Promise<void> {
+    sqliteService.saveSquadRun(run);
+    if (supabaseService.isConfigured()) {
+      await supabaseService.saveSquadRunToCloud(run, workspaceId);
+    }
+  }
 
   /**
    * Advance a squad when the member it was waiting on finishes.
@@ -86,6 +116,70 @@ export class SquadRunner {
     ticketExecution?: TicketExecutionHandle;
     plan?: string[];
     mission?: string;
+    workspaceId?: string;
+    /** Base checkout for a chat-triggered run-scoped Git worktree. */
+    baseWorkspaceDir?: string;
+    /** Ordered project steps first; unmentioned squad members follow in squad order. */
+    memberAgentIds?: string[];
+    /** Optional project-defined stages, frozen for this run. */
+    memberAssignments?: SquadMemberAssignment[];
+  }): Promise<SquadRun> {
+    const workspaceId = params.workspaceId ?? currentWorkspaceId();
+    return runWithWorkspace(workspaceId, () => this.startInWorkspace({ ...params, workspaceId }));
+  }
+
+  /** Stop the current member and close the parent run before a queued handoff can start. */
+  async cancelSquadRun(squadRunId: string, workspaceId = currentWorkspaceId()): Promise<SquadRun> {
+    return this.serializeTransition(squadRunId, () => runWithWorkspace(workspaceId, async () => {
+      const squadRun = sqliteService.getSquadRun(squadRunId);
+      if (!squadRun) throw new SquadRunError(`Squad run not found: ${squadRunId}`);
+      if (squadRun.status !== 'running') {
+        throw new SquadRunError(`Squad run is ${squadRun.status}, not cancellable.`);
+      }
+
+      const now = new Date().toISOString();
+      const cancelled: SquadRun = {
+        ...squadRun,
+        status: 'cancelled',
+        stoppedReason: 'Build stopped by the user.',
+        updatedAt: now
+      };
+
+      // Persist the parent first. A member's cancellation event then sees a
+      // terminal parent and cannot advance the squad to its next agent.
+      await this.persistSquadRun(cancelled, workspaceId);
+
+      const activeMember = sqliteService.getRunsForSquadRun(squadRunId)
+        .find(run => run.status === 'queued' || run.status === 'running');
+      if (activeMember) await runnerService.cancelRun(activeMember.id);
+
+      updateIssueAndPush(squadRun.issueId, { status: 'in_progress' });
+      addCommentAndShare({
+        id: `comm-${squadRun.id}-cancelled`,
+        issueId: squadRun.issueId,
+        authorType: 'system',
+        authorName: 'Alpha Squad Runner',
+        content: `Build stopped by the user. Work already completed remains on \`${squadRun.branchName}\` for review.`,
+        createdAt: now
+      });
+
+      const result = sqliteService.getSquadRun(squadRunId) ?? cancelled;
+      runnerService.emit('squad_run_cancelled', result);
+      return result;
+    }));
+  }
+
+  private async startInWorkspace(params: {
+    squadId: string;
+    issueId: string;
+    id?: string;
+    ticketExecution?: TicketExecutionHandle;
+    plan?: string[];
+    mission?: string;
+    workspaceId: string;
+    baseWorkspaceDir?: string;
+    memberAgentIds?: string[];
+    memberAssignments?: SquadMemberAssignment[];
   }): Promise<SquadRun> {
     this.wire();
 
@@ -102,7 +196,10 @@ export class SquadRunner {
     const issue = sqliteService.getIssues().find(i => i.id === params.issueId);
     if (!issue) throw new SquadRunError(`Issue not found: ${params.issueId}`);
 
-    const members = orderedMembers(squad);
+    const configuredOrder = orderedMembers(squad);
+    const requestedOrder = [...new Set(params.memberAgentIds ?? [])]
+      .filter(id => configuredOrder.includes(id));
+    const members = [...requestedOrder, ...configuredOrder.filter(id => !requestedOrder.includes(id))];
     if (!members.length) {
       throw new SquadRunError(`"${squad.name}" has no member agents, so there is nobody to run.`);
     }
@@ -116,6 +213,49 @@ export class SquadRunner {
       );
     }
 
+    const providedAssignments = new Map<string, SquadMemberAssignment>();
+    for (const assignment of params.memberAssignments ?? []) {
+      if (!members.includes(assignment.agentId)) continue;
+      const existing = providedAssignments.get(assignment.agentId);
+      providedAssignments.set(assignment.agentId, existing
+        ? {
+            agentId: assignment.agentId,
+            stageLabel: `${existing.stageLabel} · ${assignment.stageLabel}`,
+            phase: existing.phase === assignment.phase ? assignment.phase : undefined,
+            instructions: `${existing.instructions}\n- ${assignment.instructions}`
+          }
+        : assignment);
+    }
+    const agents = sqliteService.getAgents();
+    const memberAssignments = members.map((agentId, index) => {
+      const agent = agents.find(item => item.id === agentId)!;
+      return providedAssignments.get(agentId)
+        ?? defaultMemberAssignment(agent, index, members.length, resolveAgent(agent, { includeMemory: false }).systemPrompt);
+    });
+
+    const now = new Date().toISOString();
+    const squadRun: SquadRun = {
+      id: params.id ?? `squadrun-${randomUUID()}`,
+      squadId: squad.id,
+      issueId: issue.id,
+      projectId: issue.projectId,
+      // Decided once, here, because every member commits to it.
+      branchName: agentBranchName(`squad-${squad.name}`, `${issue.identifier}-${Date.now().toString().slice(-4)}`),
+      memberAgentIds: members,
+      currentMemberIndex: 0,
+      status: 'running',
+      mission: params.mission || squad.mission,
+      plan: params.plan || [],
+      memberAssignments,
+      createdAt: now,
+      updatedAt: now
+    };
+    if (params.baseWorkspaceDir) {
+      const workingDir = projectRunWorkspacePath(squadRun.projectId, squadRun.id);
+      await addDetachedWorktree(params.baseWorkspaceDir, workingDir);
+      this.runWorkspaces.set(squadRun.id, { repositoryDir: params.baseWorkspaceDir, workingDir });
+    }
+
     // The squad is the issue's execution owner. Member runs below carry the
     // individual agent identity, but must not replace this assignment when the
     // issue is refreshed by the project execution monitor.
@@ -127,54 +267,77 @@ export class SquadRunner {
       });
     }
 
-    const now = new Date().toISOString();
-    const squadRun: SquadRun = {
-      id: params.id ?? `squadrun-${Date.now()}`,
-      squadId: squad.id,
-      issueId: issue.id,
-      projectId: issue.projectId,
-      // Decided once, here, because every member commits to it.
-      branchName: agentBranchName(`squad-${squad.name}`, `${issue.identifier}-${Date.now().toString().slice(-4)}`),
-      memberAgentIds: members,
-      currentMemberIndex: 0,
-      status: 'running',
-      mission: params.mission || squad.mission,
-      plan: params.plan || [],
-      createdAt: now,
-      updatedAt: now
-    };
     if (params.ticketExecution) this.ticketExecutions.set(squadRun.id, params.ticketExecution);
-    sqliteService.saveSquadRun(squadRun);
+    await this.persistSquadRun(squadRun, params.workspaceId);
+    workspaceRegistry.bind('squad_runs', squadRun.id, params.workspaceId);
 
     logInfo(
       `Squad "${squad.name}" starting on ${issue.identifier}: ${members.length} member(s), branch ${squadRun.branchName}`
     );
 
-    await this.startMember(squadRun, 0);
+    try {
+      await this.startMember(squadRun, 0, params.workspaceId);
+    } catch (error) {
+      const reason = `Could not start ${nameFor(members[0])}: ${error instanceof Error ? error.message : String(error)}`;
+      const stopped: SquadRun = {
+        ...squadRun,
+        status: 'failed',
+        stoppedReason: reason,
+        updatedAt: new Date().toISOString()
+      };
+      await this.persistSquadRun(stopped, params.workspaceId);
+      updateIssueAndPush(issue.id, { status: 'in_progress' });
+      addCommentAndShare({
+        id: `comm-${squadRun.id}-stopped`,
+        issueId: squadRun.issueId,
+        authorType: 'system',
+        authorName: 'Alpha Squad Runner',
+        content: `Squad run stopped before its first agent started. ${reason} The issue is ready to retry.`,
+        createdAt: stopped.updatedAt
+      });
+      runnerService.emit('squad_run_failed', stopped);
+      throw error;
+    }
     return sqliteService.getSquadRun(squadRun.id) ?? squadRun;
   }
 
-  private async startMember(squadRun: SquadRun, index: number) {
+  private async startMember(squadRun: SquadRun, index: number, workspaceId: string) {
     const ticketExecution = this.ticketExecutions.get(squadRun.id);
-    const run = await runnerService.startRun({
+    const agentId = squadRun.memberAgentIds[index];
+    const assignment = squadRun.memberAssignments?.find(item => item.agentId === agentId)
+      ?? (() => {
+        const agent = sqliteService.getAgents().find(item => item.id === agentId)!;
+        return defaultMemberAssignment(agent, index, squadRun.memberAgentIds.length,
+          resolveAgent(agent, { includeMemory: false }).systemPrompt);
+      })();
+    const assignmentPlan = [
+      `Assigned stage: ${assignment.stageLabel}${assignment.phase ? ` (${assignment.phase})` : ''}`,
+      `Assigned task: ${assignment.instructions}`
+    ];
+    const run = await runWithWorkspace(workspaceId, () => runnerService.startRun({
       issueId: squadRun.issueId,
-      agentId: squadRun.memberAgentIds[index],
-      plan: squadRun.plan,
+      agentId,
+      plan: [...squadRun.plan, ...assignmentPlan],
+      workspaceId,
+      workingDir: this.runWorkspaces.get(squadRun.id)?.workingDir,
       squad: {
         squadRunId: squadRun.id,
         order: index,
+        memberCount: squadRun.memberAgentIds.length,
         branchName: squadRun.branchName,
+        assignment,
         handoff: this.buildHandoff(squadRun, index)
       },
       ...(ticketExecution ? { ticketExecution: { ...ticketExecution, memberOrder: index } } : {})
-    });
+    }));
 
-    this.awaiting.set(run.id, squadRun.id);
-    sqliteService.saveSquadRun({
+    workspaceRegistry.bind('prototype_runs', run.id, workspaceId);
+    this.awaiting.set(run.id, { squadRunId: squadRun.id, workspaceId });
+    await this.persistSquadRun({
       ...squadRun,
       currentMemberIndex: index,
       updatedAt: new Date().toISOString()
-    });
+    }, workspaceId);
 
     /**
      * The handoff, as an event.
@@ -213,9 +376,21 @@ export class SquadRunner {
    * branch and every commit up to the failure intact for a person to inspect.
    */
   private async advance(finished: PrototypeRun, succeeded: boolean) {
-    const squadRunId = this.awaiting.get(finished.id);
-    this.awaiting.delete(finished.id);
-    if (!squadRunId) return;
+    const waiting = this.awaiting.get(finished.id);
+    if (!waiting) return;
+    return this.serializeTransition(waiting.squadRunId, async () => {
+      if (this.awaiting.get(finished.id) !== waiting) return;
+      this.awaiting.delete(finished.id);
+      return runWithWorkspace(waiting.workspaceId, () => this.advanceInWorkspace(finished, succeeded, waiting));
+    });
+  }
+
+  private async advanceInWorkspace(
+    finished: PrototypeRun,
+    succeeded: boolean,
+    waiting: { squadRunId: string; workspaceId: string }
+  ) {
+    const squadRunId = waiting.squadRunId;
 
     const squadRun = sqliteService.getSquadRun(squadRunId);
     if (!squadRun || squadRun.status !== 'running') return;
@@ -227,7 +402,7 @@ export class SquadRunner {
 
     if (!succeeded) {
       const reason = `${who} did not finish (${finished.status}). Stopped at member ${position} of ${total}.`;
-      sqliteService.saveSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now });
+      await this.persistSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now }, waiting.workspaceId);
       addCommentAndShare({
         id: `comm-${squadRun.id}-stopped`,
         issueId: squadRun.issueId,
@@ -245,7 +420,7 @@ export class SquadRunner {
     const next = position;
 
     if (next >= total) {
-      sqliteService.saveSquadRun({ ...squadRun, status: 'awaiting_approval', updatedAt: now });
+      await this.persistSquadRun({ ...squadRun, status: 'awaiting_approval', updatedAt: now }, waiting.workspaceId);
 
       const runs = sqliteService.getRunsForSquadRun(squadRun.id);
       const tokens = runs.reduce((sum, r) => sum + (totalTokens(r.usage) ?? 0), 0);
@@ -267,11 +442,24 @@ export class SquadRunner {
       logInfo(`Squad run ${squadRun.id} complete: ${runs.length} member(s), ${tokens} tokens`);
       runnerService.emit('squad_run_completed', sqliteService.getSquadRun(squadRun.id));
       this.ticketExecutions.delete(squadRun.id);
+      await this.cleanupCompletedWorkspace(squadRun.id);
       return;
     }
 
     logInfo(`Squad run ${squadRun.id}: ${who} done, starting member ${next + 1}/${total}`);
-    await this.startMember({ ...squadRun, updatedAt: now }, next);
+    await this.startMember({ ...squadRun, updatedAt: now }, next, waiting.workspaceId);
+  }
+
+  /** A successful build has pushed its branch, so its disposable worktree can go. */
+  private async cleanupCompletedWorkspace(squadRunId: string): Promise<void> {
+    const workspace = this.runWorkspaces.get(squadRunId);
+    if (!workspace) return;
+    try {
+      await removeDetachedWorktree(workspace.repositoryDir, workspace.workingDir);
+      this.runWorkspaces.delete(squadRunId);
+    } catch (error) {
+      logError(`Could not clean completed build workspace ${squadRunId}:`, error);
+    }
   }
 
   /**
@@ -296,7 +484,10 @@ export class SquadRunner {
     const lines = done.map(r => {
       const agent = sqliteService.getAgents().find(a => a.id === r.agentId);
       const role = agent?.role ? ` (${agent.role})` : '';
-      return `- ${agent?.name ?? r.agentId}${role}: ${describeWork(r)}`;
+      const assignment = squadRun.memberAssignments?.find(item => item.agentId === r.agentId);
+      const stage = assignment ? ` — ${assignment.stageLabel}` : '';
+      const report = writtenHandoff(r);
+      return `- ${agent?.name ?? r.agentId}${role}${stage}: ${report || describeWork(r)}`;
     });
 
     return [
@@ -313,6 +504,47 @@ export class SquadRunner {
       'Build on that work rather than repeating it, and do not revert it without saying why.'
     ].join('\n');
   }
+}
+
+/** Role-aware default for squads started without project-specific build steps. */
+export function defaultMemberAssignment(
+  agent: Agent,
+  index: number,
+  total: number,
+  personaPrompt = agent.systemPrompt
+): SquadMemberAssignment {
+  const profile = `${agent.role} ${agent.name} ${agent.description} ${personaPrompt}`.toLowerCase();
+  const choices: Array<{ match: RegExp; stageLabel: string; phase: BuildStepPhase; instructions: string }> = [
+    { match: /research|requirements|product manager/, stageLabel: 'Requirements and research', phase: 'requirements', instructions: 'Analyze the request and repository context, state testable requirements and assumptions, and hand them to the next agent. Do not implement code.' },
+    { match: /architect|architecture|solution design/, stageLabel: 'Technical design', phase: 'architecture', instructions: 'Define the affected components, interfaces, and decisions from the request and earlier handoff. Record a concise design for the next agent. Do not begin implementation.' },
+    { match: /manager|planner|coordinator/, stageLabel: 'Work planning and handoff', phase: 'architecture', instructions: 'Turn the request and earlier handoff into a small, ordered work breakdown with acceptance criteria. Do not replace specialist implementation.' },
+    { match: /database|data engineer|schema/, stageLabel: 'Data layer', phase: 'database', instructions: 'Implement only the necessary schema, migration, and data-access changes. Preserve compatibility and report migration checks.' },
+    { match: /backend|server|api engineer/, stageLabel: 'Backend implementation', phase: 'implementation', instructions: 'Implement only the server-side behavior, API contracts, and focused tests needed for the request. Leave UI work to its specialist.' },
+    { match: /frontend|front-end|ui engineer|web developer/, stageLabel: 'Frontend implementation', phase: 'implementation', instructions: 'Implement only the user-facing interface, interactions, accessibility behavior, and focused UI tests needed for the request. Build on earlier work.' },
+    { match: /mobile|ios|android/, stageLabel: 'Mobile implementation', phase: 'implementation', instructions: 'Implement only the requested mobile-specific screens and behavior when the project includes a mobile client. Do not recreate the web implementation.' },
+    { match: /security|reviewer|code quality/, stageLabel: 'Security and quality review', phase: 'review', instructions: 'Review the accumulated changes for defects, security issues, and maintainability concerns. Report evidence and fixes needed; do not take over implementation.' },
+    { match: /validation|tester|quality assurance|\bqa\b/, stageLabel: 'Validation', phase: 'validation', instructions: 'Run relevant tests and validate the accumulated behavior against the request. Report actual evidence and failures; do not repeat implementation.' },
+    { match: /github|release|delivery|devops|deployment/, stageLabel: 'Delivery readiness', phase: 'delivery', instructions: 'Check branch, CI, and delivery readiness and report blockers. Do not merge, release, or deploy without an explicit user request.' }
+  ];
+  const specialized = choices.find(choice => choice.match.test(profile));
+  if (specialized) return { agentId: agent.id, ...specialized };
+
+  return {
+    agentId: agent.id,
+    stageLabel: `${agent.role || 'Specialist'} contribution ${index + 1} of ${total}`,
+    phase: 'implementation',
+    instructions: `Use your assigned persona as the authority for your contribution. Complete one focused deliverable that fits your role, build on prior agents' work, and do not repeat the full project request or take work assigned to another stage.`
+  };
+}
+
+function writtenHandoff(run: PrototypeRun): string | undefined {
+  const activities = run.activities ?? [];
+  const response = [...activities].reverse().find(activity =>
+    activity.kind === 'assistant' && !activity.isStreaming && activity.message.trim()
+  ) ?? [...activities].reverse().find(activity => activity.kind === 'assistant' && activity.message.trim());
+  if (!response) return undefined;
+  const text = response.message.trim().replace(/\s+/g, ' ');
+  return text.length > 1400 ? `${text.slice(0, 1397).trimEnd()}...` : text;
 }
 
 /** Leader first when there is one, then the rest in their configured order. */

@@ -20,6 +20,7 @@ let createBranch: ReturnType<typeof vi.fn>;
 let diff: ReturnType<typeof vi.fn>;
 let spawn: ReturnType<typeof vi.fn>;
 let squads: Map<string, any>;
+let invocations: any[];
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -33,12 +34,20 @@ beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-run-lifetime-'));
   vi.resetModules(); rows = new Map(); squads = new Map(); issues = []; projects = []; processes = [];
   let time = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => ++time);
-  const agent = { id: 'agent-fixture', name: 'Fixture agent', avatar: '', autonomyLevel: 'supervised' };
+  invocations = [];
+  const agent = {
+    id: 'agent-fixture', name: 'Research Agent', role: 'Research Agent', description: 'Clarifies requirements.',
+    systemPrompt: 'You are the Research Agent. Do not write implementation code.', avatar: '', autonomyLevel: 'supervised'
+  };
+  const secondAgent = {
+    id: 'agent-second', name: 'Frontend Agent', role: 'Frontend Agent', description: 'Builds user interfaces.',
+    systemPrompt: 'You are the Frontend Agent. Implement assigned UI work only.', avatar: '', autonomyLevel: 'supervised'
+  };
   const sql = {
     getPrototypeRuns: () => [...rows.values()].map(value => structuredClone(value)),
     savePrototypeRun: (value: any) => rows.set(value.id, structuredClone(value)),
     getIssues: () => issues.map(value => structuredClone(value)), getProjects: () => projects,
-    getAgents: () => [agent, { ...agent, id: 'agent-second' }], getRuntimes: () => [], recordRemoteAction: vi.fn(),
+    getAgents: () => [agent, secondAgent], getRuntimes: () => [], recordRemoteAction: vi.fn(),
     getSquads: () => [{ id: 'squad-fixture', name: 'Fixture squad', topology: 'Sequential', memberAgentIds: ['agent-fixture', 'agent-second'] }],
     getSquadRun: (id: string) => structuredClone(squads.get(id)),
     saveSquadRun: (value: any) => squads.set(value.id, structuredClone(value)),
@@ -54,6 +63,7 @@ beforeEach(async () => {
   createBranch = vi.fn(async () => undefined);
   diff = vi.fn(async () => ({ changedFiles: 0, insertions: 0, deletions: 0 }));
   vi.doMock('./sqliteService.js', () => ({ sqliteService: sql }));
+  vi.doMock('./workspaceRegistry.js', () => ({ workspaceRegistry: { bind: vi.fn() } }));
   vi.doMock('./processManager.js', () => ({ processManager: { spawnProcess: spawn,
     killProcess: vi.fn(async () => undefined), isRunActive: () => true } }));
   vi.doMock('./supabaseService.js', () => ({ supabaseService: { isConfigured: () => false } }));
@@ -61,13 +71,18 @@ beforeEach(async () => {
     updateIssueAndPush: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes) }));
   vi.doMock('./workspaceService.js', () => ({ resolveProjectWorkspace: (project: any) => ({ dir: project.cwd }), allowAttachedWorkspace: vi.fn() }));
   vi.doMock('../utils/gitUtils.js', () => ({ createBranch, createBranchFrom: createBranch, checkoutBranch: createBranch,
-    remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => false }));
+    remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => true }));
   vi.doMock('./githubService.js', () => ({ githubService: {} }));
   vi.doMock('./verificationService.js', () => ({ runVerification: verify }));
   vi.doMock('./agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready' }) }));
-  vi.doMock('./personaService.js', () => ({ resolveAgentLogged: () => ({ name: agent.name, autonomyLevel: 'supervised',
-    modelProvider: 'Anthropic', modelName: 'fixture-model', systemPrompt: 'Fixture.', mcpServers: [] }) }));
-  vi.doMock('./cliRunner.js', () => ({ writeTurnPersona: () => undefined, buildTurnInvocation: () => ({ bin: 'test-only-not-spawned', args: [], family: 'claude', env: {} }) }));
+  vi.doMock('./personaService.js', () => ({
+    resolveAgent: (input: any) => ({ systemPrompt: input.systemPrompt || '' }),
+    resolveAgentLogged: (input: any) => ({ name: input.name, autonomyLevel: 'supervised',
+    modelProvider: 'Anthropic', modelName: 'fixture-model', systemPrompt: input.systemPrompt, mcpServers: [] }) }));
+  vi.doMock('./cliRunner.js', () => ({ writeTurnPersona: () => undefined, buildTurnInvocation: (options: any) => {
+    invocations.push(options);
+    return { bin: 'test-only-not-spawned', args: [], family: 'claude', env: {} };
+  } }));
   vi.doMock('./mcpConfigService.js', () => ({ writeRunMcpConfig: () => ({ serverNames: [] }), cleanupRunMcpConfig: vi.fn(), hostingScopeFor: () => undefined }));
   vi.doMock('./customCliArgs.js', () => ({ buildEnv: () => ({ env: {} }), reportIgnoredProjectEnv: vi.fn() }));
   vi.doMock('./gitCredentialIsolation.js', () => ({ agentCredentialEnv: () => ({}) }));
@@ -126,6 +141,24 @@ describe('RunnerService workspace ownership lifetime', () => {
     await work('a', 'checkout-a').start(); await work('b', 'checkout-b').start();
     await vi.waitFor(() => expect(processes).toHaveLength(2)); await Promise.all([exit(0), exit(1)]);
   });
+  it('runs the same squad concurrently in different project workspaces with independent run state', async () => {
+    work('project-a-issue', 'project-a-checkout');
+    work('project-b-issue', 'project-b-checkout');
+    const squadRunner = new (await import('./squadRunner.js')).SquadRunner();
+
+    const [projectA, projectB] = await Promise.all([
+      squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'project-a-issue' }),
+      squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'project-b-issue' })
+    ]);
+
+    await vi.waitFor(() => expect(processes).toHaveLength(2));
+    expect(projectA.id).not.toBe(projectB.id);
+    expect(projectA.squadId).toBe(projectB.squadId);
+    expect(new Set(processes.map(process => process.options.cwd)).size).toBe(2);
+    expect(new Set([...rows.values()].map(run => run.squadRunId).filter(Boolean))).toEqual(new Set([projectA.id, projectB.id]));
+    expect(squads.get(projectA.id).currentMemberIndex).toBe(0);
+    expect(squads.get(projectB.id).currentMemberIndex).toBe(0);
+  });
   it('releases the checkout after a failed process', async () => {
     const a = await work('a').start(); await work('b').start();
     await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0, 1);
@@ -156,6 +189,20 @@ describe('RunnerService workspace ownership lifetime', () => {
     expect(processes).toHaveLength(1); await exit(0, 1, 'cancelled');
     await vi.waitFor(() => expect(processes).toHaveLength(2)); expect(rows.get(a.id).status).toBe('cancelled'); await exit(1);
   });
+  it('stops a sequential squad without starting its next member', async () => {
+    work('squad-cancel-issue');
+    const squadRunner = new (await import('./squadRunner.js')).SquadRunner();
+    const squadRun = await squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'squad-cancel-issue' });
+
+    await vi.waitFor(() => expect(processes).toHaveLength(1));
+    const stopped = await squadRunner.cancelSquadRun(squadRun.id);
+
+    expect(stopped).toMatchObject({ status: 'cancelled', stoppedReason: 'Build stopped by the user.' });
+    expect(squads.get(squadRun.id).status).toBe('cancelled');
+    expect([...rows.values()].filter(value => value.squadRunId === squadRun.id).map(value => value.status))
+      .toEqual(['cancelled']);
+    expect(processes).toHaveLength(1);
+  });
   it('skips a queued cancelled run without spawning it', async () => {
     await work('a').start(); const b = await work('b').start();
     await vi.waitFor(() => expect(processes).toHaveLength(1)); await runner.cancelRun(b.id); await exit(0);
@@ -180,8 +227,24 @@ describe('RunnerService workspace ownership lifetime', () => {
     work('squad-issue');
     const squadRunner = new (await import('./squadRunner.js')).SquadRunner();
     const squadRun = await squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'squad-issue' });
-    await vi.waitFor(() => expect(processes).toHaveLength(1)); await exit(0);
+    await vi.waitFor(() => expect(processes).toHaveLength(1));
+    expect(invocations[0].systemPrompt).toContain('You are the Research Agent. Do not write implementation code.');
+    expect(invocations[0].systemPrompt).toContain('Assigned stage: Requirements and research');
+    expect(invocations[0].prompt).toContain('Your assigned stage: Requirements and research (requirements)');
+    expect(invocations[0].prompt).not.toContain('Your assigned work:\nImplement only the user-facing interface');
+    const firstRun = [...rows.values()].find(value => value.squadRunId === squadRun.id);
+    rows.set(firstRun.id, {
+      ...firstRun,
+      activities: [{ id: 'handoff-note', sequence: 1, kind: 'assistant', isStreaming: false,
+        message: 'The request needs a display, keyboard input, and chained arithmetic. Acceptance criteria are ready for implementation.' }]
+    });
+    await exit(0);
     await vi.waitFor(() => expect(processes).toHaveLength(2));
+    expect(invocations[1].systemPrompt).toContain('You are the Frontend Agent. Implement assigned UI work only.');
+    expect(invocations[1].systemPrompt).toContain('Assigned stage: Frontend implementation');
+    expect(invocations[1].prompt).toContain('Your assigned stage: Frontend implementation (implementation)');
+    expect(invocations[1].prompt).toContain('Acceptance criteria are ready for implementation.');
+    expect(invocations[0].prompt).not.toBe(invocations[1].prompt);
     expect(squads.get(squadRun.id).currentMemberIndex).toBe(1);
     expect(issues.find(value => value.id === 'squad-issue').status).toBe('agent_running');
     await exit(1);

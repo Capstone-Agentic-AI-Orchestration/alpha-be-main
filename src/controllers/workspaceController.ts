@@ -255,6 +255,12 @@ workspaceRouter.post(
     for (const member of members.values()) {
       await workspaceRegistry.addMember(workspace.id, member.userId, member.role);
     }
+    const memberWorkspaces = await Promise.all(
+      [userId, ...Array.from(members.values(), member => member.userId)]
+        .map(memberId => workspaceRegistry.listForUser(memberId))
+    );
+    const workspaceIds = [...new Set(memberWorkspaces.flatMap(list => list.map(item => item.id)))];
+    await agentStore().syncShared(workspace.id, workspaceIds);
     res.status(201).json({ ...workspace, memberCount: workspace.memberCount + members.size });
   })
 );
@@ -314,7 +320,13 @@ workspaceRouter.post(
     }
     if (await relayToCloud(req, res)) return;
 
-    res.status(201).json(await workspaceRegistry.addMember(req.params.id, userId, role));
+    const member = await workspaceRegistry.addMember(req.params.id, userId, role);
+    const memberWorkspaces = await workspaceRegistry.listForUser(userId);
+    await agentStore().syncShared(
+      req.params.id,
+      memberWorkspaces.map(workspace => workspace.id)
+    );
+    res.status(201).json(member);
   })
 );
 

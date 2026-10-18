@@ -5,6 +5,7 @@ import { githubApi, GitHubApiError } from '../services/githubApi.js';
 import { reposForProject } from '../services/githubIssueMapping.js';
 import {
   getHostingStatus,
+  getBuildBranchPreview,
   hostingHintsFor,
   platformForStack,
   roleForStack,
@@ -19,6 +20,7 @@ import { previewsFor } from '../services/hosting/hostingPreviews.js';
 import { checkHealth } from '../services/hosting/healthCheck.js';
 import { getHostingLogs } from '../services/hosting/hostingLogs.js';
 import { parseDeploymentLogsQuery } from '../services/hosting/logCursor.js';
+import { assertSafeBranchName } from '../utils/gitUtils.js';
 import { deleteHostingEnv, EnvRequestError, listHostingEnv, setHostingEnv } from '../services/hosting/hostingEnv.js';
 import type { HostingActor } from '../services/hosting/hostingAudit.js';
 import type { HostingBranch } from '../services/hosting/hostingService.js';
@@ -144,7 +146,7 @@ function hasBody(op: { method: string }): boolean {
 
 interface Operation {
   /** Appended to `/hosting/:owner/:name` and to `/projects/:id/repos/:owner/:name/hosting`. */
-  suffix: '' | '/previews' | '/health' | '/logs' | '/env';
+  suffix: '' | '/previews' | '/branch-preview' | '/health' | '/logs' | '/env';
   method: 'get' | 'post' | 'put' | 'delete';
   access: Access;
   /** When the capability depends on the request (which environment a variable change is for). */
@@ -190,12 +192,53 @@ const OPERATIONS: Operation[] = [
     offline: (repo, hints) => previewsFor(noCloud(repo, hints.stack, hints.partner))
   },
   {
+    suffix: '/branch-preview',
+    method: 'get',
+    access: 'read',
+    run: (ctx, req) => getBuildBranchPreview(ctx, text(req.query.branch) ?? ''),
+    offline: (repo, _hints, req) => ({
+      repo,
+      branch: text(req.query.branch) ?? '',
+      platform: null,
+      state: 'unavailable',
+      url: null,
+      deployStatus: null,
+      ci: {
+        state: 'unknown',
+        commitSha: null,
+        checksUrl: `https://github.com/${repo}/actions?query=${encodeURIComponent(`branch:${text(req.query.branch) ?? ''}`)}`,
+        checks: []
+      },
+      error: NO_CLOUD
+    })
+  },
+  {
     suffix: '/health',
     method: 'get',
     access: 'read',
     slow: true,
     run: async (ctx, req) => {
       const branch = text(req.query.branch);
+      if (branch && !['main', 'uat', 'dev'].includes(branch)) {
+        try {
+          assertSafeBranchName(branch);
+        } catch {
+          return { url: null, ok: false, status: null, latencyMs: 0, error: 'The requested branch name is not valid.' };
+        }
+        const preview = await getBuildBranchPreview(ctx, branch);
+        if (preview.platform !== 'vercel' || preview.state !== 'ready' || !preview.url) {
+          return {
+            url: preview.url,
+            ok: false,
+            status: null,
+            latencyMs: 0,
+            error: preview.error ?? (preview.state === 'failed' ? 'The build preview deployment failed.' : 'The build preview is not ready yet.')
+          };
+        }
+        // For a frontend preview, reachability is a request to the served page,
+        // not an assumed `/health` API endpoint.
+        return checkHealth(preview.url, '/');
+      }
       const status = await getHostingStatus(ctx);
       const env = status.environments.find(e => e.branch === branch);
       if (!env?.url) {

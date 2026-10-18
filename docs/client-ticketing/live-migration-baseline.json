@@ -161,6 +161,24 @@
       "notes": "Not in recorded ledger; read-only to_regclass confirmed hosting_audit absent."
     },
     {
+      "local_file": "0018_shared_agents_across_workspaces.sql",
+      "local_sha256": "ad7b5e9de8ad34616cccc09b4fdfcd3a78a804615e25f924ea315bdb4a464fbe",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "Not in the historical ledger; this snapshot does not establish whether the migration was applied."
+    },
+    {
+      "local_file": "0019_squad_run_member_assignments.sql",
+      "local_sha256": "cc321a369feff703b8111235d6a8a073e02a73a62105bc21d41f08ec84a4d9c5",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "New migration for role-scoped sequential squad assignments; not verified against or applied to the shared-live database."
+    },
+    {
       "local_file": "20261015212437_ticket_central_client_intake.sql",
       "local_sha256": "b8e8ab6c27bd7fa06f91435be63fcf198935b2159ee8499efa7ed091b591f6c1",
       "remote_version": "20261015212437",

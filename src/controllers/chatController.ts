@@ -13,8 +13,36 @@ import {
   shareThread
 } from '../services/chatWriteThrough.js';
 import { desktopOnly } from './desktopOnly.js';
+import { isProjectBuildRequest } from '../services/projectBuildIntent.js';
+import { IS_CLOUD } from '../config/env.js';
+import { supabaseService } from '../services/supabaseService.js';
+import { retryChatSync } from '../services/chatSyncService.js';
 
 export const chatRouter = Router();
+
+/** Sync health for the current owner's local chat outbox. */
+chatRouter.get('/chat/sync/status', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  if (IS_CLOUD) return res.json({ enabled: false, state: 'shared', pending: 0, failed: 0 });
+  const threadId = typeof req.query.threadId === 'string' ? req.query.threadId : undefined;
+  if (threadId && !requireEntityWorkspace(req, res, 'chat_threads', threadId)) return;
+  const status = sqliteService.getChatSyncStatus(req.workspace!.workspaceId, req.workspace!.userId, threadId);
+  const enabled = supabaseService.sharesBoard();
+  res.json({
+    enabled,
+    state: !enabled ? 'local_only' : status.failed ? 'failed' : status.pending ? 'syncing' : 'synced',
+    ...status
+  });
+}));
+
+/** Explicitly retry this owner's queued chat changes after a visible sync error. */
+chatRouter.post('/chat/sync/retry', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId : undefined;
+  if (threadId && !requireEntityWorkspace(req, res, 'chat_threads', threadId)) return;
+  const queued = retryChatSync(req.workspace!.workspaceId, req.workspace!.userId, threadId);
+  res.json({ queued });
+}));
 
 /**
  * The caller's own conversations, and only those.
@@ -116,6 +144,21 @@ chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res:
   }
 
   if (projectId && !requireProjectWorkspace(req, res, projectId)) return;
+
+  const workspaceId = req.workspace!.workspaceId;
+  const ownerId = req.workspace!.userId;
+  const ownThreads = await chatStore().listThreads(workspaceId, ownerId);
+  const current = ownThreads.find(thread => thread.id === req.params.id);
+  if (!current) return res.status(404).json({ error: 'Thread not found' });
+
+  if ((current.projectId ?? null) !== (projectId ?? null)) {
+    const messages = await chatStore().messages(workspaceId, req.params.id, ownerId);
+    if (messages?.length) {
+      return res.status(409).json({
+        error: 'This conversation already has messages. Start a new conversation to switch projects; the existing chat will stay saved.'
+      });
+    }
+  }
 
   const updated = sqliteService.setChatThreadProject(req.params.id, projectId);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
@@ -224,9 +267,19 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
-    const { threadId, content, senderName, targetAgentId, targetSquadId } = req.body;
-    if (!threadId || !content) {
+    if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId } = req.body;
+    if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
+    }
+    if (projectId !== undefined && projectId !== null && typeof projectId !== 'string') {
+      return res.status(400).json({ error: 'projectId must be a string or omitted' });
+    }
+    if (intent !== undefined && !['auto', 'build', 'ask'].includes(intent)) {
+      return res.status(400).json({ error: 'intent must be auto, build, or ask' });
+    }
+    if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || !clientMessageId.trim() || clientMessageId.length > 200)) {
+      return res.status(400).json({ error: 'clientMessageId must be a non-empty string of at most 200 characters' });
     }
     if (
       (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') ||
@@ -237,14 +290,46 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (targetAgentId && targetSquadId) {
       return res.status(400).json({ error: 'Choose an agent or a squad, not both' });
     }
+    if (repository !== undefined && repository !== null && typeof repository !== 'string') {
+      return res.status(400).json({ error: 'repository must be a repository name or omitted' });
+    }
+    if (repositories !== undefined && (!Array.isArray(repositories) || repositories.length > 30 || repositories.some((item: unknown) => typeof item !== 'string' || !item.trim()))) {
+      return res.status(400).json({ error: 'repositories must be a list of up to 30 repository names' });
+    }
+    const requestedRepositories = Array.isArray(repositories)
+      ? [...new Set(repositories.map((item: string) => item.trim()))]
+      : typeof repository === 'string' && repository.trim() ? [repository.trim()] : undefined;
+
+    const existingThread = sqliteService.getChatThreads().find(thread => thread.id === threadId);
+    if (existingThread && existingThread.ownerId !== req.workspace!.userId) {
+      return res.status(404).json({ error: 'Conversation not found.' });
+    }
+    if (existingThread?.projectId && projectId && existingThread.projectId !== projectId) {
+      return res.status(409).json({ error: 'This conversation is already attached to another project.' });
+    }
+    const scopedProjectId = existingThread?.projectId ?? projectId ?? undefined;
+    if (scopedProjectId && !requireProjectWorkspace(req, res, scopedProjectId)) return;
+    if (existingThread && !existingThread.projectId && scopedProjectId) {
+      const scopedThread = sqliteService.setChatThreadProject(threadId, scopedProjectId);
+      if (!scopedThread) return res.status(404).json({ error: 'Conversation not found.' });
+      shareThread(scopedThread);
+    }
+
+    const buildRequested = intent === 'build' || (intent !== 'ask' && isProjectBuildRequest(content));
+    const buildRequest = req.workspace!.role !== 'client' && buildRequested
+      ? { context: req.workspace!, repositories: requestedRepositories }
+      : undefined;
     const result = await chatService.sendMessage({
       threadId,
       content,
       senderName,
       targetAgentId,
       targetSquadId,
+      projectId: scopedProjectId,
+      clientMessageId,
       workspaceId: req.workspace!.workspaceId,
-      userId: req.workspace!.userId
+      userId: req.workspace!.userId,
+      buildRequest
     });
     res.status(201).json(result);
   } catch (err: any) {

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { sqliteService } from './sqliteService.js';
 import { ProcessTerminationReason, processManager } from './processManager.js';
@@ -25,7 +26,7 @@ import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
 import { runVerification } from './verificationService.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind } from '../models/index.js';
+import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
 import { RUNS_DIR } from '../config/env.js';
 import { admitTicketExecution, stopTicketExecution, type TicketExecutionHandle } from './ticketExecutionRelay.js';
 import type { DeveloperTicketWorkContext } from '../ticketing/developerContext.js';
@@ -49,14 +50,19 @@ export interface StartRunParams {
   runId?: string;
   /** In-memory claim context; deliberately excluded from persisted run records. */
   ticketExecution?: TicketExecutionHandle;
+  /** Internal run-scoped worktree; routes must never accept this from a request body. */
+  workingDir?: string;
 }
 
 export interface SquadMemberContext {
   squadRunId: string;
   /** 0-based position in the squad's order. */
   order: number;
+  memberCount: number;
   /** The shared branch. Created by order 0; checked out by everyone after. */
   branchName: string;
+  /** This member's frozen scope for the current sequential stage. */
+  assignment: SquadMemberAssignment;
   /**
    * What the members before this one did, already written up. Empty for the
    * first member.
@@ -68,6 +74,23 @@ export interface SquadMemberContext {
    * what the diff already shows.
    */
   handoff: string;
+}
+
+function appendSquadAssignmentPolicy(
+  personaPrompt: string,
+  agent: { name: string; role: string },
+  squad: SquadMemberContext
+): string {
+  const policy = [
+    'Sequential squad assignment — this stage defines your scope for this run.',
+    `You are ${agent.name}, role: ${agent.role}, member ${squad.order + 1} of ${squad.memberCount}.`,
+    `Assigned stage: ${squad.assignment.stageLabel}${squad.assignment.phase ? ` (${squad.assignment.phase})` : ''}.`,
+    `Assigned work: ${squad.assignment.instructions}`,
+    'Treat the full project request as shared context, not as an instruction to do every stage yourself.',
+    'Follow your persona’s responsibilities and restrictions. If your persona conflicts with the assigned work, respect the persona boundary and report the mismatch in your handoff.',
+    'Do not repeat, replace, or silently undo work from earlier agents. Leave a concise factual handoff for the next agent.'
+  ].join('\n');
+  return [personaPrompt.trim(), policy].filter(Boolean).join('\n\n---\n\n');
 }
 
 /** Control-flow marker: this member is not the one that opens the PR. */
@@ -111,15 +134,22 @@ export class RunnerService extends EventEmitter {
       );
     }
 
-    const cwd = workspace.dir;
+    const cwd = params.workingDir ? path.resolve(params.workingDir) : workspace.dir;
 
     if (!fs.existsSync(cwd)) {
       throw new Error(`Working copy for "${project.name}" is missing from disk: ${cwd}`);
     }
 
+    if (params.workingDir && !sqliteService.isPathAllowed(cwd)) {
+      throw new Error('The isolated build folder is outside Alpha’s approved workspace area.');
+    }
+    if (!(await isGitRepo(cwd))) {
+      throw new Error(`The selected build folder for "${project.name}" is not a Git checkout.`);
+    }
+
     allowAttachedWorkspace(workspace, project.name);
 
-    const runId = params.runId ?? `run-${Date.now()}`;
+    const runId = params.runId ?? `run-${randomUUID()}`;
     if (params.ticketExecution) this.ticketExecutions.set(runId, params.ticketExecution);
     const now = new Date().toISOString();
     /**
@@ -407,7 +437,10 @@ export class RunnerService extends EventEmitter {
         ctx.ticketWorkContext.correction ? `\n\nPM-authorized correction:\n${ctx.ticketWorkContext.correction.instructions}` : '']
         .join(''),
     } : issue;
-    const prompt = this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access);
+    const prompt = this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad);
+    const systemPrompt = ctx.squad
+      ? appendSquadAssignmentPolicy(persona.systemPrompt, agent, ctx.squad)
+      : persona.systemPrompt;
 
     const invocation = buildTurnInvocation(
       {
@@ -415,11 +448,11 @@ export class RunnerService extends EventEmitter {
         cwd,
         mode: 'run',
         // Keeps the persona out of argv — see TurnInvocation.stdin.
-        personaFile: writeTurnPersona(runId, persona.systemPrompt) ?? undefined,
+        personaFile: writeTurnPersona(runId, systemPrompt) ?? undefined,
         provider: persona.modelProvider,
         modelName: persona.modelName,
         reasoningEffort: persona.reasoningEffort,
-        systemPrompt: persona.systemPrompt,
+        systemPrompt,
         personaName: persona.name,
         prompt,
         priorSession: null,
@@ -577,10 +610,12 @@ export class RunnerService extends EventEmitter {
     /** MCP servers this run actually has, so the prompt promises only those. */
     mcpServers: string[] = [],
     /** What those servers may do to a remote, which narrows it further. */
-    access: McpAccess = 'read'
+    access: McpAccess = 'read',
+    squad?: SquadMemberContext
   ): string {
-    const planSection = plan.length > 0
-      ? `\n\nExecution Plan:\n${plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
+    const sharedPlan = plan.filter(item => !item.startsWith('Assigned stage:') && !item.startsWith('Assigned task:'));
+    const planSection = sharedPlan.length > 0
+      ? `\n\nShared build context:\n${sharedPlan.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
       : '';
 
     // The persona is NOT interpolated here any more: it reaches the model
@@ -596,6 +631,14 @@ export class RunnerService extends EventEmitter {
     const handoffSection = handoff ? `
 
 ${handoff}` : '';
+
+    const assignmentSection = squad
+      ? `
+
+Your assigned stage: ${squad.assignment.stageLabel}${squad.assignment.phase ? ` (${squad.assignment.phase})` : ''}
+Your assigned work:
+${squad.assignment.instructions}`
+      : '';
 
     /**
      * Say that the shell cannot reach GitHub, and what to use instead.
@@ -641,16 +684,23 @@ Hosting (Render for backends, Vercel for frontends):
         }`
       : '';
 
-    return `You are working on Issue ${issue.identifier}: ${issue.title}
-
-Description:
-${issue.description}${planSection}${handoffSection}
-
-Instructions:
+    const instructions = squad
+      ? `Instructions:
+1. Treat the full project request as shared context; complete only your assigned stage and follow your persona's role boundaries.
+2. Read the repository and preceding handoff before acting; build on existing work without repeating it.
+3. Leave a concise factual handoff for the next agent: completed work, decisions, checks actually run, and remaining work.`
+      : `Instructions:
 1. First analyze relevant files in the workspace.
 2. Implement the required changes cleanly and concisely.
 3. Run existing tests or add new tests to verify your implementation.
-4. Summarize your completed work.${remoteSection}${hostingSection}`;
+4. Summarize your completed work.`;
+
+    return `You are working on Issue ${issue.identifier}: ${issue.title}
+
+Description:
+${issue.description}${planSection}${assignmentSection}${handoffSection}
+
+${instructions}${remoteSection}${hostingSection}`;
   }
 
   private async handleProcessExit(

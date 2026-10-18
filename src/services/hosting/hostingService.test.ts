@@ -139,6 +139,7 @@ async function load(options: {
   render?: ReturnType<typeof fakeRenderClient>;
   vercel?: ReturnType<typeof fakeVercelClient>;
   githubRepos?: string[];
+  githubCi?: { sha?: string; checkRuns?: Array<Record<string, unknown>>; statuses?: Array<Record<string, unknown>> };
 } = {}) {
   process.env.ALPHA_MODE = 'cloud';
   // Every hosting setting is given a value -- '' when the test does not name it -- because env.ts
@@ -170,6 +171,11 @@ async function load(options: {
           if (match) {
             if (existingRepos.has(match[1].toLowerCase())) return { full_name: match[1] };
             throw new actual.GitHubApiError('Not Found', 404);
+          }
+          if (path.startsWith('/repos/') && path.includes('/commits/')) {
+            if (path.endsWith('/check-runs?per_page=100')) return { check_runs: options.githubCi?.checkRuns ?? [] };
+            if (path.endsWith('/status')) return { statuses: options.githubCi?.statuses ?? [] };
+            if (/\/commits\/[^/]+$/.test(path)) return { sha: options.githubCi?.sha ?? 'sha-test' };
           }
           if (path.endsWith('/actions/secrets')) return { secrets: [] };
           if (path.endsWith('/actions/variables')) return { variables: [] };
@@ -487,6 +493,103 @@ describe('what a status reveals', () => {
       ])
     );
     expect(JSON.stringify(status)).not.toContain('user:secret');
+  });
+});
+
+describe('build branch previews', () => {
+  it('rejects invalid Git branch names before querying Vercel', async () => {
+    const vercel = fakeVercelClient();
+    const { service } = await load({ env: VERCEL_ENV, vercel });
+
+    const preview = await service.getBuildBranchPreview(
+      { repo: 'acme/shop-fe', stackHint: 'react' },
+      '/main'
+    );
+
+    expect(preview).toMatchObject({ state: 'unavailable', url: null, error: 'The build branch name is not valid.' });
+    expect(vercel.client.findProjectByName).not.toHaveBeenCalled();
+  });
+
+  it('reads the deployment for the exact build branch and returns its real preview URL', async () => {
+    const vercel = fakeVercelClient({
+      latestDeployment: vi.fn(async (_id: string, scope: any) =>
+        'branch' in scope && scope.branch === 'build/calculator-1'
+          ? { uid: 'dpl-calculator', url: 'shop-fe-calculator.vercel.app', readyState: 'READY' }
+          : null
+      )
+    });
+    vercel.projects.set('shop-fe', {
+      id: 'proj-shop-fe', name: 'shop-fe', link: { type: 'github', org: 'acme', repo: 'shop-fe' }
+    });
+    const { service } = await load({
+      env: VERCEL_ENV,
+      vercel,
+      githubCi: {
+        sha: 'sha-calculator-1',
+        checkRuns: [
+          { name: 'Alpha CI / Verify', status: 'completed', conclusion: 'success', html_url: 'https://github.com/acme/shop-fe/actions/runs/10' },
+          { name: 'Vercel Preview', status: 'in_progress', conclusion: null, html_url: 'https://github.com/acme/shop-fe/checks/11' }
+        ]
+      }
+    });
+
+    const preview = await service.getBuildBranchPreview(
+      { repo: 'acme/shop-fe', stackHint: 'react' },
+      'build/calculator-1'
+    );
+
+    expect(preview).toMatchObject({
+      repo: 'acme/shop-fe',
+      branch: 'build/calculator-1',
+      platform: 'vercel',
+      state: 'ready',
+      url: 'https://shop-fe-calculator.vercel.app',
+      deployStatus: 'READY'
+    });
+    expect(vercel.client.latestDeployment).toHaveBeenCalledWith('proj-shop-fe', { branch: 'build/calculator-1' });
+    expect(preview.ci).toMatchObject({
+      state: 'running',
+      commitSha: 'sha-calculator-1',
+      checksUrl: 'https://github.com/acme/shop-fe/actions?query=branch%3Abuild%2Fcalculator-1',
+      checks: [
+        { name: 'Alpha CI / Verify', state: 'passed', url: 'https://github.com/acme/shop-fe/actions/runs/10' },
+        { name: 'Vercel Preview', state: 'running', url: 'https://github.com/acme/shop-fe/checks/11' }
+      ]
+    });
+  });
+
+  it('reports failed repository checks separately from a deployment state', async () => {
+    const vercel = fakeVercelClient({
+      latestDeployment: vi.fn(async () => ({ uid: 'dpl-calculator', url: 'shop-fe-calculator.vercel.app', readyState: 'READY' }))
+    });
+    vercel.projects.set('shop-fe', {
+      id: 'proj-shop-fe', name: 'shop-fe', link: { type: 'github', org: 'acme', repo: 'shop-fe' }
+    });
+    const { service } = await load({
+      env: VERCEL_ENV,
+      vercel,
+      githubCi: { checkRuns: [{ name: 'Unit tests', status: 'completed', conclusion: 'failure' }] }
+    });
+
+    const preview = await service.getBuildBranchPreview({ repo: 'acme/shop-fe', stackHint: 'react' }, 'build/calculator-1');
+
+    expect(preview).toMatchObject({ state: 'ready', ci: { state: 'failed', checks: [{ name: 'Unit tests', state: 'failed' }] } });
+  });
+
+  it('states that the configured Render pipeline cannot publish an isolated run branch yet', async () => {
+    const { service } = await load({ env: RENDER_ENV });
+
+    const preview = await service.getBuildBranchPreview(
+      { repo: 'acme/shop-be', stackHint: 'nodejs' },
+      'build/calculator-1'
+    );
+
+    expect(preview).toMatchObject({
+      platform: 'render',
+      state: 'unsupported',
+      url: null,
+      error: expect.stringContaining('not available')
+    });
   });
 });
 

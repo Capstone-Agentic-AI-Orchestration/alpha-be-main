@@ -25,6 +25,7 @@ import { agentCallRouter } from './controllers/agentCallController.js';
 import { agentCallService } from './services/agentCallService.js';
 import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
+import { flushChatSyncOutbox, startChatSyncRetryLoop } from './services/chatSyncService.js';
 import { runtimeRefreshService } from './services/runtimeRefreshService.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
@@ -435,6 +436,7 @@ agentCallService.on('agent_call.activity', (data) => broadcast({ type: 'agent_ca
 runnerService.on('squad_member_started', (data) => broadcast({ type: 'squad_member_started', payload: data }));
 runnerService.on('squad_run_completed', (data) => broadcast({ type: 'squad_run_completed', payload: data }));
 runnerService.on('squad_run_failed', (data) => broadcast({ type: 'squad_run_failed', payload: data }));
+runnerService.on('squad_run_cancelled', (data) => broadcast({ type: 'squad_run_cancelled', payload: data }));
 
 // Subscribe chat events to WebSocket broadcast
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
@@ -560,6 +562,9 @@ function onListening(): void {
     .then(identity => {
       const claimed = sqliteService.claimUnownedThreads(identity.login);
       if (claimed > 0) logInfo(`Claimed ${claimed} conversation(s) for ${identity.login}.`);
+      const stopChatSync = startChatSyncRetryLoop();
+      server.once('close', stopChatSync);
+      void flushChatSyncOutbox();
     })
     .catch(err => logError('Could not claim unowned conversations:', err));
 

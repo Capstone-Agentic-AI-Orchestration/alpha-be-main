@@ -433,6 +433,20 @@ runRouter.get('/squad-runs/:id', route(async (req: Request, res: Response) => {
   res.json({ ...squadRun, runs: await runStore().runsForSquadRun(req.workspace!.workspaceId, squadRun.id) });
 }));
 
+runRouter.post('/squad-runs/:id/cancel', desktopOnly, async (req: Request, res: Response) => {
+  try {
+    if (!requireWorkspaceCapability(req, res, 'squad.run')) return;
+    const squadRun = await scopedSquadRun(req, res, req.params.id);
+    if (!squadRun) return;
+    const cancelled = await squadRunner.cancelSquadRun(squadRun.id, req.workspace!.workspaceId);
+    res.json(cancelled);
+  } catch (err: any) {
+    const message = err.message || 'Failed to stop squad build';
+    const status = message.startsWith('Squad run not found') ? 404 : message.includes('not cancellable') ? 409 : 500;
+    res.status(status).json({ error: message });
+  }
+});
+
 runRouter.post('/squads/:id/run', desktopOnly, async (req: Request, res: Response) => {
   let ticketExecution: Awaited<ReturnType<typeof reserveTicketExecution>> = null;
   try {

@@ -169,6 +169,50 @@ describe.each(backends)('the agent store ($name)', backend => {
 
     expect((await agents.get(WS, first.id))!.name).toBe('Renamed by its owner');
   });
+
+  it('seeds a shared official roster in separate workspaces and propagates profile edits', async () => {
+    const { agents } = await backend.open();
+    await agents.ensureOfficial(WS);
+    await agents.ensureOfficial(OTHER_WS);
+    const firstRoster = await agents.list(WS);
+    const secondRoster = await agents.list(OTHER_WS);
+
+    expect(secondRoster.map(agent => agent.templateKey).sort()).toEqual(
+      OFFICIAL_AGENT_TEMPLATES.map(template => template.key).sort()
+    );
+    expect(firstRoster.every(agent => agent.sharedKey)).toBe(true);
+    expect(secondRoster.every(agent => agent.sharedKey)).toBe(true);
+
+    const source = firstRoster[0];
+    await agents.update(WS, source.id, { name: 'Workspace-wide name' });
+    const sharedCopy = secondRoster.find(agent => agent.templateKey === source.templateKey)!;
+    expect((await agents.get(OTHER_WS, sharedCopy.id))!.name).toBe('Workspace-wide name');
+  });
+
+  it('shares custom agents only with selected workspaces and keeps execution config local', async () => {
+    const { agents } = await backend.open();
+    await agents.create(WS, anAgent({
+      customCliArgs: '--local-only',
+      envVars: [{ key: 'LOCAL_TOKEN', value: 'secret', isSecret: true }],
+      mcpServers: ['machine-only-server']
+    }));
+
+    const shared = await agents.share(WS, 'agent-custom', [WS, OTHER_WS]);
+    const target = (await agents.list(OTHER_WS)).find(agent => agent.sharedKey === shared!.sharedKey)!;
+    expect(shared?.sharedKey).toBeTruthy();
+    expect(target).toBeTruthy();
+    expect(target.id).not.toBe(shared!.id);
+    expect(target.customCliArgs).toBe('');
+    expect(target.envVars).toEqual([]);
+    expect(target.mcpServers).toEqual([]);
+
+    await agents.update(WS, 'agent-custom', { name: 'Shared change' });
+    expect((await agents.get(OTHER_WS, target.id))!.name).toBe('Shared change');
+
+    const detached = await agents.unshare(WS, 'agent-custom');
+    expect(detached?.sharedKey).toBeUndefined();
+    expect((await agents.get(OTHER_WS, target.id))?.sharedKey).toBeTruthy();
+  });
 });
 
 describe.each(backends)('the squad store ($name)', backend => {

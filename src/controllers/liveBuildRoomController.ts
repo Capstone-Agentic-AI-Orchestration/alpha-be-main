@@ -94,12 +94,17 @@ function cardStatus(run: any | undefined, squadRun: any | undefined, memberIndex
   return run.status === 'queued' ? 'waiting' : 'running';
 }
 
-function currentTask(run: any | undefined, status: RoomCardStatus): string {
+function currentTask(run: any | undefined, status: RoomCardStatus, assignedStageLabel?: string): string {
   if (status === 'completed') return 'Work completed';
   if (status === 'review') return 'Ready for review';
   if (status === 'failed') return 'Run stopped — review activity';
-  if (status === 'waiting') return 'Waiting for squad handoff';
+  const assignedStage = run?.plan?.find((item: unknown) => typeof item === 'string' && item.startsWith('Assigned stage:'))
+    ?.replace(/^Assigned stage:\s*/, '') ?? assignedStageLabel;
+  if (status === 'waiting') return assignedStage
+    ? `Waiting · ${safeOperationalText(assignedStage, 150) ?? 'next stage'}`
+    : 'Waiting for squad handoff';
   if (status === 'idle') return 'Ready to run';
+  if (assignedStage) return safeOperationalText(assignedStage, 150) ?? 'Assigned stage in progress';
   return run?.stages?.[run.currentStageIndex]?.label || 'Execution in progress';
 }
 
@@ -382,7 +387,21 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     .filter(run => run.projectId === project.id && projectSquadIds.has(run.squadId))
     .filter(run => workspaceRegistry.canAccessSquad(req.workspace!, run.squadId))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-  const squadRun = squadRuns.find(run => run.status === 'running' || run.status === 'awaiting_approval') ?? squadRuns[0];
+  const requestedRunId = typeof req.query.runId === 'string' ? req.query.runId : undefined;
+  const requestedRun = requestedRunId ? squadRuns.find(run => run.id === requestedRunId) : undefined;
+  const squadRun = requestedRun ?? squadRuns.find(run => run.status === 'running' || run.status === 'awaiting_approval') ?? squadRuns[0];
+  const buildRuns = squadRuns.slice(0, 40).map(run => {
+    const issue = issues.find(item => item.id === run.issueId && item.projectId === project.id);
+    return {
+      id: run.id,
+      status: run.status,
+      issueIdentifier: issue?.identifier,
+      issueTitle: issue?.title,
+      repository: issue?.githubRepo,
+      branchName: run.branchName,
+      updatedAt: run.updatedAt
+    };
+  });
   const selectedSquad = squads.find(squad => squad.id === squadRun?.squadId) ?? squads[0];
   const selectedRun = squadRun && squadRun.squadId === selectedSquad?.id ? squadRun : undefined;
   const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
@@ -606,7 +625,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
         color: agent?.color,
         status,
         progress: progressForRun(run),
-        currentTask: currentTask(run, status),
+        currentTask: currentTask(run, status, projectSquadRun.memberAssignments?.find(item => item.agentId === agentId)?.stageLabel),
         currentStage: run?.stages?.[run.currentStageIndex]?.label,
         runId: run?.id,
         squadRunId: projectSquadRun.id,
@@ -705,7 +724,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
         color: agent?.color,
         status,
         progress: progressForRun(run),
-        currentTask: currentTask(run, status),
+        currentTask: currentTask(run, status, selectedRun?.memberAssignments?.find(item => item.agentId === agentId)?.stageLabel),
         currentStage: run?.stages?.[run.currentStageIndex]?.label,
         runId: run?.id,
         squadRunId: selectedRun?.id,
@@ -806,8 +825,9 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     }),
     eligible: true,
     canRun: Boolean(selectedSquad) && workspaceRegistry.can(req.workspace!.role, 'squad.run'),
-    canManage: workspaceRegistry.can(req.workspace!.role, 'squad.manage'),
+    canManage: Boolean(selectedSquad && workspaceRegistry.canManageSquad(req.workspace!, selectedSquad.id)),
     status: selectedRun?.status ?? 'idle',
+    buildRuns,
     summary: {
       totalAgents: agentCards.length,
       completed,
@@ -832,6 +852,13 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       ...selectedRun,
       mission: safeOperationalText(selectedRun.mission, 700) ?? '',
       plan: selectedRun.plan.map(item => safeOperationalText(item, 360) ?? ''),
+      memberAssignments: (selectedRun.memberAssignments ?? [])
+        .filter(assignment => visibleAgentIds.has(assignment.agentId))
+        .map(assignment => ({
+          ...assignment,
+          stageLabel: safeOperationalText(assignment.stageLabel, 180) ?? '',
+          instructions: safeOperationalText(assignment.instructions, 1000) ?? ''
+        })),
       stoppedReason: safeOperationalText(selectedRun.stoppedReason, 500),
       memberAgentIds: visibleSelectedMemberIds,
       currentMemberIndex: visibleCurrentMemberIndex,

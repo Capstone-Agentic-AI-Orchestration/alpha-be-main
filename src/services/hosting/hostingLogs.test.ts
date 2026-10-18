@@ -32,7 +32,7 @@ async function load(options: { render?: Record<string, any>; vercel?: Record<str
     ...options.render
   };
   const vercel = {
-    findProjectByName: vi.fn(async () => ({ id: 'proj-1', name: 'shop-fe' })),
+    findProjectByName: vi.fn(async () => ({ id: 'proj-1', name: 'shop-fe', link: { type: 'github', org: 'example-org', repo: 'shop-fe' } })),
     listEnvVars: vi.fn(async () => []),
     queryLogs: vi.fn(async (..._args: any[]) => ({ logs: [LINE('GET / 200')], hasMore: false, next: null })),
     ...options.vercel
@@ -103,12 +103,45 @@ describe('a frontend branch’s logs', () => {
     expect(vercel.queryLogs.mock.calls[0][2]).toMatchObject({ type: ['build'] });
   });
 
-  it('refuses a branch that is not part of the pipeline', async () => {
-    const { getHostingLogs } = await load();
+  it('reads the exact deployment build output for a project build branch', async () => {
+    const { getHostingLogs, vercel } = await load();
 
-    expect(await getHostingLogs({ repo: 'example-org/shop-fe', stackHint: 'react' }, 'feature-x', {})).toMatchObject({
-      source: 'unavailable',
-      reason: 'Choose a branch: main, uat or dev.'
-    });
+    const page = await getHostingLogs({ repo: 'example-org/shop-fe', stackHint: 'react' }, 'build/calculator-1', { type: ['build'], direction: 'backward' });
+
+    expect(vercel.queryLogs).toHaveBeenCalledWith('proj-1', { branch: 'build/calculator-1' }, { type: ['build'], level: undefined, text: undefined });
+    expect(page).toMatchObject({ source: 'live', logs: [expect.objectContaining({ message: 'GET / 200' })] });
   });
+
+  it('refuses unsafe branch names before querying Vercel', async () => {
+    const { getHostingLogs, vercel } = await load();
+
+    expect(await getHostingLogs({ repo: 'example-org/shop-fe', stackHint: 'react' }, '/main', {})).toMatchObject({
+      source: 'unavailable',
+      reason: 'The requested branch name is not valid.'
+    });
+    expect(vercel.queryLogs).not.toHaveBeenCalled();
+  });
+
+  it('does not show a same-named Vercel project linked to another repository', async () => {
+    const { getHostingLogs, vercel } = await load({
+      vercel: { findProjectByName: vi.fn(async () => ({ id: 'proj-1', name: 'shop-fe', link: { org: 'somewhere-else', repo: 'shop-fe' } })) }
+    });
+
+    expect(await getHostingLogs({ repo: 'example-org/shop-fe', stackHint: 'react' }, 'build/calculator-1', {})).toMatchObject({
+      source: 'unavailable',
+      reason: 'The Vercel project with this name is linked to a different repository.'
+    });
+    expect(vercel.queryLogs).not.toHaveBeenCalled();
+  });
+
+  it('does not imply Render can provide logs for an isolated build branch', async () => {
+    const { getHostingLogs, render } = await load();
+
+    expect(await getHostingLogs({ repo: 'example-org/shop-be', stackHint: 'nodejs' }, 'build/calculator-1', {})).toMatchObject({
+      source: 'unavailable',
+      reason: 'Run-branch logs are not available for Render previews.'
+    });
+    expect(render.queryLogs).not.toHaveBeenCalled();
+  });
+
 });

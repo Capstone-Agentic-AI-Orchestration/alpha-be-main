@@ -83,9 +83,23 @@ async function startApi(options: Options = {}) {
         calls.push({ kind: 'status', repo: ctx.repo, project: ctx.project?.id ?? null, stackHint: ctx.stackHint });
         return { state: 'ready' };
       },
+      getBuildBranchPreview: async (ctx: any, branch: string) => {
+        calls.push({ kind: 'branch_preview', repo: ctx.repo, branch });
+        return { repo: ctx.repo, branch, platform: 'vercel', state: 'ready', url: 'https://shop-fe-build.vercel.app', deployStatus: 'READY', ci: { state: 'passed', commitSha: 'sha-build', checksUrl: null, checks: [] } };
+      },
       setUpHosting: async (ctx: any) => {
         calls.push({ kind: 'setup', repo: ctx.repo, project: ctx.project?.id ?? null });
         return { state: 'ready' };
+      }
+    };
+  });
+  vi.doMock('../services/hosting/healthCheck.js', async () => {
+    const actual = await vi.importActual<typeof import('../services/hosting/healthCheck.js')>('../services/hosting/healthCheck.js');
+    return {
+      ...actual,
+      checkHealth: async (url: string, path = '/health') => {
+        calls.push({ kind: 'health', url, path });
+        return { url: `${url}${path}`, ok: true, status: 200, latencyMs: 17 };
       }
     };
   });
@@ -134,7 +148,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
 
 afterEach(() => {
   delete process.env.ALPHA_MODE;
-  for (const mod of ['../store/stores.js', './workspaceContext.js', '../services/githubApi.js', '../services/cloudWorkspaces.js', '../services/hosting/hostingService.js', '../services/hosting/hostingEnv.js']) {
+  for (const mod of ['../store/stores.js', './workspaceContext.js', '../services/githubApi.js', '../services/cloudWorkspaces.js', '../services/hosting/hostingService.js', '../services/hosting/hostingEnv.js', '../services/hosting/healthCheck.js']) {
     vi.doUnmock(mod);
   }
   vi.resetModules();
@@ -268,6 +282,30 @@ describe('on a desktop', () => {
       [`/hosting/${ORG}/shop-fe/previews?stack=react&partner=${encodeURIComponent(`${ORG}/shop-be`)}`, undefined],
       // A health check may be waking a sleeping service.
       [`/hosting/${ORG}/shop-fe/health?stack=react&partner=${encodeURIComponent(`${ORG}/shop-be`)}&branch=uat`, 180_000]
+    ]);
+  });
+
+  it('forwards the exact build branch to the hosting provider preview lookup', async () => {
+    const { app, calls } = await startApi({ role: 'dev' });
+
+    await call(app, 'GET', `${projectRoute}/branch-preview?branch=build%2Fcalculator-1`);
+
+    expect(calls.map(c => c.path)).toEqual([
+      `/hosting/${ORG}/shop-fe/branch-preview?stack=react&partner=${encodeURIComponent(`${ORG}/shop-be`)}&branch=build%2Fcalculator-1`
+    ]);
+  });
+
+  it('checks the served page of a ready Vercel build preview on request', async () => {
+    const { app, calls } = await startApi({ cloud: true, role: 'dev' });
+
+    const res = await call(app, 'GET', `${projectRoute}/health?branch=build%2Fcalculator-1`);
+
+    expect(res.body).toMatchObject({ ok: true, status: 200, latencyMs: 17 });
+    expect(calls.filter(c => c.kind === 'branch_preview')).toEqual([
+      { kind: 'branch_preview', repo: `${ORG}/shop-fe`, branch: 'build/calculator-1' }
+    ]);
+    expect(calls.filter(c => c.kind === 'health')).toEqual([
+      { kind: 'health', url: 'https://shop-fe-build.vercel.app', path: '/' }
     ]);
   });
 
