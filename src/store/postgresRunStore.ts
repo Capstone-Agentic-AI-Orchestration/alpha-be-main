@@ -111,12 +111,13 @@ export class PostgresRunStore implements RunStore {
     await this.sql.query(
       `insert into squad_runs
          (id, workspace_id, owner_id, squad_id, issue_id, project_id, branch_name, member_agent_ids,
-          current_member_index, status, mission, plan, stopped_reason, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          current_member_index, status, mission, plan, member_assignments, stopped_reason, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        on conflict (id) do update set
          current_member_index = excluded.current_member_index, status = excluded.status,
          mission = excluded.mission, plan = excluded.plan, stopped_reason = excluded.stopped_reason,
-         member_agent_ids = excluded.member_agent_ids, updated_at = excluded.updated_at`,
+         member_agent_ids = excluded.member_agent_ids, member_assignments = excluded.member_assignments,
+         updated_at = excluded.updated_at`,
       [
         run.id,
         workspaceId,
@@ -130,6 +131,7 @@ export class PostgresRunStore implements RunStore {
         run.status,
         run.mission ?? '',
         JSON.stringify(run.plan ?? []),
+        JSON.stringify(run.memberAssignments ?? []),
         run.stoppedReason ?? null,
         run.createdAt || new Date().toISOString(),
         run.updatedAt || new Date().toISOString()
@@ -234,6 +236,7 @@ interface SquadRunRow {
   status: string;
   mission: string | null;
   plan: string[] | null;
+  member_assignments: SquadRun['memberAssignments'] | null;
   stopped_reason: string | null;
   created_at: Timestamp;
   updated_at: Timestamp;
@@ -307,6 +310,7 @@ function toSquadRun(row: SquadRunRow): SquadRun {
     status: row.status as SquadRun['status'],
     mission: row.mission ?? '',
     plan: row.plan ?? [],
+    memberAssignments: row.member_assignments ?? [],
     stoppedReason: row.stopped_reason ?? undefined,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)

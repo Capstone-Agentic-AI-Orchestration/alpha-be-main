@@ -419,6 +419,14 @@ export interface AnalyticsData {
  * A squad run owns an ordered list of PrototypeRuns — one per member — sharing
  * a single git branch, executed one after another.
  */
+export interface SquadMemberAssignment {
+  agentId: string;
+  stageLabel: string;
+  phase?: BuildStepPhase;
+  /** A concrete task boundary; the project request remains shared context. */
+  instructions: string;
+}
+
 export interface SquadRun {
   id: string;
   squadId: string;
@@ -433,6 +441,8 @@ export interface SquadRun {
   status: 'running' | 'awaiting_approval' | 'failed' | 'cancelled';
   mission: string;
   plan: string[];
+  /** Frozen per-member work boundaries for this run; absent on older runs. */
+  memberAssignments?: SquadMemberAssignment[];
   /** Why the squad stopped early, when it did. */
   stoppedReason?: string;
   createdAt: string;

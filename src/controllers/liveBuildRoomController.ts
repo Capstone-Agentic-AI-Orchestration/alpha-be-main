@@ -94,12 +94,17 @@ function cardStatus(run: any | undefined, squadRun: any | undefined, memberIndex
   return run.status === 'queued' ? 'waiting' : 'running';
 }
 
-function currentTask(run: any | undefined, status: RoomCardStatus): string {
+function currentTask(run: any | undefined, status: RoomCardStatus, assignedStageLabel?: string): string {
   if (status === 'completed') return 'Work completed';
   if (status === 'review') return 'Ready for review';
   if (status === 'failed') return 'Run stopped — review activity';
-  if (status === 'waiting') return 'Waiting for squad handoff';
+  const assignedStage = run?.plan?.find((item: unknown) => typeof item === 'string' && item.startsWith('Assigned stage:'))
+    ?.replace(/^Assigned stage:\s*/, '') ?? assignedStageLabel;
+  if (status === 'waiting') return assignedStage
+    ? `Waiting · ${safeOperationalText(assignedStage, 150) ?? 'next stage'}`
+    : 'Waiting for squad handoff';
   if (status === 'idle') return 'Ready to run';
+  if (assignedStage) return safeOperationalText(assignedStage, 150) ?? 'Assigned stage in progress';
   return run?.stages?.[run.currentStageIndex]?.label || 'Execution in progress';
 }
 
@@ -606,7 +611,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
         color: agent?.color,
         status,
         progress: progressForRun(run),
-        currentTask: currentTask(run, status),
+        currentTask: currentTask(run, status, projectSquadRun.memberAssignments?.find(item => item.agentId === agentId)?.stageLabel),
         currentStage: run?.stages?.[run.currentStageIndex]?.label,
         runId: run?.id,
         squadRunId: projectSquadRun.id,
@@ -705,7 +710,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
         color: agent?.color,
         status,
         progress: progressForRun(run),
-        currentTask: currentTask(run, status),
+        currentTask: currentTask(run, status, selectedRun?.memberAssignments?.find(item => item.agentId === agentId)?.stageLabel),
         currentStage: run?.stages?.[run.currentStageIndex]?.label,
         runId: run?.id,
         squadRunId: selectedRun?.id,
@@ -832,6 +837,13 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       ...selectedRun,
       mission: safeOperationalText(selectedRun.mission, 700) ?? '',
       plan: selectedRun.plan.map(item => safeOperationalText(item, 360) ?? ''),
+      memberAssignments: (selectedRun.memberAssignments ?? [])
+        .filter(assignment => visibleAgentIds.has(assignment.agentId))
+        .map(assignment => ({
+          ...assignment,
+          stageLabel: safeOperationalText(assignment.stageLabel, 180) ?? '',
+          instructions: safeOperationalText(assignment.instructions, 1000) ?? ''
+        })),
       stoppedReason: safeOperationalText(selectedRun.stoppedReason, 500),
       memberAgentIds: visibleSelectedMemberIds,
       currentMemberIndex: visibleCurrentMemberIndex,
