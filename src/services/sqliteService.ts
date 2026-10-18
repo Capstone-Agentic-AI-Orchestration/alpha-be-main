@@ -641,6 +641,7 @@ export class SQLiteService {
       ['agents', 'template_version INTEGER'],
       ['agents', 'phase TEXT'],
       ['agents', 'is_seeded INTEGER DEFAULT 0'],
+      ['agents', 'shared_key TEXT'],
       /**
        * Which project a conversation is about.
        *
@@ -770,6 +771,11 @@ export class SQLiteService {
         // Already present — normal on every start after the migration landed.
       }
     }
+
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_workspace_shared_key
+      ON agents (workspace_id, shared_key) WHERE shared_key IS NOT NULL
+    `);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS squad_runs (
@@ -1006,7 +1012,8 @@ export class SQLiteService {
         SET template_key = @templateKey,
             template_version = @templateVersion,
             phase = @phase,
-            is_seeded = 1
+            is_seeded = 1,
+            shared_key = coalesce(shared_key, @sharedKey)
         WHERE id = @id AND workspace_id = @workspaceId AND template_key IS NULL
       `);
 
@@ -1018,6 +1025,7 @@ export class SQLiteService {
           templateKey: template.key,
           templateVersion: template.version,
           phase: template.phase,
+          sharedKey: `official:${template.key}`,
           workspaceId
         });
       }
@@ -1037,7 +1045,28 @@ export class SQLiteService {
     const now = new Date().toISOString();
 
     for (const template of OFFICIAL_AGENT_TEMPLATES) {
-      if (existing.has(template.key)) continue;
+      const sharedKey = `official:${template.key}`;
+      if (existing.has(template.key)) {
+        const current = this.db.prepare(
+          'SELECT id FROM agents WHERE workspace_id = ? AND template_key = ?'
+        ).get(workspaceId, template.key) as { id: string } | undefined;
+        if (!current) continue;
+        this.db.prepare('UPDATE agents SET shared_key = ? WHERE id = ? AND workspace_id = ?')
+          .run(sharedKey, current.id, workspaceId);
+        const sharedTemplate = this.db.prepare(
+          'SELECT id FROM agents WHERE shared_key = ? AND workspace_id <> ? ORDER BY created_at LIMIT 1'
+        ).get(sharedKey, workspaceId) as { id: string } | undefined;
+        if (sharedTemplate) this.syncSharedProfile(sharedTemplate.id, workspaceId, current.id);
+        continue;
+      }
+
+      const sharedTemplate = this.db.prepare('SELECT id FROM agents WHERE shared_key = ? ORDER BY created_at LIMIT 1')
+        .get(sharedKey) as { id: string } | undefined;
+      if (sharedTemplate) {
+        this.copySharedAgent(sharedTemplate.id, workspaceId, sharedKey);
+        existing.add(template.key);
+        continue;
+      }
 
       // An installation may already have a manually created agent whose id
       // happens to match a new official role. That record is its owner's work,
@@ -1056,9 +1085,105 @@ export class SQLiteService {
       }
 
       this.createAgent(seeded);
+      this.db.prepare('UPDATE agents SET shared_key = ? WHERE id = ? AND workspace_id = ?')
+        .run(`official:${template.key}`, seeded.id, workspaceId);
       existing.add(template.key);
       existingIds.add(seeded.id);
     }
+
+  }
+
+  shareAgentAcrossWorkspaces(workspaceId: string, id: string, workspaceIds: string[]): Agent | null {
+    const source = this.db.prepare('SELECT template_key, shared_key FROM agents WHERE id = ? AND workspace_id = ?')
+      .get(id, workspaceId) as { template_key: string | null; shared_key: string | null } | undefined;
+    if (!source) return null;
+    const sharedKey = source.shared_key ?? (source.template_key ? `official:${source.template_key}` : `shared:${randomUUID()}`);
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE agents SET shared_key = ? WHERE id = ? AND workspace_id = ?').run(sharedKey, id, workspaceId);
+      for (const targetWorkspaceId of new Set([workspaceId, ...workspaceIds])) {
+        if (source.template_key) {
+          const existingTemplate = this.db.prepare('SELECT id FROM agents WHERE workspace_id = ? AND template_key = ?')
+            .get(targetWorkspaceId, source.template_key) as { id: string } | undefined;
+          if (existingTemplate) {
+            this.db.prepare('UPDATE agents SET shared_key = ? WHERE id = ? AND workspace_id = ?')
+              .run(sharedKey, existingTemplate.id, targetWorkspaceId);
+            continue;
+          }
+        }
+        if (targetWorkspaceId !== workspaceId) this.copySharedAgent(id, targetWorkspaceId, sharedKey);
+      }
+    })();
+    return this.getAgents().find(agent => agent.id === id) ?? null;
+  }
+
+  unshareAgentAcrossWorkspaces(workspaceId: string, id: string): Agent | null {
+    const row = this.db.prepare('SELECT shared_key, template_key FROM agents WHERE id = ? AND workspace_id = ?')
+      .get(id, workspaceId) as { shared_key: string | null; template_key: string | null } | undefined;
+    if (row?.shared_key && !row.template_key) {
+      this.db.prepare('UPDATE agents SET shared_key = NULL WHERE id = ? AND workspace_id = ?').run(id, workspaceId);
+    }
+    return this.getAgents().find(agent => agent.id === id) ?? null;
+  }
+
+  syncSharedAgentsIntoWorkspace(workspaceId: string, workspaceIds: string[]): void {
+    if (!workspaceIds.includes(workspaceId)) return;
+    const placeholders = workspaceIds.map(() => '?').join(',');
+    const shared = this.db.prepare(`
+      SELECT id, shared_key FROM agents
+      WHERE shared_key IS NOT NULL AND template_key IS NULL AND workspace_id IN (${placeholders})
+      GROUP BY shared_key
+    `).all(...workspaceIds) as Array<{ id: string; shared_key: string }>;
+    const existing = this.db.prepare('SELECT shared_key FROM agents WHERE workspace_id = ? AND shared_key IS NOT NULL')
+      .all(workspaceId) as Array<{ shared_key: string }>;
+    const keys = new Set(existing.map(row => row.shared_key));
+    for (const agent of shared) {
+      if (keys.has(agent.shared_key)) continue;
+      this.copySharedAgent(agent.id, workspaceId, agent.shared_key);
+      keys.add(agent.shared_key);
+    }
+  }
+
+  private copySharedAgent(sourceId: string, workspaceId: string, sharedKey: string): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO agents
+        (id, workspace_id, name, role, avatar, color, description, owner, is_mine,
+         model_provider, model_name, reasoning_effort, system_prompt, autonomy_level,
+         temperature, skills, mcp_servers, custom_cli_args, env_vars, concurrency_limit,
+         is_archived, allowed_users, template_key, template_version, phase, is_seeded,
+         shared_key, created_at)
+      SELECT @id, @workspaceId, name, role, avatar, color, description, owner, is_mine,
+         model_provider, model_name, reasoning_effort, system_prompt, autonomy_level,
+         temperature, skills, '[]', '', '[]', concurrency_limit,
+         is_archived, allowed_users, template_key, template_version, phase, is_seeded,
+         @sharedKey, created_at
+      FROM agents WHERE id = @sourceId
+    `).run({ id: `agent-shared-${randomUUID()}`, workspaceId, sharedKey, sourceId });
+  }
+
+  private syncSharedProfile(sourceId: string, workspaceId: string, targetId: string): void {
+    this.db.prepare(`
+      UPDATE agents SET
+        name = (SELECT name FROM agents WHERE id = @sourceId),
+        role = (SELECT role FROM agents WHERE id = @sourceId),
+        avatar = (SELECT avatar FROM agents WHERE id = @sourceId),
+        color = (SELECT color FROM agents WHERE id = @sourceId),
+        description = (SELECT description FROM agents WHERE id = @sourceId),
+        owner = (SELECT owner FROM agents WHERE id = @sourceId),
+        is_mine = (SELECT is_mine FROM agents WHERE id = @sourceId),
+        model_provider = (SELECT model_provider FROM agents WHERE id = @sourceId),
+        model_name = (SELECT model_name FROM agents WHERE id = @sourceId),
+        reasoning_effort = (SELECT reasoning_effort FROM agents WHERE id = @sourceId),
+        system_prompt = (SELECT system_prompt FROM agents WHERE id = @sourceId),
+        autonomy_level = (SELECT autonomy_level FROM agents WHERE id = @sourceId),
+        temperature = (SELECT temperature FROM agents WHERE id = @sourceId),
+        skills = (SELECT skills FROM agents WHERE id = @sourceId),
+        concurrency_limit = (SELECT concurrency_limit FROM agents WHERE id = @sourceId),
+        is_archived = (SELECT is_archived FROM agents WHERE id = @sourceId),
+        allowed_users = (SELECT allowed_users FROM agents WHERE id = @sourceId)
+      WHERE workspace_id = @workspaceId AND id = @targetId
+    `).run({ sourceId, workspaceId, targetId });
+    const copy = this.getAgents().find(agent => agent.id === targetId);
+    if (copy) syncAgentFile(copy, 'preserve');
   }
 
   private seedDefaultsIfEmpty() {
@@ -1650,6 +1775,7 @@ export class SQLiteService {
       templateVersion: r.template_version ?? undefined,
       phase: r.phase ?? undefined,
       isSeeded: Boolean(r.is_seeded),
+      sharedKey: r.shared_key ?? undefined,
       stats: stats.get(r.id) ?? {
         totalRuns: 0,
         successRate: 0,
@@ -1744,6 +1870,8 @@ export class SQLiteService {
     }
 
     const merged = { ...existing, ...overlay, ...updates };
+    const sharedKey = this.db.prepare('SELECT shared_key FROM agents WHERE id = ? AND workspace_id = ?')
+      .get(id, this.workspaceId()) as { shared_key: string | null } | undefined;
     const stmt = this.db.prepare(`
       UPDATE agents SET
         name = @name, role = @role, avatar = @avatar, color = @color, description = @description,
@@ -1764,6 +1892,31 @@ export class SQLiteService {
       mcpServers: JSON.stringify(merged.mcpServers || []),
       envVars: JSON.stringify(merged.envVars || [])
     });
+
+    if (sharedKey?.shared_key) {
+      this.db.prepare(`
+        UPDATE agents SET
+          name = @name, role = @role, avatar = @avatar, color = @color, description = @description,
+          model_provider = @modelProvider, model_name = @modelName, reasoning_effort = @reasoningEffort,
+          system_prompt = @systemPrompt, autonomy_level = @autonomyLevel, temperature = @temperature,
+          skills = @skills, concurrency_limit = @concurrencyLimit, is_archived = @isArchived,
+          allowed_users = @allowedUsers
+        WHERE shared_key = @sharedKey
+      `).run({
+        ...merged,
+        sharedKey: sharedKey.shared_key,
+        isArchived: merged.isArchived ? 1 : 0,
+        allowedUsers: merged.allowedUsers ?? null,
+        reasoningEffort: merged.reasoningEffort ?? null,
+        skills: JSON.stringify(merged.skills || [])
+      });
+
+      const copies = this.db.prepare('SELECT id FROM agents WHERE shared_key = ? AND id <> ?')
+        .all(sharedKey.shared_key, id) as Array<{ id: string }>;
+      for (const copy of copies) {
+        syncAgentFile({ ...merged, id: copy.id }, 'systemPrompt' in updates ? 'replace' : 'preserve');
+      }
+    }
 
     /**
      * Refresh the persona file's frontmatter, but keep its body unless this

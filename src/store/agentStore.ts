@@ -13,6 +13,9 @@ export interface AgentStore {
   create(workspaceId: string, agent: Agent): Promise<Agent>;
   update(workspaceId: string, id: string, updates: Partial<Agent>): Promise<Agent | null>;
   remove(workspaceId: string, id: string): Promise<boolean>;
+  share(workspaceId: string, id: string, workspaceIds: string[]): Promise<Agent | null>;
+  unshare(workspaceId: string, id: string): Promise<Agent | null>;
+  syncShared(workspaceId: string, workspaceIds: string[]): Promise<void>;
   /**
    * Give a workspace Alpha's official roles, once.
    *

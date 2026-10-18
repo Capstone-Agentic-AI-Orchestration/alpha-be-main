@@ -31,6 +31,18 @@ export class SqliteAgentStore implements AgentStore {
     return runWithWorkspace(workspaceId, () => sqliteService.deleteAgent(id));
   }
 
+  async share(workspaceId: string, id: string, workspaceIds: string[]): Promise<Agent | null> {
+    return runWithWorkspace(workspaceId, () => sqliteService.shareAgentAcrossWorkspaces(workspaceId, id, workspaceIds));
+  }
+
+  async unshare(workspaceId: string, id: string): Promise<Agent | null> {
+    return runWithWorkspace(workspaceId, () => sqliteService.unshareAgentAcrossWorkspaces(workspaceId, id));
+  }
+
+  async syncShared(workspaceId: string, workspaceIds: string[]): Promise<void> {
+    runWithWorkspace(workspaceId, () => sqliteService.syncSharedAgentsIntoWorkspace(workspaceId, workspaceIds));
+  }
+
   /** Seeded by `sqliteService` itself, at construction and on workspace create. */
   async ensureOfficial(workspaceId: string): Promise<void> {
     runWithWorkspace(workspaceId, () => sqliteService.ensureOfficialAgents(workspaceId));
