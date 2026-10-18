@@ -30,6 +30,7 @@ import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 import { PostgresTicketCommunicationNotificationStore } from '../store/ticketCommunicationNotificationStore.js';
 import { createTicketCommunicationNotificationService } from '../services/ticketCommunicationNotificationService.js';
 import { startTicketCommunicationNotificationWorker } from '../services/ticketCommunicationNotificationWorker.js';
+import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
 
 const INVITATION_LIFETIME_MS = 60 * 60 * 1000;
 const CLIENT_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
@@ -59,6 +60,7 @@ export function createTicketClientComposition(input: {
   webOrigin: string;
   emailProvider: TicketInvitationContentEmailProvider;
   onSignInDeliveryUnavailable?: () => void;
+  workflow?: TicketLifecycleRuntime;
 }): TicketClientComposition {
   if (typeof input.emailProvider.sendContent !== 'function') {
     throw new Error('Client email delivery is not configured.');
@@ -109,6 +111,7 @@ export function createTicketClientComposition(input: {
     cookiePolicy: { secure: true, allowedOrigins: [input.webOrigin] },
     sessionAdmission,
     activationAdmission,
+    workflow: input.workflow,
   });
 
   const delivery = createTicketClientInvitationDeliveryService(

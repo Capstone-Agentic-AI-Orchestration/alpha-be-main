@@ -17,8 +17,36 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { IS_CLOUD } from '../config/env.js';
 import { mergePullRequestOverApi } from '../services/githubPullRequests.js';
 import { desktopOnly } from './desktopOnly.js';
+import { randomUUID } from 'node:crypto';
+import { reserveTicketExecution, reviewTicketExecution, stopTicketExecution, TicketExecutionRelayError, type TicketRunReviewDecision } from '../services/ticketExecutionRelay.js';
+import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
+import { assignedWorkTicketSubject } from './ticketRequestAuth.js';
+import { supabaseService } from '../services/supabaseService.js';
+import type { PrototypeRun } from '../models/index.js';
+import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
 
 export const runRouter = Router();
+let ticketLifecycleRuntime: TicketLifecycleRuntime | null = null;
+
+/** The runtime is built after the database/environment are resolved in index. */
+export function setRunTicketLifecycleRuntime(runtime: TicketLifecycleRuntime | null): void {
+  ticketLifecycleRuntime = runtime;
+}
+
+async function recordTicketRunReview(req: Request, res: Response, run: PrototypeRun,
+  decision: TicketRunReviewDecision) {
+  const workspaceId = req.workspace?.workspaceId ?? '';
+  if (IS_CLOUD) {
+    if (!ticketLifecycleRuntime?.enabled) return { kind: 'unavailable' as const };
+    if (!requireWorkspaceCapability(req, res, 'issue.manage')) return null;
+    const subject = assignedWorkTicketSubject(req, res);
+    if (!subject) return null;
+    return decision === 'passed'
+      ? ticketLifecycleRuntime.completeReviewedIssue({ workspaceId, issueId: run.issueId }, subject, run.id)
+      : ticketLifecycleRuntime.stopReviewedRun({ workspaceId, issueId: run.issueId }, subject, run.id);
+  }
+  return reviewTicketExecution({ workspaceId, issueId: run.issueId, runId: run.id, decision });
+}
 
 async function scopedRun(req: Request, res: Response, runId: string) {
   if (!requireEntityWorkspace(req, res, 'prototype_runs', runId)) return null;
@@ -103,6 +131,7 @@ runRouter.get('/analytics', route(async (req: Request, res: Response) => {
 }));
 
 runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) => {
+  let ticketExecution: Awaited<ReturnType<typeof reserveTicketExecution>> = null;
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const { issueId, agentId, plan, scenario } = req.body;
@@ -114,17 +143,32 @@ runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) =
     const issue = await issueStore().get(req.workspace!.workspaceId, issueId);
     if (!issue) return res.status(404).json({ error: 'Issue not found' });
     if (!requireProjectWorkspace(req, res, issue.projectId)) return;
-    const run = await runnerService.startRun({
-      issueId,
-      agentId,
-      plan: plan || [],
-      scenario,
-      workspaceId: req.workspace!.workspaceId
+    const workspaceId = req.workspace!.workspaceId;
+    const runId = `run-${randomUUID()}`;
+    ticketExecution = await reserveTicketExecution({
+      workspaceId, issueId, runId, executor: { kind: 'agent', id: agentId },
     });
+    let run;
+    try {
+      run = await runnerService.startRun({
+        issueId,
+        agentId,
+        plan: plan || [],
+        scenario,
+        workspaceId,
+        ...(ticketExecution ? { runId: ticketExecution.runId, ticketExecution } : {}),
+      });
+    } catch (error) {
+      if (ticketExecution) await stopTicketExecution(ticketExecution).catch(stopError =>
+        logError('Could not release unused ticket reservation:', stopError?.message ?? stopError));
+      throw error;
+    }
     workspaceRegistry.bind('prototype_runs', run.id, req.workspace!.workspaceId);
     res.status(201).json(run);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to start run' });
+    const status = err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500
+      ? err.status : err instanceof TicketExecutionRelayError ? 503 : 500;
+    res.status(status).json({ error: err.message || 'Failed to start run' });
   }
 });
 
@@ -176,7 +220,8 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
     return res.status(400).json({ error: 'approved must be a boolean' });
   }
 
-  if (run.status !== 'awaiting_approval') {
+  const approvedReplay = approved && run.status === 'completed';
+  if (run.status !== 'awaiting_approval' && !approvedReplay) {
     return res.status(409).json({
       error: `Run is ${run.status}, not awaiting approval.`
     });
@@ -185,6 +230,14 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
   const now = new Date().toISOString();
 
   if (!approved) {
+    try {
+      const review = await recordTicketRunReview(req, res, run, 'changes_requested');
+      if (review === null) return;
+    } catch (err: any) {
+      const status = err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500
+        ? err.status : err instanceof TicketExecutionRelayError ? 503 : Number(err?.status) || 503;
+      return res.status(status).json({ error: err.message || 'Could not record the ticket-linked review decision.' });
+    }
     const rejected = { ...run, status: 'changes_requested' as any, updatedAt: now };
     await runStore().save(req.workspace!.workspaceId, rejected, req.workspace!.userId);
     await issueStore().addComment(req.workspace!.workspaceId, {
@@ -205,9 +258,11 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
    * A run with no pull request is still approvable — a project with no remote
    * commits locally and never opens one, and that work is no less done.
    */
-  let mergeNote = 'No pull request was opened, so there was nothing to merge.';
+  let mergeNote = approvedReplay
+    ? 'The run was already approved; its ticket review is being reconciled.'
+    : 'No pull request was opened, so there was nothing to merge.';
 
-  if (run.prUrl) {
+  if (run.prUrl && !approvedReplay) {
     const project = await projectStore().get(req.workspace!.workspaceId, run.projectId);
     /**
      * In the cloud, through GitHub's API as the person approving. There is no
@@ -285,6 +340,29 @@ The run is still at the review gate.`,
 
   const updated = { ...run, status: 'completed' as const, updatedAt: now };
   await runStore().save(req.workspace!.workspaceId, updated, req.workspace!.userId);
+
+  // The ticket authority validates this exact run against its durable cloud
+  // record. On desktop, do not proceed if that terminal status failed to sync.
+  if (!IS_CLOUD && usesCloudDirectory()) {
+    if (!supabaseService.isConfigured()) {
+      return res.status(503).json({ error: 'The run could not be synchronized with cloud ticket review. Reconnect cloud access before continuing.' });
+    }
+    try {
+      await supabaseService.saveRunToCloud(updated, { throwOnError: true });
+    } catch (err: any) {
+      logError(`Could not sync approved run ${run.id} before ticket review:`, err?.message ?? err);
+      return res.status(503).json({ error: 'The run could not be synchronized with cloud ticket review. Retry this approval after the connection is restored.' });
+    }
+  }
+
+  try {
+    const review = await recordTicketRunReview(req, res, updated, 'passed');
+    if (review === null) return;
+  } catch (err: any) {
+    const status = err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500
+      ? err.status : err instanceof TicketExecutionRelayError ? 503 : Number(err?.status) || 503;
+    return res.status(status).json({ error: err.message || 'Could not record the ticket-linked review decision. Retry approval to reconcile it.' });
+  }
 
   // Written to the comments table, not appended to an array in the browser.
   await issueStore().addComment(req.workspace!.workspaceId, {
@@ -370,6 +448,7 @@ runRouter.post('/squad-runs/:id/cancel', desktopOnly, async (req: Request, res: 
 });
 
 runRouter.post('/squads/:id/run', desktopOnly, async (req: Request, res: Response) => {
+  let ticketExecution: Awaited<ReturnType<typeof reserveTicketExecution>> = null;
   try {
     if (!requireWorkspaceCapability(req, res, 'squad.run')) return;
     if (!requireSquadWorkspace(req, res, req.params.id)) return;
@@ -383,12 +462,26 @@ runRouter.post('/squads/:id/run', desktopOnly, async (req: Request, res: Respons
       return res.status(409).json({ error: 'Assign this squad to the project before starting a squad run.' });
     }
 
-    const squadRun = await squadRunner.startSquadRun({
-      squadId: req.params.id,
-      issueId,
-      plan: plan || [],
-      mission
+    const workspaceId = req.workspace!.workspaceId;
+    const reservedSquadRunId = `squadrun-${randomUUID()}`;
+    ticketExecution = await reserveTicketExecution({
+      workspaceId, issueId, runId: reservedSquadRunId,
+      executor: { kind: 'squad', id: req.params.id },
     });
+    let squadRun;
+    try {
+      squadRun = await squadRunner.startSquadRun({
+        squadId: req.params.id,
+        issueId,
+        plan: plan || [],
+        mission,
+        ...(ticketExecution ? { id: ticketExecution.runId, ticketExecution } : {}),
+      });
+    } catch (error) {
+      if (ticketExecution) await stopTicketExecution(ticketExecution).catch(stopError =>
+        logError('Could not release unused ticket squad reservation:', stopError?.message ?? stopError));
+      throw error;
+    }
     workspaceRegistry.bind('squad_runs', squadRun.id, req.workspace!.workspaceId);
     for (const run of await runStore().runsForSquadRun(req.workspace!.workspaceId, squadRun.id)) {
       workspaceRegistry.bind('prototype_runs', run.id, req.workspace!.workspaceId);
@@ -398,7 +491,9 @@ runRouter.post('/squads/:id/run', desktopOnly, async (req: Request, res: Respons
     // A squad that cannot run — unimplemented topology, no members, a missing
     // issue — is the caller's problem to fix and says so, rather than being
     // reported as an internal failure.
-    const status = err instanceof SquadRunError ? 400 : 500;
+    const status = err instanceof SquadRunError ? 400
+      : err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500 ? err.status
+        : err instanceof TicketExecutionRelayError ? 503 : 500;
     res.status(status).json({ error: err.message || 'Failed to start squad run' });
   }
 });

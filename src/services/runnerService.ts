@@ -28,6 +28,8 @@ import { runVerification } from './verificationService.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
 import { RUNS_DIR } from '../config/env.js';
+import { admitTicketExecution, stopTicketExecution, type TicketExecutionHandle } from './ticketExecutionRelay.js';
+import type { DeveloperTicketWorkContext } from '../ticketing/developerContext.js';
 
 export interface StartRunParams {
   issueId: string;
@@ -44,6 +46,10 @@ export interface StartRunParams {
   squad?: SquadMemberContext;
   /** The workspace the run was started in; the run's hosting tools act in it. */
   workspaceId?: string;
+  /** Cloud-reserved ID for a ticket-linked direct run. Never sent to the UI as a capability. */
+  runId?: string;
+  /** In-memory claim context; deliberately excluded from persisted run records. */
+  ticketExecution?: TicketExecutionHandle;
   /** Internal run-scoped worktree; routes must never accept this from a request body. */
   workingDir?: string;
 }
@@ -91,6 +97,9 @@ function appendSquadAssignmentPolicy(
 class SkipPullRequest extends Error {}
 
 export class RunnerService extends EventEmitter {
+  private readonly ticketExecutions = new Map<string, TicketExecutionHandle>();
+  private readonly admittedTicketRuns = new Set<string>();
+
   /**
    * Start autonomous execution for an issue
    */
@@ -140,7 +149,8 @@ export class RunnerService extends EventEmitter {
 
     allowAttachedWorkspace(workspace, project.name);
 
-    const runId = `run-${randomUUID()}`;
+    const runId = params.runId ?? `run-${randomUUID()}`;
+    if (params.ticketExecution) this.ticketExecutions.set(runId, params.ticketExecution);
     const now = new Date().toISOString();
     /**
      * A squad's members all commit to the branch the squad run opened. Only a
@@ -211,9 +221,11 @@ export class RunnerService extends EventEmitter {
       branchName,
       ...(params.squad ? {} : { assignedAgentId: agentId })
     };
-    updateIssueAndPush(issueId, issueUpdate);
-    if (supabaseService.isConfigured()) {
-      supabaseService.updateIssueInCloud(issueId, issueUpdate).catch(() => {});
+    if (!params.ticketExecution) {
+      updateIssueAndPush(issueId, issueUpdate);
+      if (supabaseService.isConfigured()) {
+        supabaseService.updateIssueInCloud(issueId, issueUpdate).catch(() => {});
+      }
     }
 
     addCommentAndShare({
@@ -225,9 +237,11 @@ export class RunnerService extends EventEmitter {
       agentId: agent.id,
       // Says what is true right now. A run that is waiting for the workspace
       // has not started anything, and the comment is a permanent record.
-      content: queuedBehind
-        ? `Queued for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`. ${waitNote}`
-        : `Started autonomous execution for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`.`,
+      content: params.ticketExecution
+        ? `Execution reserved for **${issue.identifier}**. Project access and the approved work scope will be checked again before an agent starts.`
+        : queuedBehind
+          ? `Queued for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`. ${waitNote}`
+          : `Started autonomous execution for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`.`,
       createdAt: now,
       isThinking: true
     });
@@ -242,11 +256,19 @@ export class RunnerService extends EventEmitter {
      * projects are unaffected: they have their own directory and their own
      * queue.
      */
+    let admittedWorkContext: DeveloperTicketWorkContext | undefined;
     workspaceQueue
       .run(cwd, async () => {
         // Waiting is over; say so before the first stage moves.
         const queued = sqliteService.getPrototypeRuns().find(r => r.id === runId);
         if (queued?.status === 'queued') this.markRunStarted(runId);
+
+        if (params.ticketExecution) {
+          const issueUpdate: Partial<Issue> = { status: 'agent_running', branchName,
+            ...(params.squad ? {} : { assignedAgentId: agentId }) };
+          updateIssueAndPush(issueId, issueUpdate);
+          if (supabaseService.isConfigured()) supabaseService.updateIssueInCloud(issueId, issueUpdate).catch(() => {});
+        }
 
         await this.executeTask({
           runId,
@@ -257,15 +279,30 @@ export class RunnerService extends EventEmitter {
           branchName,
           plan,
           squad: params.squad,
-          workspaceId: params.workspaceId
+          workspaceId: params.workspaceId,
+          ticketWorkContext: admittedWorkContext
         });
       }, {
         // A queued run can be cancelled while an earlier run owns the
         // checkout. Check again at the front of the queue so cancellation
         // prevents the process from ever being spawned.
-        shouldStart: () => {
+        shouldStart: async () => {
           const latest = sqliteService.getPrototypeRuns().find(r => r.id === runId);
-          return !!latest && (latest.status === 'queued' || latest.status === 'running');
+          if (!latest || (latest.status !== 'queued' && latest.status !== 'running')) return false;
+          if (!params.ticketExecution) return true;
+          try {
+            const admission = await admitTicketExecution(params.ticketExecution);
+            if (!admission.launch) {
+              this.markRunFailed(runId, 'This ticket execution was already admitted elsewhere. Reconcile it before retrying.');
+              return false;
+            }
+            this.admittedTicketRuns.add(runId);
+            admittedWorkContext = admission.workContext;
+            return true;
+          } catch (error: any) {
+            this.markRunFailed(runId, error?.message || 'Ticket work authorization could not be verified.');
+            return false;
+          }
         }
       })
       .catch(err => {
@@ -286,6 +323,7 @@ export class RunnerService extends EventEmitter {
     plan: string[];
     squad?: SquadMemberContext;
     workspaceId?: string;
+    ticketWorkContext?: DeveloperTicketWorkContext;
   }) {
     const { runId, issue, agent, cwd, branchName, plan } = ctx;
 
@@ -392,7 +430,14 @@ export class RunnerService extends EventEmitter {
      * Constructing it earlier meant promising a push tool before knowing
      * whether the agent had been granted one.
      */
-    const prompt = this.buildTaskPrompt(issue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad);
+    const promptIssue = ctx.ticketWorkContext ? {
+      ...issue,
+      title: `Approved work for ${ctx.ticketWorkContext.ticketReference}`,
+      description: [ctx.ticketWorkContext.brief,
+        ctx.ticketWorkContext.correction ? `\n\nPM-authorized correction:\n${ctx.ticketWorkContext.correction.instructions}` : '']
+        .join(''),
+    } : issue;
+    const prompt = this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad);
     const systemPrompt = ctx.squad
       ? appendSquadAssignmentPolicy(persona.systemPrompt, agent, ctx.squad)
       : persona.systemPrompt;
@@ -1005,6 +1050,8 @@ ${issue.description}
       });
 
       this.emit('run_completed', finalRun);
+      this.ticketExecutions.delete(runId);
+      this.admittedTicketRuns.delete(runId);
     } else {
       this.markRunFailed(runId, `Process exited with error code: ${code}`);
     }
@@ -1284,14 +1331,17 @@ ${issue.description}
     };
 
     sqliteService.savePrototypeRun(failedRun);
-    updateIssueAndPush(run.issueId, { status: 'in_progress' });
+    const ticketNotAdmitted = this.ticketExecutions.has(runId) && !this.admittedTicketRuns.has(runId);
+    const issueStatus: Issue['status'] = ticketNotAdmitted ? 'todo' : 'in_progress';
+    updateIssueAndPush(run.issueId, { status: issueStatus });
     this.emit('run_failed', failedRun);
 
     if (supabaseService.isConfigured()) {
       supabaseService.saveRunToCloud(failedRun).catch(() => {});
-      supabaseService.updateIssueInCloud(run.issueId, { status: 'in_progress' }).catch(() => {});
+      supabaseService.updateIssueInCloud(run.issueId, { status: issueStatus }).catch(() => {});
       supabaseService.broadcastRunEvent(runId, { type: 'run_failed', payload: failedRun }).catch(() => {});
     }
+    void this.releaseTicketClaimAfterTerminalRun(failedRun);
   }
 
   async cancelRun(runId: string): Promise<void> {
@@ -1325,12 +1375,14 @@ ${issue.description}
     };
 
     sqliteService.savePrototypeRun(cancelledRun);
-    updateIssueAndPush(run.issueId, { status: 'in_progress' });
+    const ticketNotAdmitted = this.ticketExecutions.has(runId) && !this.admittedTicketRuns.has(runId);
+    const issueStatus: Issue['status'] = ticketNotAdmitted ? 'todo' : 'in_progress';
+    updateIssueAndPush(run.issueId, { status: issueStatus });
     this.emit('run_cancelled', cancelledRun);
 
     if (supabaseService.isConfigured()) {
       supabaseService.saveRunToCloud(cancelledRun).catch(() => {});
-      supabaseService.updateIssueInCloud(run.issueId, { status: 'in_progress' }).catch(() => {});
+      supabaseService.updateIssueInCloud(run.issueId, { status: issueStatus }).catch(() => {});
       supabaseService.broadcastRunEvent(runId, { type: 'run_cancelled', payload: cancelledRun }).catch(() => {});
     }
 
@@ -1338,6 +1390,30 @@ ${issue.description}
     // the scheduling race, handleProcessExit now sees the terminal row and
     // cannot finalize it as a success.
     await processManager.killProcess(runId, 'SIGTERM', 'cancelled');
+    void this.releaseTicketClaimAfterTerminalRun(cancelledRun);
+  }
+
+  private async releaseTicketClaimAfterTerminalRun(run: PrototypeRun) {
+    const handle = this.ticketExecutions.get(run.id);
+    if (!handle) return;
+    // The cloud checks its durable run record before freeing an admitted claim.
+    // Await the existing desktop sync first; if it cannot be confirmed, leave
+    // the claim active instead of risking a second process on the same Issue.
+    if (supabaseService.isConfigured()) {
+      try { await supabaseService.saveRunToCloud(run); }
+      catch (error: any) { logError('Could not sync terminal ticket run before claim release:', error?.message ?? error); }
+    }
+    for (const delay of [0, 250, 750, 1_500]) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      try {
+        await stopTicketExecution(handle);
+        this.ticketExecutions.delete(run.id);
+        this.admittedTicketRuns.delete(run.id);
+        return;
+      } catch (error: any) {
+        if (delay === 1_500) logError('Ticket execution claim remains active for reconciliation:', error?.message ?? error);
+      }
+    }
   }
 }
 

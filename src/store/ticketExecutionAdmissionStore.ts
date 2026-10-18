@@ -47,16 +47,18 @@ export interface LockedTicketRunAdmission {
  * Durable adapter and existing-run integration are intentionally deferred.
  */
 export interface TicketExecutionAdmissionTransaction {
-  /** Resolve verified internal identity, active developer membership/assignment,
+  /** Resolve verified internal identity and active developer access to the project,
    * exact tenant/Issue binding and selected executor from authoritative rows.
    * Never classify an unavailable ticket store as an unlinked Issue. Lock the
-   * binding slot even when absent, serializing with PM authorize_work.
+   * binding slot even when absent, serializing with PM authorize_work. For linked
+   * ticket work, require workspace/project access rather than a named Issue
+   * assignee. Unlinked legacy work retains its existing assignment check.
    */
-  lockAssignedIssue(target: TicketIssueTarget, subject: TicketSubject): Promise<LockedTicketIssue | null>;
+  lockAuthorizedIssue(target: TicketIssueTarget, subject: TicketSubject): Promise<LockedTicketIssue | null>;
   /** Resolve a persisted worker verification reference, original developer's
    * CURRENT authority, exact persisted run + claim + executor relation, and fresh
    * Issue evidence. Not a browser run ID, an expired request context, or token.
-   * Lock in the same order as lockAssignedIssue, then the claim/run rows.
+   * Lock in the same order as lockAuthorizedIssue, then the claim/run rows.
    */
   lockVerifiedRun(target: TicketIssueTarget, subject: TicketRunAdmissionSubject): Promise<LockedTicketRunAdmission | null>;
   findOperation(key: TicketAdmissionKey): Promise<SavedTicketAdmission | null>;

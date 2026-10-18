@@ -42,7 +42,7 @@ export function ticketDeliveryWorkflowFixture() {
     clientAccessActive: true, project: { id: 'project-a', workspaceId: deliveryTarget.workspaceId, creatorActive: true, nonProductionSafe: true },
     issues: ['a', 'b'].map(suffix => ({ id: `issue-${suffix}`, revisionId: `revision-${suffix}`, ...deliveryTarget,
       projectId: 'project-a', scopeVersionId: 'scope-a', status: 'done', requiredReviewsPassed: true,
-      assignedDeveloperActive: true, hasActiveRun: false })),
+      hasActiveRun: false })),
   };
   const readiness: SavedTicketReadiness = {
     key: { ...deliveryTarget, kind: 'technical_work_ready', actorId: 'dev-a', runId: 'run-a', completionId: 'completion-a', operationId: 'ready-operation' },

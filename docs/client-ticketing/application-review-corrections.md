@@ -5,10 +5,10 @@ folders are retained. Ticket routes are still unmounted; Supabase integration st
 
 ## Lifecycle
 
-1. An assigned developer finishes the existing Issues and technical checks.
+1. A developer with access to the linked project claims and finishes the existing Issues and technical checks.
 2. PM reviews the work. If it needs fixing, **Return affected Issues** on Tickets
    selects only the reviewed/completed Issues and requires a developer brief.
-3. The server rechecks the exact authorized manifest, active affected assignees,
+3. The server rechecks the exact authorized manifest, current project access,
    current revisions, and absence of queued/running work. An Issue already queued
    for its correction cannot be repeatedly reset under fresh operation IDs.
 4. A correction atomically appends an immutable private brief/new revision,
@@ -16,7 +16,7 @@ folders are retained. Ticket routes are still unmounted; Supabase integration st
    fresh review requirements, clears the current delivery pointer and records
    the audit/outbox/operation outcome. Initial work links, prior reviews and
    deliveries are preserved; unrelated Issues are unchanged.
-5. The assigned developer's work-context projection includes the original agreed
+5. Any project-authorized developer who claims the work receives a context projection with the original agreed
    scope plus the current revision's PM instructions. It never copies the whole
    client thread or PM notes. A missing, foreign or stale correction brief fails
    closed, and unresolved client withdrawal blocks the context.

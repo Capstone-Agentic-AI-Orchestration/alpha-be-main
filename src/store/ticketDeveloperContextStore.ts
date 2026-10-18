@@ -7,13 +7,13 @@ import type { TicketWorkflow } from '../ticketing/workflow.js';
  */
 export interface TicketDeveloperContextSnapshot {
   workspaceId: string;
+  /** Access of the requesting verified developer to this Issue's project. */
+  developerProjectAccessActive: boolean;
   issue: {
     id: string;
     workspaceId: string;
     projectId: string;
     ticketId: string;
-    assignedDeveloperId: string;
-    assignmentActive: boolean;
     revisionId: string;
     initialRevisionId: string;
     status: IssueStatus;
@@ -38,13 +38,14 @@ export interface TicketDeveloperContextSnapshot {
 /** Current authorization must be resolved in one coherent read snapshot. */
 export interface TicketDeveloperContextTransaction {
   /**
-   * Return null for missing/foreign/inactive identity, workspace membership,
-   * assignment or Issue. Recheck the persisted internal session/bearer, active
-   * developer membership, exact human assignment, project and ticket links.
-   * Project safety is freshly derived from the existing execution/release path,
-   * not copied from a caller-controlled flag. No unrelated client data is read.
+   * Return null for missing/foreign/inactive identity, workspace/project access,
+   * or Issue. Recheck the persisted internal session/bearer, active developer
+   * membership and project access, exact tenant/Issue/ticket links. Do not require
+   * an individual Issue assignee for ticket-linked work. Project safety is freshly
+   * derived from the existing execution/release path, not a caller flag. No
+   * unrelated client data is read.
    */
-  loadAssignedWorkContext(workspaceId: string, issueId: string, subject: TicketSubject): Promise<TicketDeveloperContextSnapshot | null>;
+  loadAuthorizedWorkContext(workspaceId: string, issueId: string, subject: TicketSubject): Promise<TicketDeveloperContextSnapshot | null>;
 }
 export interface TicketDeveloperContextStore {
   transaction<T>(work: (tx: TicketDeveloperContextTransaction) => Promise<T>): Promise<T>;

@@ -16,7 +16,7 @@ The PM submits two distinct text fields:
 
 - `publicSummary`: the work the client is being asked to agree to.
 - `developerBrief`: private implementation notes; it is not part of a client
-  read projection and is only eligible for the assigned developer context after
+  read projection and is only eligible for a developer with project access after
   client agreement and separate PM work authorization.
 
 One request creates a new immutable scope version and applies the existing

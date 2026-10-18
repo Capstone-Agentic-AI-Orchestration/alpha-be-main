@@ -10,7 +10,7 @@ import type { NextFunction, Request, Response } from 'express';
  * what makes their failures answer 500 (or 503) like every other error.
  */
 export const route =
-  (handler: (req: Request, res: Response) => Promise<unknown>) =>
+  (handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction): void => {
-    handler(req, res).catch(next);
+    handler(req, res, next).catch(next);
   };

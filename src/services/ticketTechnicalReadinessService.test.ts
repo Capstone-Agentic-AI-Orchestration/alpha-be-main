@@ -27,7 +27,7 @@ function completedFacts(): TicketFacts {
     issues: ['a', 'b'].map(suffix => ({
       id: `issue-${suffix}`, revisionId: `revision-${suffix}`, ...target,
       projectId: 'project-a', scopeVersionId: 'scope-a', status: 'done', hasActiveRun: false,
-      assignedDeveloperActive: true, requiredReviewsPassed: true,
+      requiredReviewsPassed: true,
     })),
   };
 }

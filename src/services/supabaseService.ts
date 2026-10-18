@@ -525,7 +525,7 @@ export class SupabaseService {
   }
 
   /** Persist a run to the cloud board. */
-  saveRunToCloud(run: PrototypeRun): Promise<void> {
+  saveRunToCloud(run: PrototypeRun, options: { throwOnError?: boolean } = {}): Promise<void> {
     if (!this.client) return Promise.resolve();
     const client = this.client;
 
@@ -539,6 +539,7 @@ export class SupabaseService {
         if (error) throw error;
       } catch (err: any) {
         this.reportFailure(`save run ${run.id}`, err);
+        if (options.throwOnError) throw err;
       }
     })();
 

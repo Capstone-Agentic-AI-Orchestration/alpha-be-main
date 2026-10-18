@@ -7,6 +7,7 @@ import { logInfo, logError } from '../utils/logger.js';
 import { Agent, BuildStepPhase, PrototypeRun, Squad, SquadMemberAssignment, SquadRun } from '../models/index.js';
 import { addCommentAndShare, updateIssueAndPush } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
+import type { TicketExecutionHandle } from './ticketExecutionRelay.js';
 import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { supabaseService } from './supabaseService.js';
@@ -61,6 +62,7 @@ export class SquadRunError extends Error {}
 export class SquadRunner {
   /** Squad runs waiting on a member, keyed by the run id currently executing. */
   private awaiting = new Map<string, { squadRunId: string; workspaceId: string }>();
+  private ticketExecutions = new Map<string, TicketExecutionHandle>();
   /** Local-only paths: never published with the shared squad-run record. */
   private runWorkspaces = new Map<string, { repositoryDir: string; workingDir: string }>();
   /** Serialize finish and cancellation transitions so a stop cannot race a handoff. */
@@ -110,6 +112,8 @@ export class SquadRunner {
   async startSquadRun(params: {
     squadId: string;
     issueId: string;
+    id?: string;
+    ticketExecution?: TicketExecutionHandle;
     plan?: string[];
     mission?: string;
     workspaceId?: string;
@@ -168,6 +172,8 @@ export class SquadRunner {
   private async startInWorkspace(params: {
     squadId: string;
     issueId: string;
+    id?: string;
+    ticketExecution?: TicketExecutionHandle;
     plan?: string[];
     mission?: string;
     workspaceId: string;
@@ -229,7 +235,7 @@ export class SquadRunner {
 
     const now = new Date().toISOString();
     const squadRun: SquadRun = {
-      id: `squadrun-${randomUUID()}`,
+      id: params.id ?? `squadrun-${randomUUID()}`,
       squadId: squad.id,
       issueId: issue.id,
       projectId: issue.projectId,
@@ -244,7 +250,6 @@ export class SquadRunner {
       createdAt: now,
       updatedAt: now
     };
-
     if (params.baseWorkspaceDir) {
       const workingDir = projectRunWorkspacePath(squadRun.projectId, squadRun.id);
       await addDetachedWorktree(params.baseWorkspaceDir, workingDir);
@@ -254,12 +259,15 @@ export class SquadRunner {
     // The squad is the issue's execution owner. Member runs below carry the
     // individual agent identity, but must not replace this assignment when the
     // issue is refreshed by the project execution monitor.
-    sqliteService.updateIssue(issue.id, {
-      assignedSquadId: squad.id,
-      assignedAgentId: undefined,
-      status: 'agent_running'
-    });
+    if (!params.ticketExecution) {
+      sqliteService.updateIssue(issue.id, {
+        assignedSquadId: squad.id,
+        assignedAgentId: undefined,
+        status: 'agent_running'
+      });
+    }
 
+    if (params.ticketExecution) this.ticketExecutions.set(squadRun.id, params.ticketExecution);
     await this.persistSquadRun(squadRun, params.workspaceId);
     workspaceRegistry.bind('squad_runs', squadRun.id, params.workspaceId);
 
@@ -294,6 +302,7 @@ export class SquadRunner {
   }
 
   private async startMember(squadRun: SquadRun, index: number, workspaceId: string) {
+    const ticketExecution = this.ticketExecutions.get(squadRun.id);
     const agentId = squadRun.memberAgentIds[index];
     const assignment = squadRun.memberAssignments?.find(item => item.agentId === agentId)
       ?? (() => {
@@ -318,7 +327,8 @@ export class SquadRunner {
         branchName: squadRun.branchName,
         assignment,
         handoff: this.buildHandoff(squadRun, index)
-      }
+      },
+      ...(ticketExecution ? { ticketExecution: { ...ticketExecution, memberOrder: index } } : {})
     }));
 
     workspaceRegistry.bind('prototype_runs', run.id, workspaceId);
@@ -403,6 +413,7 @@ export class SquadRunner {
       });
       logInfo(`Squad run ${squadRun.id} stopped: ${reason}`);
       runnerService.emit('squad_run_failed', sqliteService.getSquadRun(squadRun.id));
+      this.ticketExecutions.delete(squadRun.id);
       return;
     }
 
@@ -430,6 +441,7 @@ export class SquadRunner {
 
       logInfo(`Squad run ${squadRun.id} complete: ${runs.length} member(s), ${tokens} tokens`);
       runnerService.emit('squad_run_completed', sqliteService.getSquadRun(squadRun.id));
+      this.ticketExecutions.delete(squadRun.id);
       await this.cleanupCompletedWorkspace(squadRun.id);
       return;
     }

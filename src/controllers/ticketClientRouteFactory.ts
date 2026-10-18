@@ -108,6 +108,7 @@ export function createTicketClientRouteBoundary(dependencies: TicketClientRouteD
   };
 
   const apiApplication: TicketClientApiApplication = {
+    workflowCapabilities: () => ({ phaseWorkflowEnabled: false }),
     authenticate: sessions.authenticate,
     listWorkspaces: workspaces.list,
     getIntakeContext: intakeContext.get,

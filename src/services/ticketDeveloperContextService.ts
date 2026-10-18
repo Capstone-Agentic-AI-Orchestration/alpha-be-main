@@ -6,7 +6,7 @@ import { TicketWorkflowError } from '../ticketing/workflow.js';
 const opaque = (value: unknown): value is string => typeof value === 'string'
   && value.length > 0 && value.length <= 200 && value.trim().length > 0 && value.trim() === value;
 
-/** Read-only, assignment-scoped developer view. This service never starts work. */
+/** Read-only, project-access-scoped developer view. This service never starts work. */
 export function createTicketDeveloperContextService(store: TicketDeveloperContextStore) {
   return {
     async read(workspaceId: string, issueId: string, subject: TicketSubject) {
@@ -14,7 +14,7 @@ export function createTicketDeveloperContextService(store: TicketDeveloperContex
         throw new TicketWorkflowError(404, 'ticket_not_found', 'Issue not found.');
       }
       return store.transaction(async tx => {
-        const snapshot = await tx.loadAssignedWorkContext(workspaceId, issueId, subject);
+        const snapshot = await tx.loadAuthorizedWorkContext(workspaceId, issueId, subject);
         if (!snapshot) throw new TicketWorkflowError(404, 'ticket_not_found', 'Issue not found.');
         return projectDeveloperTicketContext(workspaceId, issueId, subject.userId, snapshot);
       });

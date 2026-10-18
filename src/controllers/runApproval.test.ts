@@ -16,6 +16,7 @@ import path from 'node:path';
  * it actually succeeded.
  */
 let tmp: string;
+let previousCloudApi: string | undefined;
 let opened: { close(): void }[] = [];
 let merge: ReturnType<typeof vi.fn>;
 
@@ -133,6 +134,10 @@ async function post(app: express.Express, url: string, body: unknown) {
 }
 
 beforeEach(() => {
+  previousCloudApi = process.env.ALPHA_CLOUD_API;
+  // These are legacy-run integration tests; Phase 7 cloud relaying is covered
+  // by ticketExecutionRelay.test.ts and must not depend on a developer's .env.
+  process.env.ALPHA_CLOUD_API = '';
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-approve-'));
   opened = [];
 });
@@ -140,6 +145,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const svc of opened) { try { svc.close(); } catch { /* already closed */ } }
   delete process.env.ALPHA_HOME;
+  if (previousCloudApi === undefined) delete process.env.ALPHA_CLOUD_API;
+  else process.env.ALPHA_CLOUD_API = previousCloudApi;
   fs.rmSync(tmp, { recursive: true, force: true });
   vi.restoreAllMocks();
   vi.doUnmock('../services/githubService.js');

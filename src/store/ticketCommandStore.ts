@@ -140,8 +140,8 @@ export interface TicketCommandTransaction {
   loadAssessmentCandidate(ticket: LockedTicket, deliveryId: string): Promise<TicketDeliveryAssessmentCandidate | null>;
   /** Insert the exact validated initial links in THIS transaction. Insert-only;
    * enforce unique (workspaceId, issueId) across all tickets, never upsert/rebind.
-   * Recheck candidate/Project ownership, active assignee and run eligibility
-   * under the shared execution serialization boundary. Do not mutate existing
+   * Recheck candidate/Project ownership, workspace/project developer access and
+   * run eligibility under the shared execution serialization boundary. Do not mutate existing
    * Issue text/status/agent/squad assignment or create a Project/Issue/run.
    * Any conflicting/missing link must throw and roll back the entire handoff.
    */

@@ -58,7 +58,7 @@ export class WorkspaceQueue {
   run<T>(
     key: string,
     task: () => Promise<T>,
-    options: { shouldStart?: () => boolean } = {}
+    options: { shouldStart?: () => boolean | Promise<boolean> } = {}
   ): Promise<T | undefined> {
     const previous = this.tails.get(key) ?? Promise.resolve();
     this.counts.set(key, this.depth(key) + 1);
@@ -67,8 +67,8 @@ export class WorkspaceQueue {
     // the one before it threw, but a caller may withdraw queued work before it
     // reaches the front of the chain. The predicate is evaluated at the last
     // possible moment, immediately before the task would start.
-    const runIfAllowed = () => {
-      if (options.shouldStart && !options.shouldStart()) return undefined;
+    const runIfAllowed = async () => {
+      if (options.shouldStart && !await options.shouldStart()) return undefined;
       return task();
     };
     const result = previous.then(runIfAllowed, runIfAllowed);

@@ -22,8 +22,9 @@ function linkedIssue(): Extract<LockedTicketIssue, { kind: 'ticket' }> {
     actionOwner: 'developer' as const, nextAction: 'execute_work' as const };
   return { kind: 'ticket', clientAccessActive: true, projectCreatorActive: true, mode: 'enabled', executor: { ...executor, active: true, allowed: true }, snapshot: {
     workspaceId: target.workspaceId,
+    developerProjectAccessActive: true,
     issue: { id: target.issueId, workspaceId: target.workspaceId, projectId: 'project-a', ticketId: 'ticket-a',
-      assignedDeveloperId: subject.userId, assignmentActive: true, revisionId: 'revision-a', initialRevisionId: 'revision-a', status: 'todo' },
+      revisionId: 'revision-a', initialRevisionId: 'revision-a', status: 'todo' },
     project: { id: 'project-a', workspaceId: target.workspaceId, nonProductionSafe: true },
     ticket: { id: 'ticket-a', workspaceId: target.workspaceId, reference: 'TCK-A', state },
     scope: { id: 'scope-a', ticketId: 'ticket-a', workspaceId: target.workspaceId, developerBrief: 'Approved implementation only.', immutable: true, clientAgreed: true },
@@ -44,7 +45,7 @@ function fixture() {
       const draft = structuredClone(data);
       function step(name: string) { control.calls.push(name); if (control.failAt === name) throw new Error(`Injected ${name}`); }
       const tx: TicketExecutionAdmissionTransaction = {
-        async lockAssignedIssue(owner, identity) {
+        async lockAuthorizedIssue(owner, identity) {
           step('authorize');
           if (!control.access || owner.workspaceId !== target.workspaceId || owner.issueId !== target.issueId
             || identity.kind !== 'internal' || identity.userId !== subject.userId
@@ -148,7 +149,7 @@ describe('ticket execution reservation and queue-front admission', () => {
     await expect(f.service.reserve(target, subject, { ...input, operationId: 'new-operation' })).rejects.toMatchObject({ status: 503 });
     await expect(f.service.lookup(target, subject, input.operationId)).resolves.toMatchObject({ claimId: 'claim-1' });
   });
-  it.each(['hold', 'withdrawal', 'cancelled', 'closed', 'client-revoked', 'creator-inactive', 'unsafe-project', 'unagreed', 'assignment', 'executor-revoked', 'scope-changed', 'revision-changed', 'reviewed'])('rechecks %s after queue wait', async condition => {
+  it.each(['hold', 'withdrawal', 'cancelled', 'closed', 'client-revoked', 'creator-inactive', 'unsafe-project', 'unagreed', 'project-access-revoked', 'executor-revoked', 'scope-changed', 'revision-changed', 'reviewed'])('rechecks %s after queue wait', async condition => {
     const f = fixture(); await f.service.reserve(target, subject, input); const value = f.linked(); const state = value.snapshot.ticket.state;
     if (condition === 'hold') state.status = 'on_hold';
     if (condition === 'withdrawal') state.withdrawalRequested = true;
@@ -158,7 +159,7 @@ describe('ticket execution reservation and queue-front admission', () => {
     if (condition === 'creator-inactive') value.projectCreatorActive = false;
     if (condition === 'unsafe-project') value.snapshot.project.nonProductionSafe = false;
     if (condition === 'unagreed') state.agreedScopeVersionId = null;
-    if (condition === 'assignment') value.snapshot.issue.assignmentActive = false;
+    if (condition === 'project-access-revoked') value.snapshot.developerProjectAccessActive = false;
     if (condition === 'executor-revoked') value.executor.allowed = false;
     if (condition === 'scope-changed') state.authorizedScopeVersionId = 'scope-other';
     if (condition === 'revision-changed') { value.snapshot.issue.revisionId = 'revision-new'; value.snapshot.issue.initialRevisionId = 'revision-new'; }

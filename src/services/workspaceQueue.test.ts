@@ -114,6 +114,21 @@ describe('WorkspaceQueue', () => {
     expect(q.depth('/repo')).toBe(0);
   });
 
+  it('waits for an asynchronous admission check before starting queued work', async () => {
+    const q = new WorkspaceQueue();
+    let finishAdmission!: (allowed: boolean) => void;
+    let started = false;
+    const admission = new Promise<boolean>(resolve => { finishAdmission = resolve; });
+    const queued = q.run('/repo', async () => { started = true; }, { shouldStart: () => admission });
+
+    await tick();
+    expect(started).toBe(false);
+    finishAdmission(false);
+    await expect(queued).resolves.toBeUndefined();
+    expect(started).toBe(false);
+    expect(q.depth('/repo')).toBe(0);
+  });
+
   it('forgets a key once its work is done', async () => {
     // Otherwise the maps grow for the life of the daemon, one entry per
     // directory ever touched.

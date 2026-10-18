@@ -109,7 +109,7 @@ completes a project, authorizes a release, sends email or starts execution.
   serializable checks. Concurrent revocation and Issue revision edits must not
   race the decision. A ticket row lock alone does not prove this.
 - Immutable scope/message/delivery evidence, full required-Issue manifest, exact
-  revisions and active affected assignees. Preserve superseded history.
+  revisions and current project/workspace access for any worker claim. Preserve superseded history.
 - Apply targeted Issue changes through compatible existing execution safeguards;
   append exact `TicketIssueCorrection` records and atomically CAS each previous
   revision to its new current revision, resetting only its pending review state.

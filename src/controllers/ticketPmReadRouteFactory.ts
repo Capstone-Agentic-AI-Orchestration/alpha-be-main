@@ -34,6 +34,10 @@ import { createTicketInvitationRouter } from './ticketInvitationController.js';
 import type { TicketInvitationSecretProtector } from '../ticketing/invitationSecret.js';
 import { createTicketPmDocumentRouter } from './ticketPmDocumentController.js';
 import type { TicketDocumentsApplication } from './ticketDocumentController.js';
+import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
+import { createTicketScopeRouter } from './ticketScopeController.js';
+import { createTicketPmDeliveryCandidatesRouter } from './ticketPmDeliveryCandidatesController.js';
+import { createTicketPmResultRouter } from './ticketPmResultController.js';
 
 /**
  * Production composition for the existing PM Tickets page.
@@ -49,6 +53,7 @@ export function createTicketPmReadRouteBoundary(
   clientActivation?: { enabled: boolean; policy: TicketInvitationPolicy; secretProtector?: TicketInvitationSecretProtector },
   communicationEnabled = false,
   documents?: TicketDocumentsApplication,
+  lifecycle?: TicketLifecycleRuntime,
 ): Router {
   const router = Router({ caseSensitive: true, strict: true });
   const queue = createTicketQueueService(new PostgresTicketQueueStore(db));
@@ -103,6 +108,15 @@ export function createTicketPmReadRouteBoundary(
   // Register this exact collection route before `/:ticketId`; otherwise the
   // existing detail reader can consume "intakes" as a ticket ID.
   if (triageEnabled) {
+    router.get('/workflow-capabilities', route(async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store, private');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (await relayRequest(req, res)) return;
+      const subject = pmTicketSubject(req, res);
+      if (!subject) return;
+      return res.json({ phaseWorkflowEnabled: lifecycle?.enabled === true });
+    }));
     const centralKey = (domain: string) => createHmac('sha256', ALPHA_SESSION_SECRET).update(domain).digest();
     const centralIntake = createTicketCentralIntakeService({
       store: new PostgresTicketCentralIntakeStore(db), organizationKey: ALPHA_ORG,
@@ -124,14 +138,19 @@ export function createTicketPmReadRouteBoundary(
     router.use(createTicketProjectManagementRouter(
       createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)), relayRequest,
     ));
-    const store = new PostgresTicketTriageStore(db, { communicationEnabled });
-    const commands = createTicketCommandService(store);
-    const messages = createTicketMessageService(store);
+    const store = lifecycle?.enabled ? lifecycle.store : new PostgresTicketTriageStore(db, { communicationEnabled });
+    const commands = lifecycle?.enabled ? lifecycle.commands : createTicketCommandService(store);
+    const messages = lifecycle?.enabled ? lifecycle.messages : createTicketMessageService(store);
     router.use(createTicketCommandRouter(commands, relayRequest));
     router.use(createTicketMessageRouter({ note: messages.note,
       reply: communicationEnabled ? messages.reply
         : async () => { throw new TicketWorkflowError(503, 'ticket_action_unavailable', 'Client conversations are not enabled yet.'); },
     }, relayRequest));
+    if (lifecycle?.enabled) {
+      router.use(createTicketScopeRouter(lifecycle.scopes));
+      router.use(createTicketPmDeliveryCandidatesRouter(lifecycle.candidates));
+      router.use(createTicketPmResultRouter(lifecycle));
+    }
     if (communicationEnabled && documents) router.use(createTicketPmDocumentRouter(documents, relayRequest));
     if (clientActivation) {
       const invitationApp = clientActivation.enabled && clientActivation.secretProtector

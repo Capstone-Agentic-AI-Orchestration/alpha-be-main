@@ -444,9 +444,12 @@ technical-readiness hook routes passed work to PM assessment without publishing.
 
 Follow-up regression tests reproduced and fixed two local rule gaps: initial
 authorization cannot replace an already-authorized manifest during correction
-triage, and a correction needs an active assignee only for affected Issues, not
-an unrelated finished Issue. Repeated scope agreement cannot overwrite triage.
-A genuinely new scope still requires fresh agreement and PM authorization.
+triage, and repeated scope agreement cannot overwrite triage. The original
+scaffold assumed Issue assignees; the clarified operating model supersedes that
+assumption for ticket-linked work: eligible developers are those with active
+workspace/project access, and execution is serialized by an Issue claim. Ordinary
+unlinked Issues retain their existing assignment behavior. A genuinely new scope
+still requires fresh agreement and PM authorization.
 
 These are domain checks, **not implemented API authentication or database
 isolation**. Future services must resolve identities and fresh facts in the same
