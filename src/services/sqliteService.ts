@@ -40,6 +40,21 @@ import { analyticsFrom } from './runAnalytics.js';
 import { BUILTIN_SKILLS } from './builtinSkills.js';
 import { normalizeBuildSteps } from '../store/buildSteps.js';
 
+export type ChatSyncOperation = 'share_thread' | 'share_message' | 'delete_thread' | 'clear_messages';
+
+export interface ChatSyncOutboxItem {
+  id: number;
+  workspaceId: string;
+  ownerId: string;
+  threadId: string;
+  operation: ChatSyncOperation;
+  payload?: Record<string, unknown>;
+  attempts: number;
+  nextAttemptAt: string;
+  lastError?: string;
+  createdAt: string;
+}
+
 // Ensure alpha dir exists
 if (!fs.existsSync(ALPHA_DIR)) {
   fs.mkdirSync(ALPHA_DIR, { recursive: true });
@@ -124,14 +139,16 @@ function toBinding(row: any): LocalProjectBinding {
 export class SQLiteService {
   private db: Database.Database;
 
-  constructor() {
-    this.db = new Database(DB_PATH);
+  constructor(options: { dbPath?: string; seedDefaults?: boolean } = {}) {
+    this.db = new Database(options.dbPath ?? DB_PATH);
     this.initPragmas();
     this.initTables();
     this.migrate();
     this.ensureDefaultWorkspace();
-    this.seedDefaultsIfEmpty();
-    this.ensureOfficialAgents();
+    if (options.seedDefaults !== false) {
+      this.seedDefaultsIfEmpty();
+      this.ensureOfficialAgents();
+    }
   }
 
   /**
@@ -449,6 +466,24 @@ export class SQLiteService {
         revision_target TEXT,
         timestamp TEXT NOT NULL
       );
+
+      /* Durable, ordered publication of the owner's local chat changes. */
+      CREATE TABLE IF NOT EXISTS chat_sync_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        payload TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_sync_outbox_due
+        ON chat_sync_outbox(owner_id, next_attempt_at, id);
+      CREATE INDEX IF NOT EXISTS idx_chat_sync_outbox_thread_order
+        ON chat_sync_outbox(workspace_id, owner_id, thread_id, id);
 
       CREATE TABLE IF NOT EXISTS agent_calls (
         id TEXT PRIMARY KEY,
@@ -2678,6 +2713,101 @@ export class SQLiteService {
       revisionTarget: parseJson<AgentCallTarget | undefined>(r.revision_target, undefined),
       timestamp: r.timestamp
     }));
+  }
+
+  /** Queue one owner-scoped chat publication with its workspace captured now. */
+  enqueueChatSync(input: {
+    ownerId: string;
+    threadId: string;
+    operation: ChatSyncOperation;
+    payload?: Record<string, unknown>;
+  }): number | null {
+    if (!input.ownerId || !input.threadId) return null;
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      INSERT INTO chat_sync_outbox (
+        workspace_id, owner_id, thread_id, operation, payload, next_attempt_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      this.workspaceId(), input.ownerId, input.threadId, input.operation,
+      input.payload ? JSON.stringify(input.payload) : null, now, now
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** The oldest due change per thread, preserving edits/deletes in order. */
+  getDueChatSyncItems(limit = 20, now = new Date().toISOString(), ownerId?: string): ChatSyncOutboxItem[] {
+    const rows = this.db.prepare(`
+      SELECT queued.* FROM chat_sync_outbox queued
+      WHERE queued.next_attempt_at <= ?
+        AND (? IS NULL OR queued.owner_id = ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM chat_sync_outbox earlier
+          WHERE earlier.workspace_id = queued.workspace_id
+            AND earlier.owner_id = queued.owner_id
+            AND earlier.thread_id = queued.thread_id
+            AND earlier.id < queued.id
+        )
+      ORDER BY queued.id ASC
+      LIMIT ?
+    `).all(now, ownerId ?? null, ownerId ?? null, Math.max(1, Math.min(limit, 100))) as any[];
+    return rows.map(row => ({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      ownerId: row.owner_id,
+      threadId: row.thread_id,
+      operation: row.operation as ChatSyncOperation,
+      payload: parseJson<Record<string, unknown> | undefined>(row.payload, undefined),
+      attempts: row.attempts,
+      nextAttemptAt: row.next_attempt_at,
+      lastError: row.last_error ?? undefined,
+      createdAt: row.created_at
+    }));
+  }
+
+  markChatSyncDelivered(id: number): void {
+    this.db.prepare('DELETE FROM chat_sync_outbox WHERE id = ?').run(id);
+  }
+
+  scheduleChatSyncRetry(id: number, nextAttemptAt: string, errorCategory = 'network_error'): void {
+    this.db.prepare(`
+      UPDATE chat_sync_outbox
+      SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
+      WHERE id = ?
+    `).run(nextAttemptAt, errorCategory.slice(0, 80), id);
+  }
+
+  retryChatSyncForOwner(workspaceId: string, ownerId: string, threadId?: string): number {
+    const now = new Date().toISOString();
+    const result = threadId
+      ? this.db.prepare(`
+          UPDATE chat_sync_outbox SET next_attempt_at = ?, last_error = NULL, attempts = 0
+          WHERE workspace_id = ? AND owner_id = ? AND thread_id = ?
+        `).run(now, workspaceId, ownerId, threadId)
+      : this.db.prepare(`
+          UPDATE chat_sync_outbox SET next_attempt_at = ?, last_error = NULL, attempts = 0
+          WHERE workspace_id = ? AND owner_id = ?
+        `).run(now, workspaceId, ownerId);
+    return result.changes;
+  }
+
+  getChatSyncStatus(workspaceId: string, ownerId: string, threadId?: string): {
+    pending: number;
+    failed: number;
+  } {
+    const row = threadId
+      ? this.db.prepare(`
+          SELECT COUNT(*) AS pending, SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS failed
+          FROM chat_sync_outbox WHERE workspace_id = ? AND owner_id = ? AND thread_id = ?
+        `).get(workspaceId, ownerId, threadId) as any
+      : this.db.prepare(`
+          SELECT COUNT(*) AS pending, SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS failed
+          FROM chat_sync_outbox WHERE workspace_id = ? AND owner_id = ?
+        `).get(workspaceId, ownerId) as any;
+    return {
+      pending: Number(row?.pending ?? 0),
+      failed: Number(row?.failed ?? 0)
+    };
   }
 
   saveChatMessage(msg: ChatMessage) {

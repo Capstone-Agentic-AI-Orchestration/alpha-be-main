@@ -7,6 +7,9 @@ import { addCommentAndShare, updateIssueAndPush } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
 import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
+import { supabaseService } from './supabaseService.js';
+import { addDetachedWorktree, removeDetachedWorktree } from '../utils/gitUtils.js';
+import { projectRunWorkspacePath } from './workspaceService.js';
 
 /**
  * Running a squad over an issue, one member at a time.
@@ -56,7 +59,17 @@ export class SquadRunError extends Error {}
 export class SquadRunner {
   /** Squad runs waiting on a member, keyed by the run id currently executing. */
   private awaiting = new Map<string, { squadRunId: string; workspaceId: string }>();
+  /** Local-only paths: never published with the shared squad-run record. */
+  private runWorkspaces = new Map<string, { repositoryDir: string; workingDir: string }>();
   private wired = false;
+
+  /** Keep the local runner authoritative while publishing the room's parent run to the shared board. */
+  private async persistSquadRun(run: SquadRun, workspaceId: string): Promise<void> {
+    sqliteService.saveSquadRun(run);
+    if (supabaseService.isConfigured()) {
+      await supabaseService.saveSquadRunToCloud(run, workspaceId);
+    }
+  }
 
   /**
    * Advance a squad when the member it was waiting on finishes.
@@ -85,6 +98,8 @@ export class SquadRunner {
     plan?: string[];
     mission?: string;
     workspaceId?: string;
+    /** Base checkout for a chat-triggered run-scoped Git worktree. */
+    baseWorkspaceDir?: string;
     /** Ordered project steps first; unmentioned squad members follow in squad order. */
     memberAgentIds?: string[];
   }): Promise<SquadRun> {
@@ -98,6 +113,7 @@ export class SquadRunner {
     plan?: string[];
     mission?: string;
     workspaceId: string;
+    baseWorkspaceDir?: string;
     memberAgentIds?: string[];
   }): Promise<SquadRun> {
     this.wire();
@@ -132,15 +148,6 @@ export class SquadRunner {
       );
     }
 
-    // The squad is the issue's execution owner. Member runs below carry the
-    // individual agent identity, but must not replace this assignment when the
-    // issue is refreshed by the project execution monitor.
-    sqliteService.updateIssue(issue.id, {
-      assignedSquadId: squad.id,
-      assignedAgentId: undefined,
-      status: 'agent_running'
-    });
-
     const now = new Date().toISOString();
     const squadRun: SquadRun = {
       id: `squadrun-${Date.now()}`,
@@ -157,7 +164,23 @@ export class SquadRunner {
       createdAt: now,
       updatedAt: now
     };
-    sqliteService.saveSquadRun(squadRun);
+
+    if (params.baseWorkspaceDir) {
+      const workingDir = projectRunWorkspacePath(squadRun.projectId, squadRun.id);
+      await addDetachedWorktree(params.baseWorkspaceDir, workingDir);
+      this.runWorkspaces.set(squadRun.id, { repositoryDir: params.baseWorkspaceDir, workingDir });
+    }
+
+    // The squad is the issue's execution owner. Member runs below carry the
+    // individual agent identity, but must not replace this assignment when the
+    // issue is refreshed by the project execution monitor.
+    sqliteService.updateIssue(issue.id, {
+      assignedSquadId: squad.id,
+      assignedAgentId: undefined,
+      status: 'agent_running'
+    });
+
+    await this.persistSquadRun(squadRun, params.workspaceId);
     workspaceRegistry.bind('squad_runs', squadRun.id, params.workspaceId);
 
     logInfo(
@@ -174,7 +197,7 @@ export class SquadRunner {
         stoppedReason: reason,
         updatedAt: new Date().toISOString()
       };
-      sqliteService.saveSquadRun(stopped);
+      await this.persistSquadRun(stopped, params.workspaceId);
       updateIssueAndPush(issue.id, { status: 'in_progress' });
       addCommentAndShare({
         id: `comm-${squadRun.id}-stopped`,
@@ -196,6 +219,7 @@ export class SquadRunner {
       agentId: squadRun.memberAgentIds[index],
       plan: squadRun.plan,
       workspaceId,
+      workingDir: this.runWorkspaces.get(squadRun.id)?.workingDir,
       squad: {
         squadRunId: squadRun.id,
         order: index,
@@ -206,11 +230,11 @@ export class SquadRunner {
 
     workspaceRegistry.bind('prototype_runs', run.id, workspaceId);
     this.awaiting.set(run.id, { squadRunId: squadRun.id, workspaceId });
-    sqliteService.saveSquadRun({
+    await this.persistSquadRun({
       ...squadRun,
       currentMemberIndex: index,
       updatedAt: new Date().toISOString()
-    });
+    }, workspaceId);
 
     /**
      * The handoff, as an event.
@@ -272,7 +296,7 @@ export class SquadRunner {
 
     if (!succeeded) {
       const reason = `${who} did not finish (${finished.status}). Stopped at member ${position} of ${total}.`;
-      sqliteService.saveSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now });
+      await this.persistSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now }, waiting.workspaceId);
       addCommentAndShare({
         id: `comm-${squadRun.id}-stopped`,
         issueId: squadRun.issueId,
@@ -289,7 +313,7 @@ export class SquadRunner {
     const next = position;
 
     if (next >= total) {
-      sqliteService.saveSquadRun({ ...squadRun, status: 'awaiting_approval', updatedAt: now });
+      await this.persistSquadRun({ ...squadRun, status: 'awaiting_approval', updatedAt: now }, waiting.workspaceId);
 
       const runs = sqliteService.getRunsForSquadRun(squadRun.id);
       const tokens = runs.reduce((sum, r) => sum + (totalTokens(r.usage) ?? 0), 0);
@@ -310,11 +334,24 @@ export class SquadRunner {
 
       logInfo(`Squad run ${squadRun.id} complete: ${runs.length} member(s), ${tokens} tokens`);
       runnerService.emit('squad_run_completed', sqliteService.getSquadRun(squadRun.id));
+      await this.cleanupCompletedWorkspace(squadRun.id);
       return;
     }
 
     logInfo(`Squad run ${squadRun.id}: ${who} done, starting member ${next + 1}/${total}`);
     await this.startMember({ ...squadRun, updatedAt: now }, next, waiting.workspaceId);
+  }
+
+  /** A successful build has pushed its branch, so its disposable worktree can go. */
+  private async cleanupCompletedWorkspace(squadRunId: string): Promise<void> {
+    const workspace = this.runWorkspaces.get(squadRunId);
+    if (!workspace) return;
+    try {
+      await removeDetachedWorktree(workspace.repositoryDir, workspace.workingDir);
+      this.runWorkspaces.delete(squadRunId);
+    } catch (error) {
+      logError(`Could not clean completed build workspace ${squadRunId}:`, error);
+    }
   }
 
   /**

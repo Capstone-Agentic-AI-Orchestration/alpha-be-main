@@ -10,7 +10,7 @@ import {
   IS_PACKAGED_DESKTOP
 } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
-import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread, Project } from '../models/index.js';
+import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread, Project, SquadRun } from '../models/index.js';
 import { commentRow, issueRow } from '../store/postgresIssueStore.js';
 import { agentRow, squadRow } from '../store/postgresAgentStore.js';
 import { projectRow } from '../store/postgresProjectStore.js';
@@ -109,6 +109,31 @@ export function runToCloudRow(
     insertions: run.insertions || 0,
     deletions: run.deletions || 0,
     test_summary: run.testSummary ?? null,
+    updated_at: run.updatedAt || new Date().toISOString()
+  };
+}
+
+/** The squad-level run record as the shared room table stores it. */
+export function squadRunToCloudRow(
+  run: SquadRun,
+  workspaceId: string,
+  ownerId: string
+): Record<string, unknown> {
+  return {
+    id: run.id,
+    workspace_id: workspaceId,
+    owner_id: ownerId,
+    squad_id: run.squadId,
+    issue_id: run.issueId,
+    project_id: run.projectId,
+    branch_name: run.branchName,
+    member_agent_ids: run.memberAgentIds ?? [],
+    current_member_index: run.currentMemberIndex ?? 0,
+    status: run.status,
+    mission: run.mission ?? '',
+    plan: run.plan ?? [],
+    stopped_reason: run.stoppedReason ?? null,
+    created_at: run.createdAt || new Date().toISOString(),
     updated_at: run.updatedAt || new Date().toISOString()
   };
 }
@@ -297,46 +322,52 @@ export class SupabaseService {
    * `chat_messages` to the owner, with no project-manager bypass. What
    * oversight sees is the work -- runs, stages, patches -- not the prompts.
    */
-  async shareThread(thread: ChatThread): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
-    const login = knownIdentity()?.login;
-    if (!login) return;
+  async shareThread(thread: ChatThread, workspaceId = currentWorkspaceId(), ownerId = knownIdentity()?.login): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client || !ownerId) return false;
     try {
-      const { error } = await this.client.from('chat_threads').upsert(threadRow(currentWorkspaceId(), login, thread));
+      const { error } = await this.client.from('chat_threads').upsert(threadRow(workspaceId, ownerId, thread));
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`share conversation ${thread.id}`, err);
+      return false;
     }
   }
 
-  async shareMessage(message: ChatMessage): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async shareMessage(message: ChatMessage, _workspaceId = currentWorkspaceId()): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
     try {
       const { error } = await this.client.from('chat_messages').upsert(messageRow(message));
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`share message in ${message.threadId}`, err);
+      return false;
     }
   }
 
   /** Its messages go with it, by the schema's `on delete cascade`. */
-  async unshareThread(threadId: string): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async unshareThread(threadId: string, _workspaceId = currentWorkspaceId()): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
     try {
       const { error } = await this.client.from('chat_threads').delete().eq('id', threadId);
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`remove conversation ${threadId}`, err);
+      return false;
     }
   }
 
-  async unshareMessages(threadId: string): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async unshareMessages(threadId: string, _workspaceId = currentWorkspaceId()): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
     try {
       const { error } = await this.client.from('chat_messages').delete().eq('thread_id', threadId);
       if (error) throw error;
+      return true;
     } catch (err: any) {
       this.reportFailure(`clear conversation ${threadId}`, err);
+      return false;
     }
   }
 
@@ -513,6 +544,27 @@ export class SupabaseService {
     // Broadcasts for this run wait on its first save; see RunPublishGate.
     this.publishGate.saved(run.id, save);
     return save;
+  }
+
+  /** Persist the parent squad run so the shared Live Build Room can reconstruct the sequence. */
+  saveSquadRunToCloud(run: SquadRun, workspaceId = currentWorkspaceId()): Promise<void> {
+    if (!this.client) return Promise.resolve();
+    const client = this.client;
+
+    return (async () => {
+      const identity = knownIdentity();
+      if (!identity?.login) {
+        this.reportFailure(`save squad run ${run.id}`, new Error('No signed-in owner is available for cloud sync'));
+        return;
+      }
+      try {
+        const payload = squadRunToCloudRow(run, workspaceId, identity.login);
+        const { error } = await client.from('squad_runs').upsert(payload);
+        if (error) throw error;
+      } catch (err: any) {
+        this.reportFailure(`save squad run ${run.id}`, err);
+      }
+    })();
   }
 
   /** Persist issue updates to the cloud board. */

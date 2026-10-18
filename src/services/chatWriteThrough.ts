@@ -1,6 +1,23 @@
 import type { ChatMessage, ChatThread } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
 import { supabaseService } from './supabaseService.js';
+import { flushChatSyncOutbox } from './chatSyncService.js';
+
+function enqueue(
+  ownerId: string | undefined,
+  threadId: string,
+  operation: 'share_thread' | 'share_message' | 'delete_thread' | 'clear_messages',
+  payload?: ChatThread | ChatMessage
+): void {
+  if (!supabaseService.sharesBoard() || !ownerId) return;
+  sqliteService.enqueueChatSync({
+    ownerId,
+    threadId,
+    operation,
+    ...(payload ? { payload: payload as unknown as Record<string, unknown> } : {})
+  });
+  void flushChatSyncOutbox();
+}
 
 /**
  * Write a conversation locally and give it to this person's own cloud copy.
@@ -21,37 +38,43 @@ import { supabaseService } from './supabaseService.js';
 
 export function createThreadAndShare(input: Partial<ChatThread> & { ownerId?: string }): ChatThread {
   const thread = sqliteService.createChatThread(input);
-  void supabaseService.shareThread(thread);
+  enqueue(thread.ownerId, thread.id, 'share_thread', thread);
   return thread;
 }
 
 /** For the routes that change one field of a thread: the row as it now stands. */
 export function shareThread(thread: ChatThread | null): void {
-  if (thread) void supabaseService.shareThread(thread);
+  if (thread) enqueue(thread.ownerId, thread.id, 'share_thread', thread);
 }
 
 export function saveChatMessageAndShare(message: ChatMessage): ChatMessage {
   sqliteService.saveChatMessage(message);
   const saved = message;
-  void supabaseService.shareMessage(saved);
+  const thread = sqliteService.getChatThreads().find(candidate => candidate.id === saved.threadId);
+  enqueue(thread?.ownerId, saved.threadId, 'share_message', saved);
   /*
    * The thread carries the snippet and the time of its last message, which
    * `saveChatMessage` has just moved on. Published too, or the list on the web
    * would order conversations by a moment that is no longer the last one.
    */
-  const thread = sqliteService.getChatThreads().find(candidate => candidate.id === saved.threadId);
-  if (thread) void supabaseService.shareThread(thread);
+  if (thread) enqueue(thread.ownerId, thread.id, 'share_thread', thread);
   return saved;
 }
 
 export function deleteThreadAndShare(threadId: string): boolean {
+  const thread = sqliteService.getChatThreads().find(candidate => candidate.id === threadId);
   const deleted = sqliteService.deleteChatThread(threadId);
-  if (deleted) void supabaseService.unshareThread(threadId);
+  if (deleted && thread) enqueue(thread.ownerId, threadId, 'delete_thread');
   return deleted;
 }
 
 export function clearMessagesAndShare(threadId: string): number {
+  const before = sqliteService.getChatThreads().find(candidate => candidate.id === threadId);
   const removed = sqliteService.clearChatMessages(threadId);
-  if (removed >= 0) void supabaseService.unshareMessages(threadId);
+  if (removed >= 0 && before) {
+    enqueue(before.ownerId, threadId, 'clear_messages');
+    const updated = sqliteService.getChatThreads().find(candidate => candidate.id === threadId);
+    if (updated) enqueue(updated.ownerId, updated.id, 'share_thread', updated);
+  }
   return removed;
 }
