@@ -204,6 +204,15 @@
       "remote_sql_md5": null,
       "review": "not_recorded",
       "notes": "Pending branch migration; not verified against or applied to the shared-live database."
+    },
+    {
+      "local_file": "20261020120000_ticket_client_action_notices.sql",
+      "local_sha256": "89823402b2183b0bbc444d9b9b1d9c66e2f33638b8c92e6b38b9db0e7bc121ce",
+      "remote_version": "20261019213059",
+      "remote_name": "ticket_client_action_notices",
+      "remote_sql_md5": "cd807ac36c0f0c972df6375054fcb42d",
+      "review": "formatting_reviewed",
+      "notes": "Applied to the shared-live project on 2026-10-20 as the single ALTER TABLE statement; the local file adds only header comments."
     }
   ]
 }

@@ -32,7 +32,12 @@ import { createTicketCommunicationNotificationService } from '../services/ticket
 import { startTicketCommunicationNotificationWorker } from '../services/ticketCommunicationNotificationWorker.js';
 import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
 
-const INVITATION_LIFETIME_MS = 60 * 60 * 1000;
+/**
+ * How long a PM invitation stays valid. A client often opens the email the next day, so this is
+ * days, not an hour. The one-time sign-in link inside it has its own, shorter lifetime set in
+ * Supabase Auth (Email OTP expiration); keep that at its maximum (24 hours) to match.
+ */
+const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const CLIENT_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 
 export interface TicketClientComposition {
@@ -43,7 +48,7 @@ export interface TicketClientComposition {
     secretProtector: TicketInvitationSecretProtector;
   };
   documents: TicketDocumentsApplication;
-  startDeliveryWorker(onUnavailable: () => void): () => void;
+  startDeliveryWorker(onUnavailable: () => void, onActionNoticesUnavailable?: () => void): () => void;
 }
 
 /**
@@ -124,12 +129,12 @@ export function createTicketClientComposition(input: {
   return {
     router, documents,
     pmInvitation: { enabled: true, policy: invitationPolicy, secretProtector: secrets.invitation },
-    startDeliveryWorker(onUnavailable) {
+    startDeliveryWorker(onUnavailable, onActionNoticesUnavailable) {
       const stopInvitations = startTicketClientInvitationDeliveryWorker({
         isCloud: true, enabled: true, delivery, onUnavailable,
       });
       const stopCommunications = startTicketCommunicationNotificationWorker({
-        isCloud: true, enabled: true, delivery: communicationDelivery, onUnavailable,
+        isCloud: true, enabled: true, delivery: communicationDelivery, onUnavailable, onActionNoticesUnavailable,
       });
       return () => { stopInvitations(); stopCommunications(); };
     },

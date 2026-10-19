@@ -56,6 +56,13 @@ function link(origin: string, invitationToken: string, providerTokenHash: string
   return url.toString();
 }
 
+/** A readable deadline for the client, e.g. "Tuesday 27 October 2026 at 09:12 UTC". */
+export function invitationExpiryText(expiresAt: string): string {
+  const date = new Date(expiresAt);
+  if (!Number.isFinite(date.getTime())) return 'soon';
+  return `${new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short', timeZone: 'UTC' }).format(date)} UTC`;
+}
+
 function retryDelay(attempt: number, policy: TicketClientInvitationDeliveryPolicy): number {
   return Math.min(policy.retryBaseDelayMs * 2 ** Math.max(0, attempt - 1), policy.retryMaxDelayMs);
 }
@@ -148,7 +155,7 @@ export function createTicketClientInvitationDeliveryService(
         'Your inquiry has been reviewed by Alpha’s project manager.',
         'Use this secure, one-time link to verify your email and activate access to the ticket for this inquiry:',
         activationLink,
-        `This invitation expires at ${claim.invitation.expiresAt}.`,
+        `This invitation is valid until ${invitationExpiryText(claim.invitation.expiresAt)}. If it has expired, ask your project manager to send you a new one.`,
         'Your account will not provide access to Alpha’s desktop app, other client tickets, projects, or internal developer work.',
         'If you were not expecting this invitation, you can ignore this email.',
       ].join('\n\n');
