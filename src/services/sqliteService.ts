@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
 import {
   Project,
@@ -39,6 +39,22 @@ import { currentWorkspaceId, DEFAULT_WORKSPACE_ID, runWithWorkspace } from './wo
 import { analyticsFrom } from './runAnalytics.js';
 import { BUILTIN_SKILLS } from './builtinSkills.js';
 import { normalizeBuildSteps } from '../store/buildSteps.js';
+import { MAX_PLAN_TASKS, parseOrchestrationPlan, validateOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
+import type { PersistedReviewFinding } from './orchestrationReviewWorkflow.js';
+import {
+  transitionTask,
+  transitionRun,
+  selectNextReadyTask,
+  type OrchestrationRunRecord,
+  type OrchestrationTaskRecord,
+  type OrchestrationTaskStatus,
+  type OrchestrationSnapshot,
+  type OrchestrationAttemptRecord,
+  type OrchestrationEventRecord,
+  type OrchestrationOutboxDeliveryRecord,
+  type OrchestrationArtifactRecord,
+  type OrchestrationFindingRecord
+} from './orchestrationStateMachine.js';
 
 export type ChatSyncOperation = 'share_thread' | 'share_message' | 'delete_thread' | 'clear_messages';
 
@@ -103,6 +119,142 @@ function squadRunFromRow(r: any): SquadRun {
     stoppedReason: r.stopped_reason ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at
+  };
+}
+
+function orchestrationRunFromRow(row: any, plan: OrchestrationPlan): OrchestrationRunRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    issueId: row.issue_id,
+    repository: row.repository,
+    requestKey: row.request_key,
+    requestFingerprint: row.request_fingerprint,
+    createdBy: row.created_by,
+    executorId: row.executor_id,
+    ownershipEpoch: row.ownership_epoch,
+    workflowVersion: row.workflow_version,
+    planVersion: row.plan_version,
+    plan,
+    status: row.status,
+    revision: row.revision,
+    currentTaskId: row.current_task_id ?? undefined,
+    stoppedReason: row.stopped_reason ?? undefined,
+    branchName: row.branch_name ?? undefined,
+    baseRef: row.base_ref ?? undefined,
+    baseCommit: row.base_commit ?? undefined,
+    worktreePath: row.worktree_path ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function canonicalOrchestrationRepository(value: string): string {
+  return value.trim()
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/$/, '')
+    .toLowerCase();
+}
+
+function isSafeOrchestrationBranchName(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9._/-]{1,200}$/.test(value) &&
+    !value.startsWith('-') && !value.startsWith('/') && !value.endsWith('/') && !value.endsWith('.') &&
+    !value.endsWith('.lock') && !value.includes('..') && !value.includes('//');
+}
+
+function orchestrationTaskFromRow(row: any): OrchestrationTaskRecord {
+  return {
+    id: row.task_id,
+    title: row.title,
+    description: row.description,
+    kind: row.kind,
+    ownerAgentId: row.owner_agent_id,
+    dependsOn: parseJson(row.depends_on_json, []),
+    requirementIds: parseJson(row.requirement_ids_json, []),
+    acceptanceCriteria: parseJson(row.acceptance_json, []),
+    requiredChecks: parseJson(row.checks_json, []),
+    scope: parseJson(row.scope_json, { includePaths: [], excludePaths: [] }),
+    required: Boolean(row.required),
+    correctionOfTaskId: row.correction_of_task_id ?? undefined,
+    correctionCycle: row.correction_cycle ?? undefined,
+    status: row.status,
+    revision: row.revision,
+    attemptCount: row.attempt_count,
+    acceptedRevision: row.accepted_revision ?? undefined,
+    updatedAt: row.updated_at
+  };
+}
+
+function orchestrationAttemptFromRow(row: any): OrchestrationAttemptRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    attemptNumber: row.attempt_number,
+    agentId: row.agent_id,
+    prototypeRunId: row.prototype_run_id ?? undefined,
+    startingCommit: row.starting_commit ?? undefined,
+    resultCommit: row.result_commit ?? undefined,
+    personaHash: row.persona_hash ?? undefined,
+    modelProvider: row.model_provider ?? undefined,
+    modelName: row.model_name ?? undefined,
+    contextManifest: parseJson(row.context_manifest_json, {}),
+    status: row.status,
+    result: parseJson(row.result_json, undefined),
+    failureReason: row.failure_reason ?? undefined,
+    createdAt: row.created_at,
+    startedAt: row.started_at ?? undefined,
+    completedAt: row.completed_at ?? undefined
+  };
+}
+
+function orchestrationEventFromRow(row: any): OrchestrationEventRecord {
+  return {
+    id: row.id,
+    eventId: row.event_id,
+    runId: row.run_id,
+    sequence: row.run_sequence,
+    actorId: row.actor_id ?? undefined,
+    type: row.event_type,
+    payload: parseJson(row.payload_json, {}),
+    createdAt: row.created_at
+  };
+}
+
+function orchestrationArtifactFromRow(row: any): OrchestrationArtifactRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    attemptId: row.attempt_id,
+    type: row.artifact_type,
+    version: row.version,
+    contentHash: row.content_hash,
+    contentReference: row.content_reference ?? undefined,
+    content: row.content ?? undefined,
+    metadata: parseJson(row.metadata_json, {}),
+    status: row.status,
+    createdAt: row.created_at
+  };
+}
+
+function orchestrationFindingFromRow(row: any): OrchestrationFindingRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    sourceTaskId: row.source_task_id,
+    severity: row.severity,
+    requirementId: row.requirement_id ?? undefined,
+    artifactId: row.artifact_id ?? undefined,
+    path: row.path ?? undefined,
+    evidence: parseJson(row.evidence, {}),
+    status: row.status,
+    correctionTaskId: row.correction_task_id ?? undefined,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at ?? undefined
   };
 }
 
@@ -282,6 +434,15 @@ export class SQLiteService {
       CREATE INDEX IF NOT EXISTS idx_project_build_steps_project
         ON project_build_steps(workspace_id, project_id, position);
 
+      CREATE TABLE IF NOT EXISTS project_orchestration_settings (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        updated_by TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, project_id)
+      );
+
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL DEFAULT 'ws-default',
@@ -378,12 +539,17 @@ export class SQLiteService {
         current_stage_index INTEGER DEFAULT 0,
         stages TEXT NOT NULL,
         branch_name TEXT,
+        checkpoint_commit TEXT,
         pr_url TEXT,
         changed_files INTEGER DEFAULT 0,
         insertions INTEGER DEFAULT 0,
         deletions INTEGER DEFAULT 0,
         test_summary TEXT,
+        verification_evidence TEXT,
         activities TEXT NOT NULL DEFAULT '[]',
+        orchestration_run_id TEXT,
+        orchestration_task_id TEXT,
+        orchestration_attempt_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -504,6 +670,7 @@ export class SQLiteService {
         instruction TEXT NOT NULL,
         working_copy_id TEXT,
         working_branch TEXT,
+        working_commit TEXT,
         result_message_id TEXT,
         error TEXT,
         created_at TEXT NOT NULL,
@@ -521,6 +688,252 @@ export class SQLiteService {
         content TEXT,
         created_at TEXT NOT NULL
       );
+
+      /*
+       * Short-lived local ownership for code-capable project calls and patch
+       * application. The row is acquired in the same SQLite transaction as
+       * call admission, so planning and independent calls cannot both win a
+       * read-then-write race for the same repository.
+       */
+      CREATE TABLE IF NOT EXISTS project_code_execution_locks (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        repository_key TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        owner_call_id TEXT NOT NULL REFERENCES agent_calls(id) ON DELETE CASCADE,
+        purpose TEXT NOT NULL CHECK (purpose IN ('call', 'patch')),
+        acquired_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, project_id, repository_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_project_code_execution_locks_owner
+        ON project_code_execution_locks(owner_call_id);
+
+      /*
+       * Versioned, task-driven builds live beside legacy squad_runs. Keeping
+       * separate records prevents a task graph from being mistaken for an
+       * ordered member roster by older runners and clients.
+       */
+      CREATE TABLE IF NOT EXISTS orchestration_runs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        executor_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL DEFAULT 1,
+        workflow_version INTEGER NOT NULL,
+        plan_version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        current_task_id TEXT,
+        stopped_reason TEXT,
+        branch_name TEXT,
+        base_ref TEXT,
+        base_commit TEXT,
+        worktree_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, id),
+        UNIQUE (workspace_id, request_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_runs_project
+        ON orchestration_runs(workspace_id, project_id, created_at DESC);
+
+      /*
+       * Durable admission while a read-only planner is running. The unique
+       * repository key prevents another local build or independent code call
+       * from entering the same project/repository before the immutable plan
+       * has been activated as an orchestration run.
+       */
+      CREATE TABLE IF NOT EXISTS orchestration_planning_reservations (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        repository TEXT NOT NULL,
+        repository_key TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        branch_name TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        owner_session_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, request_key),
+        UNIQUE (workspace_id, project_id, repository_key)
+      );
+
+      /*
+       * Durable recovery record for planner worktrees that could not be
+       * safely retired. A human may explicitly keep the saved files and
+       * release repository admission; the record remains for room history.
+       */
+      CREATE TABLE IF NOT EXISTS orchestration_planning_recoveries (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        repository_key TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        branch_name TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        owner_session_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('needs_review', 'manual_review', 'retained', 'cleaned')),
+        reason TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT,
+        resolved_by TEXT,
+        PRIMARY KEY (workspace_id, run_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_planning_recoveries_project
+        ON orchestration_planning_recoveries(workspace_id, project_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS orchestration_plans (
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        schema_version INTEGER NOT NULL,
+        plan_json TEXT NOT NULL,
+        source TEXT NOT NULL,
+        activated_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, run_id, version),
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS orchestration_tasks (
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        plan_version INTEGER NOT NULL,
+        task_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        owner_agent_id TEXT NOT NULL,
+        depends_on_json TEXT NOT NULL,
+        requirement_ids_json TEXT NOT NULL,
+        acceptance_json TEXT NOT NULL,
+        checks_json TEXT NOT NULL,
+        scope_json TEXT NOT NULL DEFAULT '{}',
+        required INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        accepted_revision INTEGER,
+        correction_of_task_id TEXT,
+        correction_cycle INTEGER,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, run_id, task_id),
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_tasks_ready
+        ON orchestration_tasks(workspace_id, run_id, status, task_id);
+
+      CREATE TABLE IF NOT EXISTS orchestration_attempts (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        agent_id TEXT NOT NULL,
+        prototype_run_id TEXT,
+        starting_commit TEXT,
+        result_commit TEXT,
+        persona_hash TEXT,
+        model_provider TEXT,
+        model_name TEXT,
+        context_manifest_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL,
+        result_json TEXT,
+        failure_reason TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        UNIQUE (workspace_id, run_id, task_id, attempt_number),
+        UNIQUE (prototype_run_id),
+        FOREIGN KEY (workspace_id, run_id, task_id)
+          REFERENCES orchestration_tasks(workspace_id, run_id, task_id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestration_one_active_attempt
+        ON orchestration_attempts(workspace_id, run_id)
+        WHERE status IN ('starting', 'running', 'submitted', 'recovery_required');
+
+      CREATE TABLE IF NOT EXISTS orchestration_artifacts (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        artifact_type TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        content_reference TEXT,
+        content TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id, run_id, task_id)
+          REFERENCES orchestration_tasks(workspace_id, run_id, task_id) ON DELETE CASCADE,
+        FOREIGN KEY (attempt_id) REFERENCES orchestration_attempts(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS orchestration_findings (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        source_task_id TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        requirement_id TEXT,
+        artifact_id TEXT,
+        path TEXT,
+        evidence TEXT NOT NULL,
+        status TEXT NOT NULL,
+        correction_task_id TEXT,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        FOREIGN KEY (workspace_id, run_id, task_id)
+          REFERENCES orchestration_tasks(workspace_id, run_id, task_id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS orchestration_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        run_sequence INTEGER NOT NULL,
+        actor_id TEXT,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        UNIQUE (workspace_id, run_id, run_sequence),
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_events_cursor
+        ON orchestration_events(workspace_id, run_id, id);
+
+      CREATE TABLE IF NOT EXISTS orchestration_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        event_id TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        delivered_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_outbox_due
+        ON orchestration_outbox(workspace_id, delivered_at, next_attempt_at, id);
     `);
   }
 
@@ -630,6 +1043,16 @@ export class SQLiteService {
       ['prototype_runs', 'thinking_tokens INTEGER'],
       ['prototype_runs', 'cost_usd REAL'],
       ['prototype_runs', 'num_turns INTEGER'],
+      ['prototype_runs', 'orchestration_run_id TEXT'],
+      ['prototype_runs', 'orchestration_task_id TEXT'],
+      ['prototype_runs', 'orchestration_attempt_id TEXT'],
+      ['prototype_runs', 'checkpoint_commit TEXT'],
+      ['prototype_runs', 'verification_evidence TEXT'],
+      ['orchestration_runs', 'branch_name TEXT'],
+      ['orchestration_runs', 'base_ref TEXT'],
+      ['orchestration_runs', 'base_commit TEXT'],
+      ['orchestration_runs', 'worktree_path TEXT'],
+      ['orchestration_tasks', "scope_json TEXT NOT NULL DEFAULT '{}'"],
       /**
        * Which squad run this run is a member's turn in, and where in the order.
        *
@@ -774,6 +1197,10 @@ export class SQLiteService {
       ['issues', 'github_repo TEXT'],
       ['issues', 'github_number INTEGER'],
       ['issues', 'github_url TEXT'],
+      // Identifies the local daemon that owns an in-progress read-only plan.
+      // Null on older databases means the reservation predates this fence and
+      // must be reconciled before another build can use the repository.
+      ['orchestration_planning_reservations', 'owner_session_id TEXT'],
       /**
        * The GitHub comment this one is, when it has reached GitHub.
        *
@@ -795,7 +1222,10 @@ export class SQLiteService {
       ,['chat_messages', 'revision_target TEXT']
       ,['agent_calls', "activities TEXT NOT NULL DEFAULT '[]'"]
       ,['agent_calls', 'working_branch TEXT']
+      ,['agent_calls', 'working_commit TEXT']
       ,['agent_calls', "origin TEXT NOT NULL DEFAULT 'agent_call'"]
+      ,['orchestration_tasks', 'correction_of_task_id TEXT']
+      ,['orchestration_tasks', 'correction_cycle INTEGER']
     ];
 
 
@@ -1103,8 +1533,14 @@ export class SQLiteService {
         continue;
       }
 
-      const sharedTemplate = this.db.prepare('SELECT id FROM agents WHERE shared_key = ? ORDER BY created_at LIMIT 1')
-        .get(sharedKey) as { id: string } | undefined;
+      // Shared user agents and official templates use the same sharing key
+      // column. Only a still-linked template from another workspace is a
+      // template source; a local persona whose template metadata was cleared
+      // must remain user-owned even if it retains its former sharing key.
+      const sharedTemplate = this.db.prepare(`SELECT id FROM agents
+        WHERE shared_key = ? AND template_key = ? AND workspace_id <> ?
+        ORDER BY created_at LIMIT 1`)
+        .get(sharedKey, template.key, workspaceId) as { id: string } | undefined;
       if (sharedTemplate) {
         this.copySharedAgent(sharedTemplate.id, workspaceId, sharedKey);
         existing.add(template.key);
@@ -1117,6 +1553,13 @@ export class SQLiteService {
       // record a deterministic alternate id instead of failing startup.
       const seeded = agentFromOfficialTemplate(template, now);
       if (existingIds.has(seeded.id)) {
+        // An older official record may have been converted into a local custom
+        // persona while retaining its internal official sharing key. Free that
+        // reserved key before creating the new canonical template instance;
+        // the user's persona row itself and its stable ID remain untouched.
+        this.db.prepare(`UPDATE agents SET shared_key = NULL
+          WHERE id = ? AND workspace_id = ? AND template_key IS NULL AND shared_key = ?`)
+          .run(seeded.id, workspaceId, sharedKey);
         const baseId = `${seeded.id}-official`;
         let candidateId = baseId;
         let suffix = 2;
@@ -1674,6 +2117,28 @@ export class SQLiteService {
     }));
   }
 
+  getProjectOrchestrationSetting(projectId: string): { enabled: boolean; updatedAt?: string; updatedBy?: string } {
+    const row = this.db.prepare(`SELECT enabled, updated_at, updated_by
+      FROM project_orchestration_settings WHERE workspace_id = ? AND project_id = ?`)
+      .get(this.workspaceId(), projectId) as { enabled: number; updated_at: string; updated_by: string | null } | undefined;
+    return row ? { enabled: row.enabled === 1, updatedAt: row.updated_at, updatedBy: row.updated_by ?? undefined } : { enabled: false };
+  }
+
+  setProjectOrchestrationEnabled(projectId: string, enabled: boolean, updatedBy: string): { enabled: boolean; updatedAt: string; updatedBy: string } {
+    const workspaceId = this.workspaceId();
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const project = this.db.prepare('SELECT id FROM projects WHERE workspace_id = ? AND id = ?').get(workspaceId, projectId);
+      if (!project) throw new Error('Project not found');
+      this.db.prepare(`INSERT INTO project_orchestration_settings (workspace_id, project_id, enabled, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(workspace_id, project_id) DO UPDATE SET enabled = excluded.enabled,
+          updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+        .run(workspaceId, projectId, enabled ? 1 : 0, updatedBy, now);
+      return { enabled, updatedAt: now, updatedBy };
+    })();
+  }
+
   saveProjectBuildSteps(
     projectId: string,
     input: Array<Partial<ProjectBuildStep>>
@@ -2229,6 +2694,7 @@ export class SQLiteService {
     const rows = this.db.prepare('SELECT * FROM prototype_runs WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
     return rows.map(r => ({
       id: r.id,
+      workspaceId: r.workspace_id,
       issueId: r.issue_id,
       projectId: r.project_id,
       agentId: r.agent_id,
@@ -2239,14 +2705,19 @@ export class SQLiteService {
       stages: JSON.parse(r.stages || '[]'),
       activities: JSON.parse(r.activities || '[]'),
       branchName: r.branch_name,
+      checkpointCommit: r.checkpoint_commit ?? undefined,
       prUrl: r.pr_url,
       changedFiles: r.changed_files,
       insertions: r.insertions,
       deletions: r.deletions,
       testSummary: r.test_summary,
+      verificationEvidence: parseJson(r.verification_evidence, undefined),
       usage: usageFromRow(r),
       squadRunId: r.squad_run_id ?? undefined,
       squadOrder: r.squad_order ?? undefined,
+      orchestrationRunId: r.orchestration_run_id ?? undefined,
+      orchestrationTaskId: r.orchestration_task_id ?? undefined,
+      orchestrationAttemptId: r.orchestration_attempt_id ?? undefined,
       createdAt: r.created_at,
       updatedAt: r.updated_at
     }));
@@ -2266,8 +2737,8 @@ export class SQLiteService {
 
   savePrototypeRun(run: PrototypeRun): PrototypeRun {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO prototype_runs (id, workspace_id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, pr_url, changed_files, insertions, deletions, test_summary, activities, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, created_at, updated_at)
-      VALUES (@id, @workspaceId, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @activities, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @createdAt, @updatedAt)
+      INSERT OR REPLACE INTO prototype_runs (id, workspace_id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index, stages, branch_name, checkpoint_commit, pr_url, changed_files, insertions, deletions, test_summary, verification_evidence, activities, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, thinking_tokens, cost_usd, num_turns, squad_run_id, squad_order, orchestration_run_id, orchestration_task_id, orchestration_attempt_id, created_at, updated_at)
+      VALUES (@id, @workspaceId, @issueId, @projectId, @agentId, @status, @scenario, @plan, @currentStageIndex, @stages, @branchName, @checkpointCommit, @prUrl, @changedFiles, @insertions, @deletions, @testSummary, @verificationEvidence, @activities, @inputTokens, @outputTokens, @cacheReadTokens, @cacheCreationTokens, @thinkingTokens, @costUsd, @numTurns, @squadRunId, @squadOrder, @orchestrationRunId, @orchestrationTaskId, @orchestrationAttemptId, @createdAt, @updatedAt)
     `);
     stmt.run({
       id: run.id,
@@ -2281,11 +2752,13 @@ export class SQLiteService {
       currentStageIndex: run.currentStageIndex,
       stages: JSON.stringify(run.stages || []),
       branchName: run.branchName || null,
+      checkpointCommit: run.checkpointCommit ?? null,
       prUrl: run.prUrl || null,
       changedFiles: run.changedFiles || 0,
       insertions: run.insertions || 0,
       deletions: run.deletions || 0,
       testSummary: run.testSummary || null,
+      verificationEvidence: run.verificationEvidence ? JSON.stringify(run.verificationEvidence) : null,
       activities: JSON.stringify(run.activities || []),
       /**
        * `?? null`, never `|| 0`. A reported zero has to survive the round trip
@@ -2301,6 +2774,9 @@ export class SQLiteService {
       numTurns: run.usage?.numTurns ?? null,
       squadRunId: run.squadRunId ?? null,
       squadOrder: run.squadOrder ?? null,
+      orchestrationRunId: run.orchestrationRunId ?? null,
+      orchestrationTaskId: run.orchestrationTaskId ?? null,
+      orchestrationAttemptId: run.orchestrationAttemptId ?? null,
       createdAt: run.createdAt || new Date().toISOString(),
       updatedAt: run.updatedAt || new Date().toISOString()
     });
@@ -2320,6 +2796,1429 @@ export class SQLiteService {
   getSquadRuns(): SquadRun[] {
     const rows = this.db.prepare('SELECT * FROM squad_runs WHERE workspace_id = ? ORDER BY created_at DESC').all(this.workspaceId()) as any[];
     return rows.map(squadRunFromRow);
+  }
+
+  private appendOrchestrationEvent(
+    runId: string,
+    eventType: string,
+    payload: Record<string, unknown>,
+    actorId?: string,
+    createdAt = new Date().toISOString()
+  ): void {
+    const workspaceId = this.workspaceId();
+    const sequence = (this.db.prepare('SELECT COALESCE(MAX(run_sequence), 0) + 1 AS next FROM orchestration_events WHERE workspace_id = ? AND run_id = ?').get(workspaceId, runId) as any).next as number;
+    const eventId = randomUUID();
+    const serialized = JSON.stringify(payload);
+    this.db.prepare('INSERT INTO orchestration_events (event_id, workspace_id, run_id, run_sequence, actor_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(eventId, workspaceId, runId, sequence, actorId ?? null, eventType, serialized, createdAt);
+    this.db.prepare('INSERT INTO orchestration_outbox (workspace_id, run_id, event_id, payload_json, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(workspaceId, runId, eventId, serialized, createdAt, createdAt);
+  }
+
+  createOrchestrationSnapshot(
+    run: OrchestrationRunRecord,
+    tasks: readonly OrchestrationTaskRecord[],
+    planSource: 'template' | 'model' | 'manual' = 'template',
+    expectedPlanningOwnerSessionId?: string
+  ): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    if (run.workspaceId !== workspaceId) throw new Error('The orchestration run belongs to a different workspace.');
+    if (tasks.length !== run.plan.tasks.length || tasks.some(task => !run.plan.tasks.some(definition => definition.id === task.id))) {
+      throw new Error('The task records do not match the activated plan.');
+    }
+    if (run.status !== 'planning' || run.revision !== 0 || run.planVersion !== 1) {
+      throw new Error('A new orchestration must start at plan version 1 in planning state.');
+    }
+
+    const create = this.db.transaction(() => {
+      if (expectedPlanningOwnerSessionId !== undefined) {
+        const reservation = this.db.prepare(`SELECT request_fingerprint, owner_session_id
+          FROM orchestration_planning_reservations WHERE workspace_id = ? AND request_key = ?`)
+          .get(workspaceId, run.requestKey) as { request_fingerprint: string; owner_session_id: string | null } | undefined;
+        if (!reservation || reservation.request_fingerprint !== run.requestFingerprint ||
+            reservation.owner_session_id !== expectedPlanningOwnerSessionId) {
+          throw new Error('The planning reservation is no longer owned by this Alpha session. Reconcile it before activating the plan.');
+        }
+      }
+      const { plan: _plan, ...runRow } = run;
+      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, stopped_reason, branch_name, base_ref, base_commit, worktree_path, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @createdAt, @updatedAt)')
+        .run({ ...runRow, workspaceId, currentTaskId: run.currentTaskId ?? null, stoppedReason: run.stoppedReason ?? null,
+          branchName: run.branchName ?? null, baseRef: run.baseRef ?? null, baseCommit: run.baseCommit ?? null, worktreePath: run.worktreePath ?? null });
+      this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(workspaceId, run.id, run.planVersion, run.plan.schemaVersion, JSON.stringify(run.plan), planSource, run.createdAt, run.createdAt);
+
+      const insertTask = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, accepted_revision, correction_of_task_id, correction_cycle, updated_at) VALUES (@workspaceId, @runId, @planVersion, @taskId, @title, @description, @kind, @ownerAgentId, @dependsOn, @requirementIds, @acceptance, @checks, @scope, @required, @status, @revision, @attemptCount, @acceptedRevision, @correctionOfTaskId, @correctionCycle, @updatedAt)');
+      for (const task of tasks) {
+        insertTask.run({
+          workspaceId,
+          runId: run.id,
+          planVersion: run.planVersion,
+          taskId: task.id,
+          title: task.title,
+          description: task.description,
+          kind: task.kind,
+          ownerAgentId: task.ownerAgentId,
+          dependsOn: JSON.stringify(task.dependsOn),
+          requirementIds: JSON.stringify(task.requirementIds),
+          acceptance: JSON.stringify(task.acceptanceCriteria),
+          checks: JSON.stringify(task.requiredChecks),
+          scope: JSON.stringify(task.scope),
+          required: task.required ? 1 : 0,
+          status: task.status,
+          revision: task.revision,
+          attemptCount: task.attemptCount,
+          acceptedRevision: task.acceptedRevision ?? null,
+          correctionOfTaskId: task.correctionOfTaskId ?? null,
+          correctionCycle: task.correctionCycle ?? null,
+          updatedAt: task.updatedAt ?? run.createdAt
+        });
+      }
+      this.appendOrchestrationEvent(run.id, 'plan_activated', {
+        planVersion: run.planVersion,
+        taskCount: tasks.length,
+        goal: run.plan.goal
+      }, run.createdBy, run.createdAt);
+      const released = expectedPlanningOwnerSessionId === undefined
+        ? this.db.prepare('DELETE FROM orchestration_planning_reservations WHERE workspace_id = ? AND request_key = ? AND request_fingerprint = ?')
+          .run(workspaceId, run.requestKey, run.requestFingerprint)
+        : this.db.prepare(`DELETE FROM orchestration_planning_reservations
+          WHERE workspace_id = ? AND request_key = ? AND request_fingerprint = ? AND owner_session_id = ?`)
+          .run(workspaceId, run.requestKey, run.requestFingerprint, expectedPlanningOwnerSessionId);
+      if (expectedPlanningOwnerSessionId !== undefined && released.changes !== 1) {
+        throw new Error('The planning reservation changed before the plan could be activated.');
+      }
+    });
+    create();
+    return this.getOrchestrationSnapshot(run.id)!;
+  }
+
+  bindOrchestrationWorkspace(input: {
+    runId: string;
+    branchName: string;
+    baseRef: string;
+    baseCommit: string;
+    worktreePath: string;
+    actorId?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    if (!/^[a-f0-9]{40,64}$/i.test(input.baseCommit)) throw new Error('The orchestration base commit is invalid.');
+    if (!path.isAbsolute(input.worktreePath) || !this.isPathAllowed(input.worktreePath)) {
+      throw new Error('The orchestration worktree is outside the approved local workspace.');
+    }
+    const bind = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (!['executing', 'blocked'].includes(snapshot.run.status)) throw new Error(`Cannot bind a worktree while the build is ${snapshot.run.status}.`);
+      const run = snapshot.run;
+      if ((run.branchName && run.branchName !== input.branchName) ||
+          (run.baseRef && run.baseRef !== input.baseRef) ||
+          (run.worktreePath && path.resolve(run.worktreePath) !== path.resolve(input.worktreePath))) {
+        throw new Error('The orchestration run is already bound to a different branch, base, or worktree.');
+      }
+      if (run.branchName && run.baseCommit && run.worktreePath) return;
+      const result = this.db.prepare('UPDATE orchestration_runs SET branch_name = ?, base_ref = ?, base_commit = COALESCE(base_commit, ?), worktree_path = ?, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?')
+        .run(input.branchName, input.baseRef, input.baseCommit, input.worktreePath, now, workspaceId, input.runId, run.revision);
+      if (result.changes !== 1) throw new Error('Build changed before its worktree could be bound.');
+      this.appendOrchestrationEvent(input.runId, 'workspace_prepared', {
+        branchName: input.branchName,
+        baseRef: input.baseRef,
+        baseCommit: run.baseCommit ?? input.baseCommit
+      }, input.actorId, now);
+    });
+    bind();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  getOrchestrationSnapshot(runId: string): OrchestrationSnapshot | undefined {
+    const workspaceId = this.workspaceId();
+    const row = this.db.prepare('SELECT * FROM orchestration_runs WHERE workspace_id = ? AND id = ?').get(workspaceId, runId) as any;
+    if (!row) return undefined;
+    const planRow = this.db.prepare('SELECT plan_json FROM orchestration_plans WHERE workspace_id = ? AND run_id = ? AND version = ?')
+      .get(workspaceId, runId, row.plan_version) as any;
+    if (!planRow) throw new Error('The orchestration plan version is missing.');
+    const plan = JSON.parse(planRow.plan_json) as OrchestrationPlan;
+    const tasks = this.db.prepare('SELECT * FROM orchestration_tasks WHERE workspace_id = ? AND run_id = ? AND plan_version = ? ORDER BY rowid')
+      .all(workspaceId, runId, row.plan_version) as any[];
+    const attempts = this.db.prepare('SELECT * FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? ORDER BY created_at, attempt_number')
+      .all(workspaceId, runId) as any[];
+    const artifacts = this.db.prepare('SELECT * FROM orchestration_artifacts WHERE workspace_id = ? AND run_id = ? ORDER BY created_at, id')
+      .all(workspaceId, runId) as any[];
+    const findings = this.db.prepare('SELECT * FROM orchestration_findings WHERE workspace_id = ? AND run_id = ? ORDER BY created_at, id')
+      .all(workspaceId, runId) as any[];
+    const completedEvent = this.db.prepare(`SELECT payload_json FROM orchestration_events
+      WHERE workspace_id = ? AND run_id = ? AND event_type = 'run_completed'
+      ORDER BY run_sequence DESC LIMIT 1`).get(workspaceId, runId) as { payload_json: string } | undefined;
+    const completionPayload = parseJson<{ evidence?: Record<string, unknown> }>(completedEvent?.payload_json, {});
+    const publication = completionPayload.evidence?.decision === 'approved'
+      ? completionPayload.evidence.publication as Record<string, unknown> | undefined
+      : undefined;
+    const run = orchestrationRunFromRow(row, plan);
+    const pullUrl = typeof publication?.pullRequestUrl === 'string' ? publication.pullRequestUrl.toLowerCase() : '';
+    const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(run.repository).toLowerCase()}/pull/`;
+    const pullNumber = pullUrl.startsWith(expectedPullPrefix) ? pullUrl.slice(expectedPullPrefix.length) : '';
+    if (publication && isSafeOrchestrationBranchName(publication.branchName) && isSafeOrchestrationBranchName(publication.baseBranch) &&
+        publication.branchName === run.branchName && publication.baseBranch !== publication.branchName &&
+        typeof publication.resultCommit === 'string' && /^[a-f0-9]{40,64}$/i.test(publication.resultCommit) &&
+        typeof publication.pullRequestUrl === 'string' &&
+        /^\d+$/.test(pullNumber) &&
+        typeof publication.publishedAt === 'string' && Number.isFinite(Date.parse(publication.publishedAt))) {
+      run.publication = {
+        branchName: publication.branchName,
+        baseBranch: publication.baseBranch,
+        resultCommit: publication.resultCommit,
+        pullRequestUrl: publication.pullRequestUrl,
+        publishedAt: publication.publishedAt
+      };
+    }
+    return {
+      run,
+      tasks: tasks.map(orchestrationTaskFromRow),
+      attempts: attempts.map(orchestrationAttemptFromRow),
+      artifacts: artifacts.map(orchestrationArtifactFromRow),
+      findings: findings.map(orchestrationFindingFromRow)
+    };
+  }
+
+  getOrchestrationByRequestKey(requestKey: string): OrchestrationSnapshot | undefined {
+    const row = this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND request_key = ?')
+      .get(this.workspaceId(), requestKey) as any;
+    return row ? this.getOrchestrationSnapshot(row.id) : undefined;
+  }
+
+  listActiveOrchestrationSnapshots(): OrchestrationSnapshot[] {
+    const statuses = ['planning', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
+    const placeholders = statuses.map(() => '?').join(', ');
+    const rows = this.db.prepare(`SELECT id FROM orchestration_runs WHERE workspace_id = ? AND status IN (${placeholders}) ORDER BY created_at ASC`)
+      .all(this.workspaceId(), ...statuses) as Array<{ id: string }>;
+    return rows.map(row => this.getOrchestrationSnapshot(row.id)).filter((item): item is OrchestrationSnapshot => Boolean(item));
+  }
+
+  listAllActiveOrchestrationSnapshots(): OrchestrationSnapshot[] {
+    const statuses = ['planning', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
+    const placeholders = statuses.map(() => '?').join(', ');
+    const rows = this.db.prepare(`SELECT workspace_id, id FROM orchestration_runs WHERE status IN (${placeholders}) ORDER BY created_at ASC`)
+      .all(...statuses) as Array<{ workspace_id: string; id: string }>;
+    return rows.flatMap(row => {
+      const snapshot = runWithWorkspace(row.workspace_id, () => this.getOrchestrationSnapshot(row.id));
+      return snapshot ? [snapshot] : [];
+    });
+  }
+
+  /** Published workflows whose project-issue effects may need replay. */
+  listAllPublishedOrchestrationSnapshots(): OrchestrationSnapshot[] {
+    const rows = this.db.prepare(`SELECT DISTINCT runs.workspace_id, runs.id, events.payload_json
+      FROM orchestration_runs AS runs
+      JOIN orchestration_events AS events
+        ON events.workspace_id = runs.workspace_id AND events.run_id = runs.id
+      WHERE runs.status = 'completed' AND events.event_type = 'run_completed'
+      ORDER BY runs.updated_at ASC`)
+      .all() as Array<{ workspace_id: string; id: string; payload_json: string }>;
+    const approved = rows.filter(row => {
+      try {
+        const payload = JSON.parse(row.payload_json) as { evidence?: { decision?: unknown; publication?: unknown } };
+        return payload.evidence?.decision === 'approved' && Boolean(payload.evidence.publication);
+      } catch {
+        return false;
+      }
+    });
+    return approved.flatMap(row => {
+      const snapshot = runWithWorkspace(row.workspace_id, () => this.getOrchestrationSnapshot(row.id));
+      return snapshot?.run.publication ? [snapshot] : [];
+    });
+  }
+
+  getLatestOrchestrationSnapshot(projectId: string): OrchestrationSnapshot | undefined {
+    const row = this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(this.workspaceId(), projectId) as { id: string } | undefined;
+    return row ? this.getOrchestrationSnapshot(row.id) : undefined;
+  }
+
+  reserveOrchestrationPlanning(input: {
+    projectId: string;
+    repository: string;
+    requestKey: string;
+    requestFingerprint: string;
+    createdBy: string;
+    runId: string;
+    branchName: string;
+    baseCommit: string;
+    worktreePath: string;
+    ownerSessionId: string;
+    now?: string;
+  }): {
+    runId: string;
+    repository: string;
+    repositoryKey: string;
+    requestKey: string;
+    requestFingerprint: string;
+    branchName: string;
+    baseCommit: string;
+    worktreePath: string;
+    ownerSessionId: string | null;
+    createdAt: string;
+    created: boolean;
+  } {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const repositoryKey = canonicalOrchestrationRepository(input.repository);
+    if (!repositoryKey) throw new Error('A canonical repository identity is required to reserve task planning.');
+    if (!/^[a-f0-9]{40,64}$/i.test(input.baseCommit)) throw new Error('The planning base commit is invalid.');
+    if (!path.isAbsolute(input.worktreePath) || !this.isPathAllowed(input.worktreePath)) {
+      throw new Error('The planning worktree is outside the approved local workspace.');
+    }
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM orchestration_planning_reservations WHERE workspace_id = ? AND request_key = ?')
+        .get(workspaceId, input.requestKey) as any;
+      if (existing) {
+        if (existing.request_fingerprint !== input.requestFingerprint) {
+          throw new Error('This request key is already reserved for a different build request.');
+        }
+        return {
+          runId: existing.run_id, repository: existing.repository, repositoryKey: existing.repository_key,
+          requestKey: existing.request_key, requestFingerprint: existing.request_fingerprint,
+          branchName: existing.branch_name, baseCommit: existing.base_commit,
+          worktreePath: existing.worktree_path, ownerSessionId: existing.owner_session_id ?? null,
+          createdAt: existing.created_at, created: false
+        };
+      }
+      const activeStatuses = ['planning', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+      const placeholders = activeStatuses.map(() => '?').join(', ');
+      const active = this.db.prepare(`SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)
+        .all(workspaceId, input.projectId, ...activeStatuses) as Array<{ id: string }>;
+      const activeRepo = active.find(row => {
+        const run = this.db.prepare('SELECT repository FROM orchestration_runs WHERE workspace_id = ? AND id = ?').get(workspaceId, row.id) as { repository: string } | undefined;
+        return run && canonicalOrchestrationRepository(run.repository) === repositoryKey;
+      });
+      if (activeRepo) throw new Error('A task-based build already owns this project repository. Follow or resolve it before planning another.');
+
+      const codeCallLock = this.db.prepare('SELECT owner_call_id FROM project_code_execution_locks WHERE workspace_id = ? AND project_id = ? AND repository_key = ?')
+        .get(workspaceId, input.projectId, repositoryKey) as { owner_call_id: string } | undefined;
+      if (codeCallLock) throw new Error('An independent project code call or patch is using this repository. Let it finish before starting a task-based build.');
+
+      const runId = input.runId;
+      try {
+        this.db.prepare(`INSERT INTO orchestration_planning_reservations
+          (workspace_id, project_id, repository, repository_key, request_key, request_fingerprint, run_id, created_by, branch_name, base_commit, worktree_path, owner_session_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(workspaceId, input.projectId, input.repository, repositoryKey, input.requestKey,
+            input.requestFingerprint, runId, input.createdBy, input.branchName, input.baseCommit,
+          input.worktreePath, input.ownerSessionId, now);
+      } catch (error) {
+        const reserved = this.db.prepare('SELECT request_key FROM orchestration_planning_reservations WHERE workspace_id = ? AND project_id = ? AND repository_key = ?')
+          .get(workspaceId, input.projectId, repositoryKey) as { request_key: string } | undefined;
+        if (reserved) throw new Error('Another task build is already being planned for this project repository.');
+        throw error;
+      }
+      return {
+        runId, repository: input.repository, repositoryKey, requestKey: input.requestKey,
+        requestFingerprint: input.requestFingerprint, branchName: input.branchName,
+        baseCommit: input.baseCommit, worktreePath: input.worktreePath,
+        ownerSessionId: input.ownerSessionId, createdAt: now, created: true
+      };
+    })();
+  }
+
+  releaseOrchestrationPlanningReservation(
+    requestKey: string,
+    requestFingerprint: string,
+    expectedOwnerSessionId: string | null
+  ): boolean {
+    return this.db.prepare(`DELETE FROM orchestration_planning_reservations
+      WHERE workspace_id = ? AND request_key = ? AND request_fingerprint = ? AND owner_session_id IS ?`)
+      .run(this.workspaceId(), requestKey, requestFingerprint, expectedOwnerSessionId).changes === 1;
+  }
+
+  getOrchestrationPlanningReservation(projectId: string, repository?: string): {
+    runId: string;
+    repository: string;
+    requestKey: string;
+    requestFingerprint: string;
+    branchName: string;
+    baseCommit: string;
+    worktreePath: string;
+    ownerSessionId: string | null;
+    createdAt: string;
+  } | undefined {
+    const rows = this.db.prepare('SELECT run_id, repository, repository_key, request_key, request_fingerprint, branch_name, base_commit, worktree_path, owner_session_id, created_at FROM orchestration_planning_reservations WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC')
+      .all(this.workspaceId(), projectId) as any[];
+    const key = repository ? canonicalOrchestrationRepository(repository) : undefined;
+    const row = key ? rows.find(item => item.repository_key === key) : rows[0];
+    return row ? {
+      runId: row.run_id, repository: row.repository, requestKey: row.request_key,
+      requestFingerprint: row.request_fingerprint,
+      branchName: row.branch_name, baseCommit: row.base_commit,
+      worktreePath: row.worktree_path, ownerSessionId: row.owner_session_id ?? null,
+      createdAt: row.created_at
+    } : undefined;
+  }
+
+  getOrchestrationPlanningReservationByRun(projectId: string, runId: string): {
+    runId: string;
+    repository: string;
+    repositoryKey: string;
+    requestKey: string;
+    requestFingerprint: string;
+    branchName: string;
+    baseCommit: string;
+    worktreePath: string;
+    ownerSessionId: string | null;
+    createdAt: string;
+  } | undefined {
+    const row = this.db.prepare(`SELECT run_id, repository, repository_key, request_key, request_fingerprint,
+      branch_name, base_commit, worktree_path, owner_session_id, created_at
+      FROM orchestration_planning_reservations
+      WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+      .get(this.workspaceId(), projectId, runId) as any;
+    return row ? {
+      runId: row.run_id, repository: row.repository, repositoryKey: row.repository_key,
+      requestKey: row.request_key, requestFingerprint: row.request_fingerprint,
+      branchName: row.branch_name, baseCommit: row.base_commit,
+      worktreePath: row.worktree_path, ownerSessionId: row.owner_session_id ?? null,
+      createdAt: row.created_at
+    } : undefined;
+  }
+
+  listOrchestrationPlanningReservations(projectId: string, limit = 20): NonNullable<ReturnType<SQLiteService['getOrchestrationPlanningReservationByRun']>>[] {
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT run_id FROM orchestration_planning_reservations
+      WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(this.workspaceId(), projectId, safeLimit) as Array<{ run_id: string }>;
+    return rows.map(row => this.getOrchestrationPlanningReservationByRun(projectId, row.run_id))
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+  }
+
+  recordOrchestrationPlanningRecovery(input: {
+    projectId: string;
+    reservation: NonNullable<ReturnType<SQLiteService['getOrchestrationPlanningReservationByRun']>>;
+    state: 'needs_review' | 'manual_review';
+    reason: string;
+    now?: string;
+  }): { runId: string; repository: string; branchName: string; baseCommit: string; state: 'needs_review' | 'manual_review'; reason: string; revision: number; createdAt: string; updatedAt: string } {
+    const reservation = input.reservation;
+    if (!reservation) throw new Error('The interrupted planning reservation is unavailable.');
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    this.db.transaction(() => {
+      const current = this.db.prepare(`SELECT request_key, request_fingerprint, owner_session_id
+        FROM orchestration_planning_reservations
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+        .get(workspaceId, input.projectId, reservation.runId) as any;
+      if (!current || current.request_key !== reservation.requestKey ||
+          current.request_fingerprint !== reservation.requestFingerprint ||
+          (current.owner_session_id ?? null) !== reservation.ownerSessionId) {
+        throw new Error('The planning reservation changed before recovery could be recorded.');
+      }
+      this.db.prepare(`INSERT INTO orchestration_planning_recoveries
+        (workspace_id, project_id, run_id, repository, repository_key, request_key, request_fingerprint,
+         branch_name, base_commit, worktree_path, owner_session_id, state, reason, revision, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(workspace_id, run_id) DO UPDATE SET
+          state = CASE WHEN orchestration_planning_recoveries.state IN ('retained', 'cleaned') THEN orchestration_planning_recoveries.state ELSE excluded.state END,
+          reason = CASE WHEN orchestration_planning_recoveries.state IN ('retained', 'cleaned') THEN orchestration_planning_recoveries.reason ELSE excluded.reason END,
+          revision = CASE WHEN orchestration_planning_recoveries.state IN ('retained', 'cleaned') THEN orchestration_planning_recoveries.revision ELSE orchestration_planning_recoveries.revision + 1 END,
+          updated_at = CASE WHEN orchestration_planning_recoveries.state IN ('retained', 'cleaned') THEN orchestration_planning_recoveries.updated_at ELSE excluded.updated_at END`)
+        .run(workspaceId, input.projectId, reservation.runId, reservation.repository, reservation.repositoryKey,
+          reservation.requestKey, reservation.requestFingerprint, reservation.branchName, reservation.baseCommit,
+          reservation.worktreePath, reservation.ownerSessionId, input.state, input.reason.slice(0, 1_000), now, now);
+    })();
+    const row = this.db.prepare(`SELECT run_id, repository, branch_name, base_commit, state, reason, revision, created_at, updated_at
+      FROM orchestration_planning_recoveries WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+      .get(workspaceId, input.projectId, reservation.runId) as any;
+    if (!row) throw new Error('The planning recovery record could not be loaded.');
+    return {
+      runId: row.run_id, repository: row.repository, branchName: row.branch_name, baseCommit: row.base_commit,
+      state: row.state, reason: row.reason, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at
+    };
+  }
+
+  getOrchestrationPlanningRecovery(projectId: string, runId: string): {
+    projectId: string; runId: string; repository: string; repositoryKey: string; requestKey: string;
+    requestFingerprint: string; branchName: string; baseCommit: string; worktreePath: string;
+    ownerSessionId: string | null; state: 'needs_review' | 'manual_review' | 'retained' | 'cleaned'; reason: string;
+    revision: number; createdAt: string; updatedAt: string; resolvedAt?: string; resolvedBy?: string;
+  } | undefined {
+    const row = this.db.prepare(`SELECT project_id, run_id, repository, repository_key, request_key, request_fingerprint,
+      branch_name, base_commit, worktree_path, owner_session_id, state, reason, revision, created_at, updated_at, resolved_at, resolved_by
+      FROM orchestration_planning_recoveries WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+      .get(this.workspaceId(), projectId, runId) as any;
+    return row ? {
+      projectId: row.project_id, runId: row.run_id, repository: row.repository, repositoryKey: row.repository_key,
+      requestKey: row.request_key, requestFingerprint: row.request_fingerprint, branchName: row.branch_name,
+      baseCommit: row.base_commit, worktreePath: row.worktree_path, ownerSessionId: row.owner_session_id ?? null,
+      state: row.state, reason: row.reason, revision: row.revision, createdAt: row.created_at,
+      updatedAt: row.updated_at, resolvedAt: row.resolved_at ?? undefined, resolvedBy: row.resolved_by ?? undefined
+    } : undefined;
+  }
+
+  listOrchestrationPlanningRecoveries(projectId: string, limit = 10): NonNullable<ReturnType<SQLiteService['getOrchestrationPlanningRecovery']>>[] {
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT run_id FROM orchestration_planning_recoveries
+      WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(this.workspaceId(), projectId, safeLimit) as Array<{ run_id: string }>;
+    return rows.map(row => this.getOrchestrationPlanningRecovery(projectId, row.run_id))
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+  }
+
+  retainOrchestrationPlanningRecovery(input: {
+    projectId: string;
+    runId: string;
+    expectedRevision: number;
+    actorId: string;
+    now?: string;
+  }): NonNullable<ReturnType<SQLiteService['getOrchestrationPlanningRecovery']>> {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    this.db.transaction(() => {
+      const recovery = this.db.prepare(`SELECT request_key, request_fingerprint, owner_session_id, state, revision
+        FROM orchestration_planning_recoveries WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+        .get(workspaceId, input.projectId, input.runId) as any;
+      if (!recovery) throw new Error('The planning recovery record is unavailable.');
+      if (recovery.state === 'retained') return;
+      if (recovery.state !== 'needs_review') throw new Error('Alpha cannot safely unlock this planning workspace automatically.');
+      if (recovery.revision !== input.expectedRevision) throw new Error('The saved workspace changed during review. Refresh it before continuing.');
+      const released = this.db.prepare(`DELETE FROM orchestration_planning_reservations
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND request_key = ?
+          AND request_fingerprint = ? AND owner_session_id IS ?`)
+        .run(workspaceId, input.projectId, input.runId, recovery.request_key, recovery.request_fingerprint, recovery.owner_session_id ?? null);
+      if (released.changes !== 1) throw new Error('The planning reservation changed before recovery was resolved. Refresh the project and inspect its active build.');
+      const updated = this.db.prepare(`UPDATE orchestration_planning_recoveries
+        SET state = 'retained', revision = revision + 1, updated_at = ?, resolved_at = ?, resolved_by = ?
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND state = 'needs_review' AND revision = ?`)
+        .run(now, now, input.actorId, workspaceId, input.projectId, input.runId, input.expectedRevision);
+      if (updated.changes !== 1) throw new Error('The planning recovery record changed before it could be resolved.');
+    })();
+    const result = this.getOrchestrationPlanningRecovery(input.projectId, input.runId);
+    if (!result) throw new Error('The resolved planning recovery could not be loaded.');
+    return result;
+  }
+
+  cleanOrchestrationPlanningReservation(input: {
+    projectId: string;
+    runId: string;
+    reservation: NonNullable<ReturnType<SQLiteService['getOrchestrationPlanningReservationByRun']>>;
+    actorId: string;
+    now?: string;
+  }): { recoveryState: 'cleaned'; revision: number } {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    return this.db.transaction(() => {
+      const current = this.db.prepare(`SELECT repository, repository_key, request_key, request_fingerprint,
+        branch_name, base_commit, worktree_path, owner_session_id
+        FROM orchestration_planning_reservations
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+        .get(workspaceId, input.projectId, input.runId) as any;
+      if (!current || current.request_key !== input.reservation.requestKey ||
+          current.request_fingerprint !== input.reservation.requestFingerprint ||
+          (current.owner_session_id ?? null) !== input.reservation.ownerSessionId) {
+        throw new Error('The planning reservation changed during recovery. Refresh the room and inspect the active build.');
+      }
+      const reservation = this.db.prepare(`DELETE FROM orchestration_planning_reservations
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND request_key = ?
+          AND request_fingerprint = ? AND owner_session_id IS ?`)
+        .run(workspaceId, input.projectId, input.runId, input.reservation.requestKey,
+          input.reservation.requestFingerprint, input.reservation.ownerSessionId);
+      if (reservation.changes !== 1) throw new Error('The planning reservation changed during recovery. Refresh the room and inspect the active build.');
+      const prior = this.db.prepare(`SELECT state, revision FROM orchestration_planning_recoveries
+        WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+        .get(workspaceId, input.projectId, input.runId) as { state: string; revision: number } | undefined;
+      let revision = 0;
+      if (prior) {
+        if (!['needs_review', 'manual_review'].includes(prior.state)) {
+          throw new Error('The planning recovery record is no longer in a cleanable state.');
+        }
+        revision = prior.revision + 1;
+        this.db.prepare(`UPDATE orchestration_planning_recoveries
+          SET state = 'cleaned', reason = ?, revision = ?, updated_at = ?, resolved_at = ?, resolved_by = ?
+          WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
+          .run('The saved planning workspace was verified clean and safely removed.', revision, now, now,
+            input.actorId, workspaceId, input.projectId, input.runId);
+      } else {
+        this.db.prepare(`INSERT INTO orchestration_planning_recoveries
+          (workspace_id, project_id, run_id, repository, repository_key, request_key, request_fingerprint,
+           branch_name, base_commit, worktree_path, owner_session_id, state, reason, revision, created_at, updated_at, resolved_at, resolved_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cleaned', ?, 0, ?, ?, ?, ?)`)
+          .run(workspaceId, input.projectId, input.runId, current.repository, current.repository_key,
+            current.request_key, current.request_fingerprint, current.branch_name, current.base_commit,
+            current.worktree_path, current.owner_session_id, 'The saved planning workspace was verified clean and safely removed.',
+            now, now, now, input.actorId);
+      }
+      return { recoveryState: 'cleaned' as const, revision };
+    })();
+  }
+
+  /** Active local workflow ownership for an attached project repository. */
+  getActiveOrchestrationForProject(projectId: string, repository?: string): {
+    runId: string;
+    repository: string;
+    status: OrchestrationRunRecord['status'];
+    branchName?: string;
+  } | undefined {
+    const activeStatuses = ['planning', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+    const placeholders = activeStatuses.map(() => '?').join(', ');
+    const rows = this.db.prepare(`SELECT id, repository, status, branch_name FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders}) ORDER BY created_at DESC`)
+      .all(this.workspaceId(), projectId, ...activeStatuses) as any[];
+    const normalize = canonicalOrchestrationRepository;
+    const matching = repository ? rows.find(row => normalize(row.repository) === normalize(repository)) : rows[0];
+    const reservation = this.getOrchestrationPlanningReservation(projectId, repository);
+    if (reservation && (!matching || Date.parse(reservation.createdAt) >= Date.parse(matching.created_at))) return {
+      runId: reservation.runId, repository: reservation.repository, status: 'planning', branchName: reservation.branchName
+    };
+    return matching ? {
+      runId: matching.id,
+      repository: matching.repository,
+      status: matching.status,
+      branchName: matching.branch_name ?? undefined
+    } : undefined;
+  }
+
+  transitionOrchestrationRun(input: {
+    runId: string;
+    expectedRevision: number;
+    nextStatus: OrchestrationRunRecord['status'];
+    actorId?: string;
+    reason?: string;
+    evidence?: Record<string, unknown>;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const change = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (['validating', 'awaiting_approval', 'publishing', 'completed'].includes(input.nextStatus)) {
+        if (snapshot.run.currentTaskId || snapshot.tasks.some(task => ['running', 'submitted'].includes(task.status))) {
+          throw new Error('The build still has a task awaiting execution or acceptance.');
+        }
+        if (!snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted')) {
+          throw new Error('All required tasks must be accepted before final validation or approval.');
+        }
+      }
+      if (input.nextStatus === 'awaiting_approval' && !input.evidence) {
+        throw new Error('Final validation evidence is required before requesting human approval.');
+      }
+      if (input.nextStatus === 'publishing' && snapshot.run.status === 'awaiting_approval' &&
+          (!input.evidence || input.evidence.decision !== 'approved' ||
+            typeof input.evidence.publicationBaseBranch !== 'string')) {
+        throw new Error('A human approval and a resolved pull request target are required before publication.');
+      }
+      if (input.nextStatus === 'completed' && snapshot.run.status === 'publishing' &&
+          (!input.evidence || input.evidence.decision !== 'approved' ||
+            !input.evidence.publication || typeof input.evidence.publication !== 'object')) {
+        throw new Error('A reconciled pull request is required before completing this task build.');
+      }
+      if (input.nextStatus === 'completed' && snapshot.run.status === 'publishing') {
+        const publication = input.evidence!.publication as Record<string, unknown>;
+        const validationEvent = this.db.prepare(`SELECT payload_json FROM orchestration_events
+          WHERE workspace_id = ? AND run_id = ? AND event_type = 'run_awaiting_approval'
+          ORDER BY run_sequence DESC LIMIT 1`).get(workspaceId, input.runId) as { payload_json: string } | undefined;
+        const validationPayload = parseJson<{ evidence?: Record<string, unknown> }>(validationEvent?.payload_json, {});
+        const validated = validationPayload.evidence ?? {};
+        const pullUrl = typeof publication.pullRequestUrl === 'string' ? publication.pullRequestUrl.toLowerCase() : '';
+        const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(snapshot.run.repository)}/pull/`;
+        const mismatchReasons = [
+          !isSafeOrchestrationBranchName(publication.branchName) || publication.branchName !== snapshot.run.branchName ? 'branch' : '',
+          !isSafeOrchestrationBranchName(publication.baseBranch) || publication.baseBranch === publication.branchName ? 'base branch' : '',
+          typeof publication.resultCommit !== 'string' || publication.resultCommit !== validated.resultCommit ||
+            validated.branchName !== publication.branchName ? 'commit' : '',
+          !pullUrl.startsWith(expectedPullPrefix) || !/^\d+$/.test(pullUrl.slice(expectedPullPrefix.length)) ? 'pull request URL' : '',
+          typeof publication.publishedAt !== 'string' || !Number.isFinite(Date.parse(publication.publishedAt)) ? 'publication time' : ''
+        ].filter(Boolean);
+        if (mismatchReasons.length) {
+          throw new Error(`The published pull request does not match the validated ${mismatchReasons.join(', ')}. Reconcile final review before completing the build.`);
+        }
+      }
+      if (input.nextStatus === 'awaiting_approval' && snapshot.findings.some(finding =>
+        finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity))) {
+        throw new Error('Open blocking or critical findings must be resolved before requesting human approval.');
+      }
+      const updated = transitionRun(snapshot.run, input.nextStatus, input.expectedRevision, now);
+      const result = this.db.prepare('UPDATE orchestration_runs SET status = ?, revision = ?, stopped_reason = ?, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?')
+        .run(updated.status, updated.revision, input.reason === undefined ? (snapshot.run.stoppedReason ?? null) : input.reason,
+          now,
+          workspaceId, input.runId, input.expectedRevision);
+      if (result.changes !== 1) throw new Error('Build changed while its transition was being committed.');
+      this.appendOrchestrationEvent(input.runId, `run_${updated.status}`, {
+        revision: updated.revision,
+        reason: input.reason,
+        evidence: input.evidence
+      }, input.actorId, now);
+    });
+    change();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  cancelOrchestrationRun(input: {
+    runId: string;
+    actorId: string;
+    reason?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const reason = input.reason ?? 'Build cancelled by an authorized project member.';
+    const cancel = this.db.transaction(() => {
+      let snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (snapshot.run.status === 'publishing') {
+        throw new Error('An approved build cannot be cancelled while its pull request is being reconciled.');
+      }
+      if (['failed', 'cancelled'].includes(snapshot.run.status)) return;
+      const currentTask = snapshot.run.currentTaskId
+        ? snapshot.tasks.find(task => task.id === snapshot!.run.currentTaskId)
+        : undefined;
+      if (currentTask && !['accepted', 'failed', 'cancelled', 'superseded'].includes(currentTask.status)) {
+        const activeAttempt = [...snapshot.attempts].reverse().find(attempt =>
+          attempt.taskId === currentTask.id && ['starting', 'running', 'submitted'].includes(attempt.status));
+        if (activeAttempt) {
+          this.db.prepare("UPDATE orchestration_attempts SET status = 'cancelled', failure_reason = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND id = ? AND status IN ('starting', 'running', 'submitted')")
+            .run(reason, now, workspaceId, input.runId, activeAttempt.id);
+          this.db.prepare("UPDATE orchestration_artifacts SET status = 'cancelled' WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND attempt_id = ? AND status = 'submitted'")
+            .run(workspaceId, input.runId, currentTask.id, activeAttempt.id);
+        }
+        snapshot = this.transitionOrchestrationTask({
+          runId: input.runId, taskId: currentTask.id, expectedRevision: currentTask.revision,
+          nextStatus: 'cancelled', actorId: input.actorId, reason, now
+        });
+      }
+      for (const task of snapshot.tasks) {
+        if (task.id === currentTask?.id || !['pending', 'ready', 'blocked'].includes(task.status)) continue;
+        snapshot = this.transitionOrchestrationTask({
+          runId: input.runId, taskId: task.id, expectedRevision: task.revision,
+          nextStatus: 'cancelled', actorId: input.actorId, reason, now
+        });
+      }
+      snapshot = this.getOrchestrationSnapshot(input.runId)!;
+      this.transitionOrchestrationRun({
+        runId: input.runId, expectedRevision: snapshot.run.revision,
+        nextStatus: 'cancelled', actorId: input.actorId, reason, now
+      });
+    });
+    cancel();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  markOrchestrationRecoveryRequired(input: {
+    runId: string;
+    actorId?: string;
+    reason: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const recover = this.db.transaction(() => {
+      let snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (['failed', 'cancelled', 'awaiting_approval', 'recovery_required'].includes(snapshot.run.status)) return;
+      const task = snapshot.run.currentTaskId
+        ? snapshot.tasks.find(item => item.id === snapshot!.run.currentTaskId)
+        : undefined;
+      if (task && ['running', 'submitted'].includes(task.status)) {
+        const activeAttempt = [...snapshot.attempts].reverse().find(attempt =>
+          attempt.taskId === task.id && ['starting', 'running', 'submitted'].includes(attempt.status));
+        if (activeAttempt) {
+          this.db.prepare("UPDATE orchestration_attempts SET status = 'recovery_required', failure_reason = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND id = ? AND status IN ('starting', 'running', 'submitted')")
+            .run(input.reason, now, workspaceId, input.runId, activeAttempt.id);
+        }
+        snapshot = this.transitionOrchestrationTask({
+          runId: input.runId, taskId: task.id, expectedRevision: task.revision,
+          nextStatus: 'blocked', actorId: input.actorId ?? 'orchestrator', reason: input.reason, now
+        });
+      }
+      const latest = this.getOrchestrationSnapshot(input.runId)!;
+      const nextStatus = latest.run.status === 'planning' ? 'blocked' : 'recovery_required';
+      this.transitionOrchestrationRun({
+        runId: input.runId, expectedRevision: latest.run.revision,
+        nextStatus, actorId: input.actorId ?? 'orchestrator', reason: input.reason, now
+      });
+    });
+    recover();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  settleOrchestrationRecoveryAttempt(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    actorId?: string;
+    reason: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const settle = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'recovery_required') {
+        throw new Error('This build no longer has an interrupted attempt to reconcile.');
+      }
+      const task = snapshot.tasks.find(item => item.id === input.taskId);
+      if (!task || task.status !== 'blocked') throw new Error('The interrupted task is no longer waiting for recovery.');
+      const attempt = snapshot.attempts.find(item => item.id === input.attemptId && item.taskId === task.id);
+      if (!attempt || attempt.status !== 'recovery_required') throw new Error('The saved attempt has already been reconciled.');
+      const updated = this.db.prepare("UPDATE orchestration_attempts SET status = 'failed', failure_reason = ?, completed_at = COALESCE(completed_at, ?) WHERE workspace_id = ? AND run_id = ? AND id = ? AND status = 'recovery_required'")
+        .run(input.reason, now, workspaceId, input.runId, input.attemptId);
+      if (updated.changes !== 1) throw new Error('The interrupted attempt changed before recovery was recorded.');
+      this.appendOrchestrationEvent(input.runId, 'recovery_attempt_settled', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        action: 'retry',
+        reason: input.reason
+      }, input.actorId ?? 'orchestrator', now);
+    });
+    settle();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  listOrchestrationEvents(runId: string, afterId = 0, limit = 100): OrchestrationEventRecord[] {
+    const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const rows = this.db.prepare('SELECT * FROM orchestration_events WHERE workspace_id = ? AND run_id = ? AND id > ? ORDER BY id ASC LIMIT ?')
+      .all(this.workspaceId(), runId, Math.max(0, Math.trunc(afterId)), boundedLimit) as any[];
+    return rows.map(orchestrationEventFromRow);
+  }
+
+  /** Events awaiting a post-commit realtime notification, across local workspaces. */
+  listDueOrchestrationOutbox(now = new Date().toISOString(), limit = 100): OrchestrationOutboxDeliveryRecord[] {
+    const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const rows = this.db.prepare(`SELECT outbox.workspace_id, outbox.run_id, outbox.event_id, outbox.attempts,
+        events.run_sequence, events.event_type, events.created_at
+      FROM orchestration_outbox AS outbox
+      JOIN orchestration_events AS events
+        ON events.workspace_id = outbox.workspace_id AND events.run_id = outbox.run_id AND events.event_id = outbox.event_id
+      WHERE outbox.delivered_at IS NULL AND outbox.next_attempt_at <= ?
+      ORDER BY outbox.id ASC LIMIT ?`)
+      .all(now, boundedLimit) as any[];
+    return rows.map(row => ({
+      workspaceId: row.workspace_id,
+      runId: row.run_id,
+      eventId: row.event_id,
+      sequence: row.run_sequence,
+      type: row.event_type,
+      createdAt: row.created_at,
+      attempts: row.attempts
+    }));
+  }
+
+  markOrchestrationOutboxDelivered(workspaceId: string, eventId: string, now = new Date().toISOString()): boolean {
+    const result = this.db.prepare(`UPDATE orchestration_outbox
+      SET delivered_at = ?, last_error = NULL
+      WHERE workspace_id = ? AND event_id = ? AND delivered_at IS NULL`)
+      .run(now, workspaceId, eventId);
+    return result.changes === 1;
+  }
+
+  retryOrchestrationOutbox(input: {
+    workspaceId: string;
+    eventId: string;
+    nextAttemptAt: string;
+    errorCode: string;
+  }): boolean {
+    const result = this.db.prepare(`UPDATE orchestration_outbox
+      SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
+      WHERE workspace_id = ? AND event_id = ? AND delivered_at IS NULL`)
+      .run(input.nextAttemptAt, input.errorCode.slice(0, 120), input.workspaceId, input.eventId);
+    return result.changes === 1;
+  }
+
+  transitionOrchestrationTask(input: {
+    runId: string;
+    taskId: string;
+    expectedRevision: number;
+    nextStatus: OrchestrationTaskStatus;
+    actorId?: string;
+    reason?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const transition = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (['failed', 'cancelled', 'awaiting_approval'].includes(snapshot.run.status)) {
+        throw new Error(`Cannot change a task while the build is ${snapshot.run.status}.`);
+      }
+      if (input.nextStatus === 'running') throw new Error('Use startOrchestrationAttempt to start a task.');
+      const task = snapshot.tasks.find(item => item.id === input.taskId);
+      if (!task) throw new Error('Orchestration task not found.');
+      const acceptedDependencies = new Set(snapshot.tasks.filter(item => item.status === 'accepted').map(item => item.id));
+      const updated = transitionTask(task, input.nextStatus, input.expectedRevision, acceptedDependencies, now);
+      const result = this.db.prepare('UPDATE orchestration_tasks SET status = ?, revision = ?, attempt_count = ?, accepted_revision = ?, updated_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND revision = ?')
+        .run(updated.status, updated.revision, updated.attemptCount, updated.acceptedRevision ?? null, now,
+          workspaceId, input.runId, input.taskId, input.expectedRevision);
+      if (result.changes !== 1) throw new Error('Task changed while the transition was being committed.');
+      this.appendOrchestrationEvent(input.runId, `task_${updated.status}`, {
+        taskId: input.taskId,
+        taskRevision: updated.revision,
+        reason: input.reason
+      }, input.actorId, now);
+
+      if (updated.status === 'accepted') {
+        const accepted = new Set([...acceptedDependencies, updated.id]);
+        for (const dependent of snapshot.tasks) {
+          if (dependent.status !== 'pending' || !dependent.dependsOn.every(id => accepted.has(id))) continue;
+          const ready = transitionTask(dependent, 'ready', dependent.revision, accepted, now);
+          this.db.prepare('UPDATE orchestration_tasks SET status = ?, revision = ?, updated_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND revision = ?')
+            .run('ready', ready.revision, now, workspaceId, input.runId, dependent.id, dependent.revision);
+          this.appendOrchestrationEvent(input.runId, 'task_ready', {
+            taskId: dependent.id,
+            taskRevision: ready.revision,
+            causeTaskId: updated.id
+          }, input.actorId, now);
+        }
+      }
+
+      if (['accepted', 'failed', 'blocked', 'cancelled'].includes(updated.status)) {
+        this.db.prepare('UPDATE orchestration_runs SET current_task_id = NULL, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND current_task_id = ?')
+          .run(now, workspaceId, input.runId, input.taskId);
+      }
+    });
+    transition();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  startOrchestrationAttempt(input: {
+    runId: string;
+    taskId: string;
+    expectedTaskRevision: number;
+    attemptId: string;
+    startingCommit?: string;
+    personaHash?: string;
+    modelProvider?: string;
+    modelName?: string;
+    contextManifest: Record<string, unknown>;
+    actorId?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const start = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId) {
+        throw new Error('The build is not ready to start another specialist task.');
+      }
+      const selected = selectNextReadyTask(snapshot.run.plan, snapshot.tasks);
+      if (!selected || selected.id !== input.taskId) throw new Error('Only the next ready task can be dispatched.');
+      const running = transitionTask(selected, 'running', input.expectedTaskRevision,
+        new Set(snapshot.tasks.filter(task => task.status === 'accepted').map(task => task.id)), now);
+      const update = this.db.prepare('UPDATE orchestration_tasks SET status = ?, revision = ?, attempt_count = ?, updated_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND status = ? AND revision = ?')
+        .run('running', running.revision, running.attemptCount, now, workspaceId, input.runId,
+          input.taskId, 'ready', input.expectedTaskRevision);
+      if (update.changes !== 1) throw new Error('Task changed before its attempt could start.');
+      this.db.prepare('INSERT INTO orchestration_attempts (id, workspace_id, run_id, task_id, attempt_number, agent_id, starting_commit, persona_hash, model_provider, model_name, context_manifest_json, status, created_at, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(input.attemptId, workspaceId, input.runId, input.taskId, running.attemptCount,
+          selected.ownerAgentId, input.startingCommit ?? null, input.personaHash ?? null,
+          input.modelProvider ?? null, input.modelName ?? null, JSON.stringify(input.contextManifest), 'starting', now, now);
+      const runUpdate = this.db.prepare("UPDATE orchestration_runs SET current_task_id = ?, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ? AND current_task_id IS NULL AND status = 'executing'")
+        .run(input.taskId, now, workspaceId, input.runId, snapshot.run.revision);
+      if (runUpdate.changes !== 1) throw new Error('Build changed before its specialist attempt could start.');
+      this.appendOrchestrationEvent(input.runId, 'attempt_starting', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        attemptNumber: running.attemptCount,
+        agentId: selected.ownerAgentId,
+        startingCommit: input.startingCommit
+      }, input.actorId, now);
+    });
+    start();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  bindOrchestrationAttempt(input: {
+    runId: string;
+    attemptId: string;
+    prototypeRunId: string;
+    actorId?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const bind = this.db.transaction(() => {
+      const attempt = this.db.prepare('SELECT status, prototype_run_id FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND id = ?')
+        .get(workspaceId, input.runId, input.attemptId) as any;
+      if (attempt?.status === 'running' && attempt.prototype_run_id === input.prototypeRunId) return;
+      const result = this.db.prepare("UPDATE orchestration_attempts SET prototype_run_id = ?, status = 'running' WHERE workspace_id = ? AND run_id = ? AND id = ? AND status = 'starting' AND prototype_run_id IS NULL")
+        .run(input.prototypeRunId, workspaceId, input.runId, input.attemptId);
+      if (result.changes !== 1) throw new Error('Attempt is no longer waiting for a runner process.');
+      this.appendOrchestrationEvent(input.runId, 'attempt_running', {
+        attemptId: input.attemptId,
+        prototypeRunId: input.prototypeRunId
+      }, input.actorId, now);
+    });
+    bind();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  failOrchestrationAttempt(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    expectedTaskRevision: number;
+    reason: string;
+    actorId?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const fail = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== input.taskId) {
+        throw new Error('This task attempt is no longer eligible to change orchestration state.');
+      }
+      const attempt = this.db.prepare("SELECT status FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ?")
+        .get(workspaceId, input.runId, input.taskId, input.attemptId) as any;
+      if (!attempt || !['starting', 'running'].includes(attempt.status)) {
+        throw new Error('Only a starting or running attempt can fail.');
+      }
+      const result = this.db.prepare("UPDATE orchestration_attempts SET status = 'failed', failure_reason = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = ?")
+        .run(input.reason, now, workspaceId, input.runId, input.taskId, input.attemptId, attempt.status);
+      if (result.changes !== 1) throw new Error('Attempt changed before its failure was saved.');
+      this.transitionOrchestrationTask({
+        runId: input.runId,
+        taskId: input.taskId,
+        expectedRevision: input.expectedTaskRevision,
+        nextStatus: 'failed',
+        actorId: input.actorId,
+        reason: input.reason,
+        now
+      });
+      this.appendOrchestrationEvent(input.runId, 'attempt_failed', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        reason: input.reason
+      }, input.actorId, now);
+    });
+    fail();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  cancelOrchestrationAttempt(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    expectedTaskRevision: number;
+    actorId?: string;
+    reason?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const cancel = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== input.taskId) {
+        throw new Error('This task attempt is no longer eligible to change orchestration state.');
+      }
+      const attempt = this.db.prepare("SELECT status FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ?")
+        .get(workspaceId, input.runId, input.taskId, input.attemptId) as any;
+      if (!attempt || !['starting', 'running'].includes(attempt.status)) {
+        throw new Error('Only a starting or running attempt can be cancelled.');
+      }
+      const result = this.db.prepare("UPDATE orchestration_attempts SET status = 'cancelled', failure_reason = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = ?")
+        .run(input.reason ?? 'Specialist process was cancelled.', now,
+          workspaceId, input.runId, input.taskId, input.attemptId, attempt.status);
+      if (result.changes !== 1) throw new Error('Attempt changed before cancellation was saved.');
+      this.transitionOrchestrationTask({
+        runId: input.runId,
+        taskId: input.taskId,
+        expectedRevision: input.expectedTaskRevision,
+        nextStatus: 'cancelled',
+        actorId: input.actorId,
+        reason: input.reason ?? 'Specialist process was cancelled.',
+        now
+      });
+      const afterTask = this.getOrchestrationSnapshot(input.runId)!;
+      this.transitionOrchestrationRun({
+        runId: input.runId,
+        expectedRevision: afterTask.run.revision,
+        nextStatus: 'cancelled',
+        actorId: input.actorId,
+        reason: input.reason ?? 'Specialist process was cancelled.',
+        now
+      });
+      this.appendOrchestrationEvent(input.runId, 'attempt_cancelled', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        reason: input.reason
+      }, input.actorId, now);
+    });
+    cancel();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  submitOrchestrationAttempt(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    expectedTaskRevision: number;
+    result: Record<string, unknown>;
+    resultCommit?: string;
+    actorId?: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const submit = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== input.taskId) {
+        throw new Error('This task attempt is no longer eligible to submit work.');
+      }
+      const attempt = this.db.prepare('SELECT status, attempt_number FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ?')
+        .get(workspaceId, input.runId, input.taskId, input.attemptId) as any;
+      if (!attempt || attempt.status !== 'running') throw new Error('Only a running attempt can submit a result.');
+      const serializedResult = JSON.stringify(input.result);
+      if (serializedResult.length > 64 * 1024) throw new Error('The task result exceeds the 64 KB submission limit.');
+      const result = this.db.prepare("UPDATE orchestration_attempts SET status = 'submitted', result_json = ?, result_commit = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = 'running'")
+        .run(serializedResult, input.resultCommit ?? null, now,
+          workspaceId, input.runId, input.taskId, input.attemptId);
+      if (result.changes !== 1) throw new Error('Attempt changed before its submission was saved.');
+      const artifactId = randomUUID();
+      const contentHash = createHash('sha256').update(serializedResult).digest('hex');
+      this.db.prepare('INSERT INTO orchestration_artifacts (id, workspace_id, run_id, task_id, attempt_id, artifact_type, version, content_hash, content, metadata_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(artifactId, workspaceId, input.runId, input.taskId, input.attemptId, 'task_result', attempt.attempt_number,
+          contentHash, serializedResult, JSON.stringify({ resultCommit: input.resultCommit ?? null }), 'submitted', now);
+      this.transitionOrchestrationTask({
+        runId: input.runId,
+        taskId: input.taskId,
+        expectedRevision: input.expectedTaskRevision,
+        nextStatus: 'submitted',
+        actorId: input.actorId,
+        reason: 'Specialist submitted a structured result.',
+        now
+      });
+      this.appendOrchestrationEvent(input.runId, 'attempt_submitted', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        artifactId,
+        contentHash
+      }, input.actorId, now);
+    });
+    submit();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  acceptOrchestrationAttempt(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    expectedTaskRevision: number;
+    acceptedBy: string;
+    evidence: Record<string, unknown>;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const accept = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== input.taskId) {
+        throw new Error('This task attempt is no longer eligible for acceptance.');
+      }
+      const attempt = this.db.prepare('SELECT status, result_json FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ?')
+        .get(workspaceId, input.runId, input.taskId, input.attemptId) as any;
+      if (!attempt || attempt.status !== 'submitted') throw new Error('Only a submitted attempt can be accepted.');
+      const resultPayload = parseJson<Record<string, unknown>>(attempt.result_json, {});
+      const updated = this.db.prepare("UPDATE orchestration_attempts SET status = 'accepted', result_json = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = 'submitted'")
+        .run(JSON.stringify({ ...resultPayload, acceptanceEvidence: input.evidence }), now,
+          workspaceId, input.runId, input.taskId, input.attemptId);
+      if (updated.changes !== 1) throw new Error('Attempt changed before acceptance was saved.');
+      this.db.prepare("UPDATE orchestration_artifacts SET status = 'accepted' WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND attempt_id = ? AND status = 'submitted'")
+        .run(workspaceId, input.runId, input.taskId, input.attemptId);
+      this.transitionOrchestrationTask({
+        runId: input.runId,
+        taskId: input.taskId,
+        expectedRevision: input.expectedTaskRevision,
+        nextStatus: 'accepted',
+        actorId: input.acceptedBy,
+        reason: 'Submission passed its acceptance gate.',
+        now
+      });
+      const candidateFindings = this.db.prepare("SELECT id, evidence FROM orchestration_findings WHERE workspace_id = ? AND run_id = ? AND correction_task_id = ? AND status = 'open'")
+        .all(workspaceId, input.runId, input.taskId) as Array<{ id: string; evidence: string }>;
+      const deterministicFindingIds = candidateFindings
+        .filter(finding => parseJson<Record<string, unknown>>(finding.evidence, {}).origin !== 'independent_review')
+        .map(finding => finding.id);
+      if (deterministicFindingIds.length) {
+        const placeholders = deterministicFindingIds.map(() => '?').join(', ');
+        this.db.prepare(`UPDATE orchestration_findings SET status = 'resolved', resolved_at = ? WHERE workspace_id = ? AND run_id = ? AND id IN (${placeholders})`)
+          .run(now, workspaceId, input.runId, ...deterministicFindingIds);
+      }
+      this.appendOrchestrationEvent(input.runId, 'attempt_accepted', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        acceptedBy: input.acceptedBy,
+        evidence: input.evidence
+      }, input.acceptedBy, now);
+    });
+    accept();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  /** Accepts a completed read-only review and atomically records any routed correction plan. */
+  acceptOrchestrationReviewOutcome(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    expectedTaskRevision: number;
+    expectedPlanVersion: number;
+    acceptedBy: string;
+    evidence: Record<string, unknown>;
+    plan: OrchestrationPlan;
+    addedTasks: readonly OrchestrationTaskRecord[];
+    findings: readonly PersistedReviewFinding[];
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    if (input.findings.length > 20) throw new Error('A review can record at most 20 findings.');
+    const accept = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      const existingAttempt = snapshot.attempts.find(attempt => attempt.id === input.attemptId);
+      if (existingAttempt?.status === 'accepted') return;
+      if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== input.taskId ||
+          snapshot.run.planVersion !== input.expectedPlanVersion) {
+        throw new Error('This review is no longer eligible to accept or amend the plan.');
+      }
+      const reviewTask = snapshot.tasks.find(task => task.id === input.taskId);
+      if (!reviewTask || reviewTask.kind !== 'review' || reviewTask.revision !== input.expectedTaskRevision) {
+        throw new Error('Only the current revision of a submitted review task can be accepted.');
+      }
+      const attempt = this.db.prepare('SELECT status, result_json FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ?')
+        .get(workspaceId, input.runId, input.taskId, input.attemptId) as { status: string; result_json: string | null } | undefined;
+      if (!attempt || attempt.status !== 'submitted') throw new Error('Only a submitted review attempt can be accepted.');
+
+      const submitted = parseJson<Record<string, unknown>>(attempt.result_json, {});
+      const agentReport = submitted.agentReport && typeof submitted.agentReport === 'object'
+        ? submitted.agentReport as Record<string, unknown>
+        : undefined;
+      const reportedFindings = agentReport?.reviewFindings;
+      if (!Array.isArray(reportedFindings) || reportedFindings.length !== input.findings.length) {
+        throw new Error('The accepted review findings do not match the submitted reviewer report.');
+      }
+      const plan = parseOrchestrationPlan(input.plan);
+      if (plan.tasks.length > MAX_PLAN_TASKS || plan.goal !== snapshot.run.plan.goal ||
+          JSON.stringify(plan.exclusions) !== JSON.stringify(snapshot.run.plan.exclusions) ||
+          JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements)) {
+        throw new Error('A review correction cannot change the authorized goal, exclusions, requirements, or task ceiling.');
+      }
+      const currentPlanTasks = new Map(snapshot.run.plan.tasks.map(task => [task.id, task]));
+      const nextPlanTasks = new Map(plan.tasks.map(task => [task.id, task]));
+      const addedPlanTasks = plan.tasks.filter(task => !currentPlanTasks.has(task.id));
+      if (snapshot.run.plan.tasks.some(task => !nextPlanTasks.has(task.id)) || addedPlanTasks.length !== input.addedTasks.length) {
+        throw new Error('A review correction must preserve all prior task identities and add only its explicit correction tasks.');
+      }
+      const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+      for (const [taskId, oldTask] of currentPlanTasks) {
+        const nextTask = nextPlanTasks.get(taskId)!;
+        if (oldTask.kind === 'validation') {
+          const { required: _oldRequired, ...oldStable } = oldTask;
+          const { required: nextRequired, ...nextStable } = nextTask;
+          const requiredChangedSafely = oldTask.required !== nextRequired && !(oldTask.required && nextRequired === false);
+          if (!same(oldStable, nextStable) || requiredChangedSafely) {
+            throw new Error('A review correction may only retire a prior validation gate; it cannot rewrite its contract.');
+          }
+        } else if (oldTask.kind === 'delivery') {
+          const { dependsOn: _oldDependencies, ...oldStable } = oldTask;
+          const { dependsOn: _newDependencies, ...nextStable } = nextTask;
+          if (!same(oldStable, nextStable)) throw new Error('A review correction cannot rewrite a delivery task.');
+        } else if (!same(oldTask, nextTask)) {
+          throw new Error(`A review correction cannot rewrite prior task ${taskId}.`);
+        }
+      }
+      const newTaskRecords = new Map(input.addedTasks.map(task => [task.id, task]));
+      if (newTaskRecords.size !== input.addedTasks.length || addedPlanTasks.some(definition => !newTaskRecords.has(definition.id))) {
+        throw new Error('The correction-task records do not match the amended plan.');
+      }
+      for (const definition of addedPlanTasks) {
+        const record = newTaskRecords.get(definition.id)!;
+        const { status: _status, revision: _revision, attemptCount: _attemptCount, acceptedRevision: _acceptedRevision,
+          updatedAt: _updatedAt, correctionOfTaskId: _correctionOfTaskId, correctionCycle: _correctionCycle, ...recordDefinition } = record;
+        if (!same(recordDefinition, definition)) throw new Error(`Correction task ${definition.id} does not match its plan definition.`);
+      }
+      const planIssues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived));
+      if (planIssues.length) throw new Error(`The amended review plan is invalid: ${planIssues.map(issue => issue.detail).join(' ')}`);
+
+      for (const finding of input.findings) {
+        const target = snapshot.tasks.find(task => task.id === finding.taskId);
+        if (!target || target.status !== 'accepted' || !['database', 'backend', 'frontend', 'mobile'].includes(target.kind) ||
+            finding.sourceTaskId !== input.taskId ||
+            (finding.correctionTaskId && !newTaskRecords.has(finding.correctionTaskId)) ||
+            (['blocking', 'critical'].includes(finding.severity) && !finding.correctionTaskId)) {
+          throw new Error('Every blocking review finding must route to an explicit correction task owned by its accepted code-task owner.');
+        }
+      }
+
+      const hasAmendment = addedPlanTasks.length > 0;
+      if (hasAmendment && plan.tasks.length <= snapshot.run.plan.tasks.length) {
+        throw new Error('The amended plan does not contain its correction tasks.');
+      }
+      const nextPlanVersion = snapshot.run.planVersion + (hasAmendment ? 1 : 0);
+      const acceptedResult = JSON.stringify({ ...submitted, acceptanceEvidence: input.evidence });
+      const attemptUpdate = this.db.prepare("UPDATE orchestration_attempts SET status = 'accepted', result_json = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = 'submitted'")
+        .run(acceptedResult, now, workspaceId, input.runId, input.taskId, input.attemptId);
+      if (attemptUpdate.changes !== 1) throw new Error('Review attempt changed before acceptance was saved.');
+      this.db.prepare("UPDATE orchestration_artifacts SET status = 'accepted' WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND attempt_id = ? AND status = 'submitted'")
+        .run(workspaceId, input.runId, input.taskId, input.attemptId);
+      const taskUpdate = this.db.prepare("UPDATE orchestration_tasks SET status = 'accepted', revision = revision + 1, accepted_revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND run_id = ? AND plan_version = ? AND task_id = ? AND status = 'submitted' AND revision = ?")
+        .run(now, workspaceId, input.runId, input.expectedPlanVersion, input.taskId, input.expectedTaskRevision);
+      if (taskUpdate.changes !== 1) throw new Error('Review task changed before acceptance was saved.');
+
+      if (hasAmendment) {
+        this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(workspaceId, input.runId, nextPlanVersion, plan.schemaVersion, JSON.stringify(plan), 'model', now, now);
+        this.db.prepare('UPDATE orchestration_tasks SET plan_version = ? WHERE workspace_id = ? AND run_id = ? AND plan_version = ?')
+          .run(nextPlanVersion, workspaceId, input.runId, input.expectedPlanVersion);
+        const updateDefinition = this.db.prepare(`UPDATE orchestration_tasks SET title = ?, description = ?, kind = ?, owner_agent_id = ?, depends_on_json = ?, requirement_ids_json = ?, acceptance_json = ?, checks_json = ?, scope_json = ?, required = ?
+          WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND plan_version = ?`);
+        for (const definition of plan.tasks) {
+          if (!currentPlanTasks.has(definition.id)) continue;
+          const changed = updateDefinition.run(definition.title, definition.description, definition.kind, definition.ownerAgentId,
+            JSON.stringify(definition.dependsOn), JSON.stringify(definition.requirementIds), JSON.stringify(definition.acceptanceCriteria),
+            JSON.stringify(definition.requiredChecks), JSON.stringify(definition.scope), definition.required ? 1 : 0,
+            workspaceId, input.runId, definition.id, nextPlanVersion);
+          if (changed.changes !== 1) throw new Error(`Task ${definition.id} disappeared while the review plan was being amended.`);
+        }
+        const insertTask = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, accepted_revision, correction_of_task_id, correction_cycle, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        for (const task of input.addedTasks) {
+          insertTask.run(workspaceId, input.runId, nextPlanVersion, task.id, task.title, task.description, task.kind,
+            task.ownerAgentId, JSON.stringify(task.dependsOn), JSON.stringify(task.requirementIds), JSON.stringify(task.acceptanceCriteria),
+            JSON.stringify(task.requiredChecks), JSON.stringify(task.scope), task.required ? 1 : 0, task.status,
+            0, 0, null, task.correctionOfTaskId ?? null, task.correctionCycle ?? null, now);
+        }
+      }
+
+      const blockingFinding = input.findings.some(finding => ['blocking', 'critical'].includes(finding.severity));
+      if (!blockingFinding) {
+        const ancestorIds = new Set<string>();
+        const visit = (taskId: string) => {
+          for (const dependencyId of snapshot.tasks.find(task => task.id === taskId)?.dependsOn ?? []) {
+            if (ancestorIds.has(dependencyId)) continue;
+            ancestorIds.add(dependencyId);
+            visit(dependencyId);
+          }
+        };
+        visit(input.taskId);
+        const correctionIds = snapshot.tasks
+          .filter(task => ancestorIds.has(task.id) && task.correctionOfTaskId)
+          .map(task => task.id);
+        if (correctionIds.length) {
+          const placeholders = correctionIds.map(() => '?').join(', ');
+          this.db.prepare(`UPDATE orchestration_findings SET status = 'resolved', resolved_at = ? WHERE workspace_id = ? AND run_id = ? AND correction_task_id IN (${placeholders}) AND status = 'open'`)
+            .run(now, workspaceId, input.runId, ...correctionIds);
+        }
+      }
+
+      const findingRows = this.db.prepare('INSERT INTO orchestration_findings (id, workspace_id, run_id, task_id, source_task_id, severity, requirement_id, path, evidence, status, correction_task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      const findingIds: string[] = [];
+      for (const finding of input.findings) {
+        const id = randomUUID();
+        findingIds.push(id);
+        findingRows.run(id, workspaceId, input.runId, finding.taskId, finding.sourceTaskId, finding.severity,
+          finding.requirementId ?? null, finding.path ?? null, JSON.stringify(finding.evidence), 'open', finding.correctionTaskId ?? null, now);
+      }
+
+      const nextDefinitions = new Map(plan.tasks.map(task => [task.id, task]));
+      const acceptedTaskIds = new Set(snapshot.tasks.filter(task => task.status === 'accepted').map(task => task.id));
+      acceptedTaskIds.add(input.taskId);
+      for (const task of snapshot.tasks) {
+        if (task.id === input.taskId || task.status !== 'pending') continue;
+        const definition = nextDefinitions.get(task.id);
+        if (!definition || !definition.dependsOn.every(dependencyId => acceptedTaskIds.has(dependencyId))) continue;
+        const changed = this.db.prepare("UPDATE orchestration_tasks SET status = 'ready', revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND status = 'pending' AND revision = ?")
+          .run(now, workspaceId, input.runId, task.id, task.revision);
+        if (changed.changes === 1) this.appendOrchestrationEvent(input.runId, 'task_ready', {
+          taskId: task.id, taskRevision: task.revision + 1, causeTaskId: input.taskId
+        }, input.acceptedBy, now);
+      }
+      const runChanged = this.db.prepare('UPDATE orchestration_runs SET plan_version = ?, current_task_id = NULL, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND status = \'executing\' AND current_task_id = ? AND plan_version = ? AND revision = ?')
+        .run(nextPlanVersion, now, workspaceId, input.runId, input.taskId, input.expectedPlanVersion, snapshot.run.revision);
+      if (runChanged.changes !== 1) throw new Error('The build changed before the review result could be committed.');
+      this.appendOrchestrationEvent(input.runId, 'task_accepted', {
+        taskId: input.taskId, attemptId: input.attemptId, acceptedBy: input.acceptedBy, evidence: input.evidence
+      }, input.acceptedBy, now);
+      if (hasAmendment) this.appendOrchestrationEvent(input.runId, 'plan_amended', {
+        planVersion: nextPlanVersion, reason: 'Independent review requested targeted corrections.',
+        addedTaskIds: input.addedTasks.map(task => task.id),
+        supersedesValidationTaskIds: [...currentPlanTasks.values()].filter(task => task.kind === 'validation' && task.required).map(task => task.id)
+      }, input.acceptedBy, now);
+      this.appendOrchestrationEvent(input.runId, 'review_outcome_recorded', {
+        taskId: input.taskId, attemptId: input.attemptId, findingIds,
+        correctionTaskIds: [...new Set(input.findings.flatMap(finding => finding.correctionTaskId ? [finding.correctionTaskId] : []))]
+      }, input.acceptedBy, now);
+    });
+    accept();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  rejectOrchestrationAttempt(input: {
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    expectedTaskRevision: number;
+    rejectedBy: string;
+    reason: string;
+    findings: Array<{
+      severity: 'info' | 'warning' | 'blocking' | 'critical';
+      requirementId?: string;
+      path?: string;
+      evidence: Record<string, unknown>;
+    }>;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    if (input.findings.length > 20) throw new Error('A submission can create at most 20 findings.');
+    if (!input.findings.length) throw new Error('A rejected submission must include at least one actionable finding.');
+    const reject = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== input.taskId) {
+        throw new Error('This task attempt is no longer eligible for rejection.');
+      }
+      const attempt = this.db.prepare("SELECT status, result_json FROM orchestration_attempts WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ?")
+        .get(workspaceId, input.runId, input.taskId, input.attemptId) as any;
+      if (!attempt || attempt.status !== 'submitted') throw new Error('Only a submitted attempt can be rejected.');
+      const priorResult = parseJson<Record<string, unknown>>(attempt.result_json, {});
+      const updated = this.db.prepare("UPDATE orchestration_attempts SET status = 'rejected', result_json = ?, failure_reason = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = 'submitted'")
+        .run(JSON.stringify({ ...priorResult, rejectionReason: input.reason }), input.reason, now,
+          workspaceId, input.runId, input.taskId, input.attemptId);
+      if (updated.changes !== 1) throw new Error('Attempt changed before rejection was saved.');
+      this.db.prepare("UPDATE orchestration_artifacts SET status = 'rejected' WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND attempt_id = ? AND status = 'submitted'")
+        .run(workspaceId, input.runId, input.taskId, input.attemptId);
+      this.transitionOrchestrationTask({
+        runId: input.runId,
+        taskId: input.taskId,
+        expectedRevision: input.expectedTaskRevision,
+        nextStatus: 'failed',
+        actorId: input.rejectedBy,
+        reason: input.reason,
+        now
+      });
+      const findingRows = this.db.prepare('INSERT INTO orchestration_findings (id, workspace_id, run_id, task_id, source_task_id, severity, requirement_id, path, evidence, status, correction_task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      const findingIds: string[] = [];
+      for (const finding of input.findings) {
+        const id = randomUUID();
+        findingIds.push(id);
+        findingRows.run(id, workspaceId, input.runId, input.taskId, input.taskId, finding.severity,
+          finding.requirementId ?? null, finding.path ?? null, JSON.stringify(finding.evidence), 'open', input.taskId, now);
+      }
+      const afterTask = this.getOrchestrationSnapshot(input.runId)!;
+      const blocked = this.transitionOrchestrationRun({
+        runId: input.runId,
+        expectedRevision: afterTask.run.revision,
+        nextStatus: 'blocked',
+        actorId: input.rejectedBy,
+        reason: input.reason,
+        now
+      });
+      this.appendOrchestrationEvent(input.runId, 'attempt_rejected', {
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        reason: input.reason,
+        findingIds
+      }, input.rejectedBy, now);
+      return blocked;
+    });
+    reject();
+    return this.getOrchestrationSnapshot(input.runId)!;
   }
 
   getSquadRun(id: string): SquadRun | undefined {
@@ -3025,6 +4924,7 @@ export class SQLiteService {
       instruction: row.instruction,
       workingCopyId: row.working_copy_id ?? undefined,
       workingBranch: row.working_branch ?? undefined,
+      workingCommit: row.working_commit ?? undefined,
       resultMessageId: row.result_message_id ?? undefined,
       error: row.error ?? undefined,
       createdAt: row.created_at,
@@ -3051,6 +4951,184 @@ export class SQLiteService {
     return row ? this.agentCallFromRow(row) : null;
   }
 
+  private assertProjectCodeCallAdmission(
+    workspaceId: string,
+    projectId: string,
+    repositoryKey: string,
+    ownerCallId?: string
+  ): void {
+    if (!repositoryKey) return;
+    const activeStatuses = ['planning', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+    const placeholders = activeStatuses.map(() => '?').join(', ');
+    const activeRuns = this.db.prepare(`SELECT id, repository, status FROM orchestration_runs
+      WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)
+      .all(workspaceId, projectId, ...activeStatuses) as Array<{ id: string; repository: string; status: string }>;
+    const activeRun = activeRuns.find(run => canonicalOrchestrationRepository(run.repository) === repositoryKey);
+    if (activeRun) {
+      throw new Error(`A task-based build is ${activeRun.status.replace(/_/g, ' ')} for this repository. Resolve it before starting or applying an independent code call.`);
+    }
+
+    const planningReservation = this.db.prepare(`SELECT run_id FROM orchestration_planning_reservations
+      WHERE workspace_id = ? AND project_id = ? AND repository_key = ?`)
+      .get(workspaceId, projectId, repositoryKey) as { run_id: string } | undefined;
+    if (planningReservation) throw new Error('A task build is being planned for this repository. Wait for planning to finish before starting or applying an independent code call.');
+
+    const existingLock = this.db.prepare(`SELECT owner_call_id FROM project_code_execution_locks
+      WHERE workspace_id = ? AND project_id = ? AND repository_key = ?`)
+      .get(workspaceId, projectId, repositoryKey) as { owner_call_id: string } | undefined;
+    if (existingLock && existingLock.owner_call_id !== ownerCallId) {
+      throw new Error('Another independent code call or patch is already using this repository. Let it finish before retrying.');
+    }
+  }
+
+  private acquireProjectCodeCallLock(
+    workspaceId: string,
+    projectId: string,
+    repository: string,
+    ownerCallId: string,
+    purpose: 'call' | 'patch',
+    acquiredAt = new Date().toISOString()
+  ): void {
+    const repositoryKey = canonicalOrchestrationRepository(repository);
+    if (!repositoryKey) return;
+    this.assertProjectCodeCallAdmission(workspaceId, projectId, repositoryKey, ownerCallId);
+    const existing = this.db.prepare(`SELECT owner_call_id, purpose FROM project_code_execution_locks
+      WHERE workspace_id = ? AND project_id = ? AND repository_key = ?`)
+      .get(workspaceId, projectId, repositoryKey) as { owner_call_id: string; purpose: string } | undefined;
+    if (existing?.owner_call_id === ownerCallId) {
+      if (purpose === 'patch' && existing.purpose === 'patch') {
+        throw new Error('This proposed patch is already being applied. Wait for that operation to finish.');
+      }
+      if (purpose === 'patch' && existing.purpose !== 'patch') {
+        this.db.prepare(`UPDATE project_code_execution_locks SET purpose = 'patch', acquired_at = ?
+          WHERE workspace_id = ? AND project_id = ? AND repository_key = ? AND owner_call_id = ?`)
+          .run(acquiredAt, workspaceId, projectId, repositoryKey, ownerCallId);
+      }
+      return;
+    }
+    this.db.prepare(`INSERT INTO project_code_execution_locks
+      (workspace_id, project_id, repository_key, repository, owner_call_id, purpose, acquired_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(workspaceId, projectId, repositoryKey, repository.trim(), ownerCallId, purpose, acquiredAt);
+  }
+
+  /** Save a queued code-capable call and acquire its repository lock atomically. */
+  saveAgentCallWithProjectLock(call: AgentCall, repository?: string): AgentCall {
+    const persist = this.db.transaction(() => {
+      this.saveAgentCall(call);
+      if (call.origin !== 'chat_turn' && call.operationMode !== 'ask' && call.status === 'queued' && repository) {
+        this.acquireProjectCodeCallLock(call.workspaceId, call.projectId,
+          repository, call.id, 'call', call.createdAt);
+      }
+    });
+    persist();
+    return this.getAgentCall(call.id)!;
+  }
+
+  /** Queue an approved or retried code call only if it can own its repository. */
+  queueAgentCallWithProjectLock(
+    id: string,
+    repository: string | undefined,
+    updates: Partial<AgentCall>
+  ): AgentCall | null {
+    const queue = this.db.transaction(() => {
+      const current = this.getAgentCall(id);
+      if (!current) return null;
+      if (current.status !== 'awaiting_confirmation') {
+        throw new Error('This implementation call is no longer waiting for confirmation.');
+      }
+      if (current.origin !== 'chat_turn' && current.operationMode !== 'ask' && updates.status === 'queued' && repository) {
+        this.acquireProjectCodeCallLock(current.workspaceId, current.projectId, repository, current.id, 'call');
+      }
+      this.updateAgentCallRow(id, updates);
+      return this.getAgentCall(id);
+    });
+    return queue();
+  }
+
+  /** Reset a failed call and its artifacts in the same transaction as admission. */
+  retryAgentCallWithProjectLock(
+    id: string,
+    repository: string | undefined,
+    updates: Partial<AgentCall>
+  ): AgentCall | null {
+    const retry = this.db.transaction(() => {
+      const current = this.getAgentCall(id);
+      if (!current) return null;
+      if (!['failed', 'cancelled'].includes(current.status)) {
+        throw new Error('Only failed or cancelled calls can be retried.');
+      }
+      if (current.origin !== 'chat_turn' && current.operationMode !== 'ask' && updates.status === 'queued' && repository) {
+        this.acquireProjectCodeCallLock(current.workspaceId, current.projectId, repository, current.id, 'call');
+      }
+      this.db.prepare('DELETE FROM agent_call_artifacts WHERE agent_call_id = ?').run(id);
+      this.updateAgentCallRow(id, updates);
+      return this.getAgentCall(id);
+    });
+    return retry();
+  }
+
+  acquireAgentCallPatchLock(id: string, repository: string): boolean {
+    const acquire = this.db.transaction(() => {
+      const call = this.getAgentCall(id);
+      if (!call || call.origin === 'chat_turn' || !['revise', 'implement'].includes(call.operationMode)) {
+        throw new Error('Only a saved revise or implement proposal can acquire a patch lock.');
+      }
+      this.acquireProjectCodeCallLock(call.workspaceId, call.projectId, repository, id, 'patch');
+      return true;
+    });
+    return acquire();
+  }
+
+  releaseAgentCallProjectLock(id: string): boolean {
+    return this.db.prepare('DELETE FROM project_code_execution_locks WHERE owner_call_id = ?').run(id).changes > 0;
+  }
+
+  getActiveAgentCallProjectLock(projectId: string, repository: string): {
+    agentCallId: string;
+    repository: string;
+    purpose: 'call' | 'patch';
+    acquiredAt: string;
+  } | undefined {
+    const repositoryKey = canonicalOrchestrationRepository(repository);
+    if (!repositoryKey) return undefined;
+    const row = this.db.prepare(`SELECT owner_call_id, repository, purpose, acquired_at
+      FROM project_code_execution_locks
+      WHERE workspace_id = ? AND project_id = ? AND repository_key = ?`)
+      .get(this.workspaceId(), projectId, repositoryKey) as any;
+    return row ? {
+      agentCallId: row.owner_call_id,
+      repository: row.repository,
+      purpose: row.purpose,
+      acquiredAt: row.acquired_at
+    } : undefined;
+  }
+
+  reconcileInterruptedAgentCalls(now = new Date().toISOString()): string[] {
+    const interrupted = this.db.prepare(`SELECT id FROM agent_calls
+      WHERE origin = 'agent_call' AND status IN ('queued', 'running') ORDER BY created_at`)
+      .all() as Array<{ id: string }>;
+    const reconcile = this.db.transaction(() => {
+      for (const call of interrupted) {
+        this.updateAgentCallRow(call.id, {
+          status: 'failed',
+          error: 'This independent call was interrupted when Alpha stopped. Review its saved activity and run it again if needed.',
+          completedAt: now
+        });
+        this.db.prepare('DELETE FROM project_code_execution_locks WHERE owner_call_id = ?').run(call.id);
+      }
+      this.db.prepare(`DELETE FROM project_code_execution_locks
+        WHERE NOT EXISTS (
+          SELECT 1 FROM agent_calls
+          WHERE agent_calls.id = project_code_execution_locks.owner_call_id
+            AND agent_calls.status IN ('queued', 'running')
+            AND agent_calls.operation_mode <> 'ask'
+        )`).run();
+    });
+    reconcile();
+    return interrupted.map(call => call.id);
+  }
+
   saveAgentCall(call: AgentCall): AgentCall {
     const target = call.revisionTarget;
     this.db.prepare(`
@@ -3058,12 +5136,12 @@ export class SQLiteService {
         id, workspace_id, project_id, thread_id, message_id, squad_id, agent_id,
         requested_by, operation_mode, origin, status, revision_target_type,
         revision_target_id, revision_target_label, instruction, working_copy_id,
-        working_branch, result_message_id, error, created_at, started_at, completed_at, activities
+        working_branch, working_commit, result_message_id, error, created_at, started_at, completed_at, activities
       ) VALUES (
         @id, @workspaceId, @projectId, @threadId, @messageId, @squadId, @agentId,
         @requestedBy, @operationMode, @origin, @status, @revisionTargetType,
         @revisionTargetId, @revisionTargetLabel, @instruction, @workingCopyId,
-        @workingBranch, @resultMessageId, @error, @createdAt, @startedAt, @completedAt, @activities
+        @workingBranch, @workingCommit, @resultMessageId, @error, @createdAt, @startedAt, @completedAt, @activities
       )
     `).run({
       id: call.id,
@@ -3083,6 +5161,7 @@ export class SQLiteService {
       instruction: call.instruction,
       workingCopyId: call.workingCopyId ?? null,
       workingBranch: call.workingBranch ?? null,
+      workingCommit: call.workingCommit ?? null,
       resultMessageId: call.resultMessageId ?? null,
       error: call.error ?? null,
       createdAt: call.createdAt,
@@ -3094,6 +5173,17 @@ export class SQLiteService {
   }
 
   updateAgentCall(id: string, updates: Partial<AgentCall>): AgentCall | null {
+    const update = this.db.transaction(() => {
+      const call = this.updateAgentCallRow(id, updates);
+      if (call && ['completed', 'failed', 'cancelled'].includes(call.status)) {
+        this.db.prepare('DELETE FROM project_code_execution_locks WHERE owner_call_id = ?').run(id);
+      }
+      return call;
+    });
+    return update();
+  }
+
+  private updateAgentCallRow(id: string, updates: Partial<AgentCall>): AgentCall | null {
     const current = this.getAgentCall(id);
     if (!current) return null;
     const merged = { ...current, ...updates };
@@ -3106,7 +5196,7 @@ export class SQLiteService {
         status = @status, revision_target_type = @revisionTargetType,
         revision_target_id = @revisionTargetId, revision_target_label = @revisionTargetLabel,
         instruction = @instruction, working_copy_id = @workingCopyId,
-        working_branch = @workingBranch,
+        working_branch = @workingBranch, working_commit = @workingCommit,
         result_message_id = @resultMessageId, error = @error,
         started_at = @startedAt, completed_at = @completedAt,
         activities = @activities
@@ -3126,6 +5216,7 @@ export class SQLiteService {
       instruction: merged.instruction,
       workingCopyId: merged.workingCopyId ?? null,
       workingBranch: merged.workingBranch ?? null,
+      workingCommit: merged.workingCommit ?? null,
       resultMessageId: merged.resultMessageId ?? null,
       error: merged.error ?? null,
       startedAt: merged.startedAt ?? null,

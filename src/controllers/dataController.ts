@@ -2,7 +2,7 @@ import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
-import { ALPHA_ORG, IS_CLOUD } from '../config/env.js';
+import { ALPHA_ORCHESTRATION_ENABLED, ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
 import { mintSupabaseToken } from '../services/supabaseTokenService.js';
 import { exchangeGitHubToken } from '../services/databaseTokenExchange.js';
@@ -482,6 +482,38 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
     void supabaseService.unshareProject(req.params.id);
   }
   res.json({ success: deleted });
+}));
+
+/**
+ * Local, per-project opt-in for the task-driven build pilot. The project
+ * preference is machine-local; the global operator switch remains the kill
+ * switch, and neither setting grants repository or agent permissions.
+ */
+dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (IS_CLOUD) {
+    return res.json({ enabled: false, available: false, localOnly: true,
+      reason: 'Task orchestration runs on an authorized Alpha desktop with the repository checkout.' });
+  }
+  const setting = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id));
+  res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
+    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The desktop operator has not enabled the orchestration pilot.' });
+}));
+
+dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const setting = runWithWorkspace(req.workspace!.workspaceId, () =>
+    sqliteService.setProjectOrchestrationEnabled(project.id, req.body.enabled, req.workspace!.userId)
+  );
+  res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
+    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'Saved for this desktop; the operator kill switch is still off.' });
 }));
 
 // --- Project Build Room ---

@@ -76,10 +76,10 @@ async function startApi() {
       unshareAgent: async (id: string) => void shared.push(`delete agent ${id}`),
       shareSquad: async (squad: any, ownerId?: string) => void shared.push(`squad ${squad.id}${ownerId ? ` owned by ${ownerId}` : ''}`),
       unshareSquad: async (id: string) => void shared.push(`delete squad ${id}`),
-      shareThread: async (thread: any) => void shared.push(`thread ${thread.id}`),
-      shareMessage: async (message: any) => void shared.push(`message ${message.id}`),
-      unshareThread: async (id: string) => void shared.push(`delete thread ${id}`),
-      unshareMessages: async (id: string) => void shared.push(`clear thread ${id}`),
+      shareThread: async (thread: any) => { shared.push(`thread ${thread.id}`); return true; },
+      shareMessage: async (message: any) => { shared.push(`message ${message.id}`); return true; },
+      unshareThread: async (id: string) => { shared.push(`delete thread ${id}`); return true; },
+      unshareMessages: async (id: string) => { shared.push(`clear thread ${id}`); return true; },
       saveRunToCloud: async () => {},
       updateIssueInCloud: async () => {},
       broadcastRunEvent: async () => {}
@@ -307,6 +307,8 @@ describe('a conversation on a team’s desktop', () => {
 
     const thread = (await call(app, 'POST', '/api/chat/threads', { id: 'thread-1', title: 'About the cart' })).body;
     await call(app, 'PUT', `/api/chat/threads/${thread.id}/target`, { targetAgentId: 'agent-architect' });
+    const { flushChatSyncOutbox } = await import('../services/chatSyncService.js');
+    await flushChatSyncOutbox();
 
     expect(shared).toEqual(['thread thread-1', 'thread thread-1']);
   });
@@ -318,8 +320,10 @@ describe('a conversation on a team’s desktop', () => {
 
     await call(app, 'DELETE', '/api/chat/threads/thread-1/messages');
     await call(app, 'DELETE', '/api/chat/threads/thread-1');
+    const { flushChatSyncOutbox } = await import('../services/chatSyncService.js');
+    await flushChatSyncOutbox();
 
-    expect(shared).toEqual(['clear thread thread-1', 'delete thread thread-1']);
+    expect(shared).toEqual(['clear thread thread-1', 'thread thread-1', 'delete thread thread-1']);
   });
 
   /** Reading is this person's own history; answering is still the machine's. */

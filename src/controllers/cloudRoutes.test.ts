@@ -100,6 +100,7 @@ async function startCloudApi() {
   const { workspaceRouter } = await import('./workspaceController.js');
   const { dataRouter } = await import('./dataController.js');
   const { liveBuildRoomRouter } = await import('./liveBuildRoomController.js');
+  const { orchestrationRouter } = await import('./orchestrationController.js');
   const { agentCallRouter } = await import('./agentCallController.js');
   const { runRouter } = await import('./runController.js');
   const { runtimeRouter } = await import('./runtimeController.js');
@@ -122,7 +123,7 @@ async function startCloudApi() {
   });
   app.use('/api', workspaceContext);
   for (const router of [
-    workspaceRouter, dataRouter, liveBuildRoomRouter, agentCallRouter, runRouter,
+    workspaceRouter, dataRouter, liveBuildRoomRouter, orchestrationRouter, agentCallRouter, runRouter,
     runtimeRouter, githubRouter, chatRouter, mcpRouter
   ]) {
     app.use('/api', router);
@@ -186,6 +187,10 @@ const DESKTOP_ONLY: Array<[string, string]> = [
   ['POST', '/api/runs/start'],
   ['POST', '/api/runs/r1/cancel'],
   ['POST', '/api/runs/r1/retry'],
+  ['POST', '/api/projects/p1/orchestrations/o1/tasks/t1/retry'],
+  ['POST', '/api/projects/p1/orchestrations/o1/resume'],
+  ['POST', '/api/projects/p1/orchestrations/o1/cancel'],
+  ['POST', '/api/projects/p1/orchestrations/o1/approve'],
   ['POST', '/api/squads/s1/run'],
   ['GET', '/api/github/runs'],
   ['POST', '/api/github/dispatch'],

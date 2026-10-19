@@ -635,6 +635,29 @@ describe('chat mode is unchanged by run mode existing', () => {
   });
 });
 
+describe('orchestration review mode is read-only', () => {
+  it('does not restore the agents write or shell skills for Claude', () => {
+    const { args } = buildTurnInvocation(options({ mode: 'review', skills: ['sk-fs', 'sk-bash'] }), noMcp);
+    expect(args).toContain('--disallowedTools');
+    expect(args).toContain('Write');
+    expect(args).toContain('Edit');
+    expect(args).toContain('Bash');
+    expect(args).not.toContain('--permission-mode');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
+
+  it('uses Codex read-only sandbox mode instead of run approval', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', mode: 'review' }), noMcp);
+    expect(valueOf(args, '--sandbox')).toBe('read-only');
+    expect(args).not.toContain('--approve-for-me');
+  });
+
+  it('does not auto-approve Antigravity tools during review', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'Antigravity', mode: 'review' }), noMcp);
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
+});
+
 /**
  * The allowlist a run needs, which it never had.
  *

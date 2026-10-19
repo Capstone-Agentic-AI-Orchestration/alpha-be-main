@@ -36,13 +36,12 @@ export class ProcessManager {
     timer?: NodeJS.Timeout;
     idleTimer?: NodeJS.Timeout;
     terminationReason?: ProcessTerminationReason;
+    exitedConfirmed: boolean;
+    exited: Promise<void>;
+    resolveExited: () => void;
+    terminationPromise?: Promise<void>;
   }>();
-  /**
-   * `killProcess` removes the process from the active map as soon as tree-kill
-   * acknowledges the request, but the child's `exit` event can arrive after
-   * that. Keep the reason separately so the runner cannot mistake SIGTERM for
-   * a normal successful exit.
-   */
+  /** Keep termination reason until the child emits its exit event. */
   private terminationReasons = new Map<string, ProcessTerminationReason>();
 
   /**
@@ -122,7 +121,9 @@ export class ProcessManager {
         entry.idleTimer = setTimeout(() => {
           logError(`Run ${runId} timed out due to idle output (no output for ${EXECUTION_LIMITS.IDLE_TIMEOUT_MS / 1000}s)`);
           logAudit('PROCESS_IDLE_TIMEOUT', { runId, bin });
-          this.killProcess(runId, 'SIGTERM', 'timeout');
+          void this.terminateProcessAndWait(runId, 'timeout').catch(error =>
+            logError(`Could not confirm timeout termination for run ${runId}:`, error)
+          );
         }, EXECUTION_LIMITS.IDLE_TIMEOUT_MS);
       }
     };
@@ -131,11 +132,25 @@ export class ProcessManager {
     const timer = setTimeout(() => {
       logError(`Run ${runId} exceeded wall-clock timeout (${EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS / 1000}s)`);
       logAudit('PROCESS_WALL_CLOCK_TIMEOUT', { runId, bin });
-      this.killProcess(runId, 'SIGTERM', 'timeout');
+      void this.terminateProcessAndWait(runId, 'timeout').catch(error =>
+        logError(`Could not confirm timeout termination for run ${runId}:`, error)
+      );
     }, EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS);
 
     this.terminationReasons.delete(runId);
-    this.activeProcesses.set(runId, { child, timer });
+    let resolveExited!: () => void;
+    const exited = new Promise<void>(resolve => { resolveExited = resolve; });
+    const entry: {
+      child: ChildProcess;
+      timer?: NodeJS.Timeout;
+      idleTimer?: NodeJS.Timeout;
+      terminationReason?: ProcessTerminationReason;
+      exitedConfirmed: boolean;
+      exited: Promise<void>;
+      resolveExited: () => void;
+      terminationPromise?: Promise<void>;
+    } = { child, timer, exitedConfirmed: false, exited, resolveExited };
+    this.activeProcesses.set(runId, entry);
     resetIdleTimer();
 
     if (child.stdout) {
@@ -156,9 +171,11 @@ export class ProcessManager {
     const finish = (code: number | null, signal: string | null, failureReason?: ProcessTerminationReason) => {
       if (settled) return;
       settled = true;
-      const entry = this.activeProcesses.get(runId);
-      if (entry?.timer) clearTimeout(entry.timer);
-      if (entry?.idleTimer) clearTimeout(entry.idleTimer);
+      entry.exitedConfirmed = true;
+      entry.resolveExited();
+      const activeEntry = this.activeProcesses.get(runId);
+      if (activeEntry?.timer) clearTimeout(activeEntry.timer);
+      if (activeEntry?.idleTimer) clearTimeout(activeEntry.idleTimer);
       this.activeProcesses.delete(runId);
       const terminationReason = failureReason ?? this.terminationReasons.get(runId);
       this.terminationReasons.delete(runId);
@@ -210,10 +227,67 @@ export class ProcessManager {
         if (err) {
           logError(`Failed to kill process tree (PID: ${pid}):`, err);
         }
-        this.activeProcesses.delete(runId);
         resolve();
       });
     });
+  }
+
+  /**
+   * Stop a child and wait for its exit event before releasing orchestration
+   * ownership. A successful tree-kill callback only confirms that the signal
+   * request was sent; it does not confirm that the child has stopped running.
+   */
+  async terminateProcessAndWait(
+    runId: string,
+    terminationReason: ProcessTerminationReason = 'cancelled',
+    gracefulTimeoutMs = 8_000,
+    forceTimeoutMs = 5_000
+  ): Promise<void> {
+    const entry = this.activeProcesses.get(runId);
+    if (!entry || !entry.child?.pid) return;
+    if (entry.terminationPromise) return entry.terminationPromise;
+
+    const operation = (async () => {
+      entry.terminationReason = terminationReason;
+      this.terminationReasons.set(runId, terminationReason);
+      if (entry.timer) clearTimeout(entry.timer);
+      if (entry.idleTimer) clearTimeout(entry.idleTimer);
+
+      const signal = (name: 'SIGTERM' | 'SIGKILL') => new Promise<void>(resolve => {
+        if (entry.exitedConfirmed) return resolve();
+        const pid = entry.child.pid!;
+        logInfo(`Killing process tree for run ${runId} (PID: ${pid}) with ${name}`);
+        logAudit('PROCESS_KILL', { runId, pid, signal: name });
+        treeKill(pid, name, error => {
+          if (error) logError(`Failed to kill process tree (PID: ${pid}):`, error);
+          resolve();
+        });
+      });
+      const waitForExit = async (timeoutMs: number): Promise<boolean> => {
+        let timer: NodeJS.Timeout | undefined;
+        const timedOut = new Promise<boolean>(resolve => {
+          timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        });
+        const exited = entry.exited.then(() => true);
+        const result = await Promise.race([exited, timedOut]);
+        if (timer) clearTimeout(timer);
+        return result;
+      };
+
+      await signal('SIGTERM');
+      if (await waitForExit(gracefulTimeoutMs) || entry.exitedConfirmed) return;
+
+      await signal('SIGKILL');
+      if (await waitForExit(forceTimeoutMs) || entry.exitedConfirmed) return;
+
+      throw new Error(`Could not confirm that the specialist process for ${runId} stopped. The process remains tracked; retry stop after checking its state.`);
+    })();
+    entry.terminationPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (entry.terminationPromise === operation) entry.terminationPromise = undefined;
+    }
   }
 
   isRunActive(runId: string): boolean {

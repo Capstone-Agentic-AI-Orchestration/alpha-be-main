@@ -289,7 +289,12 @@ export class ChatService extends EventEmitter {
         repositories
       });
       const build = builds[0];
-      const statusText = (result: ProjectBuildStartResult) => result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
+      const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
+        ? result.status === 'completed' ? `Task workflow approved · ${result.issueIdentifier}`
+          : result.status === 'awaiting_review' ? `Task workflow ready for review · ${result.issueIdentifier}`
+          : result.status === 'blocked' ? `Task workflow paused · ${result.issueIdentifier}`
+            : `Task workflow ${result.status === 'in_progress' ? 'in progress' : 'started'} · ${result.issueIdentifier}`
+        : result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
         : result.status === 'in_progress' ? `Build already in progress · ${result.issueIdentifier}`
           : result.status === 'awaiting_review' ? `Build ready for review · ${result.issueIdentifier}`
             : result.status === 'failed' ? `Build stopped · ${result.issueIdentifier}`
@@ -314,6 +319,15 @@ export class ChatService extends EventEmitter {
           ].join('\n\n')
         : build.status === 'blocked'
           ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
+          : build.orchestrationRunId
+            ? [
+                `**${statusText(build)}**`,
+                `The coordinator validated a plan with ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
+                build.reason,
+                build.repository ? `**Repository:** ${build.repository}` : undefined,
+                build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
+                'The next specialist starts only after the current result passes its checks. Open the Live Build Room to review task evidence and findings.'
+              ].filter(Boolean).join('\n\n')
           : [
               `**${statusText(build)}**`,
               build.reason,

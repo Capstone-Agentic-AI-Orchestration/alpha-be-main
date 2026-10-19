@@ -23,6 +23,8 @@ import { runCliTurn } from './cliRunner.js';
 import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
 import { saveChatMessageAndShare } from './chatWriteThrough.js';
+import { runWithWorkspace } from './workspaceContext.js';
+import { getHeadCommit } from '../utils/gitUtils.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH_BYTES = 2_000_000;
@@ -56,6 +58,7 @@ export interface AgentCallWorkspaceInfo {
   dir: string;
   managed: boolean;
   temporary: boolean;
+  repo?: string;
 }
 
 const MAX_AGENT_CALL_ACTIVITIES = 500;
@@ -225,7 +228,11 @@ export class AgentCallService extends EventEmitter {
   async create(input: CreateAgentCallInput): Promise<AgentCall> {
     const now = new Date().toISOString();
     const workspace = this.resolveExecutionWorkspace(input.project, input.operationMode, input.revisionTarget);
+    if (input.operationMode !== 'ask') {
+      this.assertNoActiveOrchestration(input.workspaceId, input.project.id, workspace.repo ?? repoOfTarget(input.revisionTarget) ?? undefined);
+    }
     const workingBranch = workspace ? await this.currentBranch(workspace.dir) : undefined;
+    const workingCommit = workspace ? await this.currentCommit(workspace.dir) : undefined;
     const call: AgentCall = {
       id: input.id || `agent-call-${randomUUID()}`,
       workspaceId: input.workspaceId,
@@ -246,12 +253,16 @@ export class AgentCallService extends EventEmitter {
         ? `${input.project.id}:${workspace.managed ? 'managed' : 'attached'}`
         : undefined,
       workingBranch,
+      workingCommit,
       createdAt: now,
       artifacts: [],
       activities: []
     };
 
-    sqliteService.saveAgentCall(call);
+    sqliteService.saveAgentCallWithProjectLock(
+      call,
+      workspace.repo ?? repoOfTarget(input.revisionTarget) ?? undefined
+    );
     this.recordActivity(call.id, 'status', call.status === 'awaiting_confirmation' ? 'Waiting for implementation approval' : 'Agent call queued');
     this.emit('agent_call.created', sqliteService.getAgentCall(call.id));
 
@@ -273,8 +284,13 @@ export class AgentCallService extends EventEmitter {
     const project = sqliteService.getProjects().find(item => item.id === call.projectId);
     const agent = sqliteService.getAgents().find(item => item.id === call.agentId);
     if (!project || !agent) throw new Error('The project or agent for this call is no longer available.');
-
-    sqliteService.updateAgentCall(id, { status: 'queued', error: undefined });
+    const workspace = this.resolveExecutionWorkspace(project, call.operationMode, call.revisionTarget);
+    const queued = sqliteService.queueAgentCallWithProjectLock(
+      id,
+      workspace.repo ?? repoOfTarget(call.revisionTarget) ?? undefined,
+      { status: 'queued', error: undefined }
+    );
+    if (!queued) throw new Error('Agent call not found.');
     this.recordActivity(id, 'status', 'Implementation approved and queued');
     this.emit('agent_call.queued', sqliteService.getAgentCall(id));
     this.scheduleExecution(id, project, agent);
@@ -291,16 +307,21 @@ export class AgentCallService extends EventEmitter {
     const project = sqliteService.getProjects().find(item => item.id === call.projectId);
     const agent = sqliteService.getAgents().find(item => item.id === call.agentId);
     if (!project || !agent) throw new Error('The project or agent for this call is no longer available.');
-
-    sqliteService.deleteAgentCallArtifacts(id);
-    sqliteService.updateAgentCall(id, {
-      status: call.operationMode === 'implement' ? 'awaiting_confirmation' : 'queued',
-      error: undefined,
-      resultMessageId: undefined,
-      startedAt: undefined,
-      completedAt: undefined,
-      activities: []
-    });
+    const workspace = this.resolveExecutionWorkspace(project, call.operationMode, call.revisionTarget);
+    const retried = sqliteService.retryAgentCallWithProjectLock(
+      id,
+      workspace.repo ?? repoOfTarget(call.revisionTarget) ?? undefined,
+      {
+        status: call.operationMode === 'implement' ? 'awaiting_confirmation' : 'queued',
+        error: undefined,
+        resultMessageId: undefined,
+        startedAt: undefined,
+        completedAt: undefined,
+        workingCommit: undefined,
+        activities: []
+      }
+    );
+    if (!retried) throw new Error('Agent call not found.');
     this.recordActivity(id, 'status', call.operationMode === 'implement' ? 'Waiting for implementation approval' : 'Retry queued');
     this.emit('agent_call.queued', sqliteService.getAgentCall(id));
     if (call.operationMode === 'implement') return sqliteService.getAgentCall(id)!;
@@ -383,51 +404,61 @@ export class AgentCallService extends EventEmitter {
     if (!sqliteService.isPathAllowed(workspace.dir)) {
       throw new Error('The project working copy is not an approved Alpha workspace.');
     }
-    const currentBranch = await this.currentBranch(workspace.dir);
-    if (call.workingBranch && call.workingBranch !== currentBranch) {
-      throw new Error(`The project working copy is now on ${currentBranch ? `branch "${currentBranch}"` : 'no Git branch'}; this patch was prepared for "${call.workingBranch}".`);
-    }
-
-    const patchFile = path.join(RUNS_DIR, `${call.id}-apply.patch`);
-    fs.mkdirSync(RUNS_DIR, { recursive: true });
-    fs.writeFileSync(patchFile, patch, { encoding: 'utf8', mode: 0o600 });
+    const repository = workspace.repo ?? repoOfTarget(call.revisionTarget) ?? '';
+    sqliteService.acquireAgentCallPatchLock(id, repository);
     try {
-      // git apply rejects absolute and parent-traversing paths unless the
-      // dangerous --unsafe-paths option is supplied. Alpha never supplies it.
-      await execFileAsync('git', ['apply', '--check', '--whitespace=nowarn', patchFile], {
-        cwd: workspace.dir,
-        maxBuffer: 4 * 1024 * 1024
-      });
-      await execFileAsync('git', ['apply', '--whitespace=nowarn', patchFile], {
-        cwd: workspace.dir,
-        maxBuffer: 4 * 1024 * 1024
-      });
-    } catch (error: any) {
-      const detail = String(error?.stderr || error?.message || 'git rejected the patch').trim();
-      throw new Error(`Patch was not applied: ${detail}`);
-    } finally {
-      try { fs.rmSync(patchFile, { force: true }); } catch { /* temp file only */ }
-    }
+      const currentBranch = await this.currentBranch(workspace.dir);
+      if (call.workingBranch && call.workingBranch !== currentBranch) {
+        throw new Error(`The project working copy is now on ${currentBranch ? `branch "${currentBranch}"` : 'no Git branch'}; this patch was prepared for "${call.workingBranch}".`);
+      }
+      const currentCommit = await this.currentCommit(workspace.dir);
+      if (call.workingCommit && currentCommit !== call.workingCommit) {
+        throw new Error('The project repository changed after this proposal was prepared. Rerun the independent call against the current commit before applying its patch.');
+      }
 
-    const message: ChatMessage = {
-      id: `msg-${randomUUID()}`,
-      threadId: call.threadId,
-      senderType: 'system',
-      senderName: 'Alpha',
-      content: `Patch applied to the ${project.name} working copy. Review the working tree before committing.`,
-      messageType: 'system',
-      agentCallId: call.id,
-      operationMode: call.operationMode,
-      agentCallStatus: 'completed',
-      revisionTarget: call.revisionTarget,
-      timestamp: new Date().toISOString()
-    };
-    saveChatMessageAndShare(message);
-    this.recordActivity(id, 'file_change', 'Proposed patch applied to the project working copy', {
-      paths: patchPaths(patch)
-    });
-    this.emit('agent_call.patch_applied', { call, message });
-    return { call: sqliteService.getAgentCall(id)!, message };
+      const patchFile = path.join(RUNS_DIR, `${call.id}-apply.patch`);
+      fs.mkdirSync(RUNS_DIR, { recursive: true });
+      fs.writeFileSync(patchFile, patch, { encoding: 'utf8', mode: 0o600 });
+      try {
+        // git apply rejects absolute and parent-traversing paths unless the
+        // dangerous --unsafe-paths option is supplied. Alpha never supplies it.
+        await execFileAsync('git', ['apply', '--check', '--whitespace=nowarn', patchFile], {
+          cwd: workspace.dir,
+          maxBuffer: 4 * 1024 * 1024
+        });
+        await execFileAsync('git', ['apply', '--whitespace=nowarn', patchFile], {
+          cwd: workspace.dir,
+          maxBuffer: 4 * 1024 * 1024
+        });
+      } catch (error: any) {
+        const detail = String(error?.stderr || error?.message || 'git rejected the patch').trim();
+        throw new Error(`Patch was not applied: ${detail}`);
+      } finally {
+        try { fs.rmSync(patchFile, { force: true }); } catch { /* temp file only */ }
+      }
+
+      const message: ChatMessage = {
+        id: `msg-${randomUUID()}`,
+        threadId: call.threadId,
+        senderType: 'system',
+        senderName: 'Alpha',
+        content: `Patch applied to the ${project.name} working copy. Review the working tree before committing.`,
+        messageType: 'system',
+        agentCallId: call.id,
+        operationMode: call.operationMode,
+        agentCallStatus: 'completed',
+        revisionTarget: call.revisionTarget,
+        timestamp: new Date().toISOString()
+      };
+      saveChatMessageAndShare(message);
+      this.recordActivity(id, 'file_change', 'Proposed patch applied to the project working copy', {
+        paths: patchPaths(patch)
+      });
+      this.emit('agent_call.patch_applied', { call, message });
+      return { call: sqliteService.getAgentCall(id)!, message };
+    } finally {
+      sqliteService.releaseAgentCallProjectLock(id);
+    }
   }
 
   private async execute(id: string, project: Project, agent: Agent): Promise<AgentCall> {
@@ -443,22 +474,29 @@ export class AgentCallService extends EventEmitter {
     let workspace: AgentCallWorkspaceInfo | undefined;
     try {
       workspace = this.resolveExecutionWorkspace(project, current.operationMode, current.revisionTarget);
+      if (current.operationMode !== 'ask') {
+        this.assertNoActiveOrchestration(current.workspaceId, project.id, workspace.repo ?? repoOfTarget(current.revisionTarget) ?? undefined);
+      }
       const workingBranch = await this.currentBranch(workspace.dir);
+      const workingCommit = await this.currentCommit(workspace.dir);
       if (current.workingBranch !== workingBranch) {
-        sqliteService.updateAgentCall(id, { workingBranch });
+        sqliteService.updateAgentCall(id, { workingBranch, workingCommit });
         this.recordActivity(id, 'status', workingBranch ? `Target branch: ${workingBranch}` : 'No Git branch detected for the working copy');
+      } else {
+        sqliteService.updateAgentCall(id, { workingCommit });
       }
-      const readiness = agentReadiness(agent, sqliteService.getRuntimes());
-      if (readiness.status !== 'ready') {
-        throw new Error(readiness.detail);
-      }
-
       const persona = resolveAgentLogged(agent, {
         projectKey: project.key,
         includeMemory: false,
         includeToolPolicy: false
       });
-      const prompt = this.buildPrompt(current, project, agent);
+      const effectiveAgent = { ...agent, ...persona };
+      const readiness = agentReadiness(effectiveAgent, sqliteService.getRuntimes());
+      if (readiness.status !== 'ready') {
+        throw new Error(readiness.detail);
+      }
+
+      const prompt = this.buildPrompt(current, project, effectiveAgent);
       const turn = await runCliTurn({
         runId: `agent-call-${id}`,
         mode: 'chat',
@@ -502,7 +540,7 @@ export class AgentCallService extends EventEmitter {
         id: `msg-${randomUUID()}`,
         threadId: current.threadId,
         senderType: 'agent',
-        senderName: agent.name,
+        senderName: persona.name,
         agentId: agent.id,
         squadId: current.squadId,
         content,
@@ -611,6 +649,24 @@ export class AgentCallService extends EventEmitter {
     }
   }
 
+  private async currentCommit(cwd: string): Promise<string | undefined> {
+    try {
+      return await getHeadCommit(cwd);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private assertNoActiveOrchestration(workspaceId: string, projectId: string, repository?: string): void {
+    const active = runWithWorkspace(workspaceId, () =>
+      sqliteService.getActiveOrchestrationForProject(projectId, repository));
+    if (!active) return;
+    const branch = active.branchName ? ` on ${active.branchName}` : '';
+    throw new Error(
+      `This independent code call is paused while task build ${active.runId} is ${active.status}${branch} for ${active.repository}. Wait for that build to reach a terminal state, then rerun the call against its result.`
+    );
+  }
+
   private recordActivity(
     id: string,
     kind: AgentCallActivityKind,
@@ -675,7 +731,11 @@ export class AgentCallService extends EventEmitter {
 
     return [
       `You are ${agent.name}, the explicitly selected project agent for Alpha.`,
+      `Role: ${agent.role}`,
+      'This is an independent call to you alone. Complete only work within your persona responsibilities; do not act as the whole squad.',
+      'When the request exceeds your role, explain the boundary and identify the specialist needed. Do not silently take over their work.',
       `Project: ${project.name} (${project.key})`,
+      `Project goal and ground rules: ${project.description || 'Not specified'}`,
       `Operation mode: ${call.operationMode.toUpperCase()}`,
       `Target: ${target}`,
       '',

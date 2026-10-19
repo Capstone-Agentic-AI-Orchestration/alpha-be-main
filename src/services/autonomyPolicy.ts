@@ -55,9 +55,10 @@ export const GITHUB_WRITE_SKILL = 'sk-git';
 
 export function mcpAccessFor(
   autonomy: AutonomyLevel | undefined,
-  mode: 'run' | 'chat',
+  mode: 'run' | 'chat' | 'review',
   skills: string[] = []
 ): McpAccess {
+  if (mode === 'review') return 'read';
   // Chat needs the grant to be explicit on the agent itself; a run inherits it
   // from the pipeline that will review the result.
   if (mode === 'chat' && !skills.includes(GITHUB_WRITE_SKILL)) return 'read';

@@ -230,7 +230,7 @@ export class SquadRunner {
     const memberAssignments = members.map((agentId, index) => {
       const agent = agents.find(item => item.id === agentId)!;
       return providedAssignments.get(agentId)
-        ?? defaultMemberAssignment(agent, index, members.length, resolveAgent(agent, { includeMemory: false }).systemPrompt);
+        ?? defaultMemberAssignment({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, index, members.length);
     });
 
     const now = new Date().toISOString();
@@ -307,8 +307,7 @@ export class SquadRunner {
     const assignment = squadRun.memberAssignments?.find(item => item.agentId === agentId)
       ?? (() => {
         const agent = sqliteService.getAgents().find(item => item.id === agentId)!;
-        return defaultMemberAssignment(agent, index, squadRun.memberAgentIds.length,
-          resolveAgent(agent, { includeMemory: false }).systemPrompt);
+        return defaultMemberAssignment({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, index, squadRun.memberAgentIds.length);
       })();
     const assignmentPlan = [
       `Assigned stage: ${assignment.stageLabel}${assignment.phase ? ` (${assignment.phase})` : ''}`,
@@ -526,7 +525,10 @@ export function defaultMemberAssignment(
     { match: /validation|tester|quality assurance|\bqa\b/, stageLabel: 'Validation', phase: 'validation', instructions: 'Run relevant tests and validate the accumulated behavior against the request. Report actual evidence and failures; do not repeat implementation.' },
     { match: /github|release|delivery|devops|deployment/, stageLabel: 'Delivery readiness', phase: 'delivery', instructions: 'Check branch, CI, and delivery readiness and report blockers. Do not merge, release, or deploy without an explicit user request.' }
   ];
-  const specialized = choices.find(choice => choice.match.test(profile));
+  // Explicit role wins over incidental references to teammates in persona prose.
+  const role = String(agent.role ?? '').toLowerCase();
+  const specialized = choices.find(choice => choice.match.test(role))
+    ?? (role === 'coder' ? undefined : choices.find(choice => choice.match.test(profile)));
   if (specialized) return { agentId: agent.id, ...specialized };
 
   return {

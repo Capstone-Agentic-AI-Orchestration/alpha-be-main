@@ -49,7 +49,7 @@ export function isSafeBranchName(name: string): boolean {
 }
 
 function assertBranch(name: string, label = 'Branch'): void {
-  if (!isSafeBranchName(name)) throw new RepoWorkspaceError(`${label} "${name}" is not a valid branch name.`, 400);
+  if (!isSafeBranchName(name)) throw new RepoWorkspaceError(`${label} "${name}" is not a valid git branch name.`, 400);
 }
 
 const ref = (name: string) => encodeURIComponent(name);
@@ -237,6 +237,27 @@ export async function listPullRequests(
     createdAt: pull.created_at,
     promotion: PROMOTIONS[pull.head.ref] === pull.base.ref
   }));
+}
+
+/** Find a single branch/base pair without relying on the first page of all open PRs. */
+export async function findOpenPullRequest(
+  repo: string,
+  head: string,
+  base: string,
+  api: GitHubApi = githubApi()
+): Promise<{ number: number; url: string } | undefined> {
+  assertRepo(repo);
+  assertBranch(head, 'Pull request head');
+  assertBranch(base, 'Pull request base');
+  const [owner] = repo.split('/');
+  const pulls = await api.get<Array<{
+    number: number;
+    html_url: string;
+    head: { ref: string };
+    base: { ref: string };
+  }>>(`/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}&base=${ref(base)}&per_page=10`);
+  const match = pulls.find(pull => pull.head.ref === head && pull.base.ref === base);
+  return match ? { number: match.number, url: match.html_url } : undefined;
 }
 
 export interface WorkflowRunSummary {

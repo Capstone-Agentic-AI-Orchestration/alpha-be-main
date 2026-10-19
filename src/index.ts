@@ -17,6 +17,7 @@ import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
 import { mcpRouter } from './controllers/mcpController.js';
 import { liveBuildRoomRouter } from './controllers/liveBuildRoomController.js';
+import { orchestrationRouter } from './controllers/orchestrationController.js';
 import { projectRepoRouter } from './controllers/projectRepoController.js';
 import { hostingRouter } from './controllers/hostingController.js';
 import { agentBridgeRouter } from './controllers/agentBridgeController.js';
@@ -280,6 +281,7 @@ app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);
 app.use('/api', dataRouter);
 app.use('/api', liveBuildRoomRouter);
+app.use('/api', orchestrationRouter);
 app.use('/api', projectRepoRouter);
 app.use('/api', hostingRouter);
 app.use('/api', agentBridgeRouter);
@@ -535,6 +537,22 @@ function onListening(): void {
    * it is the first thing a returning user sees.
    */
   reconcileOnStartup();
+  // Attach task-run lifecycle listeners on every desktop boot, then reconcile
+  // durable task attempts only after legacy runner rows have been closed.
+  // Without this, a restarted daemon could leave a task marked running with no
+  // process behind it, or miss a completed submission waiting for acceptance.
+  if (!IS_CLOUD) {
+    void import('./services/orchestrationRuntime.js')
+      .then(({ reconcileInterruptedOrchestrations, startOrchestrationEventDelivery }) => {
+        const stopEventDelivery = startOrchestrationEventDelivery(
+          event => broadcast({ type: 'orchestration_event', payload: event }),
+          error => logError('Could not publish a task workflow event:', error instanceof Error ? error.message : String(error))
+        );
+        server.once('close', stopEventDelivery);
+        return reconcileInterruptedOrchestrations();
+      })
+      .catch(err => logError('Could not initialize task orchestration recovery:', err));
+  }
 
   // Sign back in as the last account used, if it was used within the idle
   // limit; identity and the workspace gate wait for this.

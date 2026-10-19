@@ -15,6 +15,7 @@ let rows: Map<string, any>;
 let issues: any[];
 let projects: any[];
 let processes: { options: SpawnOptions; child: EventEmitter; exited: boolean }[];
+let stopWaiters: Map<string, () => void>;
 let verify: ReturnType<typeof vi.fn>;
 let createBranch: ReturnType<typeof vi.fn>;
 let diff: ReturnType<typeof vi.fn>;
@@ -32,7 +33,7 @@ const passedVerification = () => ({ status: 'passed', commands: [], summary: 'Fi
 
 beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-run-lifetime-'));
-  vi.resetModules(); rows = new Map(); squads = new Map(); issues = []; projects = []; processes = [];
+  vi.resetModules(); rows = new Map(); squads = new Map(); issues = []; projects = []; processes = []; stopWaiters = new Map();
   let time = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => ++time);
   invocations = [];
   const agent = {
@@ -65,7 +66,12 @@ beforeEach(async () => {
   vi.doMock('./sqliteService.js', () => ({ sqliteService: sql }));
   vi.doMock('./workspaceRegistry.js', () => ({ workspaceRegistry: { bind: vi.fn() } }));
   vi.doMock('./processManager.js', () => ({ processManager: { spawnProcess: spawn,
-    killProcess: vi.fn(async () => undefined), isRunActive: () => true } }));
+    killProcess: vi.fn(async () => undefined),
+    terminateProcessAndWait: vi.fn(async (runId: string) => {
+      if (!processes.some(process => process.options.runId === runId && !process.exited)) return;
+      await new Promise<void>(resolve => stopWaiters.set(runId, resolve));
+    }),
+    isRunActive: (runId: string) => processes.some(process => process.options.runId === runId && !process.exited) } }));
   vi.doMock('./supabaseService.js', () => ({ supabaseService: { isConfigured: () => false } }));
   vi.doMock('./boardWriteThrough.js', () => ({ addCommentAndShare: vi.fn(),
     updateIssueAndPush: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes) }));
@@ -110,6 +116,8 @@ function work(id: string, checkout = 'shared-checkout') {
 async function exit(index: number, code = 0, reason?: Parameters<NonNullable<SpawnOptions['onExit']>>[2]) {
   const process = processes[index]; process.exited = true;
   await process.options.onExit?.(code, reason ? 'SIGTERM' : null, reason);
+  stopWaiters.get(process.options.runId)?.();
+  stopWaiters.delete(process.options.runId);
 }
 
 describe('RunnerService workspace ownership lifetime', () => {
@@ -185,8 +193,10 @@ describe('RunnerService workspace ownership lifetime', () => {
   });
   it('does not release on cancellation until the active child actually exits', async () => {
     const a = await work('a').start(); await work('b').start();
-    await vi.waitFor(() => expect(processes).toHaveLength(1)); await runner.cancelRun(a.id);
-    expect(processes).toHaveLength(1); await exit(0, 1, 'cancelled');
+    await vi.waitFor(() => expect(processes).toHaveLength(1));
+    const stopping = runner.cancelRun(a.id);
+    await vi.waitFor(() => expect(stopWaiters.has(a.id)).toBe(true));
+    expect(processes).toHaveLength(1); await exit(0, 1, 'cancelled'); await stopping;
     await vi.waitFor(() => expect(processes).toHaveLength(2)); expect(rows.get(a.id).status).toBe('cancelled'); await exit(1);
   });
   it('stops a sequential squad without starting its next member', async () => {
@@ -195,7 +205,10 @@ describe('RunnerService workspace ownership lifetime', () => {
     const squadRun = await squadRunner.startSquadRun({ squadId: 'squad-fixture', issueId: 'squad-cancel-issue' });
 
     await vi.waitFor(() => expect(processes).toHaveLength(1));
-    const stopped = await squadRunner.cancelSquadRun(squadRun.id);
+    const stopping = squadRunner.cancelSquadRun(squadRun.id);
+    await vi.waitFor(() => expect(stopWaiters.has(processes[0].options.runId)).toBe(true));
+    await exit(0, 1, 'cancelled');
+    const stopped = await stopping;
 
     expect(stopped).toMatchObject({ status: 'cancelled', stoppedReason: 'Build stopped by the user.' });
     expect(squads.get(squadRun.id).status).toBe('cancelled');
@@ -212,7 +225,8 @@ describe('RunnerService workspace ownership lifetime', () => {
   it('rechecks cancellation after asynchronous branch preparation, before spawn', async () => {
     const prepared = deferred<void>(); createBranch.mockReturnValueOnce(prepared.promise);
     const a = await work('a').start(); await vi.waitFor(() => expect(createBranch).toHaveBeenCalledOnce());
-    await runner.cancelRun(a.id); prepared.resolve();
+    const stopping = runner.cancelRun(a.id);
+    await new Promise(resolve => setTimeout(resolve, 0)); prepared.resolve(); await stopping;
     await vi.waitFor(() => expect(queue.activeKeys()).toEqual([])); expect(processes).toHaveLength(0);
   });
   it('does not publish a successful review after work failed during verification', async () => {

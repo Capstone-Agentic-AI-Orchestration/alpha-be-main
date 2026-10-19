@@ -89,4 +89,44 @@ describe('ProcessManager termination reasons', () => {
 
     expect(onExit).toHaveBeenCalledWith(null, 'SIGTERM', 'provider_error');
   });
+
+  it('keeps the process active until exit is confirmed after a stop request', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    treeKillMock.mockImplementationOnce((_pid: number, _signal: string, done: (error?: Error | null) => void) => done(null));
+
+    const manager = new ProcessManager();
+    manager.spawnProcess({ runId: 'run-wait-for-exit', bin: 'node', args: [], cwd: process.cwd() });
+    let completed = false;
+    const stopping = manager.terminateProcessAndWait('run-wait-for-exit', 'cancelled', 1_000, 1_000).then(() => { completed = true; });
+    await Promise.resolve();
+
+    expect(completed).toBe(false);
+    expect(manager.isRunActive('run-wait-for-exit')).toBe(true);
+    child.emit('exit', null, 'SIGTERM');
+    await stopping;
+
+    expect(completed).toBe(true);
+    expect(manager.isRunActive('run-wait-for-exit')).toBe(false);
+  });
+
+  it('escalates to SIGKILL and leaves an unconfirmed process tracked', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const signals: string[] = [];
+    treeKillMock.mockImplementation((_pid: number, signal: string, done: (error?: Error | null) => void) => {
+      signals.push(signal);
+      done(null);
+    });
+
+    const manager = new ProcessManager();
+    manager.spawnProcess({ runId: 'run-force-stop', bin: 'node', args: [], cwd: process.cwd() });
+    await expect(manager.terminateProcessAndWait('run-force-stop', 'cancelled', 0, 0))
+      .rejects.toThrow(/process remains tracked/);
+
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(manager.isRunActive('run-force-stop')).toBe(true);
+    child.emit('exit', null, 'SIGKILL');
+    expect(manager.isRunActive('run-force-stop')).toBe(false);
+  });
 });

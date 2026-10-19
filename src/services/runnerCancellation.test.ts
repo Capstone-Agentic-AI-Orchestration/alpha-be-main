@@ -6,6 +6,7 @@ import path from 'node:path';
 let tmp: string;
 let sqlite: any;
 let runner: any;
+let processManager: any;
 
 beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-run-cancel-'));
@@ -13,13 +14,16 @@ beforeEach(async () => {
   vi.resetModules();
   const db = await import('./sqliteService.js');
   const service = await import('./runnerService.js');
+  const processes = await import('./processManager.js');
   sqlite = db.sqliteService;
   runner = service.runnerService;
+  processManager = processes.processManager;
 });
 
 afterEach(() => {
   try { sqlite?.close(); } catch { /* already closed */ }
   delete process.env.ALPHA_HOME;
+  vi.restoreAllMocks();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -72,5 +76,24 @@ describe('RunnerService cancellation', () => {
     plantRun('cancelled');
 
     await expect(runner.cancelRun('run-cancelled')).rejects.toThrow('not cancellable');
+  });
+
+  it('persists and announces cancellation only after process termination is confirmed', async () => {
+    plantRun('running');
+    let confirmStopped!: () => void;
+    const stopConfirmation = new Promise<void>(resolve => { confirmStopped = resolve; });
+    vi.spyOn(processManager, 'terminateProcessAndWait').mockImplementation(async () => { await stopConfirmation; });
+    const cancelled = vi.fn();
+    runner.on('run_cancelled', cancelled);
+
+    const stopping = runner.cancelRun('run-running');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sqlite.getPrototypeRuns().find((run: any) => run.id === 'run-running')?.status).toBe('running');
+    expect(cancelled).not.toHaveBeenCalled();
+
+    confirmStopped();
+    await stopping;
+    expect(sqlite.getPrototypeRuns().find((run: any) => run.id === 'run-running')?.status).toBe('cancelled');
+    expect(cancelled).toHaveBeenCalledOnce();
   });
 });

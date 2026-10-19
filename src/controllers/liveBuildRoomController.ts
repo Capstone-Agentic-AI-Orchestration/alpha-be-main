@@ -1,10 +1,13 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { IS_CLOUD } from '../config/env.js';
+import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
 import { agentStore, chatStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import type { Agent, AgentCall, AgentCallActivity, ProjectBuildStep, PrototypeRun, RunActivity, Squad, SquadRun } from '../models/index.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { sqliteService } from '../services/sqliteService.js';
+import { runWithWorkspace } from '../services/workspaceContext.js';
+import { orchestrationSessionId } from '../services/orchestrationSession.js';
+import type { OrchestrationRunStatus } from '../services/orchestrationStateMachine.js';
 import {
   requireProjectWorkspace,
   requireWorkspaceCapability
@@ -202,6 +205,197 @@ function safeRoomRun(run: PrototypeRun): PrototypeRun {
   };
 }
 
+function safeRepositoryPath(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const normalized = value.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[a-z]:\//i.test(normalized) || normalized.split('/').some(part => part === '.' || part === '..')) return undefined;
+  return normalized.slice(0, 180);
+}
+
+function safeOrchestrationProjection(
+  snapshot: NonNullable<ReturnType<typeof sqliteService.getOrchestrationSnapshot>>,
+  agentsById: ReadonlyMap<string, Agent>,
+  visibleAgentIds: ReadonlySet<string>
+) {
+  const finalValidationEvent = runWithWorkspace(snapshot.run.workspaceId, () => sqliteService.listOrchestrationEvents(snapshot.run.id, 0, 500))
+    .reverse()
+    .find(event => {
+      const evidence = event.payload.evidence;
+      return Boolean(evidence && typeof evidence === 'object' && (evidence as Record<string, unknown>).validationVersion === 1);
+    });
+  const finalEvidence = finalValidationEvent?.payload.evidence && typeof finalValidationEvent.payload.evidence === 'object'
+    ? finalValidationEvent.payload.evidence as Record<string, unknown>
+    : undefined;
+  const finalChecks = finalEvidence?.checks && typeof finalEvidence.checks === 'object'
+    ? finalEvidence.checks as Record<string, unknown>
+    : undefined;
+  const finalCommands = Array.isArray(finalChecks?.observed) ? finalChecks!.observed as Array<Record<string, unknown>> : [];
+  const safeAgentId = (agentId: string) => visibleAgentIds.has(agentId) ? agentId : undefined;
+  const safeAgentName = (agentId: string) => {
+    const agent = visibleAgentIds.has(agentId) ? agentsById.get(agentId) : undefined;
+    return safeOperationalText(agent?.name, 100) ?? 'Project specialist';
+  };
+  return {
+    run: {
+      id: snapshot.run.id,
+      status: snapshot.run.status,
+      revision: snapshot.run.revision,
+      planVersion: snapshot.run.planVersion,
+      goal: safeOperationalText(snapshot.run.plan.goal, 1_200) ?? '',
+      exclusions: snapshot.run.plan.exclusions.map(item => safeOperationalText(item, 180) ?? ''),
+      repository: safeOperationalText(snapshot.run.repository, 180) ?? '',
+      branchName: safeOperationalText(snapshot.run.branchName, 180),
+      currentTaskId: snapshot.run.currentTaskId,
+      stoppedReason: safeOperationalText(snapshot.run.stoppedReason, 500),
+      publication: snapshot.run.publication ? {
+        branchName: safeOperationalText(snapshot.run.publication.branchName, 180) ?? '',
+        baseBranch: safeOperationalText(snapshot.run.publication.baseBranch, 180) ?? '',
+        resultCommit: safeOperationalText(snapshot.run.publication.resultCommit, 64) ?? '',
+        pullRequestUrl: snapshot.run.publication.pullRequestUrl,
+        publishedAt: snapshot.run.publication.publishedAt
+      } : undefined,
+      createdAt: snapshot.run.createdAt,
+      updatedAt: snapshot.run.updatedAt
+    },
+    requirements: snapshot.run.plan.requirements.map(requirement => ({
+      id: requirement.id,
+      description: safeOperationalText(requirement.description, 360) ?? ''
+    })),
+    tasks: snapshot.tasks.map(task => ({
+      id: task.id,
+      title: safeOperationalText(task.title, 180) ?? '',
+      description: safeOperationalText(task.description, 700) ?? '',
+      kind: task.kind,
+      ownerAgentId: safeAgentId(task.ownerAgentId),
+      ownerName: safeAgentName(task.ownerAgentId),
+      dependsOn: task.dependsOn,
+      requirementIds: task.requirementIds,
+      acceptanceCriteria: task.acceptanceCriteria.map(item => safeOperationalText(item, 280) ?? ''),
+      requiredChecks: task.requiredChecks,
+      scope: {
+        includePaths: task.scope.includePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item)),
+        excludePaths: task.scope.excludePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item))
+      },
+      required: task.required,
+      status: task.status,
+      revision: task.revision,
+      attemptCount: task.attemptCount,
+      correctionOfTaskId: task.correctionOfTaskId,
+      correctionCycle: task.correctionCycle
+    })),
+    attempts: snapshot.attempts.map(attempt => {
+      const result = attempt.result ?? {};
+      const report = result.agentReport && typeof result.agentReport === 'object'
+        ? result.agentReport as Record<string, unknown>
+        : undefined;
+      const deliverables = Array.isArray(report?.deliverables) ? report!.deliverables as Array<Record<string, unknown>> : [];
+      const coverage = Array.isArray(report?.requirementCoverage) ? report!.requirementCoverage as Array<Record<string, unknown>> : [];
+      const criteria = Array.isArray(report?.criteriaEvidence) ? report!.criteriaEvidence as Array<Record<string, unknown>> : [];
+      const reportedChecks = Array.isArray(report?.reportedChecks) ? report!.reportedChecks as Array<Record<string, unknown>> : [];
+      const reviewFindings = Array.isArray(report?.reviewFindings) ? report!.reviewFindings as Array<Record<string, unknown>> : [];
+      const verification = result.verification && typeof result.verification === 'object'
+        ? result.verification as Record<string, unknown>
+        : undefined;
+      const observed = verification?.observed && typeof verification.observed === 'object'
+        ? verification.observed as Record<string, unknown>
+        : undefined;
+      const commands = Array.isArray(observed?.commands) ? observed!.commands as Array<Record<string, unknown>> : [];
+      const acceptance = result.acceptanceEvidence && typeof result.acceptanceEvidence === 'object'
+        ? result.acceptanceEvidence as Record<string, unknown>
+        : undefined;
+      const changedPaths = Array.isArray(acceptance?.changedPaths) ? acceptance!.changedPaths : [];
+      return {
+        id: attempt.id,
+        taskId: attempt.taskId,
+        attemptNumber: attempt.attemptNumber,
+        prototypeRunId: attempt.prototypeRunId,
+        agentId: safeAgentId(attempt.agentId),
+        agentName: safeAgentName(attempt.agentId),
+        status: attempt.status,
+        startedAt: attempt.startedAt,
+        completedAt: attempt.completedAt,
+        resultCommit: attempt.resultCommit,
+        summary: safeOperationalText(result.summary as string | undefined, 900),
+        failureReason: safeOperationalText(attempt.failureReason ?? result.rejectionReason as string | undefined, 500),
+        report: report ? {
+          requirementCoverage: coverage.map(item => ({
+            requirementId: safeOperationalText(item.requirementId as string | undefined, 80),
+            evidence: safeOperationalText(item.evidence as string | undefined, 350)
+          })),
+          criteriaEvidence: criteria.map(item => ({
+            criterion: safeOperationalText(item.criterion as string | undefined, 280),
+            evidence: safeOperationalText(item.evidence as string | undefined, 350)
+          })),
+          deliverables: deliverables.map(item => ({
+            summary: safeOperationalText(item.summary as string | undefined, 350),
+            paths: Array.isArray(item.paths) ? item.paths.map(safeRepositoryPath).filter((value): value is string => Boolean(value)) : []
+          })),
+          reportedChecks: reportedChecks.map(item => ({
+            script: safeOperationalText(item.script as string | undefined, 80),
+            result: item.result === 'passed' || item.result === 'failed' ? item.result : 'not_run',
+            evidence: safeOperationalText(item.evidence as string | undefined, 300)
+          })),
+          ...(Array.isArray(report?.reviewFindings) ? {
+            reviewFindings: reviewFindings.map(item => ({
+              targetTaskId: safeOperationalText(item.targetTaskId as string | undefined, 100) ?? '',
+              severity: item.severity === 'blocking' || item.severity === 'critical' ? item.severity : 'warning',
+              title: safeOperationalText(item.title as string | undefined, 180) ?? 'Review finding',
+              requirementId: safeOperationalText(item.requirementId as string | undefined, 80),
+              path: safeRepositoryPath(item.path),
+              evidence: safeOperationalText(item.evidence as string | undefined, 350) ?? '',
+              instruction: safeOperationalText(item.instruction as string | undefined, 450) ?? ''
+            }))
+          } : {}),
+          blockers: Array.isArray(report.blockers) ? report.blockers.filter((item): item is string => typeof item === 'string').map(item => safeOperationalText(item, 180) ?? '') : []
+        } : undefined,
+        verification: observed ? {
+          status: observed.status,
+          missingScripts: Array.isArray(observed.missingScripts) ? observed.missingScripts.filter((item): item is string => typeof item === 'string') : [],
+          commands: commands.map(command => {
+            const commandInfo = command.command && typeof command.command === 'object' ? command.command as Record<string, unknown> : {};
+            return {
+              script: safeOperationalText(command.script as string | undefined ?? commandInfo.script as string | undefined, 80),
+              display: safeOperationalText(command.display as string | undefined ?? commandInfo.display as string | undefined, 180),
+              exitCode: typeof command.exitCode === 'number' ? command.exitCode : null,
+              signal: safeOperationalText(command.signal as string | undefined, 40) ?? null
+            };
+          })
+        } : undefined,
+        changedPaths: changedPaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item))
+      };
+    }),
+    finalValidation: finalEvidence ? {
+      status: safeOperationalText(finalChecks?.status as string | undefined, 40),
+      missingScripts: Array.isArray(finalChecks?.missingScripts)
+        ? finalChecks!.missingScripts.filter((item): item is string => typeof item === 'string').map(item => safeOperationalText(item, 80) ?? '')
+        : [],
+      commands: finalCommands.map(command => ({
+        script: safeOperationalText(command.script as string | undefined, 80),
+        display: safeOperationalText(command.display as string | undefined, 180),
+        exitCode: typeof command.exitCode === 'number' ? command.exitCode : null,
+        signal: safeOperationalText(command.signal as string | undefined, 40) ?? null
+      })),
+      resultCommit: safeOperationalText(finalEvidence.resultCommit as string | undefined, 64),
+      noOpenBlockingFindings: finalEvidence.noOpenBlockingFindings === true
+    } : undefined,
+    artifacts: snapshot.artifacts.map(artifact => ({
+      id: artifact.id, taskId: artifact.taskId, type: artifact.type,
+      version: artifact.version, contentHash: artifact.contentHash, status: artifact.status, createdAt: artifact.createdAt
+    })),
+    findings: snapshot.findings.map(finding => ({
+      id: finding.id, taskId: finding.taskId, sourceTaskId: finding.sourceTaskId,
+      severity: finding.severity, requirementId: finding.requirementId,
+      path: safeRepositoryPath(finding.path), status: finding.status,
+      correctionTaskId: finding.correctionTaskId,
+      title: safeOperationalText(typeof finding.evidence.title === 'string' ? finding.evidence.title : undefined, 180),
+      evidence: safeOperationalText(typeof finding.evidence.evidence === 'string' ? finding.evidence.evidence : undefined, 350),
+      instruction: safeOperationalText(typeof finding.evidence.instruction === 'string' ? finding.evidence.instruction : undefined, 450),
+      check: safeOperationalText(typeof finding.evidence.check === 'string' ? finding.evidence.check : undefined, 80),
+      createdAt: finding.createdAt, resolvedAt: finding.resolvedAt
+    }))
+  };
+}
+
 function latestCallActivityAt(call: Pick<AgentCall, 'activities' | 'startedAt' | 'createdAt'>): string {
   return call.activities.at(-1)?.createdAt ?? call.startedAt ?? call.createdAt;
 }
@@ -390,10 +584,20 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const requestedRunId = typeof req.query.runId === 'string' ? req.query.runId : undefined;
   const requestedRun = requestedRunId ? squadRuns.find(run => run.id === requestedRunId) : undefined;
   const squadRun = requestedRun ?? squadRuns.find(run => run.status === 'running' || run.status === 'awaiting_approval') ?? squadRuns[0];
-  const buildRuns = squadRuns.slice(0, 40).map(run => {
+  const buildRuns: Array<{
+    id: string;
+    kind: 'squad' | 'orchestration';
+    status: SquadRun['status'] | OrchestrationRunStatus;
+    issueIdentifier?: string;
+    issueTitle?: string;
+    repository?: string;
+    branchName: string;
+    updatedAt: string;
+  }> = squadRuns.slice(0, 40).map(run => {
     const issue = issues.find(item => item.id === run.issueId && item.projectId === project.id);
     return {
       id: run.id,
+      kind: 'squad',
       status: run.status,
       issueIdentifier: issue?.identifier,
       issueTitle: issue?.title,
@@ -803,6 +1007,124 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       ?? liveChatCalls.map(issueForCall).find(Boolean)
       ?? (selectedSquad ? issues.find(issue => issue.projectId === project.id && issue.assignedSquadId === selectedSquad.id) : undefined)
       ?? issues.find(issue => issue.projectId === project.id);
+  const requestedOrchestrationId = typeof req.query.orchestrationRunId === 'string'
+    ? req.query.orchestrationRunId
+    : typeof req.query.runId === 'string' && req.query.runId.startsWith('orchestration-')
+      ? req.query.runId
+      : undefined;
+  const explicitlySelectedLegacyRun = Boolean(requestedRunId && !requestedOrchestrationId);
+  const requestedOrchestration = !IS_CLOUD && requestedOrchestrationId
+    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(requestedOrchestrationId))
+    : undefined;
+  const activeOrchestrationRef = !IS_CLOUD
+    ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id))
+    : undefined;
+  const activeOrchestration = activeOrchestrationRef
+    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(activeOrchestrationRef.runId))
+    : undefined;
+  const latestOrchestration = !IS_CLOUD
+    ? runWithWorkspace(workspaceId, () => sqliteService.getLatestOrchestrationSnapshot(project.id))
+    : undefined;
+  const selectedOrchestration = !explicitlySelectedLegacyRun
+    ? [requestedOrchestration, activeOrchestration, latestOrchestration].find(item => item?.run.projectId === project.id)
+    : undefined;
+  const planningReservations = !IS_CLOUD
+    ? runWithWorkspace(workspaceId, () => sqliteService.listOrchestrationPlanningReservations(project.id))
+    : [];
+  const planningRecoveryRecords = !IS_CLOUD
+    ? runWithWorkspace(workspaceId, () => sqliteService.listOrchestrationPlanningRecoveries(project.id, 10))
+    : [];
+  const recoveryByRunId = new Map(planningRecoveryRecords.map(record => [record.runId, record]));
+  const planningRecoveries = [
+    ...planningReservations.flatMap(reservation => {
+      const savedRecovery = recoveryByRunId.get(reservation.runId);
+      if (!savedRecovery && reservation.ownerSessionId === orchestrationSessionId) return [];
+      return [{
+        runId: reservation.runId,
+        repository: safeOperationalText(reservation.repository, 180) ?? '',
+        branchName: safeOperationalText(reservation.branchName, 180) ?? '',
+        baseCommit: reservation.baseCommit,
+        state: savedRecovery?.state ?? 'interrupted' as const,
+        reason: safeOperationalText(savedRecovery?.reason, 1_000) ?? 'Planning stopped before a task plan was activated. Inspect the saved workspace before continuing.',
+        revision: savedRecovery?.revision ?? 0,
+        createdAt: savedRecovery?.createdAt ?? reservation.createdAt,
+        canPreview: savedRecovery?.state === 'needs_review'
+      }];
+    }),
+    ...planningRecoveryRecords.filter(record => record.state === 'retained' || record.state === 'cleaned').map(record => ({
+      runId: record.runId,
+      repository: safeOperationalText(record.repository, 180) ?? '',
+      branchName: safeOperationalText(record.branchName, 180) ?? '',
+      baseCommit: record.baseCommit,
+      state: record.state,
+      reason: record.state === 'cleaned'
+        ? 'The clean interrupted planning workspace was safely removed and repository admission was released.'
+        : 'The saved planning workspace was kept and repository admission was released.',
+      revision: record.revision,
+      createdAt: record.createdAt,
+      canPreview: record.state === 'retained'
+    }))
+  ].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 8);
+  const activePlanningReservation = !IS_CLOUD && activeOrchestrationRef?.status === 'planning'
+    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationPlanningReservation(project.id, activeOrchestrationRef.repository))
+    : undefined;
+  const activePlanningRecovery = activePlanningReservation
+    ? recoveryByRunId.get(activePlanningReservation.runId)
+    : undefined;
+  const activePlanningWasInterrupted = Boolean(activePlanningReservation &&
+    (activePlanningRecovery || activePlanningReservation.ownerSessionId !== orchestrationSessionId));
+  const selectedPlanningReservation = !explicitlySelectedLegacyRun && !selectedOrchestration && !activePlanningWasInterrupted
+    ? activePlanningReservation
+    : undefined;
+  const orchestrationRunOptions = [requestedOrchestration, activeOrchestration, latestOrchestration]
+    .filter((item): item is NonNullable<typeof item> => Boolean(item && item.run.projectId === project.id));
+  for (const reservation of planningReservations) {
+    if (buildRuns.some(item => item.id === reservation.runId) || orchestrationRunOptions.some(item => item.run.id === reservation.runId)) continue;
+    const savedRecovery = recoveryByRunId.get(reservation.runId);
+    const interrupted = Boolean(savedRecovery || reservation.ownerSessionId !== orchestrationSessionId);
+    buildRuns.push({
+      id: reservation.runId,
+      kind: 'orchestration',
+      status: interrupted ? 'recovery_required' : 'planning',
+      repository: reservation.repository,
+      branchName: reservation.branchName,
+      updatedAt: savedRecovery?.updatedAt ?? reservation.createdAt
+    });
+  }
+  for (const candidate of orchestrationRunOptions) {
+    if (buildRuns.some(item => item.id === candidate.run.id)) continue;
+    const issue = issues.find(item => item.id === candidate.run.issueId && item.projectId === project.id);
+    buildRuns.push({
+      id: candidate.run.id,
+      kind: 'orchestration',
+      status: candidate.run.status,
+      issueIdentifier: issue?.identifier,
+      issueTitle: issue?.title,
+      repository: candidate.run.repository,
+      branchName: candidate.run.branchName ?? '',
+      updatedAt: candidate.run.updatedAt
+    });
+  }
+  buildRuns.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const orchestration = selectedOrchestration
+    ? safeOrchestrationProjection(selectedOrchestration, membersById, visibleAgentIds)
+    : selectedPlanningReservation ? {
+        run: {
+          id: selectedPlanningReservation.runId,
+          status: 'planning' as const,
+          revision: 0,
+          planVersion: 0,
+          goal: '',
+          exclusions: [],
+          repository: safeOperationalText(selectedPlanningReservation.repository, 180) ?? '',
+          branchName: safeOperationalText(selectedPlanningReservation.branchName, 180),
+          currentTaskId: undefined,
+          stoppedReason: undefined,
+          createdAt: selectedPlanningReservation.createdAt,
+          updatedAt: selectedPlanningReservation.createdAt
+        },
+        requirements: [], tasks: [], attempts: [], artifacts: [], findings: []
+      } : null;
   res.json({
     project: {
       id: project.id,
@@ -825,6 +1147,8 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     }),
     eligible: true,
     canRun: Boolean(selectedSquad) && workspaceRegistry.can(req.workspace!.role, 'squad.run'),
+    canControlOrchestration: workspaceRegistry.can(req.workspace!.role, 'squad.run'),
+    orchestrationResumeAvailable: !IS_CLOUD && ALPHA_ORCHESTRATION_ENABLED,
     canManage: Boolean(selectedSquad && workspaceRegistry.canManageSquad(req.workspace!, selectedSquad.id)),
     status: selectedRun?.status ?? 'idle',
     buildRuns,
@@ -847,7 +1171,9 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       selectedRun,
       memberRunByAgent
     ) : [],
-    issue: roomIssue,
+    issue: selectedOrchestration
+      ? issues.find(issue => issue.id === selectedOrchestration.run.issueId && issue.projectId === project.id)
+      : roomIssue,
     activeRun: selectedRun ? {
       ...selectedRun,
       mission: safeOperationalText(selectedRun.mission, 700) ?? '',
@@ -876,7 +1202,11 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     },
     artifacts,
     chatCalls,
-    lastUpdated: [selectedRun?.updatedAt, latestChatActivity, ...agentCards.map(card => card.updatedAt ?? undefined), project.createdAt]
+    orchestration,
+    planningRecoveries,
+    lastUpdated: [selectedRun?.updatedAt, selectedOrchestration?.run.updatedAt, selectedPlanningReservation?.createdAt,
+      latestChatActivity, ...planningRecoveries.map(recovery => recovery.createdAt),
+      ...agentCards.map(card => card.updatedAt ?? undefined), project.createdAt]
       .filter((value): value is string => Boolean(value))
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0]
   });
