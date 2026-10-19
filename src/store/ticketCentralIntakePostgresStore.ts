@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Sql, TransactionalSql } from './database.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import type {
-  CentralIntakeAcceptance, CentralIntakeCursor, CentralIntakeFingerprint, CentralIntakeItem,
+  CentralIntakeAcceptance, CentralIntakeCursor, CentralIntakeDeclineReceipt, CentralIntakeFingerprint, CentralIntakeItem,
   CentralIntakePage, CentralIntakeRatePolicy, TicketCentralIntakeStore,
 } from './ticketCentralIntakeStore.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
@@ -10,7 +10,7 @@ import { newTicketWorkflow } from '../ticketing/workflow.js';
 import { decodeTicketWorkflow } from './ticketPostgresCodec.js';
 
 interface CentralIntakeDbRow {
-  id: string; full_name: string; email: string; company: string | null; title: string;
+  id: string; public_reference: string; full_name: string; email: string; company: string | null; title: string;
   description: string; requested_deadline: string | null; submitted_at: Date | string;
 }
 interface SavedOperationDbRow {
@@ -28,7 +28,8 @@ function text(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 200 && value.trim() === value;
 }
 function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
-  if (!text(row.id) || typeof row.full_name !== 'string' || !row.full_name.trim() || row.full_name.length > 160
+  if (!text(row.id) || typeof row.public_reference !== 'string' || !/^INQ-[A-F0-9]{32}$/.test(row.public_reference)
+    || typeof row.full_name !== 'string' || !row.full_name.trim() || row.full_name.length > 160
     || typeof row.email !== 'string' || !row.email.trim() || row.email.length > 254
     || (row.company !== null && (typeof row.company !== 'string' || row.company.length > 160))
     || typeof row.title !== 'string' || !row.title.trim() || row.title.length > 160
@@ -36,7 +37,7 @@ function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
     || (row.requested_deadline !== null && !/^\d{4}-\d{2}-\d{2}$/.test(row.requested_deadline))) {
     throw new Error('Central inquiry row is invalid.');
   }
-  return { id: row.id, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
+  return { id: row.id, publicReference: row.public_reference, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
     description: row.description, requestedDeadline: row.requested_deadline, submittedAt: iso(row.submitted_at) };
 }
 
@@ -92,21 +93,23 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
     }
   }
 
-  async submit(organizationKey: string, id: string, input: import('../ticketing/intake.js').PublicTicketInquiryInput,
-    fingerprints: readonly CentralIntakeFingerprint[], occurredAt: string): Promise<'received' | 'conflict'> {
-    if (!text(organizationKey) || !text(id) || !Number.isFinite(Date.parse(occurredAt)) || fingerprints.length === 0) {
+  async submit(organizationKey: string, id: string, publicReference: string, input: import('../ticketing/intake.js').PublicTicketInquiryInput,
+    fingerprints: readonly CentralIntakeFingerprint[], occurredAt: string): Promise<{ kind: 'received'; publicReference: string } | { kind: 'conflict' }> {
+    if (!text(organizationKey) || !text(id) || !/^INQ-[A-F0-9]{32}$/.test(publicReference)
+      || !Number.isFinite(Date.parse(occurredAt)) || fingerprints.length === 0) {
       throw new Error('Central inquiry submission is invalid.');
     }
     return this.db.transaction(async tx => {
       await tx.query('select pg_advisory_xact_lock(hashtextextended($1,0))',
         [`central-intake-submit:${organizationKey}:${input.operationId}`]);
-      const existing = await tx.query<{ operation_id: string; fingerprint: string; fingerprint_key_id: string }>(
-        `select operation_id,fingerprint,fingerprint_key_id from alpha_private.ticket_central_intakes
+      const existing = await tx.query<{ operation_id: string; fingerprint: string; fingerprint_key_id: string; public_reference: string }>(
+        `select operation_id,fingerprint,fingerprint_key_id,public_reference from alpha_private.ticket_central_intakes
          where organization_key=$1 and operation_id=$2 for update`, [organizationKey, input.operationId]);
       if (existing.rows[0]) {
         const saved = existing.rows[0];
         const candidate = fingerprints.find(item => item.keyId === saved.fingerprint_key_id);
-        return candidate && saved.fingerprint === candidate.fingerprint ? 'received' : 'conflict';
+        return candidate && saved.fingerprint === candidate.fingerprint
+          ? { kind: 'received' as const, publicReference: saved.public_reference } : { kind: 'conflict' as const };
       }
       const fingerprint = fingerprints[0];
       if (!fingerprint || !text(fingerprint.keyId) || !/^[a-f0-9]{64}$/.test(fingerprint.fingerprint)) {
@@ -114,16 +117,21 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       }
       await tx.query(
         `insert into alpha_private.ticket_central_intakes
-           (organization_key,id,operation_id,fingerprint,fingerprint_key_id,full_name,email,company,title,description,requested_deadline,submitted_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-        [organizationKey, id, input.operationId, fingerprint.fingerprint, fingerprint.keyId, input.fullName,
+           (organization_key,id,operation_id,fingerprint,fingerprint_key_id,public_reference,full_name,email,company,title,description,requested_deadline,submitted_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [organizationKey, id, input.operationId, fingerprint.fingerprint, fingerprint.keyId, publicReference, input.fullName,
           input.email, input.company, input.title, input.description, input.requestedDeadline, occurredAt]);
       await tx.query(
         `insert into alpha_private.ticket_central_intake_events
            (id,organization_key,intake_id,event_type,actor_kind,occurred_at,metadata)
          values ($1,$2,$3,'inquiry_received','anonymous',$4,$5::jsonb)`,
         [randomUUID(), organizationKey, id, occurredAt, JSON.stringify({ operationId: input.operationId })]);
-      return 'received';
+      await tx.query(
+        `insert into alpha_private.ticket_central_intake_acknowledgments
+           (organization_key,intake_id,idempotency_key,status,available_at,created_at)
+         values ($1,$2,$3,'pending',$4,$4)`,
+        [organizationKey, id, input.operationId, occurredAt]);
+      return { kind: 'received', publicReference };
     });
   }
 
@@ -134,7 +142,7 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(workspaceId, subject);
       if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
       const { rows } = await tx.query<CentralIntakeDbRow>(
-        `select id,full_name,email,company,title,description,requested_deadline,submitted_at
+        `select id,public_reference,full_name,email,company,title,description,requested_deadline,submitted_at
            from alpha_private.ticket_central_intakes
           where organization_key=$1 and status='pending'
             and ($2::timestamptz is null or (submitted_at,id collate "C")<($2::timestamptz,$3::text collate "C"))
@@ -175,6 +183,7 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         }
         return 'already_handled';
       }
+      if (existing.status === 'declined') return 'already_handled';
       if (existing.status !== 'pending') throw new Error('Central inquiry state is invalid.');
 
       const workspace = await tx.query<{ name: string; write_mode: string | null }>(
@@ -241,6 +250,51 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         [randomUUID(), input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
           state.id, input.occurredAt, JSON.stringify({ operationId: input.operationId })]);
       return { ticketId: state.id, workspaceId: input.workspaceId, reference: input.reference, operationId: input.operationId };
+    });
+  }
+
+  async decline(input: {
+    organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
+    operationId: string; reason: string | null; occurredAt: string;
+  }): Promise<CentralIntakeDeclineReceipt | 'not_found' | 'already_handled' | 'forbidden'> {
+    return this.db.transaction(async tx => {
+      const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(input.workspaceId, input.subject);
+      if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
+      const { rows } = await tx.query<{
+        status: string; declined_by: string | null; declined_workspace_id: string | null;
+        decline_operation_id: string | null; decline_reason: string | null;
+      }>(
+        `select status,declined_by,declined_workspace_id,decline_operation_id,decline_reason
+           from alpha_private.ticket_central_intakes
+          where organization_key=$1 and id=$2 for update`,
+        [input.organizationKey, input.intakeId]);
+      const existing = rows[0];
+      if (!existing) return 'not_found';
+      if (existing.status === 'declined') {
+        return existing.declined_by === input.subject.userId
+          && existing.declined_workspace_id === input.workspaceId
+          && existing.decline_operation_id === input.operationId
+          && existing.decline_reason === input.reason
+          ? { intakeId: input.intakeId, operationId: input.operationId, status: 'declined' }
+          : 'already_handled';
+      }
+      if (existing.status !== 'pending') return 'already_handled';
+      const { rows: updated } = await tx.query<{ id: string }>(
+        `update alpha_private.ticket_central_intakes
+            set status='declined',declined_by=$3,declined_workspace_id=$4,decline_operation_id=$5,
+                declined_at=$6,decline_reason=$7
+          where organization_key=$1 and id=$2 and status='pending'
+          returning id`,
+        [input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
+          input.operationId, input.occurredAt, input.reason]);
+      if (updated.length !== 1) throw new Error('Central inquiry could not be atomically declined.');
+      await tx.query(
+        `insert into alpha_private.ticket_central_intake_events
+           (id,organization_key,intake_id,event_type,actor_kind,actor_id,workspace_id,ticket_id,occurred_at,metadata)
+         values ($1,$2,$3,'inquiry_declined','pm',$4,$5,null,$6,$7::jsonb)`,
+        [randomUUID(), input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
+          input.occurredAt, JSON.stringify({ operationId: input.operationId, reason: input.reason })]);
+      return { intakeId: input.intakeId, operationId: input.operationId, status: 'declined' };
     });
   }
 }

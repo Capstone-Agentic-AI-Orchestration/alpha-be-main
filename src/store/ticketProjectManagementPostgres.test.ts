@@ -17,6 +17,8 @@ import { PostgresTicketCreationStore, ticketClientProjectOptionId } from './tick
 import { PostgresTicketProjectManagementStore } from './ticketProjectManagementPostgresStore.js';
 import { PostgresTicketQueueStore } from './ticketQueuePostgresStore.js';
 import { PostgresTicketReadStore } from './ticketReadPostgresStore.js';
+import { PostgresProjectStore } from './postgresProjectStore.js';
+import { ProjectLinkedToTicketError } from './projectStore.js';
 
 const workspaceId = 'phase6-workspace';
 const otherWorkspaceId = 'phase6-other-workspace';
@@ -137,6 +139,41 @@ describe('PM project organization and client requests on the main migration sche
     const ticket = await db.query<{ project_id: string | null; version: number }>(
       `select project_id,version from alpha_private.tickets where workspace_id=$1 and id=$2`, [workspaceId, firstTicketId]);
     expect(ticket.rows[0]).toEqual({ project_id: null, version: 0 });
+  }, 60_000);
+
+  it('shares only a ready hosted preview on the linked ticket and prevents deleting a linked project', async () => {
+    const service = createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db), () => now);
+    const preview = { repository: 'Capstone-Agentic-AI-Orchestration/alpha-fe-main', branch: 'main' as const,
+      url: 'https://alpha-fe-main.vercel.app/' };
+    const link = await service.linkProject({ workspaceId, ticketId: firstTicketId }, pm, {
+      schemaVersion: 1, operationId: 'phase6-preview-link', expectedVersion: 0,
+      projectId, clientVisible: true, projectPreview: preview,
+    });
+    expect(link.projectPreview).toEqual(preview);
+    const reader = createTicketReadService(new PostgresTicketReadStore(db));
+    await expect(reader.detail({ workspaceId, ticketId: firstTicketId }, client))
+      .resolves.toMatchObject({ sharedProjectName: visibleProjectName, sharedProjectPreviewUrl: preview.url });
+    await expect(reader.detail({ workspaceId, ticketId: firstTicketId }, pm))
+      .resolves.toMatchObject({ internal: { projectPreview: preview } });
+    await expect(service.linkProject({ workspaceId, ticketId: firstTicketId }, pm, {
+      schemaVersion: 1, operationId: 'phase6-preview-untrusted-host', expectedVersion: 1,
+      projectId, clientVisible: true, projectPreview: { ...preview, url: 'https://example.com/' },
+    })).rejects.toMatchObject({ status: 400, code: 'invalid_ticket_project_link' });
+    await expect(new PostgresProjectStore(db).remove(workspaceId, projectId)).rejects.toBeInstanceOf(ProjectLinkedToTicketError);
+  }, 60_000);
+
+  it('shows client replies as unread to PMs until that PM opens the conversation', async () => {
+    await db.query(`insert into alpha_private.ticket_messages
+      (id,workspace_id,ticket_id,author_kind,author_id,audience,body,created_at)
+      values ('phase6-client-reply',$1,$2,'client',$3,'client','Please clarify the timeline.',$4)`,
+    [workspaceId, firstTicketId, clientId, new Date(now.getTime() + 1_000)]);
+    const queue = createTicketQueueService(new PostgresTicketQueueStore(db), () => now);
+    const initial = await queue.list(workspaceId, pm);
+    expect((initial.items[0] as PmTicketQueueItem).internal.clientReplyUnread).toBe(true);
+    expect(JSON.stringify(await queue.list(workspaceId, client))).not.toContain('clientReplyUnread');
+    await createTicketReadService(new PostgresTicketReadStore(db)).conversation({ workspaceId, ticketId: firstTicketId }, pm);
+    const afterRead = await queue.list(workspaceId, pm);
+    expect((afterRead.items[0] as PmTicketQueueItem).internal.clientReplyUnread).toBe(false);
   }, 60_000);
 
   it('removes a ticket from the client queue as soon as its grant is revoked', async () => {

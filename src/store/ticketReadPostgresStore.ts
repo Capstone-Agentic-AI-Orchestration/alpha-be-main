@@ -25,6 +25,9 @@ interface TicketDetailDbRow {
   project_id: string | null;
   project_display_name: string | null;
   project_client_visible: boolean;
+  preview_repository: string | null;
+  preview_branch: string | null;
+  preview_url: string | null;
 }
 interface ScopeDbRow {
   id: string; workspace_id: string; ticket_id: string; public_summary: string;
@@ -90,12 +93,15 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
   async loadDetail(ticket: LockedTicket): Promise<TicketDetailRows> {
     const { state, actor } = ticket;
     const { rows: ticketRows } = await this.sql.query<TicketDetailDbRow>(
-      `select workspace_id, id, reference, title, description, client_safe_company_label,
-              created_at, client_updated_at, internal_updated_at, closed_at, related_ticket_id,
-              project_id, project_display_name, project_client_visible
-       from alpha_private.tickets
-       where workspace_id = $1 and id = $2
-       for share`,
+      `select t.workspace_id, t.id, t.reference, t.title, t.description, t.client_safe_company_label,
+              t.created_at, t.client_updated_at, t.internal_updated_at, t.closed_at, t.related_ticket_id,
+              t.project_id, t.project_display_name, t.project_client_visible,
+              preview.repository as preview_repository,preview.branch as preview_branch,preview.url as preview_url
+       from alpha_private.tickets t
+       left join alpha_private.ticket_project_client_previews preview
+         on preview.workspace_id=t.workspace_id and preview.ticket_id=t.id and preview.project_id=t.project_id
+       where t.workspace_id = $1 and t.id = $2
+       for share of t`,
       [state.workspaceId, state.id],
     );
     const row = ticketRows[0];
@@ -119,6 +125,9 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
         projectId: row.project_id,
         displayName: row.project_display_name ?? '',
         clientVisible: asBoolean(row.project_client_visible),
+        preview: row.preview_repository === null && row.preview_branch === null && row.preview_url === null ? null
+          : row.preview_repository && (row.preview_branch === 'main' || row.preview_branch === 'uat') && row.preview_url
+            ? { repository: row.preview_repository, branch: row.preview_branch, url: row.preview_url } : invalid(),
       },
     };
 
@@ -280,5 +289,19 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
           body: row.body, createdAt: ticketSqlIso(row.created_at),
         };
       });
+  }
+
+  async markClientMessagesRead(ticket: LockedTicket, throughMessageId: string): Promise<void> {
+    if (ticket.actor.kind !== 'pm') return;
+    await this.sql.query(
+      `insert into alpha_private.ticket_pm_read_cursors (workspace_id,ticket_id,pm_user_id,last_read_at)
+       select m.workspace_id,m.ticket_id,$4,m.created_at
+       from alpha_private.ticket_messages m
+       where m.workspace_id=$1 and m.ticket_id=$2 and m.id=$3
+         and m.audience='client' and m.author_kind='client'
+       on conflict (workspace_id,ticket_id,pm_user_id) do update
+         set last_read_at=greatest(alpha_private.ticket_pm_read_cursors.last_read_at,excluded.last_read_at)`,
+      [ticket.state.workspaceId, ticket.state.id, throughMessageId, ticket.actor.userId],
+    );
   }
 }

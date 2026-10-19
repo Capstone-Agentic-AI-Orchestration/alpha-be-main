@@ -28,6 +28,7 @@ interface QueueDbRow {
   invitation_status: string | null;
   invitation_expires_at: Date | string | null;
   invitation_delivery_status: string | null;
+  client_reply_unread: boolean | null;
   cursor_found: boolean;
 }
 
@@ -111,6 +112,14 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 invitation.status as invitation_status,
                 invitation.expires_at as invitation_expires_at,
                 invitation.delivery_status as invitation_delivery_status,
+                case when $2='pm' then exists (
+                  select 1 from alpha_private.ticket_messages client_message
+                  left join alpha_private.ticket_pm_read_cursors read_cursor
+                    on read_cursor.workspace_id=t.workspace_id and read_cursor.ticket_id=t.id and read_cursor.pm_user_id=$3
+                  where client_message.workspace_id=t.workspace_id and client_message.ticket_id=t.id
+                    and client_message.audience='client' and client_message.author_kind='client'
+                    and client_message.created_at > coalesce(read_cursor.last_read_at, '-infinity'::timestamptz)
+                ) else false end as client_reply_unread,
                 case when $2 = 'pm' then t.internal_updated_at else t.client_updated_at end as sort_at
          from alpha_private.tickets t
          left join lateral (
@@ -313,6 +322,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
       clientInvitation,
       ...(pmClientGroup ? { pmClientGroup } : {}),
       ...(scope.principal.kind === 'pm' ? { pmProjectName: row.project_display_name } : {}),
+      ...(scope.principal.kind === 'pm' ? { pmClientReplyUnread: row.client_reply_unread === true } : {}),
       header: {
         workspaceId: row.workspace_id,
         ticketId: row.ticket_id,

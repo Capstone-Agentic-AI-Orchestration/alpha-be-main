@@ -1,7 +1,7 @@
 import type { BuildStepPhase, Project, ProjectBuildStep, ProjectResource } from '../models/index.js';
 import { BuildStepError, normalizeBuildSteps } from './buildSteps.js';
-import type { Sql } from './database.js';
-import { withProjectDefaults, type ProjectStore } from './projectStore.js';
+import { DatabaseError, type Sql } from './database.js';
+import { ProjectLinkedToTicketError, withProjectDefaults, type ProjectStore } from './projectStore.js';
 
 /**
  * Projects in the cloud.
@@ -127,11 +127,22 @@ export class PostgresProjectStore implements ProjectStore {
 
   async remove(workspaceId: string, id: string): Promise<boolean> {
     // Build steps go with it, by the schema's `on delete cascade`.
-    const { rows } = await this.sql.query(
-      'delete from projects where workspace_id = $1 and id = $2 returning id',
-      [workspaceId, id]
-    );
-    return rows.length > 0;
+    try {
+      const { rows } = await this.sql.query(
+        'delete from projects where workspace_id = $1 and id = $2 returning id',
+        [workspaceId, id]
+      );
+      return rows.length > 0;
+    } catch (error) {
+      const cause = error instanceof DatabaseError ? error.cause : error;
+      const databaseError = cause as { code?: unknown; constraint?: unknown };
+      const sqlState = error instanceof DatabaseError ? error.sqlState : databaseError.code;
+      if ((sqlState === '23503' || sqlState === '23001')
+        && databaseError.constraint === 'tickets_project_link_fk') {
+        throw new ProjectLinkedToTicketError();
+      }
+      throw error;
+    }
   }
 
   async getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null> {

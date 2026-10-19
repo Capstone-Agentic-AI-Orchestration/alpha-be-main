@@ -1,5 +1,9 @@
 import type { Project, ProjectBuildStep } from '../models/index.js';
 
+export class ProjectLinkedToTicketError extends Error {
+  constructor() { super('This project is still linked to one or more client tickets.'); this.name = 'ProjectLinkedToTicketError'; }
+}
+
 /**
  * Projects, as the board sees them.
  *

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Sql, TransactionalSql } from './database.js';
 import type { LockedTicket, SavedTicketOperation, TicketOperationKey, TicketSubject, TicketTarget } from './ticketCommandStore.js';
-import type { TicketProjectManagementStore, TicketProjectManagementTransaction, TicketProjectLinkAudit, TicketWorkspaceProject } from './ticketProjectManagementStore.js';
+import type { TicketProjectManagementStore, TicketProjectManagementTransaction, TicketProjectLinkAudit,
+  TicketSharedPreview, TicketWorkspaceProject } from './ticketProjectManagementStore.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
@@ -64,15 +65,25 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
   async loadCurrentProjectLink(target: TicketTarget) {
     if (!this.locked || this.locked.actor.kind !== 'pm' || target.workspaceId !== this.locked.state.workspaceId
       || target.ticketId !== this.locked.state.id) return invalid();
-    const { rows } = await this.sql.query<{ project_id: string | null; project_display_name: string | null; project_client_visible: boolean }>(
-      `select project_id,project_display_name,project_client_visible from alpha_private.tickets
-        where workspace_id=$1 and id=$2 for share`, [target.workspaceId, target.ticketId],
+    const { rows } = await this.sql.query<{ project_id: string | null; project_display_name: string | null; project_client_visible: boolean;
+      preview_repository: string | null; preview_branch: string | null; preview_url: string | null }>(
+      `select t.project_id,t.project_display_name,t.project_client_visible,
+              p.repository as preview_repository,p.branch as preview_branch,p.url as preview_url
+         from alpha_private.tickets t
+         left join alpha_private.ticket_project_client_previews p
+           on p.workspace_id=t.workspace_id and p.ticket_id=t.id and p.project_id=t.project_id
+        where t.workspace_id=$1 and t.id=$2 for share of t`, [target.workspaceId, target.ticketId],
     );
     const row = rows[0];
     if (!row || row.project_id !== this.locked.state.projectId || typeof row.project_client_visible !== 'boolean'
       || (row.project_id === null && (row.project_display_name !== null || row.project_client_visible))
       || (row.project_id !== null && (typeof row.project_display_name !== 'string' || !row.project_display_name.trim()))) return invalid();
-    return { projectId: row.project_id, projectName: row.project_display_name, clientVisible: row.project_client_visible };
+    const previewColumns = [row.preview_repository, row.preview_branch, row.preview_url];
+    const noPreview = previewColumns.every(value => value === null);
+    const projectPreview: TicketSharedPreview | null = noPreview ? null : row.preview_repository && (row.preview_branch === 'main' || row.preview_branch === 'uat')
+      && row.preview_url ? { repository: row.preview_repository, branch: row.preview_branch, url: row.preview_url } : invalid();
+    return { projectId: row.project_id, projectName: row.project_display_name,
+      clientVisible: row.project_client_visible, projectPreview };
   }
 
   async saveProjectLink(
@@ -81,6 +92,7 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
     state: LockedTicket['state'],
     projectName: string | null,
     clientVisible: boolean,
+    projectPreview: TicketSharedPreview | null,
     occurredAt: string,
   ): Promise<boolean> {
     if (!this.locked || this.locked.actor.kind !== 'pm' || target.workspaceId !== this.locked.state.workspaceId
@@ -88,6 +100,7 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
       || state.version !== expectedVersion + 1 || (state.projectId === null && (projectName !== null || clientVisible))
       || (state.projectId !== null && (typeof projectName !== 'string' || !projectName.trim()
         || projectName.trim() !== projectName || projectName.length > 200))
+      || (projectPreview !== null && (state.projectId === null || !clientVisible))
       || typeof clientVisible !== 'boolean' || state.status !== this.locked.state.status) return invalid();
     const { rows } = await this.sql.query<{ id: string }>(
       `update alpha_private.tickets
@@ -100,7 +113,22 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
       [target.workspaceId, target.ticketId, expectedVersion, state.projectId, projectName, clientVisible,
         JSON.stringify(state), state.status, state.version, occurredAt],
     );
-    return rows.length === 1;
+    if (rows.length !== 1) return false;
+    if (projectPreview === null) {
+      await this.sql.query('delete from alpha_private.ticket_project_client_previews where workspace_id=$1 and ticket_id=$2',
+        [target.workspaceId, target.ticketId]);
+    } else {
+      await this.sql.query(
+        `insert into alpha_private.ticket_project_client_previews
+           (workspace_id,project_id,ticket_id,repository,branch,url,updated_by,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)
+         on conflict (workspace_id,ticket_id) do update set
+           project_id=excluded.project_id,repository=excluded.repository,branch=excluded.branch,
+           url=excluded.url,updated_by=excluded.updated_by,updated_at=excluded.updated_at`,
+        [target.workspaceId, state.projectId, target.ticketId, projectPreview.repository, projectPreview.branch,
+          projectPreview.url, this.locked.actor.userId, occurredAt]);
+    }
+    return true;
   }
 
   async appendProjectLinkAudit(audit: TicketProjectLinkAudit): Promise<void> {
@@ -112,7 +140,8 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
       [randomUUID(), audit.key.workspaceId, audit.key.ticketId, audit.key.actorId, audit.occurredAt,
         JSON.stringify({ operationId: audit.key.operationId, previousProjectId: audit.previousProjectId,
           projectId: audit.projectId, previousClientVisible: audit.previousClientVisible,
-          clientVisible: audit.clientVisible, projectName: audit.projectName })],
+          clientVisible: audit.clientVisible, projectName: audit.projectName,
+          previousProjectPreview: audit.previousProjectPreview, projectPreview: audit.projectPreview })],
     );
   }
 

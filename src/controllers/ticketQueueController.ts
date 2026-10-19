@@ -84,6 +84,7 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
     || (invitation !== undefined && invitation !== null && (!invitationStateValues.has(invitation.status)
       || !invitationDeliveryValues.has(invitation.delivery) || !validTimestamp(invitation.expiresAt)))
     || typeof internal.clientAccessActive !== 'boolean'
+    || typeof internal.clientReplyUnread !== 'boolean'
     || (clientGroup !== undefined && (!clientGroup || !opaqueTicketRequestValue(clientGroup.key)
       || typeof clientGroup.displayName !== 'string' || !clientGroup.displayName.trim()
       || clientGroup.displayName.trim() !== clientGroup.displayName || clientGroup.displayName.length > 200
@@ -112,6 +113,7 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
       nextAction: internal.nextAction,
       projectId: internal.projectId,
       clientAccessActive: internal.clientAccessActive,
+      clientReplyUnread: internal.clientReplyUnread,
       clientInvitation: invitation ?? null,
       ...(clientGroup ? { clientGroup: {
         key: clientGroup.key, displayName: clientGroup.displayName,

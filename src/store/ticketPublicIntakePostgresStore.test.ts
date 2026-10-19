@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { PGlite } from '@electric-sql/pglite';
 
 import { createTicketPublicIntakeRouteBoundary } from '../controllers/ticketPublicIntakeRouteFactory.js';
@@ -9,7 +7,7 @@ import { createTicketPublicIntakeService } from '../services/ticketPublicIntakeS
 import { createTicketQueueService } from '../services/ticketQueueService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
 import { PublicTicketIntakeError } from '../ticketing/publicIntake.js';
-import { createSupabaseTestDatabase } from './testDatabase.js';
+import { createTestDatabase } from './testDatabase.js';
 import { fromPool, type Sql, type TransactionalSql } from './database.js';
 import { PostgresTicketPublicIntakeStore } from './ticketPublicIntakePostgresStore.js';
 import { PostgresTicketQueueStore } from './ticketQueuePostgresStore.js';
@@ -17,10 +15,6 @@ import { PostgresTicketReadStore } from './ticketReadPostgresStore.js';
 import { PostgresTicketAcknowledgmentStore } from './ticketAcknowledgmentPostgresStore.js';
 import { createTicketAcknowledgmentDeliveryService } from '../services/ticketAcknowledgmentDeliveryService.js';
 
-const staging = resolve(__dirname, '../../supabase-staging');
-const baseline = readFileSync(resolve(staging, 'supabase/migrations/20261007154549_live_control_plane_baseline.sql'), 'utf8');
-const ticketSchema = readFileSync(resolve(staging, 'supabase/migrations/20261008061941_client_ticketing_private_store.sql'), 'utf8');
-const ticketIndexes = readFileSync(resolve(staging, 'supabase/migrations/20261008063017_client_ticketing_fk_indexes.sql'), 'utf8');
 const now = new Date('2026-10-08T08:00:00.000Z');
 let local: PGlite;
 let db: TransactionalSql;
@@ -152,22 +146,12 @@ async function counts(workspaceId: string) {
 }
 
 beforeAll(async () => {
-  local = await createSupabaseTestDatabase();
-  await local.exec('begin');
-  try {
-    await local.exec(baseline);
-    await local.exec(ticketSchema);
-    await local.exec(ticketIndexes);
-    await local.exec('commit');
-  } catch (error) {
-    await local.exec('rollback');
-    throw error;
-  }
+  local = await createTestDatabase();
   db = transactionalSql(local);
 });
 afterAll(async () => { await local?.close(); });
 
-describe('PostgresTicketPublicIntakeStore against the reviewed local schema', () => {
+describe('PostgresTicketPublicIntakeStore against the current migrated schema', () => {
   it('creates one generic-acknowledged Received inquiry with private unverified contact and no account/project/Issue', async () => {
     const workspaceId = 'intake-create-ws';
     await seedEntry({ workspaceId, slug: 'synthetic-create' });

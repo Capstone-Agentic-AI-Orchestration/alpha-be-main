@@ -13,7 +13,7 @@ export interface TicketHeaderRow extends TicketReadScope {
   internalUpdatedAt: string;
   closedAt: string | null;
   relatedTicketId: string | null;
-  sharedProject: { projectId: string; displayName: string; clientVisible: boolean } | null;
+  sharedProject: { projectId: string; displayName: string; clientVisible: boolean; preview?: { repository: string; branch: 'main' | 'uat'; url: string } | null } | null;
 }
 
 export interface TicketScopeReadRow extends TicketReadScope {
@@ -98,6 +98,8 @@ export interface TicketReadTransaction extends Pick<TicketCommandTransaction, 'l
    * cursor -> non-enumerating 404, never a global message lookup.
    */
   loadMessages(ticket: LockedTicket, audience: 'client' | 'internal', page: TicketMessagePageRequest): Promise<TicketMessageReadRow[]>;
+  /** Record only a client-authored public message actually returned to this PM. */
+  markClientMessagesRead?(ticket: LockedTicket, throughMessageId: string): Promise<void>;
 }
 export interface TicketReadStore {
   transaction<T>(work: (tx: TicketReadTransaction) => Promise<T>): Promise<T>;

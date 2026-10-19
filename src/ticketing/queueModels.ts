@@ -19,6 +19,7 @@ export interface PmTicketQueueItem extends ClientTicketQueueItem {
     projectId: string | null;
     clientAccessActive: boolean;
     clientInvitation: NonNullable<TicketQueueRow['clientInvitation']> | null;
+    clientReplyUnread: boolean;
     clientGroup?: NonNullable<TicketQueueRow['pmClientGroup']>;
     projectName?: string | null;
   };
@@ -90,6 +91,7 @@ export function projectTicketQueueRow(scope: LockedTicketQueue, row: TicketQueue
       updatedAt: header.internalUpdatedAt, actionOwner: state.actionOwner, nextAction: state.nextAction,
       projectId: state.projectId, clientAccessActive: row.clientAccessActive,
       clientInvitation: row.clientInvitation ?? null,
+      clientReplyUnread: row.pmClientReplyUnread === true,
       ...(row.pmClientGroup ? { clientGroup: { ...row.pmClientGroup } } : {}),
       ...(row.pmProjectName !== undefined ? { projectName: row.pmProjectName } : {}),
     },

@@ -23,7 +23,7 @@ export interface TicketAcknowledgmentEmailProvider {
   readonly identity: string;
   // Adapters must support the same UUID key and identical-request deduplication
   // for at least the queue's ten-minute retry window. Verify before adding one.
-  send(recipient: string, idempotencyKey: string): Promise<void>;
+  send(recipient: string, idempotencyKey: string, publicReference?: string): Promise<void>;
 }
 
 export interface TicketAcknowledgmentProviderConfiguration {
@@ -45,6 +45,13 @@ export function createTicketAcknowledgmentEmailProvider(
 
 const email = z.string().email().max(254);
 const uuid = z.string().uuid();
+const inquiryReference = z.string().regex(/^INQ-[A-F0-9]{32}$/);
+
+function acknowledgmentText(publicReference?: string): string {
+  if (publicReference === undefined) return ACKNOWLEDGMENT_TEXT;
+  if (!inquiryReference.safeParse(publicReference).success) throw new TicketAcknowledgmentEmailError(false);
+  return `${ACKNOWLEDGMENT_TEXT}\n\nYour inquiry reference: ${publicReference}`;
+}
 
 /** The default resend.dev sender is restricted to the Resend account's email. */
 export function createResendTicketAcknowledgmentProvider(config: {
@@ -63,9 +70,10 @@ export function createResendTicketAcknowledgmentProvider(config: {
     identity: createHash('sha256').update(JSON.stringify([
       'resend-ack-v1', from, restrictedRecipient, ACKNOWLEDGMENT_SUBJECT, ACKNOWLEDGMENT_TEXT,
     ])).digest('hex'),
-    async send(recipient, idempotencyKey) {
+    async send(recipient, idempotencyKey, publicReference) {
       // Never redirect somebody else's inquiry receipt to the account owner's inbox.
       if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success
+        || (publicReference !== undefined && !inquiryReference.safeParse(publicReference).success)
         || (restrictedRecipient && recipient.toLowerCase() !== restrictedRecipient)) {
         throw new TicketAcknowledgmentEmailError(false);
       }
@@ -74,7 +82,7 @@ export function createResendTicketAcknowledgmentProvider(config: {
           method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
           headers: { accept: 'application/json', 'content-type': 'application/json',
             Authorization: `Bearer ${config.apiKey}`, 'Idempotency-Key': idempotencyKey },
-          body: JSON.stringify({ from, to: [recipient], subject: ACKNOWLEDGMENT_SUBJECT, text: ACKNOWLEDGMENT_TEXT }),
+          body: JSON.stringify({ from, to: [recipient], subject: ACKNOWLEDGMENT_SUBJECT, text: acknowledgmentText(publicReference) }),
         });
         if (response.ok) {
           const body: unknown = await response.json();
@@ -111,8 +119,9 @@ export function createBrevoTicketAcknowledgmentProvider(config: {
     identity: createHash('sha256').update(JSON.stringify([
       'brevo-ack-v1', config.senderEmail, config.senderName, ACKNOWLEDGMENT_SUBJECT, ACKNOWLEDGMENT_TEXT,
     ])).digest('hex'),
-    async send(recipient, idempotencyKey) {
-      if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success) {
+    async send(recipient, idempotencyKey, publicReference) {
+      if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success
+        || (publicReference !== undefined && !inquiryReference.safeParse(publicReference).success)) {
         throw new TicketAcknowledgmentEmailError(false);
       }
       try {
@@ -122,7 +131,7 @@ export function createBrevoTicketAcknowledgmentProvider(config: {
           body: JSON.stringify({
             sender: { email: config.senderEmail, name: config.senderName },
             to: [{ email: recipient }], subject: ACKNOWLEDGMENT_SUBJECT,
-            textContent: ACKNOWLEDGMENT_TEXT, headers: { idempotencyKey },
+            textContent: acknowledgmentText(publicReference), headers: { idempotencyKey },
           }),
         });
         if (response.status === 201) return; // Accepted by Brevo, not proof of inbox delivery.
