@@ -32,6 +32,8 @@ export interface VerificationCommandResult {
 export interface VerificationResult {
   status: VerificationStatus;
   commands: VerificationCommandResult[];
+  /** Requested scripts missing from the repository manifest, never treated as passed. */
+  missingScripts: string[];
   summary: string;
 }
 
@@ -78,17 +80,20 @@ function hasScript(scripts: Record<string, unknown>, name: string): boolean {
  * running the individual scripts as well would duplicate work. Without one,
  * run the conventional checks that actually exist, in a stable order.
  */
-export function discoverVerificationCommands(cwd: string): VerificationCommand[] {
+export function discoverVerificationCommands(cwd: string, requestedScripts?: readonly string[]): VerificationCommand[] {
   const manifest = readManifest(cwd);
   const scripts = manifest?.scripts;
   if (!scripts) return [];
 
   const manager = packageManagerFor(cwd, manifest);
   const bin = packageManagerBinary(manager);
-  const selected = COMBINED_CHECK_SCRIPTS.find(name => hasScript(scripts, name));
-  const scriptsToRun = selected
-    ? [selected]
-    : INDIVIDUAL_CHECK_SCRIPTS.filter(name => hasScript(scripts, name));
+  const requested = [...new Set(requestedScripts ?? [])];
+  const selected = requested.length ? undefined : COMBINED_CHECK_SCRIPTS.find(name => hasScript(scripts, name));
+  const scriptsToRun = requested.length
+    ? requested.filter(name => hasScript(scripts, name))
+    : selected
+      ? [selected]
+      : INDIVIDUAL_CHECK_SCRIPTS.filter(name => hasScript(scripts, name));
 
   return scriptsToRun.map(script => ({
     script,
@@ -164,30 +169,43 @@ function resultSummary(results: VerificationCommandResult[], status: Verificatio
 export async function runVerification(options: {
   runId: string;
   cwd: string;
+  requiredScripts?: readonly string[];
   shouldContinue?: () => boolean;
 }): Promise<VerificationResult> {
-  const commands = discoverVerificationCommands(options.cwd);
+  const requestedScripts = [...new Set(options.requiredScripts ?? [])];
+  const commands = discoverVerificationCommands(options.cwd, requestedScripts.length ? requestedScripts : undefined);
+  const scripts = readManifest(options.cwd)?.scripts ?? {};
+  const missingScripts = requestedScripts.filter(script => !hasScript(scripts, script));
   if (!commands.length) {
-    return { status: 'skipped', commands: [], summary: resultSummary([], 'skipped') };
+    const summary = missingScripts.length
+      ? `Required checks unavailable: ${missingScripts.join(', ')}.`
+      : resultSummary([], 'skipped');
+    return { status: 'skipped', commands: [], missingScripts, summary };
   }
 
   const results: VerificationCommandResult[] = [];
   for (const command of commands) {
     if (options.shouldContinue && !options.shouldContinue()) {
-      return { status: 'cancelled', commands: results, summary: resultSummary(results, 'cancelled') };
+      return { status: 'cancelled', commands: results, missingScripts, summary: resultSummary(results, 'cancelled') };
     }
 
     const result = await runCommand(options.runId, options.cwd, command);
     if (options.shouldContinue && !options.shouldContinue()) {
-      return { status: 'cancelled', commands: results, summary: resultSummary(results, 'cancelled') };
+      return { status: 'cancelled', commands: results, missingScripts, summary: resultSummary(results, 'cancelled') };
     }
     results.push(result);
     if (result.exitCode !== 0) {
-      return { status: 'failed', commands: results, summary: resultSummary(results, 'failed') };
+      return { status: 'failed', commands: results, missingScripts, summary: resultSummary(results, 'failed') };
     }
   }
 
-  return { status: 'passed', commands: results, summary: resultSummary(results, 'passed') };
+  const summary = resultSummary(results, 'passed');
+  return {
+    status: 'passed',
+    commands: results,
+    missingScripts,
+    summary: missingScripts.length ? `${summary} Required checks unavailable: ${missingScripts.join(', ')}.` : summary
+  };
 }
 
 export const verificationOutputLimit = MAX_OUTPUT_CHARS;

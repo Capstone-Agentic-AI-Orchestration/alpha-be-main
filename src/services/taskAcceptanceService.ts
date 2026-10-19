@@ -1,0 +1,580 @@
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
+import { orchestrationAgentReportSchema } from './orchestrationContract.js';
+import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { runVerification, type VerificationResult } from './verificationService.js';
+import { projectRunWorkspacePath } from './workspaceService.js';
+import { runWithWorkspace } from './workspaceContext.js';
+import { SQLiteService } from './sqliteService.js';
+import { OrchestrationService } from './orchestrationService.js';
+import { buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
+import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
+
+export interface TaskAcceptanceOutcome {
+  decision: 'accepted' | 'rejected' | 'blocked' | 'awaiting_approval';
+  snapshot: OrchestrationSnapshot;
+  reason?: string;
+  evidence?: Record<string, unknown>;
+}
+
+interface AcceptanceDependencies {
+  getCurrentBranch: typeof getCurrentBranch;
+  getHeadCommit: typeof getHeadCommit;
+  isGitWorkingTreeClean: typeof isGitWorkingTreeClean;
+  getGitChangedPaths: typeof getGitChangedPaths;
+  worktreePathFor: typeof projectRunWorkspacePath;
+  runVerification: typeof runVerification;
+}
+
+const CODE_TASK_KINDS = new Set(['database', 'backend', 'frontend', 'mobile']);
+
+function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
+  return CODE_TASK_KINDS.has(task.kind) &&
+    task.scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
+    !task.scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
+}
+
+function dependsTransitivelyOn(
+  task: OrchestrationTaskRecord,
+  dependencyId: string,
+  tasks: readonly OrchestrationTaskRecord[]
+): boolean {
+  const byId = new Map(tasks.map(candidate => [candidate.id, candidate]));
+  const seen = new Set<string>();
+  const visit = (taskId: string): boolean => {
+    for (const id of byId.get(taskId)?.dependsOn ?? []) {
+      if (id === dependencyId) return true;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (visit(id)) return true;
+    }
+    return false;
+  };
+  return visit(task.id);
+}
+
+function reviewRootTask(task: OrchestrationTaskRecord, tasks: readonly OrchestrationTaskRecord[]): OrchestrationTaskRecord | undefined {
+  return tasks.find(candidate => candidate.id === (task.correctionOfTaskId ?? task.id));
+}
+
+/** Match repository-relative Git paths against a small, dependency-free glob subset. */
+export function pathMatchesScope(filePath: string, pattern: string): boolean {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  let expression = '^';
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index];
+    if (char === '*' && pattern[index + 1] === '*') {
+      index++;
+      if (pattern[index + 1] === '/') {
+        index++;
+        expression += '(?:.*/)?';
+      } else {
+        expression += '.*';
+      }
+    } else if (char === '*') {
+      expression += '[^/]*';
+    } else if (char === '?') {
+      expression += '[^/]';
+    } else {
+      expression += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+    }
+  }
+  expression += '$';
+  return new RegExp(expression).test(normalizedPath);
+}
+
+export class TaskAcceptanceService {
+  private readonly dependencies: AcceptanceDependencies;
+
+  constructor(
+    private readonly store: SQLiteService,
+    private readonly orchestration: OrchestrationService,
+    dependencies: Partial<AcceptanceDependencies> = {}
+  ) {
+    this.dependencies = {
+      getCurrentBranch,
+      getHeadCommit,
+      isGitWorkingTreeClean,
+      getGitChangedPaths,
+      worktreePathFor: projectRunWorkspacePath,
+      runVerification,
+      ...dependencies
+    };
+  }
+
+  async evaluateAndAccept(input: {
+    workspaceId: string;
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    acceptedBy: string;
+    dispatchNext?: boolean;
+    now?: string;
+  }): Promise<TaskAcceptanceOutcome> {
+    return runWithWorkspace(input.workspaceId, async () => {
+      const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+      const task = snapshot?.tasks.find(item => item.id === input.taskId);
+      const attempt = snapshot?.attempts.find(item => item.id === input.attemptId);
+      if (!snapshot || !task || !attempt) throw new Error('The submitted task or attempt is unavailable.');
+      if (attempt.status === 'accepted') return { decision: 'accepted', snapshot };
+      if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== task.id || attempt.taskId !== task.id || attempt.status !== 'submitted') {
+        return { decision: 'blocked', snapshot, reason: 'This submission is stale or no longer owns the active task.' };
+      }
+
+      const rejection = await this.inspectSubmission(snapshot, task, attempt);
+      if (rejection) {
+        const rejected = this.store.rejectOrchestrationAttempt({
+          runId: snapshot.run.id,
+          taskId: task.id,
+          attemptId: attempt.id,
+          expectedTaskRevision: task.revision,
+          rejectedBy: input.acceptedBy,
+          reason: rejection.reason,
+          findings: rejection.findings,
+          now: input.now
+        });
+        return { decision: 'rejected', snapshot: rejected, reason: rejection.reason };
+      }
+
+      const evidence = await this.acceptanceEvidence(snapshot, task, attempt);
+      if (task.kind === 'review') {
+        const report = orchestrationAgentReportSchema.parse(attempt.result?.agentReport);
+        let amendment;
+        try {
+          amendment = buildOrchestrationReviewAmendment(
+            snapshot,
+            task,
+            report.reviewFindings!,
+            this.store.getAgents().filter(agent => !agent.isArchived).map(agent => ({ id: agent.id, role: agent.role }))
+          );
+        } catch (error) {
+          const reason = error instanceof OrchestrationReviewPlanError
+            ? error.message
+            : 'The reviewer findings could not be routed safely. Keep the build blocked for human review.';
+          const rejected = this.store.rejectOrchestrationAttempt({
+            runId: snapshot.run.id, taskId: task.id, attemptId: attempt.id,
+            expectedTaskRevision: task.revision, rejectedBy: input.acceptedBy, reason,
+            findings: [{ severity: 'blocking', evidence: { origin: 'review-routing', instruction: reason } }], now: input.now
+          });
+          return { decision: 'rejected', snapshot: rejected, reason };
+        }
+        evidence.reviewFindingCount = report.reviewFindings!.length;
+        evidence.routedCorrectionTaskIds = [...new Set(amendment.findings.flatMap(finding => finding.correctionTaskId ? [finding.correctionTaskId] : []))];
+        let accepted = await this.orchestration.acceptReviewOutcome({
+          workspaceId: input.workspaceId,
+          runId: snapshot.run.id,
+          taskId: task.id,
+          attemptId: attempt.id,
+          expectedTaskRevision: task.revision,
+          expectedPlanVersion: snapshot.run.planVersion,
+          acceptedBy: input.acceptedBy,
+          evidence,
+          amendment,
+          dispatchNext: input.dispatchNext,
+          now: input.now
+        });
+        if (accepted.run.status === 'validating') {
+          const finalized = await this.finalValidation(accepted, input.acceptedBy, input.now);
+          accepted = finalized.snapshot;
+          return finalized;
+        }
+        return { decision: 'accepted', snapshot: accepted, evidence };
+      }
+      let accepted = await this.orchestration.acceptAttempt({
+        workspaceId: input.workspaceId,
+        runId: snapshot.run.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        expectedTaskRevision: task.revision,
+        acceptedBy: input.acceptedBy,
+        evidence,
+        dispatchNext: input.dispatchNext,
+        now: input.now
+      });
+      if (accepted.run.status === 'validating') {
+        const finalized = await this.finalValidation(accepted, input.acceptedBy, input.now);
+        accepted = finalized.snapshot;
+        return finalized;
+      }
+      return { decision: 'accepted', snapshot: accepted, evidence };
+    });
+  }
+
+  async validateFinalState(input: {
+    workspaceId: string;
+    runId: string;
+    actorId: string;
+    now?: string;
+  }): Promise<TaskAcceptanceOutcome> {
+    return runWithWorkspace(input.workspaceId, async () => {
+      const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('The orchestration run is unavailable.');
+      if (snapshot.run.status !== 'validating') {
+        return { decision: 'blocked', snapshot, reason: 'The build is not waiting for final validation.' };
+      }
+      return this.finalValidation(snapshot, input.actorId, input.now);
+    });
+  }
+
+  private async inspectSubmission(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    attempt: OrchestrationAttemptRecord
+  ): Promise<{ reason: string; findings: Array<{ severity: 'blocking'; requirementId?: string; path?: string; evidence: Record<string, unknown> }>; evidence?: Record<string, unknown> } | null> {
+    const result = attempt.result;
+    const fail = (reason: string, evidence: Record<string, unknown>, filePath?: string) => ({
+      reason,
+      findings: [{ severity: 'blocking' as const, path: filePath, evidence: { instruction: reason, ...evidence } }]
+    });
+    if (!result || result.resultSchemaVersion !== 1 || typeof result.summary !== 'string' || !result.summary.trim()) {
+      return fail('The task result is missing the required versioned summary.', { check: 'result_schema' });
+    }
+    const report = orchestrationAgentReportSchema.safeParse(result.agentReport);
+    if (!report.success) {
+      return fail('The specialist did not return the required structured task report.', {
+        check: 'agent_report', detail: result.agentReportError ?? report.error.issues[0]?.message ?? 'invalid report'
+      });
+    }
+    if (report.data.taskId !== task.id) {
+      return fail('The specialist report names a different task.', {
+        check: 'report_identity', expectedTaskId: task.id, reportedTaskId: report.data.taskId
+      });
+    }
+    if (task.kind === 'review') {
+      if (!report.data.reviewFindings) {
+        return fail('The independent reviewer must return a reviewFindings array, including an explicit empty array when no defect is found.', {
+          check: 'review_findings_missing'
+        });
+      }
+      const seenFindings = new Set<string>();
+      for (const finding of report.data.reviewFindings) {
+        const key = `${finding.targetTaskId}\0${finding.path ?? ''}\0${finding.title.toLowerCase()}`;
+        if (seenFindings.has(key)) return fail('The independent review contains a duplicate finding.', { check: 'duplicate_review_finding', title: finding.title });
+        seenFindings.add(key);
+        const target = snapshot.tasks.find(candidate => candidate.id === finding.targetTaskId);
+        const root = target && reviewRootTask(target, snapshot.tasks);
+        if (!target || target.status !== 'accepted' || !CODE_TASK_KINDS.has(target.kind) || !root ||
+            target.ownerAgentId === task.ownerAgentId || !dependsTransitivelyOn(task, target.id, snapshot.tasks)) {
+          return fail(`Review finding “${finding.title}” does not refer to accepted code owned by a different specialist and included in this review's dependencies.`, {
+            check: 'review_target', targetTaskId: finding.targetTaskId
+          });
+        }
+        if (finding.requirementId && !root.requirementIds.includes(finding.requirementId)) {
+          return fail(`Review finding “${finding.title}” names a requirement outside task ${root.id}.`, {
+            check: 'review_requirement', requirementId: finding.requirementId
+          });
+        }
+        if (finding.path && !taskAllowsPath(target, finding.path)) {
+          return fail(`Review finding “${finding.title}” points to ${finding.path}, which is outside the owning task's authorized scope.`, {
+            check: 'review_path_scope', path: finding.path, targetTaskId: target.id
+          }, finding.path);
+        }
+      }
+    }
+    if (task.correctionOfTaskId) {
+      const expectedFindingIds = snapshot.findings
+        .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id)
+        .map(finding => finding.id).sort();
+      const reportedFindingCoverage = report.data.findingCoverage?.map(item => item.findingId).sort() ?? [];
+      if (!expectedFindingIds.length || expectedFindingIds.length !== reportedFindingCoverage.length ||
+          expectedFindingIds.some((id, index) => id !== reportedFindingCoverage[index]) ||
+          report.data.findingCoverage?.some(item => !item.evidence.trim())) {
+        return fail('The correction report must address every linked reviewer finding exactly once with concrete evidence.', {
+          check: 'review_finding_coverage', expectedFindingIds, reportedFindingIds: reportedFindingCoverage
+        });
+      }
+    }
+    const coveredRequirementIds = report.data.requirementCoverage.map(item => item.requirementId);
+    if (new Set(coveredRequirementIds).size !== coveredRequirementIds.length ||
+        task.requirementIds.length !== coveredRequirementIds.length ||
+        task.requirementIds.some(id => !coveredRequirementIds.includes(id)) ||
+        report.data.requirementCoverage.some(item => !item.evidence.trim())) {
+      return fail('The specialist report does not provide evidence for every assigned requirement exactly once.', {
+        check: 'requirement_coverage', expected: task.requirementIds, reported: coveredRequirementIds
+      });
+    }
+    const reportedCriteria = report.data.criteriaEvidence.map(item => item.criterion);
+    if (new Set(reportedCriteria).size !== reportedCriteria.length ||
+        task.acceptanceCriteria.length !== reportedCriteria.length ||
+        task.acceptanceCriteria.some(criterion => !reportedCriteria.includes(criterion))) {
+      return fail('The specialist report does not address every acceptance criterion exactly once.', {
+        check: 'acceptance_criteria', expected: task.acceptanceCriteria, reported: reportedCriteria
+      });
+    }
+    const unresolvedBlocker = report.data.blockers[0];
+    if (unresolvedBlocker) {
+      return fail(`The specialist reported a blocker: ${unresolvedBlocker}`, {
+        check: 'agent_blocker', blockers: report.data.blockers
+      });
+    }
+    if (result.prototypeRunId !== attempt.prototypeRunId || result.branchName !== snapshot.run.branchName) {
+      return fail('The submitted result does not match this attempt and its authorized branch.', {
+        check: 'attempt_identity', expectedRunId: attempt.prototypeRunId, resultRunId: result.prototypeRunId,
+        expectedBranch: snapshot.run.branchName, resultBranch: result.branchName
+      });
+    }
+    if (attempt.contextManifest.planVersion !== snapshot.run.planVersion || attempt.contextManifest.taskId !== task.id) {
+      return fail('The task attempt was created from a different plan version or task identity.', {
+        check: 'context_freshness', expectedPlanVersion: snapshot.run.planVersion,
+        attemptPlanVersion: attempt.contextManifest.planVersion, expectedTaskId: task.id,
+        attemptTaskId: attempt.contextManifest.taskId
+      });
+    }
+    if (!attempt.resultCommit || !/^[a-f0-9]{40,64}$/i.test(attempt.resultCommit)) {
+      return fail('The submission has no valid checkpoint commit.', { check: 'checkpoint_identity' });
+    }
+    const artifact = snapshot.artifacts.find(item => item.attemptId === attempt.id && item.type === 'task_result' && item.status === 'submitted');
+    if (!artifact?.content || createHash('sha256').update(artifact.content).digest('hex') !== artifact.contentHash) {
+      return fail('The submitted result artifact is missing or its content hash does not match.', { check: 'artifact_integrity' });
+    }
+    if (artifact.content !== JSON.stringify(result)) {
+      return fail('The saved result artifact differs from the attempt result.', { check: 'artifact_consistency', artifactId: artifact.id });
+    }
+
+    const worktreePath = snapshot.run.worktreePath
+      ? path.resolve(snapshot.run.worktreePath)
+      : path.resolve(this.dependencies.worktreePathFor(snapshot.run.projectId, snapshot.run.id));
+    if (!snapshot.run.branchName || !this.store.isPathAllowed(worktreePath)) {
+      return fail('The orchestration branch or approved local worktree is missing.', { check: 'workspace_authority' });
+    }
+    const [branchName, currentCommit, isClean] = await Promise.all([
+      this.dependencies.getCurrentBranch(worktreePath),
+      this.dependencies.getHeadCommit(worktreePath),
+      this.dependencies.isGitWorkingTreeClean(worktreePath)
+    ]);
+    if (branchName !== snapshot.run.branchName || currentCommit !== attempt.resultCommit || !isClean) {
+      return fail('The repository changed after submission or has uncheckpointed edits. Reconcile it before acceptance.', {
+        check: 'freshness', expectedBranch: snapshot.run.branchName, currentBranch: branchName,
+        submittedCommit: attempt.resultCommit, currentCommit, workingTreeClean: isClean
+      });
+    }
+    if (!attempt.startingCommit) {
+      return fail('The attempt has no recorded starting commit, so its changed-file scope cannot be verified.', { check: 'starting_commit' });
+    }
+    const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, attempt.startingCommit, attempt.resultCommit);
+    const declaredDeliverablePaths = new Set(report.data.deliverables.flatMap(deliverable => deliverable.paths));
+    const undeclaredChangedPath = changedPaths.find(filePath => !declaredDeliverablePaths.has(filePath));
+    if (undeclaredChangedPath) {
+      return fail(`The specialist report does not identify changed file ${undeclaredChangedPath} as a deliverable.`, {
+        check: 'deliverable_traceability', changedPath: undeclaredChangedPath
+      }, undeclaredChangedPath);
+    }
+    if (!snapshot.run.baseCommit) {
+      return fail('The orchestration has no recorded base commit, so cumulative change scope cannot be verified.', { check: 'base_commit' });
+    }
+    const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktreePath, snapshot.run.baseCommit, attempt.resultCommit);
+    const readOnlyTask = !CODE_TASK_KINDS.has(task.kind);
+    if (readOnlyTask && changedPaths.length) {
+      return fail('This planning, review, validation, or delivery task changed repository files.', {
+        check: 'read_only_scope', changedPaths
+      }, changedPaths[0]);
+    }
+    if (changedPaths.length && !task.scope.includePaths.length && !readOnlyTask) {
+      return fail('This code task has no approved path scope. Add an explicit scope before accepting repository changes.', {
+        check: 'scope_unconfigured', changedPaths
+      }, changedPaths[0]);
+    }
+    const correctionPaths = new Set(snapshot.findings
+      .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id && finding.path)
+      .map(finding => finding.path!));
+    const correctionLineageTaskIds = new Set(task.correctionOfTaskId
+      ? [task.correctionOfTaskId, ...snapshot.tasks.filter(candidate => candidate.correctionOfTaskId === task.correctionOfTaskId).map(candidate => candidate.id)]
+      : [task.id]);
+    const acceptedPathOwners = new Map<string, { taskId: string; commit: string }>();
+    for (const acceptedTask of snapshot.tasks.filter(candidate => candidate.status === 'accepted')) {
+      const acceptedAttempt = [...snapshot.attempts].reverse().find(candidate =>
+        candidate.taskId === acceptedTask.id && candidate.status === 'accepted' && candidate.resultCommit);
+      const acceptedEvidence = acceptedAttempt?.result?.acceptanceEvidence;
+      const acceptedChangedPaths = acceptedEvidence && typeof acceptedEvidence === 'object'
+        ? (acceptedEvidence as Record<string, unknown>).changedPaths
+        : undefined;
+      if (!acceptedAttempt?.resultCommit || !Array.isArray(acceptedChangedPaths)) continue;
+      for (const acceptedPath of acceptedChangedPaths) {
+        if (typeof acceptedPath === 'string') acceptedPathOwners.set(acceptedPath, {
+          taskId: acceptedTask.id, commit: acceptedAttempt.resultCommit
+        });
+      }
+    }
+    const acceptedCommits = new Set([...acceptedPathOwners.values()].map(owner => owner.commit));
+    const pathsChangedSinceAccepted = new Map<string, Set<string>>();
+    for (const acceptedCommit of acceptedCommits) {
+      const changedSinceAccepted = await this.dependencies.getGitChangedPaths(worktreePath, acceptedCommit, attempt.resultCommit);
+      pathsChangedSinceAccepted.set(acceptedCommit, new Set(changedSinceAccepted));
+    }
+    const restoredAcceptedPaths = new Set([...acceptedPathOwners]
+      .filter(([filePath, owner]) => !pathsChangedSinceAccepted.get(owner.commit)?.has(filePath))
+      .map(([filePath]) => filePath));
+    const outsideScope = changedPaths.find(filePath => !taskAllowsPath(task, filePath) &&
+      !(correctionPaths.has(filePath) &&
+        (!cumulativeChangedPaths.includes(filePath) ||
+          restoredAcceptedPaths.has(filePath))));
+    if (outsideScope) {
+      return fail(`The task changed ${outsideScope}, which is outside its approved path scope.`, {
+        check: 'scope_violation', changedPath: outsideScope,
+        includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths
+      }, outsideScope);
+    }
+    const modifiedAcceptedPath = changedPaths.find(filePath =>
+      acceptedPathOwners.has(filePath) && !restoredAcceptedPaths.has(filePath) &&
+      !(task.correctionOfTaskId && correctionPaths.has(filePath) &&
+        correctionLineageTaskIds.has(acceptedPathOwners.get(filePath)!.taskId) && taskAllowsPath(task, filePath)));
+    if (modifiedAcceptedPath) {
+      const owner = acceptedPathOwners.get(modifiedAcceptedPath)!;
+      return fail(`This task changed ${modifiedAcceptedPath}, which belongs to already accepted task ${owner.taskId}. Restore the accepted artifact or request a plan amendment.`, {
+        check: 'accepted_artifact_mutation', changedPath: modifiedAcceptedPath,
+        acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
+      }, modifiedAcceptedPath);
+    }
+    const scopeOwners = snapshot.tasks.filter(candidate => candidate.status === 'accepted' || candidate.id === task.id);
+    const outsideBuildScope = cumulativeChangedPaths.find(filePath =>
+      !scopeOwners.some(candidate => taskAllowsPath(candidate, filePath)));
+    if (outsideBuildScope) {
+      return fail(`The build still contains a change to ${outsideBuildScope} that no accepted or active task owns.`, {
+        check: 'cumulative_scope_violation', changedPath: outsideBuildScope,
+        authorizedTaskIds: scopeOwners.filter(candidate => taskAllowsPath(candidate, outsideBuildScope)).map(candidate => candidate.id)
+      }, outsideBuildScope);
+    }
+
+    const verification = result.verification && typeof result.verification === 'object'
+      ? (result.verification as Record<string, unknown>).observed as RunVerificationEvidence | null
+      : null;
+    const observedCommands = verification?.commands ?? [];
+    const missingScripts = verification?.missingScripts ?? [];
+    const requiredChecks = task.requiredChecks;
+    const failedCheck = requiredChecks.find(script => missingScripts.includes(script) ||
+      !observedCommands.some(command => command.script === script && command.exitCode === 0 && command.signal === null));
+    if (failedCheck) {
+      return fail(`Required check “${failedCheck}” was not observed passing on this attempt.`, {
+        check: 'required_check', requiredScript: failedCheck, missingScripts, observedCommands
+      });
+    }
+    if (CODE_TASK_KINDS.has(task.kind) && (!verification || verification.status !== 'passed' || !observedCommands.length || missingScripts.length)) {
+      return fail('No complete, passing repository check evidence is available for this code task.', {
+        check: 'verification_evidence', verification: verification ?? null
+      });
+    }
+    if (verification?.status === 'failed' || observedCommands.some(command => command.exitCode !== 0 || command.signal !== null)) {
+      return fail('One or more observed verification commands failed.', {
+        check: 'verification_failed', verification
+      });
+    }
+    return null;
+  }
+
+  private async acceptanceEvidence(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    attempt: OrchestrationAttemptRecord
+  ): Promise<Record<string, unknown>> {
+    const worktree = snapshot.run.worktreePath ?? this.dependencies.worktreePathFor(snapshot.run.projectId, snapshot.run.id);
+    const changedPaths = attempt.startingCommit && attempt.resultCommit
+      ? await this.dependencies.getGitChangedPaths(worktree, attempt.startingCommit, attempt.resultCommit)
+      : [];
+    return {
+      acceptanceVersion: 1,
+      attemptId: attempt.id,
+      artifactId: snapshot.artifacts.find(item => item.attemptId === attempt.id && item.type === 'task_result')?.id,
+      resultCommit: attempt.resultCommit,
+      currentHead: attempt.resultCommit,
+      branchName: snapshot.run.branchName,
+      changedPaths,
+      cumulativeChangedPaths: snapshot.run.baseCommit && attempt.resultCommit
+        ? await this.dependencies.getGitChangedPaths(worktree, snapshot.run.baseCommit, attempt.resultCommit)
+        : [],
+      scope: { includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths, passed: true },
+      requiredChecks: task.requiredChecks,
+      verification: attempt.result?.verification,
+      semanticReviewRequired: CODE_TASK_KINDS.has(task.kind)
+    };
+  }
+
+  private async finalValidation(
+    snapshot: OrchestrationSnapshot,
+    actorId: string,
+    now?: string
+  ): Promise<TaskAcceptanceOutcome> {
+    const worktree = path.resolve(snapshot.run.worktreePath ?? this.dependencies.worktreePathFor(snapshot.run.projectId, snapshot.run.id));
+    const current = await this.store.getOrchestrationSnapshot(snapshot.run.id);
+    if (!current) throw new Error('The orchestration run disappeared before final validation.');
+    const [branchName, currentCommit, clean] = await Promise.all([
+      this.dependencies.getCurrentBranch(worktree),
+      this.dependencies.getHeadCommit(worktree),
+      this.dependencies.isGitWorkingTreeClean(worktree)
+    ]);
+    const taskCommits = current.attempts.filter(attempt => attempt.status === 'accepted').map(attempt => attempt.resultCommit).filter(Boolean);
+    const latestTaskCommit = taskCommits[taskCommits.length - 1];
+    if (branchName !== current.run.branchName || !clean || (latestTaskCommit && currentCommit !== latestTaskCommit)) {
+      const reason = 'The shared branch changed after the last accepted task; final validation needs a fresh reconciliation.';
+      const blocked = this.store.transitionOrchestrationRun({
+        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now
+      });
+      return { decision: 'blocked', snapshot: blocked, reason };
+    }
+    if (!current.run.baseCommit) {
+      const reason = 'The orchestration has no recorded base commit for final scope verification.';
+      const blocked = this.store.transitionOrchestrationRun({
+        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now
+      });
+      return { decision: 'blocked', snapshot: blocked, reason };
+    }
+    const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktree, current.run.baseCommit, currentCommit);
+    const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind));
+    const unownedPath = cumulativeChangedPaths.find(filePath =>
+      !acceptedCodeTasks.some(task => taskAllowsPath(task, filePath)));
+    if (unownedPath) {
+      const reason = `Final validation found a repository change to ${unownedPath} outside accepted task scopes.`;
+      const blocked = this.store.transitionOrchestrationRun({
+        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason,
+        evidence: { check: 'final_scope', changedPath: unownedPath, cumulativeChangedPaths }, now
+      });
+      return { decision: 'blocked', snapshot: blocked, reason };
+    }
+    const requiredScripts = [...new Set(current.tasks.flatMap(task => task.required ? task.requiredChecks : []))];
+    const verification: VerificationResult = await this.dependencies.runVerification({
+      runId: `orchestration-final-${current.run.id}`,
+      cwd: worktree,
+      requiredScripts: requiredScripts.length ? requiredScripts : undefined
+    });
+    const evidence = {
+      validationVersion: 1,
+      resultCommit: currentCommit,
+      branchName,
+      acceptedRequiredTaskIds: current.tasks.filter(task => task.required && task.status === 'accepted').map(task => task.id),
+      cumulativeChangedPaths,
+      checks: {
+        status: verification.status,
+        missingScripts: verification.missingScripts,
+        observed: verification.commands.map(command => ({
+          script: command.command.script,
+          display: command.command.display,
+          exitCode: command.exitCode,
+          signal: command.signal
+        })),
+        summary: verification.summary
+      },
+      noOpenBlockingFindings: !current.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity))
+    };
+    if (verification.status !== 'passed' || verification.missingScripts.length || !verification.commands.length || !evidence.noOpenBlockingFindings) {
+      const reason = verification.missingScripts.length
+        ? `Final validation could not run required checks: ${verification.missingScripts.join(', ')}.`
+        : verification.commands.length
+          ? 'Final validation failed or unresolved blocking findings remain.'
+          : 'No configured automated checks were observed; add a validation path before approval.';
+      const blocked = this.store.transitionOrchestrationRun({
+        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason,
+        evidence, now
+      });
+      return { decision: 'blocked', snapshot: blocked, reason, evidence };
+    }
+    const awaitingApproval = this.store.transitionOrchestrationRun({
+      runId: current.run.id,
+      expectedRevision: current.run.revision,
+      nextStatus: 'awaiting_approval',
+      actorId,
+      evidence,
+      now
+    });
+    return { decision: 'awaiting_approval', snapshot: awaitingApproval, evidence };
+  }
+}

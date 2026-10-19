@@ -101,6 +101,15 @@ async function call(app: express.Express, method: string, url: string, body?: un
   }
 }
 
+async function createProject(app: express.Express, input: Record<string, unknown>) {
+  const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
+  const { PostgresAgentStore } = await import('../store/postgresAgentStore.js');
+  const { sqlFor: freshSqlFor } = await import('../store/testDatabase.js');
+  await workspaceRegistry.resolve(session.login, 'ws-default', session.role as any);
+  await new PostgresAgentStore(freshSqlFor(db)).ensureOfficial('ws-default');
+  return call(app, 'POST', '/api/projects', { ...input, leadAgentId: 'agent-backend' });
+}
+
 beforeEach(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-projectroutes-'));
   opened = [];
@@ -130,7 +139,7 @@ describe('the cloud project routes', () => {
   it('create a project in Postgres and read it back', async () => {
     const app = await startCloudApi();
 
-    const created = await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
+    const created = await createProject(app, { name: 'Checkout', key: 'CHK' });
     expect(created.status).toBe(201);
     expect(created.body).toMatchObject({ name: 'Checkout', key: 'CHK' });
 
@@ -144,7 +153,7 @@ describe('the cloud project routes', () => {
 
   it('update and delete the row that is actually there', async () => {
     const app = await startCloudApi();
-    const created = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const created = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
 
     const updated = await call(app, 'PUT', `/api/projects/${created.id}`, { status: 'completed' });
     expect(updated.body).toMatchObject({ name: 'Checkout', status: 'completed' });
@@ -156,9 +165,9 @@ describe('the cloud project routes', () => {
   /** The same answer the SQLite path gives, for the same mistake. */
   it('answer a duplicate key with 409, naming the field', async () => {
     const app = await startCloudApi();
-    await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
+    await createProject(app, { name: 'Checkout', key: 'CHK' });
 
-    const again = await call(app, 'POST', '/api/projects', { name: 'Copy', key: 'CHK' });
+    const again = await createProject(app, { name: 'Copy', key: 'CHK' });
     expect(again.status).toBe(409);
     expect(again.body.error).toMatch(/key is already taken/);
   });
@@ -172,7 +181,7 @@ describe('the cloud project routes', () => {
   /** Belonging to the workspace is the grant: a developer works in every project, no assignment needed. */
   it('show a developer every project in the workspace, as theirs to work in', async () => {
     const admin = await startCloudApi();
-    await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
+    await createProject(admin, { name: 'Checkout', key: 'CHK' });
 
     session = { login: 'Dev1', role: 'dev' };
     const dev = await startCloudApi();
@@ -184,7 +193,7 @@ describe('the cloud project routes', () => {
   /** A client is not internal: they see the work they commissioned, and no more. */
   it('show a client only what they are assigned to', async () => {
     const admin = await startCloudApi();
-    await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' });
+    await createProject(admin, { name: 'Checkout', key: 'CHK' });
 
     session = { login: 'Client1', role: 'client' };
     const client = await startCloudApi();
@@ -199,7 +208,7 @@ describe('the cloud project routes', () => {
   /** An issue is work, not a catalogue entry: it stays behind assignment. */
   it('show a developer the issues of every project in the workspace', async () => {
     const admin = await startCloudApi();
-    const project = (await call(admin, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const project = (await createProject(admin, { name: 'Checkout', key: 'CHK' })).body;
     await call(admin, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id });
 
     session = { login: 'Dev1', role: 'dev' };
@@ -221,7 +230,7 @@ describe('the cloud project routes', () => {
   /** The creator is the person signed in, never what the request claims. */
   it('record the PM who created it, whatever the request says', async () => {
     const app = await startCloudApi();
-    const created = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK', createdBy: 'Someone-else' })).body;
+    const created = (await createProject(app, { name: 'Checkout', key: 'CHK', createdBy: 'Someone-else' })).body;
     expect(created.createdBy).toBe('PM1');
 
     // And an edit cannot re-home it.
@@ -245,7 +254,7 @@ describe('the cloud project routes', () => {
   /** Developers run projects: they edit one, they do not start or remove one. */
   it('let a developer edit a project, but not delete it', async () => {
     const pm = await startCloudApi();
-    const project = (await call(pm, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const project = (await createProject(pm, { name: 'Checkout', key: 'CHK' })).body;
 
     session = { login: 'Dev1', role: 'dev' };
     const dev = await startCloudApi();
@@ -270,7 +279,7 @@ describe('the cloud project routes', () => {
 describe('the cloud issue routes', () => {
   /** Every issue hangs off a project, so each test starts with one. */
   async function withProject(app: express.Express) {
-    const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
     return project.id as string;
   }
 
@@ -337,9 +346,12 @@ describe('the cloud issue routes', () => {
 describe('the cloud roster routes', () => {
   it('serve the agents the workspace actually has in Postgres', async () => {
     const app = await startCloudApi();
-    // One request first, so the directory has created the default workspace
-    // the roster hangs off — as it does on a real boot.
-    expect((await call(app, 'GET', '/api/agents')).body).toEqual([]);
+    // The roster endpoint creates the official roles for a newly resolved
+    // default workspace before returning the rows from Postgres.
+    const initial = await call(app, 'GET', '/api/agents');
+    expect(initial.status).toBe(200);
+    expect(initial.body.length).toBeGreaterThan(0);
+    expect(initial.body.every((agent: any) => agent.isSeeded)).toBe(true);
 
     const { PostgresAgentStore } = await import('../store/postgresAgentStore.js');
     const { sqlFor: freshSqlFor } = await import('../store/testDatabase.js');
@@ -426,7 +438,7 @@ describe('the cloud roster routes', () => {
     const { PostgresAgentStore, PostgresSquadStore } = await import('../store/postgresAgentStore.js');
     const { sqlFor: freshSqlFor } = await import('../store/testDatabase.js');
 
-    const project = (await call(app, 'POST', '/api/projects', { name: 'Checkout', key: 'CHK' })).body;
+    const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
     const agents = new PostgresAgentStore(freshSqlFor(db));
     const squads = new PostgresSquadStore(freshSqlFor(db));
     await agents.create('ws-default', {

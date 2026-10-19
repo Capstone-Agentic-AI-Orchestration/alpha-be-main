@@ -34,6 +34,7 @@ export interface ReconcileResult {
   runs: string[];
   squadRuns: string[];
   issues: string[];
+  agentCalls: string[];
 }
 
 /**
@@ -41,11 +42,18 @@ export interface ReconcileResult {
  * without starting a server.
  */
 export function reconcileInterruptedWork(now = new Date().toISOString()): ReconcileResult {
-  const result: ReconcileResult = { runs: [], squadRuns: [], issues: [] };
+  const result: ReconcileResult = { runs: [], squadRuns: [], issues: [], agentCalls: [] };
+  // These supervised turns and proposal runs are owned by the old daemon's
+  // process tree. A saved queued/running row cannot be treated as live after a
+  // restart, so close it and release its repository admission lock.
+  result.agentCalls = sqliteService.reconcileInterruptedAgentCalls(now);
 
   const orphanedRuns = sqliteService
     .getPrototypeRuns()
-    .filter(r => UNFINISHED_RUN_STATES.has(r.status));
+    // Versioned task runs have their own durable recovery state machine. Let
+    // that reconciler inspect their last checkpoint instead of flattening the
+    // child into a legacy "failed" run before its parent workflow can inspect it.
+    .filter(r => UNFINISHED_RUN_STATES.has(r.status) && !r.orchestrationRunId);
 
   const orphanedSquads = sqliteService
     .getSquadRuns()
@@ -130,11 +138,12 @@ export function reconcileInterruptedWork(now = new Date().toISOString()): Reconc
 /** Boot-time wrapper: never let a reconciliation failure stop the daemon. */
 export function reconcileOnStartup() {
   try {
-    const { runs, squadRuns, issues } = reconcileInterruptedWork();
-    if (runs.length || squadRuns.length) {
+    const { runs, squadRuns, issues, agentCalls } = reconcileInterruptedWork();
+    if (runs.length || squadRuns.length || agentCalls.length) {
       logInfo(
         `Closed work interrupted by a previous shutdown: ` +
-        `${runs.length} run(s), ${squadRuns.length} squad run(s), ${issues.length} issue(s) moved back to In Progress.`
+        `${runs.length} run(s), ${squadRuns.length} squad run(s), ${agentCalls.length} independent call(s), ` +
+        `${issues.length} issue(s) moved back to In Progress.`
       );
     }
   } catch (err) {

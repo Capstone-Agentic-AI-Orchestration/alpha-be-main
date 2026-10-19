@@ -380,6 +380,18 @@ export interface RunUsage {
   numTurns?: number;
 }
 
+/** Check results observed by Alpha for one run; prose claims stay separate. */
+export interface RunVerificationEvidence {
+  status: 'passed' | 'failed' | 'skipped' | 'cancelled';
+  missingScripts: string[];
+  commands: Array<{
+    script: string;
+    display: string;
+    exitCode: number | null;
+    signal: string | null;
+  }>;
+}
+
 /** Aggregated run telemetry returned to the Analytics surface. */
 export interface AnalyticsData {
   totalTokens24h: number;
@@ -451,6 +463,8 @@ export interface SquadRun {
 
 export interface PrototypeRun {
   id: string;
+  /** Workspace identity attached to process events for safe orchestration recovery. */
+  workspaceId?: string;
   issueId: string;
   projectId: string;
   agentId: string;
@@ -466,17 +480,24 @@ export interface PrototypeRun {
   stages: PrototypeRunStage[];
   activities?: RunActivity[];
   branchName?: string;
+  /** Local checkpoint observed after the runner's commit step. */
+  checkpointCommit?: string;
   prUrl?: string;
   changedFiles?: number;
   insertions?: number;
   deletions?: number;
   testSummary?: string;
+  verificationEvidence?: RunVerificationEvidence;
   /** Undefined when the CLI reported nothing — see RunUsage. */
   usage?: RunUsage;
   /** Set when this run is one member's turn inside a SquadRun. */
   squadRunId?: string;
   /** This member's position in the squad's order, 0-based. */
   squadOrder?: number;
+  /** Local task-driven build identity; absent for legacy/direct runs. */
+  orchestrationRunId?: string;
+  orchestrationTaskId?: string;
+  orchestrationAttemptId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -592,6 +613,8 @@ export interface AgentCall {
   instruction: string;
   workingCopyId?: string;
   workingBranch?: string;
+  /** Git HEAD observed when the independent call generated its proposal. */
+  workingCommit?: string;
   resultMessageId?: string;
   error?: string;
   createdAt: string;

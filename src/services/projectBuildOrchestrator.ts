@@ -1,24 +1,33 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 
-import type { Project, ProjectBuildStep, Squad, SquadMemberAssignment } from '../models/index.js';
+import type { Agent, Project, ProjectBuildStep, Squad, SquadMemberAssignment } from '../models/index.js';
+import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { issueStore, projectStore, squadStore } from '../store/stores.js';
-import { isGitRepo } from '../utils/gitUtils.js';
+import { addBranchWorktree, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { agentReadiness } from './agentReadiness.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { cloneAndBindProject } from './projectBindings.js';
-import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
+import { projectRunWorkspacePath, resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { isSupportedTopology, orderedMembers, squadRunner } from './squadRunner.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
 import { supabaseService } from './supabaseService.js';
+import { resolveAgent } from './personaService.js';
+import { orchestrationRequestFingerprint } from './orchestrationService.js';
+import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity } from './orchestrationPlanner.js';
+import { roleCanOwnOrchestrationTask } from './orchestrationContract.js';
+import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
+import { orchestrationSessionId } from './orchestrationSession.js';
 export { isProjectBuildRequest } from './projectBuildIntent.js';
 
 export interface ProjectBuildStartResult {
-  status: 'started' | 'queued' | 'in_progress' | 'awaiting_review' | 'failed' | 'blocked';
+  status: 'started' | 'queued' | 'in_progress' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';
   projectId?: string;
   projectName?: string;
   repository?: string;
@@ -27,6 +36,9 @@ export interface ProjectBuildStartResult {
   squadId?: string;
   squadName?: string;
   squadRunId?: string;
+  orchestrationRunId?: string;
+  orchestrationTaskCount?: number;
+  orchestrationCurrentTask?: { id: string; title: string; ownerAgentId: string };
   branchName?: string;
   reason?: string;
 }
@@ -41,6 +53,9 @@ interface StartProjectBuildInput {
 }
 
 const inFlightBuilds = new Map<string, Promise<ProjectBuildStartResult>>();
+// Desktop supplies a fresh ID for every daemon launch; source runs use a
+// process-scoped fallback so interrupted planning can be recognized as stale.
+const orchestrationOwnerSessionId = orchestrationSessionId;
 
 function blocked(reason: string, project?: Project, repository?: string): ProjectBuildStartResult {
   return {
@@ -130,6 +145,363 @@ function selectSquad(
   return accessible.length === 1 ? accessible[0] : null;
 }
 
+const PLANNING_KINDS = new Set(['requirements', 'architecture']);
+const MAX_README_CONTEXT_CHARS = 7_000;
+
+type PlanningReservation = NonNullable<ReturnType<typeof sqliteService.getOrchestrationPlanningReservation>>;
+type PlanningReservationCleanup = 'released' | 'workspace_preserved' | 'reservation_changed';
+
+async function reconcilePlanningReservation(input: {
+  workspaceId: string;
+  repositoryDir: string;
+  projectId: string;
+  reservation: PlanningReservation;
+}): Promise<PlanningReservationCleanup> {
+  const worktreeSafeToRetire = await removeStaleOrchestrationPlanningWorktree({
+    repositoryDir: input.repositoryDir,
+    projectId: input.projectId,
+    reservation: input.reservation
+  });
+  if (!worktreeSafeToRetire) {
+    const inspection = await inspectOrchestrationPlanningWorktree({
+      projectId: input.projectId,
+      reservation: input.reservation
+    });
+    const durableReservation = runWithWorkspace(input.workspaceId, () =>
+      sqliteService.getOrchestrationPlanningReservationByRun(input.projectId, input.reservation.runId));
+    if (durableReservation) {
+      runWithWorkspace(input.workspaceId, () => sqliteService.recordOrchestrationPlanningRecovery({
+        projectId: input.projectId,
+        reservation: durableReservation,
+        state: inspection.canPreview ? 'needs_review' : 'manual_review',
+        reason: inspection.canPreview
+          ? 'Planning stopped before a task plan was activated. The saved private workspace differs from its reserved clean base and has been preserved for review.'
+          : 'Planning stopped before a task plan was activated. Alpha could not verify the saved workspace identity, so it was preserved and repository admission remains paused.'
+      }));
+    }
+    return 'workspace_preserved';
+  }
+  const released = runWithWorkspace(input.workspaceId, () => sqliteService.releaseOrchestrationPlanningReservation(
+    input.reservation.requestKey,
+    input.reservation.requestFingerprint,
+    input.reservation.ownerSessionId
+  ));
+  return released ? 'released' : 'reservation_changed';
+}
+
+function orchestrationBranchName(runId: string): string {
+  const suffix = runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase();
+  if (!suffix) throw new Error('The planning reservation has no safe branch identity.');
+  return `alpha/orchestration/${suffix}`;
+}
+
+function repositoryPlanningContext(repositoryDir: string): { context: string; scripts: string[] } {
+  const visibleEntries = fs.readdirSync(repositoryDir, { withFileTypes: true })
+    .filter(entry => !['.git', 'node_modules', '.next', 'dist', 'build'].includes(entry.name))
+    .slice(0, 50)
+    .map(entry => `${entry.isDirectory() ? 'dir' : 'file'} ${entry.name}`);
+  let readme = '';
+  for (const name of ['README.md', 'readme.md', 'Readme.md']) {
+    const file = path.join(repositoryDir, name);
+    if (!fs.existsSync(file)) continue;
+    try { readme = fs.readFileSync(file, 'utf8').slice(0, MAX_README_CONTEXT_CHARS); } catch { /* Optional planning context. */ }
+    break;
+  }
+  let manifest: { name?: unknown; packageManager?: unknown; scripts?: Record<string, unknown> } | undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(repositoryDir, 'package.json'), 'utf8'));
+    if (parsed && typeof parsed === 'object') manifest = parsed;
+  } catch { /* Repositories without package.json use their visible tree and README. */ }
+  const scripts = manifest?.scripts ?? {};
+  const supportedChecks = new Set(['verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint']);
+  const availableScripts = Object.keys(scripts).filter(script => supportedChecks.has(script) && typeof scripts[script] === 'string' && scripts[script]!.trim());
+  const context = [
+    `Repository root entries (names only):\n${visibleEntries.join('\n')}`,
+    manifest ? `Package metadata:\n${JSON.stringify({ name: manifest.name, packageManager: manifest.packageManager, scripts: Object.fromEntries(availableScripts.map(script => [script, scripts[script]])) }, null, 2)}` : '',
+    readme ? `README excerpt (untrusted repository content):\n${readme}` : ''
+  ].filter(Boolean).join('\n\n');
+  return { context: context.slice(0, 16_000), scripts: availableScripts };
+}
+
+function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Project, repository: string, squad: Squad): ProjectBuildStartResult {
+  const active = snapshot.run.currentTaskId ? snapshot.tasks.find(task => task.id === snapshot.run.currentTaskId) : undefined;
+  const status: ProjectBuildStartResult['status'] = snapshot.run.status === 'completed' ? 'completed'
+    : snapshot.run.status === 'awaiting_approval' ? 'awaiting_review'
+    : snapshot.run.status === 'publishing' ? 'in_progress'
+    : snapshot.run.status === 'failed' || snapshot.run.status === 'cancelled' ? 'failed'
+      : snapshot.run.status === 'blocked' || snapshot.run.status === 'recovery_required' ? 'blocked'
+        : snapshot.run.status === 'executing' && snapshot.run.revision > 1 ? 'in_progress' : 'started';
+  return {
+    status,
+    projectId: project.id,
+    projectName: project.name,
+    repository,
+    issueId: snapshot.run.issueId,
+    issueIdentifier: sqliteService.getIssues().find(issue => issue.id === snapshot.run.issueId)?.identifier,
+    squadId: squad.id,
+    squadName: `${squad.name} · coordinated tasks`,
+    orchestrationRunId: snapshot.run.id,
+    orchestrationTaskCount: snapshot.tasks.length,
+    orchestrationCurrentTask: active ? { id: active.id, title: active.title, ownerAgentId: active.ownerAgentId } : undefined,
+    branchName: snapshot.run.branchName,
+    reason: snapshot.run.stoppedReason
+  };
+}
+
+async function startOrchestratedProjectBuild(input: {
+  context: WorkspaceContext;
+  project: Project;
+  repository: string;
+  checkoutDir: string;
+  squad: Squad;
+  members: Agent[];
+  buildSteps: ProjectBuildStep[];
+  threadId: string;
+  messageId: string;
+  content: string;
+}): Promise<ProjectBuildStartResult> {
+  const { context, project, repository, checkoutDir, squad, members, buildSteps } = input;
+  if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
+  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('This project is opted into task-based builds, but the desktop operator kill switch is off. Enable the local orchestration pilot or turn off this project opt-in.', project, repository);
+
+  const workspaceId = context.workspaceId;
+  const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${input.threadId}:${input.messageId}`).digest('hex').slice(0, 16);
+  const cleanGoal = input.content.trim().replace(/^\/build\s*/i, '').trim();
+  if (!cleanGoal || cleanGoal.length > 4_000) return blocked('Keep a task-based build request between 1 and 4,000 characters so its accepted scope remains explicit.', project, repository);
+  const expectedIssueId = `chat-build-${requestKey}`;
+  const requestFingerprint = orchestrationRequestFingerprint({
+    workspaceId, projectId: project.id, issueId: expectedIssueId, repository,
+    createdBy: context.userId, originalRequest: cleanGoal
+  });
+  const priorSnapshot = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
+  if (priorSnapshot) {
+    if (priorSnapshot.run.requestFingerprint !== requestFingerprint) {
+      return blocked('This chat request key is already associated with a different task workflow. Start a new chat message to create a separate build.', project, repository);
+    }
+    return orchestrationStartResult(priorSnapshot, project, repository, squad);
+  }
+  let activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository));
+  if (activeWorkflow) {
+    const reservation = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationPlanningReservation(project.id, repository));
+    const isPlanningReservation = reservation?.runId === activeWorkflow.runId && activeWorkflow.status === 'planning';
+    const ownsReservation = isPlanningReservation && reservation?.ownerSessionId === orchestrationOwnerSessionId;
+    if (isPlanningReservation && !ownsReservation) {
+      const recovery = await reconcilePlanningReservation({
+        workspaceId,
+        repositoryDir: checkoutDir,
+        projectId: project.id,
+        reservation
+      });
+      if (recovery === 'workspace_preserved') {
+        return blocked('A previous Alpha session stopped while planning and its private workspace no longer matches the recorded clean base. Alpha preserved it and paused this repository so no other build or code call can overwrite the unresolved work.', project, repository);
+      }
+      if (recovery === 'reservation_changed') {
+        return blocked('The interrupted planning reservation changed while Alpha was reconciling it. Refresh the project and retry after checking the active build.', project, repository);
+      }
+      activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository));
+    }
+    const isSamePlanningRequest = ownsReservation && reservation?.runId === activeWorkflow?.runId && reservation.requestKey === requestKey;
+    if (activeWorkflow && !isSamePlanningRequest) {
+      return blocked(`A task-based build is ${activeWorkflow.status.replace('_', ' ')} for this repository. Follow or resolve that build before starting another.`, project, repository);
+    }
+  }
+
+  const issueId = `chat-build-${requestKey}`;
+  const idempotencyLabel = `alpha:chat-build-${requestKey}`;
+  const currentIssues = await issueStore().list(workspaceId);
+  let issue = currentIssues.find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));
+  const previousLegacyRun = issue && sqliteService.getSquadRuns().find(run => run.issueId === issue!.id);
+  if (previousLegacyRun && issue) {
+    const runs = sqliteService.getRunsForSquadRun(previousLegacyRun.id);
+    const firstRun = runs.sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))[0];
+    return {
+      status: previousLegacyRun.status === 'awaiting_approval' ? 'awaiting_review' : previousLegacyRun.status === 'failed' || previousLegacyRun.status === 'cancelled' ? 'failed' : 'in_progress',
+      projectId: project.id, projectName: project.name, repository, issueId: issue.id,
+      issueIdentifier: issue.identifier, squadId: squad.id, squadName: squad.name,
+      squadRunId: previousLegacyRun.id, branchName: firstRun?.branchName ?? previousLegacyRun.branchName,
+      reason: previousLegacyRun.stoppedReason
+    };
+  }
+  const activeLegacyRun = sqliteService.getSquadRuns().find(run => {
+    if (run.projectId !== project.id || run.status !== 'running') return false;
+    const activeIssue = sqliteService.getIssues().find(candidate => candidate.id === run.issueId);
+    const normalize = (value: string) => value.toLowerCase().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+    return !activeIssue?.githubRepo || normalize(activeIssue.githubRepo) === normalize(repository);
+  });
+  if (activeLegacyRun) return blocked('A legacy build is already using this project repository. Wait for it to finish before starting a task-based build.', project, repository);
+
+  const orderedSteps = [...buildSteps].filter(step => step.enabled).sort((a, b) => a.position - b.position);
+  const eligible = members.map(agent => {
+    const readiness = agentReadiness(agent, sqliteService.getRuntimes());
+    if (readiness.status !== 'ready') return { agent, readiness, persona: undefined };
+    return { agent, readiness, persona: resolveAgent(agent, { projectKey: project.key, includeMemory: false, includeToolPolicy: false }) };
+  }).filter((item): item is { agent: Agent; readiness: ReturnType<typeof agentReadiness>; persona: ReturnType<typeof resolveAgent> } => Boolean(item.persona));
+
+  const configuredPlannerStep = orderedSteps.find(step => PLANNING_KINDS.has(step.phase) && step.agentId);
+  let plannerCandidate = configuredPlannerStep
+    ? eligible.find(item => item.agent.id === configuredPlannerStep.agentId)
+    : eligible.find(item => roleCanOwnOrchestrationTask('requirements', item.persona.role));
+  if (!plannerCandidate) {
+    const reason = configuredPlannerStep
+      ? `The configured ${configuredPlannerStep.phase} step owner is unavailable or not ready. Update that owner before starting the task workflow.`
+      : 'The project squad has no ready Research, Requirements, Manager, or Architecture persona to validate the task plan.';
+    return blocked(reason, project, repository);
+  }
+  if (!roleCanOwnOrchestrationTask('requirements', plannerCandidate.persona.role)) {
+    return blocked(`${plannerCandidate.persona.role} cannot act as the read-only planning coordinator. Assign a Research, Manager, or Architecture persona to the planning step.`, project, repository);
+  }
+  const plannerIdentity: PlannerAgentIdentity = {
+    id: plannerCandidate.agent.id,
+    name: plannerCandidate.persona.name,
+    role: plannerCandidate.persona.role,
+    provider: plannerCandidate.persona.modelProvider,
+    modelName: plannerCandidate.persona.modelName,
+    reasoningEffort: plannerCandidate.persona.reasoningEffort,
+    systemPrompt: plannerCandidate.persona.systemPrompt
+  };
+  const availableAgents = eligible.map(item => ({ id: item.agent.id, role: item.persona.role, ready: true as const }));
+  const activeIndependentCall = runWithWorkspace(workspaceId, () =>
+    sqliteService.getActiveAgentCallProjectLock(project.id, repository));
+  if (activeIndependentCall) {
+    return blocked('An independent code call or patch is using this repository. Let it finish before starting a task-based build.', project, repository);
+  }
+
+  let baseCommit: string;
+  try {
+    baseCommit = await getHeadCommit(checkoutDir);
+  } catch (error) {
+    return blocked(`The selected repository has no stable Git base for planning. ${error instanceof Error ? error.message : ''}`.trim(), project, repository);
+  }
+  const proposedRunId = `orchestration-${crypto.randomUUID()}`;
+  let reservation: ReturnType<typeof sqliteService.reserveOrchestrationPlanning>;
+  try {
+    reservation = runWithWorkspace(workspaceId, () => sqliteService.reserveOrchestrationPlanning({
+      projectId: project.id,
+      repository,
+      requestKey,
+      requestFingerprint,
+      createdBy: context.userId,
+      runId: proposedRunId,
+      branchName: orchestrationBranchName(proposedRunId),
+      baseCommit,
+      worktreePath: projectRunWorkspacePath(project.id, proposedRunId),
+      ownerSessionId: orchestrationOwnerSessionId
+    }));
+  } catch (error) {
+    return blocked(error instanceof Error ? error.message : 'The project repository could not be reserved for planning.', project, repository);
+  }
+
+  try {
+    if (!fs.existsSync(reservation.worktreePath)) {
+      await addBranchWorktree(checkoutDir, reservation.worktreePath, reservation.branchName, reservation.baseCommit);
+    } else if (!(await isGitRepo(reservation.worktreePath)) ||
+        await getCurrentBranch(reservation.worktreePath) !== reservation.branchName ||
+        await getHeadCommit(reservation.worktreePath) !== reservation.baseCommit ||
+        !(await isGitWorkingTreeClean(reservation.worktreePath))) {
+      return blocked('The saved planning worktree does not match its reserved branch and base commit. Alpha preserved it for recovery; review the Live Build Room before retrying.', project, repository);
+    }
+  } catch (error) {
+    return blocked(`The isolated planning workspace could not be prepared. ${error instanceof Error ? error.message : 'Inspect the saved build workspace before retrying.'}`, project, repository);
+  }
+
+  const planningContext = repositoryPlanningContext(reservation.worktreePath);
+  const planner = new OrchestrationPlanner();
+  let planned;
+  try {
+    planned = await planner.createPlan({
+      runId: reservation.runId,
+      cwd: reservation.worktreePath,
+      goal: cleanGoal,
+      repositoryContext: planningContext.context,
+      availableScripts: planningContext.scripts,
+      eligibleAgents: availableAgents,
+      planner: plannerIdentity,
+      buildSteps: orderedSteps.map(step => ({
+        id: step.id, label: step.label, phase: step.phase,
+        agentId: step.agentId, position: step.position, required: step.required,
+        dependsOn: step.dependsOn ?? []
+      }))
+    });
+  } catch (error) {
+    const detail = error instanceof OrchestrationPlanningError ? error.message : error instanceof Error ? error.message : 'The plan could not be validated.';
+    const cleanup = await reconcilePlanningReservation({ workspaceId, repositoryDir: checkoutDir, projectId: project.id, reservation });
+    const recoveryNote = cleanup === 'released' ? ''
+      : cleanup === 'workspace_preserved'
+        ? ' The private planning workspace did not match its clean checkpoint, so Alpha preserved it and kept the repository paused for recovery.'
+        : ' The planning reservation changed during cleanup; refresh the project before retrying.';
+    return blocked(`Task planning stopped before any specialist was launched. ${detail}${recoveryNote}`, project, repository);
+  }
+
+  if (!issue) {
+    issue = await issueStore().create(workspaceId, {
+      id: issueId,
+      projectId: project.id,
+      githubRepo: repository,
+      title: issueTitle(cleanGoal),
+      description: [
+        'Build requested from project chat using the task-driven coordinator.', '',
+        'Original request:', cleanGoal, '',
+        'Build expectations:',
+        '- Work is assigned as separate, role-qualified tasks by Alpha’s validated plan.',
+        '- Each specialist receives only its task package and repository path scope.',
+        '- Alpha checks the result and required scripts before advancing to a dependent task.',
+        '- A human remains responsible for final review and approval.',
+        '', `Source conversation: ${input.threadId}`
+      ].join('\n'),
+      status: 'todo', priority: 'medium', assignedSquadId: squad.id,
+      labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
+    });
+    workspaceRegistry.bind('issues', issue.id, workspaceId);
+    await supabaseService.shareIssue(issue);
+    addCommentAndShare({
+      id: `comm-${issue.id}-chat-build`, issueId: issue.id,
+      authorType: 'system', authorName: 'Alpha Orchestrator',
+      content: `Task workflow planned by ${plannerCandidate.persona.name} for ${squad.name}.`, createdAt: issue.createdAt
+    });
+  }
+
+  if (issue.id !== expectedIssueId) {
+    const cleanup = await reconcilePlanningReservation({ workspaceId, repositoryDir: checkoutDir, projectId: project.id, reservation });
+    const recoveryNote = cleanup === 'released' ? ''
+      : cleanup === 'workspace_preserved'
+        ? ' The private planning workspace was preserved because its state changed; the repository remains paused for recovery.'
+        : ' The planning reservation changed during cleanup; refresh the project before retrying.';
+    return blocked(`The existing chat build issue has a different identity than this task workflow request. No specialists were started; contact a project administrator to reconcile the local build record.${recoveryNote}`, project, repository);
+  }
+
+  try {
+    const { orchestrationService } = await import('./orchestrationRuntime.js');
+    const snapshot = await orchestrationService.start({
+      workspaceId, projectId: project.id, issueId: issue.id, repository,
+      requestKey, requestFingerprint, createdBy: context.userId,
+      executorId: orchestrationOwnerSessionId,
+      runId: reservation.runId,
+      planningOwnerSessionId: orchestrationOwnerSessionId,
+      branchName: reservation.branchName,
+      baseRef: reservation.baseCommit,
+      baseCommit: reservation.baseCommit,
+      worktreePath: reservation.worktreePath,
+      startingCommit: reservation.baseCommit,
+      eligibleAgents: availableAgents,
+      plan: planned.plan,
+      planSource: 'model'
+    });
+    return orchestrationStartResult(snapshot, project, repository, squad);
+  } catch (error) {
+    const persisted = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
+    let recoveryNote = '';
+    if (!persisted) {
+      const cleanup = await reconcilePlanningReservation({ workspaceId, repositoryDir: checkoutDir, projectId: project.id, reservation });
+      recoveryNote = cleanup === 'workspace_preserved'
+        ? ' Alpha preserved the private planning workspace because it changed after reservation; the repository remains paused for recovery.'
+        : cleanup === 'reservation_changed'
+          ? ' The planning reservation changed during cleanup; refresh the project before retrying.'
+          : '';
+    }
+    return blocked(`Task workflow could not start safely. ${error instanceof Error ? error.message : 'The coordinator rejected the start request.'}${recoveryNote}`, project, repository);
+  }
+}
+
 /** Start a real sequential repository build, or return the exact setup blocker. */
 export function startProjectBuild(input: StartProjectBuildInput): Promise<ProjectBuildStartResult> {
   const requestKey = crypto.createHash('sha256')
@@ -151,6 +523,11 @@ export function startProjectBuildBatch(
   input: Omit<StartProjectBuildInput, 'requestedRepository'> & { repositories?: string[] }
 ): Promise<ProjectBuildStartResult[]> {
   const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
+  const projectOptedIn = Boolean(input.projectId && !IS_CLOUD && typeof sqliteService.getProjectOrchestrationSetting === 'function' &&
+    runWithWorkspace(input.context.workspaceId, () => sqliteService.getProjectOrchestrationSetting(input.projectId!).enabled));
+  if (projectOptedIn && repositories.length > 1) {
+    return Promise.resolve([blocked('Task-based builds support one repository per plan. Choose a single repository; this request was not split into unrelated workflows.', undefined, repositories.join(', '))]);
+  }
   const targets: Array<string | undefined> = repositories.length ? repositories : [undefined];
   return Promise.all(targets.map(async repository => {
     try {
@@ -263,6 +640,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       return blocked(`The project’s assigned squad uses “${squad.topology}” orchestration, which is not supported for builds yet. Set it to Sequential in Squad settings.`, project, repository);
     }
 
+    const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${threadId}:${messageId}`).digest('hex').slice(0, 16);
     const orderedSteps = [...(buildSteps ?? [])].filter(step => step.enabled).sort((a, b) => a.position - b.position);
     const otherSquadStep = orderedSteps.find(step => step.squadId && step.squadId !== squad.id);
     if (otherSquadStep) {
@@ -281,6 +659,33 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     const missing = members.filter(id => !agents.some(agent => agent.id === id));
     if (missing.length) return blocked(`${squad.name} includes unavailable agents. Update the squad membership before starting a build.`, project, repository);
 
+    const orchestrationOptedIn = !IS_CLOUD && typeof sqliteService.getProjectOrchestrationSetting === 'function' &&
+      runWithWorkspace(workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id).enabled);
+    if (orchestrationOptedIn) {
+      if (!repository) return blocked('Task-based builds require one repository attached to this project.', project);
+      return startOrchestratedProjectBuild({
+        context, project, repository, checkoutDir: checkout.dir, squad, members: agents,
+        buildSteps: buildSteps ?? [], threadId, messageId, content
+      });
+    }
+
+    const activeWorkflow = !IS_CLOUD
+      ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository))
+      : undefined;
+    if (activeWorkflow) {
+      if (!repository) return blocked('A task-based build is already active for this project. Choose its repository in the project workspace to follow or resolve it.', project);
+      const activeSnapshot = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(activeWorkflow.runId));
+      const cleanGoal = content.trim().replace(/^\/build\s*/i, '').trim();
+      const fingerprint = activeSnapshot && orchestrationRequestFingerprint({
+        workspaceId, projectId: project.id, issueId: activeSnapshot.run.issueId,
+        repository, createdBy: context.userId, originalRequest: cleanGoal
+      });
+      if (activeSnapshot?.run.requestKey === requestKey && activeSnapshot.run.requestFingerprint === fingerprint) {
+        return orchestrationStartResult(activeSnapshot, project, repository, squad);
+      }
+      return blocked(`A task-based build is ${activeWorkflow.status.replace('_', ' ')} for this repository. Follow or resolve that build before starting another.`, project, repository);
+    }
+
     const runtimes = sqliteService.getRuntimes();
     const notReady = agents.map(agent => ({ agent, readiness: agentReadiness(agent, runtimes) }))
       .filter(item => item.readiness.status !== 'ready');
@@ -290,7 +695,6 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     }
 
     const stepAgentIds = orderedSteps.map(step => step.agentId).filter((id): id is string => Boolean(id));
-    const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${threadId}:${messageId}`).digest('hex').slice(0, 16);
     const idempotencyLabel = `alpha:chat-build-${requestKey}`;
     const currentIssues = await issueStore().list(workspaceId);
     let issue = currentIssues.find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));

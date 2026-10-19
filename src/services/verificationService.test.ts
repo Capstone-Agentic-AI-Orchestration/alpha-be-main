@@ -58,6 +58,26 @@ describe('verificationService', () => {
     ]);
   });
 
+  it('runs explicitly required scripts without substituting a combined verify script', async () => {
+    const cwd = fixture({
+      verify: 'npm run test',
+      test: 'vitest run',
+      typecheck: 'tsc --noEmit'
+    });
+    spawnProcess.mockImplementation((options: any) => {
+      const child = new EventEmitter();
+      queueMicrotask(() => options.onExit?.(0, null));
+      return child;
+    });
+
+    const result = await runVerification({ runId: 'run-required-checks', cwd, requiredScripts: ['test', 'lint'] });
+
+    expect(result.commands.map(command => command.command.script)).toEqual(['test']);
+    expect(result.missingScripts).toEqual(['lint']);
+    expect(result.status).toBe('passed');
+    expect(result.summary).toContain('Required checks unavailable: lint.');
+  });
+
   it('captures command output and reports a nonzero exit as failed', async () => {
     const cwd = fixture({ test: 'node test.js', typecheck: 'tsc --noEmit' });
     spawnProcess.mockImplementation((options: any) => {

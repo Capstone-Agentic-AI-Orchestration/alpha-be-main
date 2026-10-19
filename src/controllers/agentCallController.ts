@@ -7,6 +7,7 @@ import { AgentCallMode, AgentCallTarget, AgentCallTargetType, ChatMessage } from
 import { sqliteService } from '../services/sqliteService.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { agentCallService } from '../services/agentCallService.js';
+import { resolveAgent } from '../services/personaService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
 import { isGitRepo } from '../utils/gitUtils.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
@@ -168,7 +169,7 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
       .map(agentId => agents.find(agent => agent.id === agentId))
       .filter((agent): agent is NonNullable<typeof agent> => Boolean(agent))
       .filter(agent => visible.has(`${squad.id}::${agent.id}`))
-      .filter(agent => agentReadiness(agent, runtimes).status === 'ready')
+      .filter(agent => agentReadiness({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, runtimes).status === 'ready')
       .map(agent => ({
         id: agent.id,
         name: agent.name,
@@ -259,7 +260,7 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
     if (!agent || !squad || agent.isArchived) {
       return res.status(404).json({ error: 'That agent is not available for this project.' });
     }
-    const readiness = agentReadiness(agent, sqliteService.getRuntimes());
+    const readiness = agentReadiness({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, sqliteService.getRuntimes());
     if (readiness.status !== 'ready') {
       return res.status(409).json({ error: readiness.detail });
     }

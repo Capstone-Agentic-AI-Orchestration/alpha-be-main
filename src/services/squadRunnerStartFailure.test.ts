@@ -48,6 +48,22 @@ describe('SquadRunner first-agent startup failure', () => {
     vi.resetModules();
   });
 
+  it('keeps specialist roles scoped when personas mention other teammates', async () => {
+    const { defaultMemberAssignment } = await import('./squadRunner.js');
+    for (const [role, phase] of [
+      ['Backend Agent', 'implementation'], ['Frontend Agent', 'implementation'],
+      ['Database Agent', 'database'], ['Reviewer', 'review'],
+      ['QA Tester', 'validation'], ['DevOps', 'delivery']
+    ]) {
+      const assignment = defaultMemberAssignment({
+        id: 'specialist', role, name: 'Specialist', description: 'Coordinate with the research and architecture team',
+        systemPrompt: 'Read requirements from the researcher and architect. Implement only your own specialty.'
+      } as any, 1, 6);
+      expect(assignment.phase).toBe(phase);
+      expect(assignment.stageLabel).not.toBe('Requirements and research');
+    }
+  });
+
   it('closes the squad and returns the issue to a retryable state', async () => {
     const { SquadRunner } = await import('./squadRunner.js');
     const runner = new SquadRunner();

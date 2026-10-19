@@ -33,16 +33,16 @@ export type { CliToolRecord } from './turnAccumulator.js';
 /**
  * What a turn is for, which decides what it is allowed to do.
  *
- * `chat` is a conversation: read-only, because it has no branch, no diff and no
- * approval gate. `run` is Alpha doing the work on an issue — it has all three,
- * and editing the repository is the point.
+ * `chat` is a conversation: capability follows the agent's grants. `review` is
+ * an orchestration task with only read tools. `run` is implementation work on
+ * an isolated branch, where repository edits are expected.
  *
  * One builder for both so the provider-specific argv rules exist once. They
  * previously existed twice: runnerService predates this module and was never
  * migrated, so every fix here — the persona flag, --model, the isolation from
  * the operator's own CLI configuration — reached chat and not runs.
  */
-export type TurnMode = 'chat' | 'run';
+export type TurnMode = 'chat' | 'review' | 'run';
 
 export interface CliTurnOptions {
   runId: string;
@@ -275,7 +275,7 @@ export function buildTurnInvocation(
    * question those branches actually ask — not "is this a run" as it used to be,
    * which is now the wrong question for a chat granted `sk-fs`.
    */
-  const chatTools = chatToolsFor(options.skills);
+  const chatTools = chatToolsFor(options.mode === 'review' ? [] : options.skills);
   const canWrite = isRun || chatTools.allowed.some(t => t === 'Write' || t === 'Edit');
   const canRunShell = isRun || chatTools.allowed.includes('Bash');
 
@@ -680,7 +680,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     options.mcpServers,
     options.mcpEnv,
     options.cwd,
-    mcpAccessFor(options.autonomyLevel, options.mode === 'run' ? 'run' : 'chat', options.skills)
+    mcpAccessFor(options.autonomyLevel, options.mode ?? 'chat', options.skills)
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);

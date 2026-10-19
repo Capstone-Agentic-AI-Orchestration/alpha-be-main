@@ -86,8 +86,30 @@ describe('reconcileInterruptedWork', () => {
     plantIssue(svc, 'iss-1', 'todo');
     plantRun(svc, { status: 'completed' });
 
-    expect(reconcile()).toEqual({ runs: [], squadRuns: [], issues: [] });
+    expect(reconcile()).toEqual({ runs: [], squadRuns: [], issues: [], agentCalls: [] });
     expect(svc.getPrototypeRuns()[0].status).toBe('completed');
+  });
+
+  it('fails a queued or running independent call and releases its repository lock after restart', async () => {
+    const { svc, reconcile } = await startDaemon();
+    plantProject(svc);
+    svc.createChatThread({ id: 'thread-agent-call', projectId: 'proj-1', ownerId: 'user-1' });
+    svc.saveAgentCallWithProjectLock({
+      id: 'call-interrupted', workspaceId: 'ws-default', projectId: 'proj-1',
+      threadId: 'thread-agent-call', squadId: 'squad-1', agentId: 'agent-1',
+      requestedBy: 'user-1', operationMode: 'revise', origin: 'agent_call',
+      status: 'queued', instruction: 'Prepare a focused code proposal.',
+      createdAt: new Date().toISOString(), artifacts: [], activities: []
+    }, 'acme/tasks');
+    svc.updateAgentCall('call-interrupted', { status: 'running', startedAt: new Date().toISOString() });
+
+    const result = reconcile();
+
+    expect(result.agentCalls).toEqual(['call-interrupted']);
+    expect(svc.getAgentCall('call-interrupted')).toMatchObject({
+      status: 'failed', error: expect.stringContaining('interrupted when Alpha stopped')
+    });
+    expect(svc.getActiveAgentCallProjectLock('proj-1', 'acme/tasks')).toBeUndefined();
   });
 
   it('fails an interrupted run and moves its issue back', async () => {
@@ -123,6 +145,20 @@ describe('reconcileInterruptedWork', () => {
 
     expect(reconcile().runs).toEqual(['run-1']);
     expect(svc.getPrototypeRuns()[0].status).toBe('failed');
+  });
+
+  it('leaves versioned orchestration children for their parent recovery workflow', async () => {
+    const { svc, reconcile } = await startDaemon();
+    plantIssue(svc, 'iss-1');
+    plantRun(svc, {
+      orchestrationRunId: 'orchestration-1',
+      orchestrationTaskId: 'task-1',
+      orchestrationAttemptId: 'attempt-1'
+    });
+
+    expect(reconcile()).toEqual({ runs: [], squadRuns: [], issues: [], agentCalls: [] });
+    expect(svc.getPrototypeRuns()[0].status).toBe('running');
+    expect(svc.getIssues()[0].status).toBe('agent_running');
   });
 
   it('stops an interrupted squad run and says where it got to', async () => {
@@ -215,7 +251,7 @@ describe('reconcileInterruptedWork', () => {
     plantRun(svc);
 
     reconcile();
-    expect(reconcile()).toEqual({ runs: [], squadRuns: [], issues: [] });
+    expect(reconcile()).toEqual({ runs: [], squadRuns: [], issues: [], agentCalls: [] });
     expect((svc.getIssues()[0].comments ?? []).length).toBe(1);
   });
 });

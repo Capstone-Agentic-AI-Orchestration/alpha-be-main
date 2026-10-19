@@ -6,6 +6,7 @@ import {
   compareBranches,
   createAgentBranch,
   deleteAgentBranch,
+  findOpenPullRequest,
   getFile,
   getTree,
   listBranches,
@@ -171,6 +172,29 @@ describe('comparing and pull requests', () => {
       [2, false],
       [3, true]
     ]);
+  });
+
+  it('looks up an exact open pull request by owner, head, and base', async () => {
+    const { api, calls } = fakeGitHub(() => [
+      { number: 7, html_url: 'https://github.com/acme/shop/pull/7', head: { ref: 'alpha/orchestration/run-1' }, base: { ref: 'dev' } },
+      { number: 8, html_url: 'https://github.com/acme/shop/pull/8', head: { ref: 'alpha/orchestration/run-1' }, base: { ref: 'main' } }
+    ]);
+
+    await expect(findOpenPullRequest('acme/shop', 'alpha/orchestration/run-1', 'dev', api)).resolves.toEqual({
+      number: 7,
+      url: 'https://github.com/acme/shop/pull/7'
+    });
+    expect(calls).toEqual([{
+      method: 'GET',
+      path: '/repos/acme/shop/pulls?state=open&head=acme%3Aalpha%2Forchestration%2Frun-1&base=dev&per_page=10'
+    }]);
+  });
+
+  it('refuses unsafe branches before querying the pull request API', async () => {
+    const { api, calls } = fakeGitHub(() => []);
+
+    await expect(findOpenPullRequest('acme/shop', '../main', 'dev', api)).rejects.toThrow(/not a valid git branch/);
+    expect(calls).toEqual([]);
   });
 });
 

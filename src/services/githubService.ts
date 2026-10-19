@@ -18,6 +18,7 @@ import {
   IS_DESKTOP
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
+import { tokenForThisRequest } from './githubApi.js';
 import {
   DeviceFlowError,
   activeProfile,
@@ -233,6 +234,39 @@ function assertOwnerRepo(ownerRepo: string): void {
   }
 }
 
+async function pushAuthenticatedBranch(
+  cwd: string,
+  branchName: string,
+  expectedRepo: string,
+  inspectLocalRepo: () => Promise<RepoInspection>
+): Promise<void> {
+  assertSafeBranchName(branchName);
+  assertOwnerRepo(expectedRepo);
+  const inspection = await inspectLocalRepo();
+  const localRepo = inspection.ownerRepo?.replace(/\.git$/i, '').toLowerCase();
+  if (!localRepo || localRepo !== expectedRepo.toLowerCase()) {
+    throw new Error('The local checkout remote no longer matches the project repository. Reconnect it before publishing.');
+  }
+  if (inspection.branch !== branchName) {
+    throw new Error(`The validated build branch is not checked out. Expected "${branchName}"; found "${inspection.branch || 'unknown'}".`);
+  }
+
+  const token = await tokenForThisRequest();
+  const authorization = Buffer.from(`x-access-token:${token}`).toString('base64');
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`
+  };
+  await execFileAsync('git', [
+    'push', '--porcelain', '--no-verify',
+    `https://github.com/${expectedRepo}.git`,
+    `refs/heads/${branchName}:refs/heads/${branchName}`
+  ], { cwd, env, timeout: 180_000, windowsHide: true, maxBuffer: 1024 * 1024 });
+}
+
 /** Accept the repository forms project resources commonly store. */
 function parseOwnerRepo(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -345,6 +379,8 @@ export interface IGitHubService {
   dispatchWorkflow(options: WorkflowDispatchOptions): Promise<WorkflowDispatchResult>;
   getFailedWorkflowLogs(cwdOrRepo: string, runId: string | number): Promise<string>;
   commitAndPush(cwd: string, branchName: string, commitMessage: string, push?: boolean): Promise<boolean>;
+  /** Push an already validated commit without staging or creating a new commit. */
+  pushBranch(cwd: string, branchName: string, expectedRepo: string): Promise<void>;
   createPullRequest(cwd: string, title: string, body: string, base?: string, headBranch?: string): Promise<string>;
   mergePullRequest(cwd: string, prUrlOrNumber: string, method?: 'squash' | 'merge' | 'rebase'): Promise<string>;
   reviewPullRequest(cwd: string, prUrlOrNumber: string, body: string): Promise<string>;
@@ -851,6 +887,10 @@ export class GhCliGitHubService implements IGitHubService {
       await execFileAsync('git', ['push', '-u', 'origin', branchName], { cwd });
     }
     return hasStagedChanges;
+  }
+
+  async pushBranch(cwd: string, branchName: string, expectedRepo: string): Promise<void> {
+    await pushAuthenticatedBranch(cwd, branchName, expectedRepo, () => this.inspectLocalRepo(cwd));
   }
 
   async createPullRequest(
@@ -1679,6 +1719,10 @@ export class RestGitHubService implements IGitHubService {
     return cli.commitAndPush(cwd, branchName, commitMessage, push);
   }
 
+  async pushBranch(cwd: string, branchName: string, expectedRepo: string): Promise<void> {
+    await pushAuthenticatedBranch(cwd, branchName, expectedRepo, () => this.inspectLocalRepo(cwd));
+  }
+
   async createPullRequest(cwd: string, title: string, body: string, base = 'main', headBranch?: string): Promise<string> {
     const inspection = await this.inspectLocalRepo(cwd);
     if (!inspection.ownerRepo) {
@@ -1869,6 +1913,12 @@ export class GitHubService implements IGitHubService {
 
   async commitAndPush(cwd: string, branchName: string, commitMessage: string, push = true): Promise<boolean> {
     return this.cliService.commitAndPush(cwd, branchName, commitMessage, push);
+  }
+
+  async pushBranch(cwd: string, branchName: string, expectedRepo: string): Promise<void> {
+    const auth = await this.checkAuth();
+    if (!auth.authenticated) throw new Error('Alpha is not signed in to GitHub. Sign in from Connected Accounts before publishing.');
+    await this.cliService.pushBranch(cwd, branchName, expectedRepo);
   }
 
   async createPullRequest(cwd: string, title: string, body: string, base = 'main', headBranch?: string): Promise<string> {

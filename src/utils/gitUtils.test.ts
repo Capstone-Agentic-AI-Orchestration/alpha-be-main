@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { addDetachedWorktree, createBranch, createBranchFrom, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
+import { addBranchWorktree, addDetachedWorktree, createBranch, createBranchFrom, getGitChangedPaths, getHeadCommit, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
 
 /**
  * Where an agent's branch starts, against real git: a bare "remote" and a
@@ -100,6 +100,46 @@ describe('the branch an agent starts from', () => {
 
     await removeDetachedWorktree(clone, workingDir);
     expect(fs.existsSync(workingDir)).toBe(false);
+  });
+
+  it('creates a named task branch in the private worktree without moving the source checkout', async () => {
+    const source = path.join(root, 'task-source');
+    fs.mkdirSync(source, { recursive: true });
+    git(source, 'init', '--initial-branch', 'main');
+    fs.writeFileSync(path.join(source, 'README.md'), 'baseline\n');
+    git(source, 'add', '-A');
+    git(source, 'commit', '-m', 'baseline');
+    fs.writeFileSync(path.join(source, 'uncommitted.txt'), 'leave me alone\n');
+    const sourceHead = git(source, 'rev-parse', 'HEAD');
+    const sourceStatus = git(source, 'status', '--porcelain', '--untracked-files=all');
+    const workingDir = path.join(root, 'task-worktree');
+
+    await addBranchWorktree(source, workingDir, 'alpha/orchestration/test-run');
+
+    expect(await getHeadCommit(workingDir)).toBe(sourceHead);
+    expect(git(workingDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('alpha/orchestration/test-run');
+    expect(git(source, 'rev-parse', 'HEAD')).toBe(sourceHead);
+    expect(git(source, 'status', '--porcelain', '--untracked-files=all')).toBe(sourceStatus);
+    await removeDetachedWorktree(source, workingDir);
+  });
+
+  it('reports committed added, changed, and deleted paths between checkpoint commits', async () => {
+    const repo = path.join(root, 'changed-paths');
+    fs.mkdirSync(repo, { recursive: true });
+    git(repo, 'init', '--initial-branch', 'main');
+    fs.writeFileSync(path.join(repo, 'keep.txt'), 'before\n');
+    fs.writeFileSync(path.join(repo, 'delete.txt'), 'remove\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'baseline');
+    const baseCommit = git(repo, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repo, 'keep.txt'), 'after\n');
+    fs.writeFileSync(path.join(repo, 'new.txt'), 'new\n');
+    fs.rmSync(path.join(repo, 'delete.txt'));
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'task result');
+    const resultCommit = git(repo, 'rev-parse', 'HEAD');
+
+    expect(await getGitChangedPaths(repo, baseCommit, resultCommit)).toEqual(['delete.txt', 'keep.txt', 'new.txt']);
   });
 
   it('refuses an unsafe branch name before running git', async () => {

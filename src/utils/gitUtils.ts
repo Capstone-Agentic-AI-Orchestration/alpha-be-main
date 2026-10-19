@@ -39,6 +39,61 @@ export async function addDetachedWorktree(repositoryDir: string, worktreeDir: st
   });
 }
 
+/** Create one shared orchestration branch in an isolated, run-scoped worktree. */
+export async function addBranchWorktree(
+  repositoryDir: string,
+  worktreeDir: string,
+  branchName: string,
+  baseRef = 'HEAD'
+): Promise<void> {
+  assertSafeBranchName(branchName);
+  if (!baseRef || baseRef.startsWith('-')) throw new Error('Invalid orchestration worktree base revision.');
+  const destination = path.resolve(worktreeDir);
+  if (fs.existsSync(destination)) throw new Error(`The isolated build folder already exists: ${destination}`);
+  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+  await execFileAsync('git', ['worktree', 'add', '-b', branchName, destination, baseRef], {
+    cwd: repositoryDir,
+    timeout: 120_000
+  });
+}
+
+/** Return the immutable commit currently checked out in a task worktree. */
+export async function getHeadCommit(cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd });
+  const commit = stdout.trim();
+  if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error('Git returned an invalid HEAD commit.');
+  return commit;
+}
+
+/** Names added, changed, renamed, or deleted between two immutable commits. */
+export async function getGitChangedPaths(cwd: string, baseCommit: string, resultCommit: string): Promise<string[]> {
+  if (!/^[a-f0-9]{40,64}$/i.test(baseCommit) || !/^[a-f0-9]{40,64}$/i.test(resultCommit)) {
+    throw new Error('A diff requires two valid commit IDs.');
+  }
+  const { stdout } = await execFileAsync('git', [
+    'diff', '--name-only', '--no-renames', '-z', baseCommit, resultCommit, '--'
+  ], { cwd, maxBuffer: 4 * 1024 * 1024 });
+  return [...new Set(stdout.split('\0').filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+/** Read an exact, color-free patch between two immutable task commits. */
+export async function getGitDiffPatch(cwd: string, baseCommit: string, resultCommit: string): Promise<string> {
+  if (!/^[a-f0-9]{40,64}$/i.test(baseCommit) || !/^[a-f0-9]{40,64}$/i.test(resultCommit)) {
+    throw new Error('A review patch requires two valid commit IDs.');
+  }
+  try {
+    const { stdout } = await execFileAsync('git', [
+      'diff', '--no-ext-diff', '--no-color', '--unified=3', baseCommit, resultCommit, '--'
+    ], { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 512 * 1024, windowsHide: true });
+    return stdout;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new Error('The accepted task diff exceeds Alpha’s safe review-patch limit. Split the work into smaller tasks or request human review.');
+    }
+    throw new Error(`The accepted task diff could not be read for review: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Remove only a worktree path previously allocated under the managed run root. */
 export async function removeDetachedWorktree(repositoryDir: string, worktreeDir: string): Promise<void> {
   const destination = path.resolve(worktreeDir);
@@ -141,6 +196,13 @@ export async function remoteHasDevBranch(cwd: string): Promise<boolean> {
   }
 }
 
+/** Fetch a known remote branch and return its local tracking ref for a worktree. */
+export async function fetchRemoteBranch(cwd: string, branchName: string): Promise<string> {
+  assertSafeBranchName(branchName);
+  await execFileAsync('git', ['fetch', 'origin', branchName], { cwd, timeout: 120_000 });
+  return `origin/${branchName}`;
+}
+
 /**
  * Create (or reset) `branchName` at the remote's `base`, fetched fresh.
  *
@@ -150,7 +212,7 @@ export async function remoteHasDevBranch(cwd: string): Promise<boolean> {
 export async function createBranchFrom(cwd: string, branchName: string, base: string): Promise<void> {
   assertSafeBranchName(branchName);
   assertSafeBranchName(base);
-  await execFileAsync('git', ['fetch', 'origin', base], { cwd, timeout: 120_000 });
+  await fetchRemoteBranch(cwd, base);
   await execFileAsync('git', ['checkout', '-B', branchName, `origin/${base}`], { cwd });
 }
 

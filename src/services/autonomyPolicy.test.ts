@@ -73,6 +73,12 @@ describe('a chat turn', () => {
   });
 });
 
+describe('an orchestration review', () => {
+  it('keeps remote tools read-only even for a fully autonomous agent with GitHub access', () => {
+    expect(mcpAccessFor('Full Autonomy', 'review', ['sk-git'])).toBe('read');
+  });
+});
+
 describe('a level that cannot be resolved', () => {
   it('fails closed rather than open', () => {
     expect(mcpAccessFor(undefined, 'run')).toBe('read');
