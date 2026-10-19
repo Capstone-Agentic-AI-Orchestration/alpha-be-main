@@ -524,6 +524,7 @@ function onListening(): void {
     server.once('close', stopInvitationEmails);
     const stopClientActivationEmails = ticketClient?.startDeliveryWorker(
       () => logError('Client activation email delivery is unavailable; no client access was granted. Check server-side Supabase Auth and Resend configuration.'),
+      () => logError('Client action reminders are unavailable; messages and documents still send. Apply the latest database migration (ticket_client_action_notices).'),
     ) ?? (() => undefined);
     server.once('close', stopClientActivationEmails);
     return;
