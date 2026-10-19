@@ -21,18 +21,30 @@ function headers(res: import('express').Response): void {
   res.setHeader('X-Content-Type-Options', 'nosniff');
 }
 function safeLinkReceipt(value: TicketProjectLinkReceipt, ticketId: string): TicketProjectLinkReceipt {
+  const preview = value?.projectPreview;
+  let validPreview = preview === null;
+  if (preview && typeof preview === 'object') {
+    try {
+      const url = new URL(preview.url);
+      validPreview = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(preview.repository)
+        && (preview.branch === 'main' || preview.branch === 'uat') && url.protocol === 'https:'
+        && !url.username && !url.password && !url.port && url.hostname.endsWith('.vercel.app')
+        && url.hostname !== 'vercel.app' && preview.url.length <= 2048;
+    } catch { validPreview = false; }
+  }
   if (!value || value.ticketId !== ticketId || !opaqueTicketRequestValue(value.operationId)
     || !Number.isSafeInteger(value.version) || value.version < 0 || !statuses.has(value.status)
     || (value.projectId !== null && !opaqueTicketRequestValue(value.projectId))
     || (value.projectName !== null && (typeof value.projectName !== 'string' || !value.projectName.trim()
       || value.projectName.trim() !== value.projectName || value.projectName.length > 200))
     || typeof value.clientVisible !== 'boolean'
+    || !validPreview || (preview !== null && !value.clientVisible)
     || ((value.projectId === null) !== (value.projectName === null))
     || (value.projectId === null && value.clientVisible)) throw new TicketReadInvariantError();
   return {
     ticketId, operationId: value.operationId, version: value.version,
     status: value.status, projectId: value.projectId, projectName: value.projectName,
-    clientVisible: value.clientVisible,
+    clientVisible: value.clientVisible, projectPreview: value.projectPreview,
   };
 }
 

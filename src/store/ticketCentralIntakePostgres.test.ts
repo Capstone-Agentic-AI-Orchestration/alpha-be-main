@@ -6,6 +6,8 @@ import type { TicketSubject } from './ticketCommandStore.js';
 import { sqlFor, createTestDatabase } from './testDatabase.js';
 import type { TransactionalSql } from './database.js';
 import { PostgresTicketCentralIntakeStore } from './ticketCentralIntakePostgresStore.js';
+import { PostgresTicketAcknowledgmentStore } from './ticketAcknowledgmentPostgresStore.js';
+import { createTicketAcknowledgmentDeliveryService } from '../services/ticketAcknowledgmentDeliveryService.js';
 
 const organizationKey = 'central-intake-test-org';
 const workspaceA = 'central-intake-workspace-a';
@@ -67,8 +69,9 @@ afterEach(async () => { await pg?.close(); });
 describe('central PM inquiry intake on PostgreSQL', () => {
   it('stores a pre-ticket inquiry centrally and creates a workspace ticket only after PM acceptance', async () => {
     const request = { origin: 'https://alpha.example.test', remoteAddress: '192.0.2.10' };
-    await expect(app.submit(inquiry, request)).resolves.toEqual({ received: true });
-    await expect(app.submit(inquiry, request)).resolves.toEqual({ received: true });
+    await expect(app.submit(inquiry, request)).resolves.toMatchObject({ received: true, publicReference: expect.stringMatching(/^INQ-[A-F0-9]{32}$/) });
+    const receipt = await app.submit(inquiry, request);
+    expect(receipt).toMatchObject({ received: true, publicReference: expect.stringMatching(/^INQ-[A-F0-9]{32}$/) });
     await expect(app.submit({ ...inquiry, title: 'Changed body' }, request))
       .rejects.toMatchObject({ code: 'operation_conflict' });
     expect((await db.query('select id from alpha_private.tickets')).rows).toEqual([]);
@@ -117,5 +120,44 @@ describe('central PM inquiry intake on PostgreSQL', () => {
     await expect(app.accept(page.items[0].id, workspaceB, pmA,
       { schemaVersion: 1, operationId: '00000000-0000-4000-8000-000000000004' }))
       .rejects.toBeInstanceOf(TicketWorkflowError);
+  });
+
+  it('queues a receipt email with the stable central inquiry reference, without creating a ticket', async () => {
+    const receipt = await app.submit(inquiry, { origin: 'https://alpha.example.test', remoteAddress: '192.0.2.10' });
+    let sent: unknown[] = [];
+    const acknowledgments = new PostgresTicketAcknowledgmentStore(db);
+    const delivery = createTicketAcknowledgmentDeliveryService(acknowledgments, {
+      identity: 'central-receipt-provider',
+      async send(...args: [string, string, string?]) { sent = args; },
+    });
+    expect(await delivery.deliverNext()).toBe(true);
+    expect(sent).toEqual([inquiry.email, inquiry.operationId, receipt.publicReference]);
+    expect((await db.query<{ status: string }>(
+      'select status from alpha_private.ticket_central_intake_acknowledgments')).rows).toEqual([{ status: 'delivered' }]);
+    expect((await db.query('select id from alpha_private.tickets')).rows).toEqual([]);
+  });
+
+  it('retains a PM decline and optional note without making a ticket or granting access', async () => {
+    await app.submit(inquiry, { origin: 'https://alpha.example.test', remoteAddress: '192.0.2.10' });
+    const page = await app.listPending(workspaceA, pmA, {});
+    const declineOperationId = '00000000-0000-4000-8000-000000000005';
+    const declineInput = {
+      schemaVersion: 1, operationId: declineOperationId, reason: 'Outside our current service scope.',
+    };
+    const declineReceipt = { intakeId: page.items[0].id, operationId: declineOperationId, status: 'declined' };
+    await expect(app.decline(page.items[0].id, workspaceA, pmA, declineInput)).resolves.toEqual(declineReceipt);
+    await expect(app.decline(page.items[0].id, workspaceA, pmA, declineInput)).resolves.toEqual(declineReceipt);
+    await expect(app.decline(page.items[0].id, workspaceA, pmA, {
+      ...declineInput, reason: 'A different internal note.',
+    })).rejects.toMatchObject({ status: 409 });
+    await expect(app.accept(page.items[0].id, workspaceA, pmA, {
+      schemaVersion: 1, operationId: '00000000-0000-4000-8000-000000000006',
+    })).rejects.toMatchObject({ status: 409 });
+    expect((await app.listPending(workspaceA, pmA, {})).items).toEqual([]);
+    expect((await db.query<{ status: string; decline_reason: string }>(
+      'select status,decline_reason from alpha_private.ticket_central_intakes where id=$1', [page.items[0].id])).rows)
+      .toEqual([{ status: 'declined', decline_reason: 'Outside our current service scope.' }]);
+    expect((await db.query('select id from alpha_private.tickets')).rows).toEqual([]);
+    expect((await db.query('select * from alpha_private.ticket_client_grants')).rows).toEqual([]);
   });
 });

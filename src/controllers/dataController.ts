@@ -15,6 +15,7 @@ import { sqliteService } from '../services/sqliteService.js';
 import { machineRuntimes } from '../services/machineRuntimes.js';
 import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
 import { BuildStepError } from '../store/buildSteps.js';
+import { ProjectLinkedToTicketError } from '../store/projectStore.js';
 import { agentValidationError } from './agentValidation.js';
 import { checkWorkspace } from './workspaceValidation.js';
 import {
@@ -476,7 +477,15 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
 dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   if (!requireProjectWorkspace(req, res, req.params.id)) return;
-  const deleted = await projectStore().remove(req.workspace!.workspaceId, req.params.id);
+  let deleted: boolean;
+  try {
+    deleted = await projectStore().remove(req.workspace!.workspaceId, req.params.id);
+  } catch (error) {
+    if (error instanceof ProjectLinkedToTicketError) {
+      return res.status(409).json({ error: 'This project is linked to one or more client tickets. Unlink those tickets before deleting the project.' });
+    }
+    throw error;
+  }
   if (deleted) {
     await workspaceRegistry.unbind('projects', req.params.id);
     void supabaseService.unshareProject(req.params.id);

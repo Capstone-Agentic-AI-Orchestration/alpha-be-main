@@ -150,7 +150,9 @@ function safeClientDetail(value: ClientTicketDetail | (ClientTicketDetail & { in
     companyLabel: value.companyLabel, status: value.status, version: value.version,
     createdAt: value.createdAt, updatedAt: value.updatedAt, closedAt: value.closedAt,
     readOnly: value.readOnly, writesAvailable: value.writesAvailable, requestedAction: value.requestedAction,
-    sharedProjectName: value.sharedProjectName, relatedTicket, scope, delivery, request,
+    sharedProjectName: value.sharedProjectName,
+    ...(value.sharedProjectPreviewUrl ? { sharedProjectPreviewUrl: value.sharedProjectPreviewUrl } : {}),
+    relatedTicket, scope, delivery, request,
   };
 }
 

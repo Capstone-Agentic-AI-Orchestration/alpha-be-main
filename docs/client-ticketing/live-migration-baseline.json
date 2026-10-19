@@ -195,6 +195,15 @@
       "remote_sql_md5": "3fa1db8a6810e31081611e5798b8827a",
       "review": "exact_normalized_sql",
       "notes": "Applied after the historical snapshot; normalized local SQL matches the recorded migration in the shared-live project."
+    },
+    {
+      "local_file": "20261020100000_ticketing_client_pm_followthrough.sql",
+      "local_sha256": "0161c7735788ad5262ee03c09bf2b23e4b5236be0ad28860eb96728dc9ffb5a8",
+      "remote_version": null,
+      "remote_name": null,
+      "remote_sql_md5": null,
+      "review": "not_recorded",
+      "notes": "Pending branch migration; not verified against or applied to the shared-live database."
     }
   ]
 }

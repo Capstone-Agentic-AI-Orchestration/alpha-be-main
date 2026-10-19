@@ -39,6 +39,10 @@ export function createTicketReadService(store: TicketReadStore) {
         }
         ids.add(row.id);
       }
+      if (ticket.actor.kind === 'pm' && audience === 'client') {
+        const lastVisibleClientMessage = rows.slice(0, parsed.data.limit).filter(row => row.authorKind === 'client').at(-1);
+        if (lastVisibleClientMessage) await tx.markClientMessagesRead?.(ticket, lastVisibleClientMessage.id);
+      }
       const items = projected.slice(0, parsed.data.limit);
       return { items, nextCursor: projected.length > parsed.data.limit ? items[items.length - 1].id : null };
     });

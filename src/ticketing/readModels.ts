@@ -32,6 +32,7 @@ export interface ClientTicketDetail {
   writesAvailable: boolean;
   requestedAction: ClientAction;
   sharedProjectName: string | null;
+  sharedProjectPreviewUrl?: string;
   relatedTicket: { id: string; reference: string; title: string } | null;
   scope: { id: string; summary: string; proposedAt: string; agreed: boolean } | null;
   delivery: { id: string; scopeVersionId: string; summary: string; sharedAt: string; accepted: boolean } | null;
@@ -45,6 +46,7 @@ export interface PmTicketDetail extends ClientTicketDetail {
     projectId: string | null;
     projectName: string | null;
     projectClientVisible: boolean;
+    projectPreview?: { repository: string; branch: 'main' | 'uat'; url: string };
     requiredIssueIds: string[];
     actionOwner: LockedTicket['state']['actionOwner'];
     nextAction: NextAction;
@@ -130,6 +132,8 @@ export function projectClientTicketDetail(ticket: LockedTicket, rows: TicketDeta
     createdAt: header.createdAt, updatedAt: header.clientUpdatedAt, closedAt: header.closedAt,
     readOnly, writesAvailable, requestedAction,
     sharedProjectName: header.sharedProject?.clientVisible ? header.sharedProject.displayName : null,
+    ...(header.sharedProject?.clientVisible && header.sharedProject.preview
+      ? { sharedProjectPreviewUrl: header.sharedProject.preview.url } : {}),
     relatedTicket: related,
     scope: scope ? { id: scope.id, summary: scope.publicSummary, proposedAt: scope.proposedAt, agreed: state.agreedScopeVersionId === scope.id } : null,
     delivery,
@@ -155,6 +159,7 @@ export function projectPmTicketDetail(ticket: LockedTicket, rows: TicketDetailRo
       updatedAt: rows.header.internalUpdatedAt, projectId: state.projectId,
       projectName: rows.header.sharedProject?.displayName ?? null,
       projectClientVisible: rows.header.sharedProject?.clientVisible ?? false,
+      ...(rows.header.sharedProject?.preview ? { projectPreview: rows.header.sharedProject.preview } : {}),
       requiredIssueIds: [...state.requiredIssueIds],
       actionOwner: state.actionOwner, nextAction: state.nextAction, authorizedScopeVersionId: state.authorizedScopeVersionId,
       correctionRequestedFor: state.correctionRequestedFor, withdrawalRequested: state.withdrawalRequested,

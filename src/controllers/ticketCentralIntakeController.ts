@@ -8,6 +8,7 @@ import { pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 export interface TicketCentralIntakeApplication {
   listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown }): Promise<unknown>;
   accept(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
+  decline(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
 }
 
 function safePage(value: unknown) {
@@ -21,6 +22,7 @@ function safePage(value: unknown) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TicketReadInvariantError();
     const row = item as Record<string, unknown>;
     if (typeof row.id !== 'string' || !row.id.trim() || row.id.length > 200
+      || typeof row.publicReference !== 'string' || !/^INQ-[A-F0-9]{32}$/.test(row.publicReference)
       || typeof row.fullName !== 'string' || !row.fullName.trim() || row.fullName.length > 160
       || typeof row.email !== 'string' || !row.email.trim() || row.email.length > 254
       || (row.company !== null && (typeof row.company !== 'string' || row.company.length > 160))
@@ -32,7 +34,7 @@ function safePage(value: unknown) {
       throw new TicketReadInvariantError();
     }
     // Explicit client-data allowlist for the PM-only intake response.
-    return { id: row.id, fullName: row.fullName, email: row.email, company: row.company,
+    return { id: row.id, publicReference: row.publicReference, fullName: row.fullName, email: row.email, company: row.company,
       title: row.title, description: row.description, requestedDeadline: row.requestedDeadline,
       submittedAt: row.submittedAt };
   });
@@ -49,6 +51,15 @@ function safeAcceptance(value: unknown) {
     throw new TicketReadInvariantError();
   }
   return { ticketId: row.ticketId, workspaceId: row.workspaceId, reference: row.reference, operationId: row.operationId };
+}
+
+function safeDecline(value: unknown, intakeId: string, operationId: string) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TicketReadInvariantError();
+  const row = value as Record<string, unknown>;
+  if (row.intakeId !== intakeId || row.operationId !== operationId || row.status !== 'declined') {
+    throw new TicketReadInvariantError();
+  }
+  return { intakeId, operationId, status: 'declined' as const };
 }
 
 function pageInput(req: Request): { after?: unknown; limit?: unknown } {
@@ -90,6 +101,22 @@ export function createTicketCentralIntakeRouter(
     const accepted = safeAcceptance(await application.accept(req.params.intakeId ?? '', workspaceId, subject, req.body));
     if (accepted.workspaceId !== workspaceId) throw new TicketReadInvariantError();
     return res.status(201).json(accepted);
+  }));
+  router.post('/intakes/:intakeId/decline', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    if (await relayRequest(req, res)) return;
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    const workspaceId = req.workspace?.workspaceId;
+    if (!workspaceId) throw new TicketReadInvariantError();
+    const body = req.body !== null && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? req.body as Record<string, unknown> : {};
+    if (typeof body.operationId !== 'string') throw new TicketWorkflowError(400, 'central_intake_decline_invalid', 'The inquiry could not be declined.');
+    return res.json(safeDecline(
+      await application.decline(req.params.intakeId ?? '', workspaceId, subject, req.body),
+      req.params.intakeId ?? '', body.operationId,
+    ));
   }));
   return router;
 }

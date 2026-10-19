@@ -34,6 +34,8 @@ export interface TicketQueueRow {
   pmClientGroup?: { key: string; displayName: string; acceptsNewRequests: boolean; accessActive: boolean };
   /** PM-only project label. Never included in a client queue projection. */
   pmProjectName?: string | null;
+  /** PM-only unread client-reply indicator. */
+  pmClientReplyUnread?: boolean;
   header: Pick<TicketHeaderRow, 'workspaceId' | 'ticketId' | 'reference' | 'title' | 'createdAt' | 'clientUpdatedAt' | 'internalUpdatedAt' | 'closedAt'>;
 }
 export interface ClientTicketCounters { kind: 'client'; open: number; needsClient: number }

@@ -22,7 +22,11 @@ export function createTicketAcknowledgmentDeliveryService(
       }
       let failure: unknown;
       let accepted = false;
-      try { await provider.send(claim.recipient, claim.id); accepted = true; }
+      try {
+        if (claim.kind === 'central') await provider.send(claim.recipient, claim.id, claim.publicReference);
+        else await provider.send(claim.recipient, claim.id);
+        accepted = true;
+      }
       catch (error) { failure = error; }
       // Deliberately outside the provider catch: failed confirmation must not
       // turn a successful provider call into an unbounded new send.

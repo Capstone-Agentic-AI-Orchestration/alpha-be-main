@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isTransactionOutcomeUnknown } from '../store/transactionOutcome.js';
 import type { PublicTicketIntakeGuard } from '../store/ticketPublicIntakeStore.js';
@@ -48,7 +48,7 @@ export function createTicketCentralIntakeService(input: {
   const nextId = input.nextId ?? randomUUID;
 
   return {
-    async submit(raw: unknown, request: PublicTicketIntakeRequestContext): Promise<{ received: true }> {
+    async submit(raw: unknown, request: PublicTicketIntakeRequestContext): Promise<{ received: true; publicReference: string }> {
       if (!configured) throw new PublicTicketIntakeError('unavailable');
       if (!request || typeof request.origin !== 'string' || typeof request.remoteAddress !== 'string'
         || request.origin.length < 1 || request.origin.length > 2048 || request.remoteAddress.length < 1
@@ -76,9 +76,11 @@ export function createTicketCentralIntakeService(input: {
         keyId: key.id,
         fingerprint: createHmac('sha256', key.secret).update(JSON.stringify(parsed)).digest('hex'),
       }));
-      const outcome = await input.store.submit(input.organizationKey, nextId(), parsed, fingerprints, occurredAt);
-      if (outcome === 'conflict') throw new PublicTicketIntakeError('operation_conflict');
-      return { received: true };
+      const id = nextId();
+      const publicReference = `INQ-${createHash('sha256').update(`${input.organizationKey}:${id}`).digest('hex').slice(0, 32).toUpperCase()}`;
+      const outcome = await input.store.submit(input.organizationKey, id, publicReference, parsed, fingerprints, occurredAt);
+      if (outcome.kind === 'conflict') throw new PublicTicketIntakeError('operation_conflict');
+      return { received: true, publicReference: outcome.publicReference };
     },
 
     async listPending(workspaceId: string, subject: TicketSubject, raw: { after?: unknown; limit?: unknown }) {
@@ -116,6 +118,31 @@ export function createTicketCentralIntakeService(input: {
         if (error instanceof TicketWorkflowError) throw error;
         if (isTransactionOutcomeUnknown(error)) throw new TicketWorkflowError(503, 'central_intake_outcome_unknown', 'The result is not confirmed. Retry with the same operation ID.');
         throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The inquiry could not be accepted right now.');
+      }
+    },
+
+    async decline(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown) {
+      if (!configured) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The shared inquiry inbox is unavailable.');
+      const parsed = z.object({
+        schemaVersion: z.literal(1), operationId: operationSchema,
+        reason: z.string().trim().min(1).max(1000).nullable().optional(),
+      }).strict().safeParse(raw);
+      if (!parsed.success || !opaque(intakeId) || !opaque(workspaceId) || subject.kind !== 'internal' || !opaque(subject.userId)) {
+        throw new TicketWorkflowError(400, 'central_intake_decline_invalid', 'The inquiry could not be declined.');
+      }
+      const instant = now();
+      if (!Number.isFinite(instant.getTime())) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The inquiry could not be declined right now.');
+      try {
+        const result = await input.store.decline({ organizationKey: input.organizationKey, intakeId, workspaceId,
+          subject, operationId: parsed.data.operationId, reason: parsed.data.reason || null, occurredAt: instant.toISOString() });
+        if (result === 'not_found') throw new TicketWorkflowError(404, 'central_intake_not_found', 'This inquiry is no longer available.');
+        if (result === 'already_handled') throw new TicketWorkflowError(409, 'central_intake_already_handled', 'Another PM has already handled this inquiry. Refresh the inbox.');
+        if (result === 'forbidden') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot decline inquiries from this workspace.');
+        return result;
+      } catch (error) {
+        if (error instanceof TicketWorkflowError) throw error;
+        if (isTransactionOutcomeUnknown(error)) throw new TicketWorkflowError(503, 'central_intake_outcome_unknown', 'The result is not confirmed. Retry with the same operation ID.');
+        throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The inquiry could not be declined right now.');
       }
     },
   };

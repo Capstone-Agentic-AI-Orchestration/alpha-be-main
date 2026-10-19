@@ -4,7 +4,7 @@ import { PublicTicketIntakeError } from '../ticketing/publicIntake.js';
 import { route } from './asyncRoute.js';
 
 export interface TicketCentralIntakePublicApplication {
-  submit(input: unknown, request: PublicTicketIntakeRequestContext): Promise<{ received: true }>;
+  submit(input: unknown, request: PublicTicketIntakeRequestContext): Promise<{ received: true; publicReference: string }>;
 }
 
 export function createTicketCentralIntakePublicRouter(
@@ -28,7 +28,7 @@ export function createTicketCentralIntakePublicRouter(
     try { remoteAddress = resolveRemoteAddress(req) ?? ''; } catch { /* fail closed */ }
     const body = req.body !== null && typeof req.body === 'object' && !Array.isArray(req.body)
       ? req.body as Record<string, unknown> : {};
-    let result: { received: true };
+    let result: { received: true; publicReference: string };
     try {
       result = await application.submit(body.inquiry, {
         origin: req.get('Origin') ?? null, remoteAddress,
@@ -37,8 +37,10 @@ export function createTicketCentralIntakePublicRouter(
       if (error instanceof PublicTicketIntakeError) throw error;
       throw new PublicTicketIntakeError('unavailable');
     }
-    if (result?.received !== true || Object.keys(result).length !== 1) throw new PublicTicketIntakeError('unavailable');
-    return res.status(202).json({ received: true });
+    if (result?.received !== true || typeof result.publicReference !== 'string'
+      || !/^INQ-[A-F0-9]{32}$/.test(result.publicReference)
+      || Object.keys(result).length !== 2) throw new PublicTicketIntakeError('unavailable');
+    return res.status(202).json({ received: true, publicReference: result.publicReference });
   }));
   return router;
 }
