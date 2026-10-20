@@ -229,6 +229,86 @@ describe('deterministic orchestration orchestrator', () => {
       .resolves.toMatchObject({ run: { status: 'completed' } });
   });
 
+  it('finishes the active specialist, pauses before the next handoff, and resumes the saved plan', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-pause-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace('workspace-pause-test', () => store!.createProject({
+      id: 'project-pause-test', name: 'Pause project', key: 'PAUSE'
+    }));
+    const launches: OrchestrationLaunchRequest[] = [];
+    const executor: OrchestrationExecutor = {
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    };
+    const orchestrator = new OrchestrationService(store, executor);
+    const input = {
+      workspaceId: 'workspace-pause-test',
+      projectId: 'project-pause-test',
+      issueId: 'issue-pause-test',
+      repository: 'example/pause',
+      requestKey: 'request-pause-test',
+      requestFingerprint: 'fingerprint-pause-test',
+      createdBy: 'user-pause-test',
+      executorId: 'desktop-pause-test',
+      eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const,
+      plan
+    };
+
+    let snapshot = await startAndApprove(orchestrator, input);
+    expect(snapshot.run.currentTaskId).toBe('create-endpoint');
+    expect(launches).toHaveLength(1);
+    const pendingPause = await orchestrator.pauseRun({
+      workspaceId: input.workspaceId,
+      runId: snapshot.run.id,
+      expectedRevision: snapshot.run.revision,
+      actorId: input.createdBy,
+      now: '2026-10-21T01:00:00.000Z'
+    });
+    expect(pendingPause.run.status).toBe('executing');
+    expect(pendingPause.run.pauseRequestedAt).toBe('2026-10-21T01:00:00.000Z');
+    expect(pendingPause.run.currentTaskId).toBe('create-endpoint');
+
+    const attempt = pendingPause.attempts[0];
+    snapshot = (await orchestrator.handleRunnerCompleted({
+      id: attempt.prototypeRunId,
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      issueId: input.issueId,
+      agentId: 'backend-agent',
+      orchestrationRunId: pendingPause.run.id,
+      orchestrationTaskId: attempt.taskId,
+      orchestrationAttemptId: attempt.id,
+      status: 'completed',
+      checkpointCommit: 'b'.repeat(40),
+      activities: [{ id: 'summary', sequence: 1, kind: 'assistant', message: 'Endpoint submitted.', createdAt: '2026-10-21T01:01:00.000Z' }],
+      stages: [{ id: 'tests', status: 'success' }]
+    } as any))!;
+    snapshot = await orchestrator.acceptAttempt({
+      workspaceId: input.workspaceId,
+      runId: snapshot.run.id,
+      taskId: attempt.taskId,
+      attemptId: attempt.id,
+      expectedTaskRevision: snapshot.tasks.find(task => task.id === attempt.taskId)!.revision,
+      acceptedBy: 'orchestrator',
+      evidence: { contractCheck: 'passed' }
+    });
+
+    expect(snapshot.run.status).toBe('paused');
+    expect(snapshot.run.currentTaskId).toBeUndefined();
+    expect(snapshot.run.pauseRequestedAt).toBeUndefined();
+    expect(snapshot.tasks.map(task => task.status)).toEqual(['accepted', 'ready']);
+    expect(launches).toHaveLength(1);
+    expect(runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id).map(event => event.type))).toContain('run_paused');
+
+    snapshot = await orchestrator.resume({ workspaceId: input.workspaceId, runId: snapshot.run.id, actorId: input.createdBy });
+    expect(snapshot.run.status).toBe('executing');
+    expect(snapshot.run.currentTaskId).toBe('complete-endpoint');
+    expect(snapshot.run.pauseRequestedAt).toBeUndefined();
+    expect(launches.map(request => request.taskId)).toEqual(['create-endpoint', 'complete-endpoint']);
+  });
+
   it('skips unrelated optional tasks and runs optional work only when required work depends on it', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-necessary-work-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
