@@ -30,7 +30,7 @@ interface RoomPhase {
 interface RoomActivity {
   id: string;
   sequence: number;
-  kind: 'status' | 'stage' | 'assistant' | 'tool' | 'tool_result' | 'file_change' | 'handoff' | 'error' | 'summary';
+  kind: 'status' | 'stage' | 'assistant' | 'tool' | 'tool_result' | 'file_change' | 'handoff' | 'error' | 'summary' | 'attachment' | 'steering';
   message: string;
   detail?: string;
   paths?: string[];
@@ -368,6 +368,11 @@ function safeOrchestrationProjection(
         verification: observed ? {
           status: observed.status,
           missingScripts: Array.isArray(observed.missingScripts) ? observed.missingScripts.filter((item): item is string => typeof item === 'string') : [],
+          preparation: observed.preparation && typeof observed.preparation === 'object' ? {
+            display: safeOperationalText((observed.preparation as Record<string, unknown>).display as string | undefined, 180),
+            exitCode: typeof (observed.preparation as Record<string, unknown>).exitCode === 'number' ? (observed.preparation as Record<string, unknown>).exitCode as number : null,
+            signal: safeOperationalText((observed.preparation as Record<string, unknown>).signal as string | undefined, 40) ?? null
+          } : undefined,
           commands: commands.map(command => {
             const commandInfo = command.command && typeof command.command === 'object' ? command.command as Record<string, unknown> : {};
             return {
@@ -682,11 +687,13 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
 
   const authorizedChatCalls = (await Promise.all(
     projectAgentCalls
-      .filter(call => accessibleSquadIds.has(call.squadId))
+      .filter(call => call.origin === 'chat_turn'
+        ? call.requestedBy === req.workspace!.userId
+        : accessibleSquadIds.has(call.squadId))
       .map(async call => {
-        const allowed = await workspaceRegistry.canAccessProjectAgent(
-          req.workspace!, call.projectId, call.squadId, call.agentId
-        );
+        const allowed = call.origin === 'chat_turn' && call.requestedBy === req.workspace!.userId
+          ? true
+          : await workspaceRegistry.canAccessProjectAgent(req.workspace!, call.projectId, call.squadId, call.agentId);
         if (!allowed) return null;
         const agent = membersById.get(call.agentId);
         const ownedThread = ownerThreads.get(call.threadId);
@@ -712,8 +719,8 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
           canOpenChat: Boolean(ownedThread),
           chatLabel: ownedThread?.title || 'Project chat',
           agentId: call.agentId,
-          agentName: agent?.name ?? 'Project agent',
-          agentRole: agent?.role ?? 'Agent',
+          agentName: agent?.name ?? (call.origin === 'chat_turn' ? 'Alpha' : 'Project agent'),
+          agentRole: agent?.role ?? (call.origin === 'chat_turn' ? 'Chat assistant' : 'Agent'),
           operationMode: call.operationMode,
           origin: call.origin ?? 'agent_call',
           status: call.status,

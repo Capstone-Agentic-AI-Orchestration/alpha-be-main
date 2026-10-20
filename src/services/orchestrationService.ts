@@ -647,10 +647,15 @@ export class OrchestrationService {
       if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId !== task.id ||
           attempt.status !== 'running' || attempt.prototypeRunId !== run.id) return snapshot;
       const failedStage = run.stages.find(stage => stage.status === 'failed');
-      const reason = failedStage?.logs.slice(-3).join('\n').slice(0, 2_000)
-        || run.testSummary
-        || 'The specialist runner failed before submitting a result.';
-      return this.failActiveAttempt(snapshot, task.id, attempt.id, reason);
+      const isVerificationFailure = failedStage?.id === 'tests'
+        && (run.verificationEvidence?.status === 'failed' || /verification failed|could not prepare .*dependencies/i.test(run.testSummary ?? ''));
+      const verificationOutput = failedStage?.logs.slice(-30).join('\n').slice(-4_000);
+      const reason = isVerificationFailure
+        ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
+        : failedStage?.logs.slice(-3).join('\n').slice(0, 2_000)
+          || run.testSummary
+          || 'The specialist runner failed before submitting a result.';
+      return this.failActiveAttempt(snapshot, task.id, attempt.id, reason, isVerificationFailure);
     }));
   }
 
@@ -682,12 +687,13 @@ export class OrchestrationService {
     }));
   }
 
-  private failActiveAttempt(
+  private async failActiveAttempt(
     snapshot: OrchestrationSnapshot,
     taskId: string,
     attemptId: string,
-    reason: string
-  ): OrchestrationSnapshot {
+    reason: string,
+    autoRepairVerification = false
+  ): Promise<OrchestrationSnapshot> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
     const failed = this.store.failOrchestrationAttempt({
       runId: snapshot.run.id,
@@ -698,13 +704,51 @@ export class OrchestrationService {
       actorId: 'orchestrator'
     });
     if (failed.run.status !== 'executing') return failed;
-    return this.store.transitionOrchestrationRun({
+    const issue = reason.split(/\r?\n/, 1)[0].slice(0, 400);
+    const repairAction = autoRepairVerification
+      ? task.attemptCount >= 2
+        ? `The Orchestrator reviewed the checks, but they still fail after ${task.attemptCount} attempts. ${task.ownerAgentId} made the repair attempt. Review the latest failure details for the reported problem, then retry or provide a new direction.`
+        : `The Orchestrator reviewed the failed checks (${issue}) and assigned ${task.ownerAgentId} to make a focused repair. It will run the checks again after the repair.`
+      : 'Specialist execution failed; review the preserved result before retrying.';
+    const blocked = this.store.transitionOrchestrationRun({
       runId: failed.run.id,
       expectedRevision: failed.run.revision,
       nextStatus: 'blocked',
       actorId: 'orchestrator',
-      reason: 'Specialist execution failed; review the preserved result before retrying.'
+      reason: repairAction
     });
+    const failedTask = blocked.tasks.find(task => task.id === taskId);
+    if (!autoRepairVerification || !failedTask || failedTask.attemptCount >= 2) return blocked;
+
+    return this.retryFailedTaskUnlocked(blocked, failedTask, reason);
+  }
+
+  private async retryFailedTaskUnlocked(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationSnapshot['tasks'][number],
+    failureReason: string
+  ): Promise<OrchestrationSnapshot> {
+    if (!['executing', 'blocked'].includes(snapshot.run.status) || !['failed', 'blocked'].includes(task.status) || task.attemptCount >= 2) {
+      return snapshot;
+    }
+    let next = this.store.transitionOrchestrationTask({
+      runId: snapshot.run.id,
+      taskId: task.id,
+      expectedRevision: task.revision,
+      nextStatus: 'ready',
+      actorId: 'orchestrator',
+      reason: `The Orchestrator reviewed the failed checks and assigned ${task.ownerAgentId} to fix the reported problem.`,
+    });
+    if (next.run.status === 'blocked') {
+      next = this.store.transitionOrchestrationRun({
+        runId: next.run.id,
+        expectedRevision: next.run.revision,
+        nextStatus: 'executing',
+        actorId: 'orchestrator',
+        reason: `Repair assigned to ${task.ownerAgentId}: ${failureReason.slice(0, 500)}`
+      });
+    }
+    return this.dispatchNextUnlocked(next, 'orchestrator');
   }
 
   private async dispatchNextUnlocked(
@@ -955,6 +999,14 @@ export class OrchestrationService {
         .filter(finding => finding.correctionTaskId === taskId && finding.status === 'open')
         .map(finding => finding.id)
     };
+    const priorFailure = [...snapshot.attempts].reverse().find(attempt =>
+      attempt.taskId === taskId && attempt.status === 'failed' && attempt.failureReason
+    );
+    if (priorFailure?.failureReason) {
+      taskPackage.corrections.push(
+        `[orchestrator-repair] Review the previous verification failure and correct its cause before resubmitting. Evidence: ${priorFailure.failureReason.slice(0, 4_000)}`
+      );
+    }
     if (task.kind === 'review' && Buffer.byteLength(JSON.stringify(taskPackage), 'utf8') > MAX_REVIEW_CONTEXT_BYTES) {
       throw new Error(`The independent review package exceeds Alpha’s ${MAX_REVIEW_CONTEXT_BYTES / 1024} KiB context limit. Split the work into smaller tasks or request human review.`);
     }
