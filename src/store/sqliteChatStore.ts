@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatThread } from '../models/index.js';
+import { chatBuildRequestKey } from '../services/chatBuildIdentity.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import type { ChatStore } from './chatStore.js';
@@ -17,8 +18,19 @@ export class SqliteChatStore implements ChatStore {
 
   async messages(workspaceId: string, threadId: string, ownerId: string): Promise<ChatMessage[] | null> {
     return runWithWorkspace(workspaceId, () => {
-      const mine = sqliteService.getChatThreads(ownerId).some(thread => thread.id === threadId);
-      return mine ? sqliteService.getChatMessages(threadId) : null;
+      const thread = sqliteService.getChatThreads(ownerId).find(item => item.id === threadId);
+      if (!thread) return null;
+      const messages = sqliteService.getChatMessages(threadId);
+      if (!thread.projectId) return messages;
+      return messages.map(message => {
+        if (message.messageType !== 'build' || message.orchestrationRunId || !message.id.endsWith('-build')) return message;
+        const sourceMessageId = message.id.slice(0, -'-build'.length);
+        const requestKey = chatBuildRequestKey(workspaceId, threadId, sourceMessageId);
+        const snapshot = sqliteService.getOrchestrationByRequestKey(requestKey);
+        return snapshot && snapshot.run.projectId === thread.projectId
+          ? { ...message, orchestrationRunId: snapshot.run.id }
+          : message;
+      });
     });
   }
 }

@@ -24,6 +24,7 @@ import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIden
 import { roleCanOwnOrchestrationTask } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
+import { chatBuildRequestKey } from './chatBuildIdentity.js';
 export { isProjectBuildRequest } from './projectBuildIntent.js';
 
 export interface ProjectBuildStartResult {
@@ -170,7 +171,8 @@ async function reconcilePlanningReservation(input: {
   if (!worktreeSafeToRetire) {
     const inspection = await inspectOrchestrationPlanningWorktree({
       projectId: input.projectId,
-      reservation: input.reservation
+      reservation: input.reservation,
+      repositoryDir: input.repositoryDir
     });
     const durableReservation = runWithWorkspace(input.workspaceId, () =>
       sqliteService.getOrchestrationPlanningReservationByRun(input.projectId, input.reservation.runId, input.reservation.repository));
@@ -180,8 +182,8 @@ async function reconcilePlanningReservation(input: {
         reservation: durableReservation,
         state: inspection.canPreview ? 'needs_review' : 'manual_review',
         reason: inspection.canPreview
-          ? 'Planning stopped before a task plan was activated. The saved private workspace differs from its reserved clean base and has been preserved for review.'
-          : 'Planning stopped before a task plan was activated. Alpha could not verify the saved workspace identity, so it was preserved and repository admission remains paused.'
+          ? `Planning stopped before a task plan was activated. The saved private workspace was preserved for review. ${inspection.reason ?? 'It differs from its reserved clean base.'}`
+          : `Planning stopped before a task plan was activated. The saved workspace was preserved and repository admission remains paused. ${inspection.reason ?? 'Alpha could not verify the saved workspace identity.'}`
       }));
     }
     return 'workspace_preserved';
@@ -294,7 +296,7 @@ async function startOrchestratedProjectBuild(input: {
   if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('The Orchestrator is unavailable in this desktop version. Update the app before starting a build.', project, repository);
 
   const workspaceId = context.workspaceId;
-  const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${input.threadId}:${input.messageId}`).digest('hex').slice(0, 16);
+  const requestKey = chatBuildRequestKey(workspaceId, input.threadId, input.messageId);
   const cleanGoal = input.content.trim().replace(/^\/build\s*/i, '').trim();
   if (!cleanGoal || cleanGoal.length > 4_000) return blocked('Keep a task-based build request between 1 and 4,000 characters so its accepted scope remains explicit.', project, repository);
   const expectedIssueId = `chat-build-${requestKey}`;

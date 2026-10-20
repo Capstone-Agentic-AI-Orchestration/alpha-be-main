@@ -665,6 +665,8 @@ export interface ChatMessage {
   toolsExecuted?: ToolExecutionRecord[];
   messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build';
   agentCallId?: string;
+  /** The task workflow shown beneath an Orchestrator build message. */
+  orchestrationRunId?: string;
   squadId?: string;
   operationMode?: AgentCallMode;
   agentCallStatus?: AgentCallStatus;
