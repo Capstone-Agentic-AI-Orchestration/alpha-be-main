@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -18,6 +18,7 @@ describe('runtimeDiscovery', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     process.env = { ...originalEnv };
   });
 
@@ -76,6 +77,31 @@ describe('runtimeDiscovery', () => {
       expect(findAntigravity()).toBeTruthy();
       expect(findGemini()).toBeTruthy();
       expect(findOpenCode()).toBeTruthy();
+    });
+
+    it('falls back to the CLI command when only the Gemini desktop GUI exists', () => {
+      delete process.env.GEMINI_PATH;
+      process.env.PATH = '';
+      const guiPath = process.platform === 'win32'
+        ? path.join(process.env.LOCALAPPDATA || '', 'Google', 'Gemini', 'gemini.exe')
+        : path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Gemini', 'bin', 'gemini');
+      vi.spyOn(fs, 'existsSync').mockImplementation(file => String(file) === guiPath);
+
+      expect(findGemini()).toBe(process.platform === 'win32' ? 'gemini.cmd' : 'gemini');
+    });
+
+    it('still discovers the Gemini CLI when the desktop GUI is installed', () => {
+      delete process.env.GEMINI_PATH;
+      process.env.PATH = '';
+      const cliPath = process.platform === 'win32'
+        ? path.join(process.env.APPDATA || '', 'npm', 'gemini.cmd')
+        : '/usr/local/bin/gemini';
+      const guiPath = process.platform === 'win32'
+        ? path.join(process.env.LOCALAPPDATA || '', 'Google', 'Gemini', 'gemini.exe')
+        : path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Gemini', 'bin', 'gemini');
+      vi.spyOn(fs, 'existsSync').mockImplementation(file => [cliPath, guiPath].includes(String(file)));
+
+      expect(findGemini()).toBe(cliPath);
     });
   });
 });
