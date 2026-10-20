@@ -64,6 +64,19 @@ describe('SquadRunner first-agent startup failure', () => {
     }
   });
 
+  it('assigns the Orchestrator Agent to work planning and handoff', async () => {
+    const { defaultMemberAssignment } = await import('./squadRunner.js');
+    const assignment = defaultMemberAssignment({
+      id: 'orchestrator', role: 'Orchestrator Agent', name: 'Orchestrator',
+      description: 'Plans and hands off specialist work', systemPrompt: 'Orchestrate the approved work.'
+    } as any, 0, 2);
+
+    expect(assignment).toMatchObject({
+      stageLabel: 'Work planning and handoff',
+      phase: 'architecture'
+    });
+  });
+
   it('closes the squad and returns the issue to a retryable state', async () => {
     const { SquadRunner } = await import('./squadRunner.js');
     const runner = new SquadRunner();

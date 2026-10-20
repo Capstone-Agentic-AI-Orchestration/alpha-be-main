@@ -43,7 +43,7 @@ describe('workspace data boundaries', () => {
     runWithWorkspace(workspace.id, () => {
       expect(svc.getProjects()).toEqual([]);
       expect(svc.getChatThreads()).toEqual([]);
-      expect(svc.getAgents()).toHaveLength(10);
+      expect(svc.getAgents()).toHaveLength(11);
       svc.createProject({ id: 'project-client', name: 'Client project', key: 'CLI' });
       svc.createChatThread({ id: 'thread-client', title: 'Client chat' });
     });
