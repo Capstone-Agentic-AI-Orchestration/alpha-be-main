@@ -632,6 +632,7 @@ export class SQLiteService {
         tools_executed TEXT DEFAULT '[]',
         message_type TEXT DEFAULT 'assistant',
         agent_call_id TEXT,
+        orchestration_run_id TEXT,
         squad_id TEXT,
         operation_mode TEXT,
         agent_call_status TEXT,
@@ -1238,6 +1239,7 @@ export class SQLiteService {
       ['issue_comments', 'github_id INTEGER']
       ,['chat_messages', 'message_type TEXT DEFAULT \'assistant\'']
       ,['chat_messages', 'agent_call_id TEXT']
+      ,['chat_messages', 'orchestration_run_id TEXT']
       ,['chat_messages', 'squad_id TEXT']
       ,['chat_messages', 'operation_mode TEXT']
       ,['chat_messages', 'agent_call_status TEXT']
@@ -4744,6 +4746,7 @@ export class SQLiteService {
       toolsExecuted: parseJson(r.tools_executed, []),
       messageType: r.message_type ?? undefined,
       agentCallId: r.agent_call_id ?? undefined,
+      orchestrationRunId: r.orchestration_run_id ?? undefined,
       squadId: r.squad_id ?? undefined,
       operationMode: r.operation_mode ?? undefined,
       agentCallStatus: r.agent_call_status ?? undefined,
@@ -4853,12 +4856,12 @@ export class SQLiteService {
       INSERT INTO chat_messages (
         id, thread_id, sender_type, sender_name, agent_id, content,
         thinking_process, tools_executed, message_type, agent_call_id,
-        squad_id, operation_mode, agent_call_status, revision_target, timestamp, attachments_json
+        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, timestamp, attachments_json
       )
       VALUES (
         @id, @threadId, @senderType, @senderName, @agentId, @content,
         @thinkingProcess, @toolsExecuted, @messageType, @agentCallId,
-        @squadId, @operationMode, @agentCallStatus, @revisionTarget, @timestamp, @attachments
+        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @timestamp, @attachments
       )
     `);
     stmt.run({
@@ -4868,6 +4871,7 @@ export class SQLiteService {
       thinkingProcess: msg.thinkingProcess || null,
       messageType: msg.messageType || (msg.senderType === 'user' ? 'user' : msg.senderType),
       agentCallId: msg.agentCallId || null,
+      orchestrationRunId: msg.orchestrationRunId || null,
       squadId: msg.squadId || null,
       operationMode: msg.operationMode || null,
       agentCallStatus: msg.agentCallStatus || null,

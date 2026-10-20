@@ -458,6 +458,7 @@ export class ChatService extends EventEmitter {
         senderName: 'Alpha Orchestrator',
         content: summary,
         messageType: 'build',
+        orchestrationRunId: build.orchestrationRunId,
         timestamp: new Date().toISOString()
       };
       saveChatMessageAndShare(reply);

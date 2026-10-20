@@ -164,7 +164,7 @@ orchestrationRouter.post('/projects/:projectId/planning-recoveries/:runId/inspec
   if (!repositoryWorkspace) return res.status(409).json({ error: 'The repository checkout is not available on this desktop. Restore its project binding before recovering the planning workspace.' });
 
   const inspection = await runWithWorkspace(workspaceId, () =>
-    inspectOrchestrationPlanningWorktree({ projectId: project.id, reservation }));
+    inspectOrchestrationPlanningWorktree({ projectId: project.id, reservation, repositoryDir: repositoryWorkspace.dir }));
   if (inspection.safeToRetire || inspection.state === 'missing') {
     const removed = await runWithWorkspace(workspaceId, () => removeStaleOrchestrationPlanningWorktree({
       repositoryDir: repositoryWorkspace.dir,
@@ -183,8 +183,8 @@ orchestrationRouter.post('/projects/:projectId/planning-recoveries/:runId/inspec
     reservation,
     state: inspection.canPreview ? 'needs_review' : 'manual_review',
     reason: inspection.canPreview
-      ? 'Planning stopped before a task plan was activated. The saved private workspace differs from its reserved clean base and has been preserved for review.'
-      : 'Planning stopped before a task plan was activated. Alpha could not verify the saved workspace identity, so it was preserved and repository admission remains paused.'
+      ? `Planning stopped before a task plan was activated. The saved private workspace was preserved for review. ${inspection.reason ?? 'It differs from its reserved clean base.'}`
+      : `Planning stopped before a task plan was activated. The saved workspace was preserved and repository admission remains paused. ${inspection.reason ?? 'Alpha could not verify the saved workspace identity.'}`
   }));
   res.json({ runId: recovery.runId, state: recovery.state, revision: recovery.revision, reason: recovery.reason });
 }));
