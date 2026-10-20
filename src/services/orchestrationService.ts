@@ -452,6 +452,7 @@ export class OrchestrationService {
           expectedRevision: snapshot.run.revision,
           nextStatus: 'executing',
           actorId: input.actorId,
+          clearStoppedReason: true,
           now: input.now
         });
       }
