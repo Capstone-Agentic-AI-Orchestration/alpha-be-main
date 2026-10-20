@@ -264,14 +264,12 @@ export function findGemini(): string {
   const candidates = isWin
     ? [
         path.join(process.env.APPDATA || '', 'npm', 'gemini.cmd'),
-        path.join(process.env.LOCALAPPDATA || '', 'Google', 'Gemini', 'gemini.exe'),
         path.join(os.homedir(), '.local', 'bin', 'gemini.exe')
       ]
     : [
         path.join(os.homedir(), '.local', 'bin', 'gemini'),
         '/opt/homebrew/bin/gemini',
-        '/usr/local/bin/gemini',
-        path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Gemini', 'bin', 'gemini')
+        '/usr/local/bin/gemini'
       ];
 
   for (const candidate of candidates) {
