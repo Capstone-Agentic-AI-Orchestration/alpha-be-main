@@ -134,8 +134,20 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         if (!(await isGitWorkingTreeClean(workingDir))) {
           throw new Error('The previous task left uncheckpointed changes. Preserve the worktree and reconcile those changes before dispatching another task.');
         }
-        if (request.attemptNumber === 1 && repositoryWorkspace.baseCommit && await getHeadCommit(workingDir) !== repositoryWorkspace.baseCommit) {
-          throw new Error('The planning worktree no longer matches its recorded base commit. Preserve it and reconcile the build before retrying.');
+        if (request.attemptNumber === 1) {
+          // Attempt numbers belong to tasks, not the build. A new specialist
+          // starts from the last accepted checkpoint in its own repository.
+          const latestAccepted = [...snapshot!.attempts].reverse().find(attempt => {
+            const task = snapshot!.tasks.find(item => item.id === attempt.taskId);
+            return attempt.status === 'accepted' && task &&
+              normalizeRepository(task.repository ?? snapshot!.run.repository) === normalizeRepository(request.repository);
+          });
+          const expectedCommit = latestAccepted?.resultCommit ?? repositoryWorkspace.baseCommit;
+          if (expectedCommit && await getHeadCommit(workingDir) !== expectedCommit) {
+            throw new Error(latestAccepted
+              ? 'The handoff worktree no longer matches its latest accepted checkpoint. Preserve it and reconcile the build before retrying.'
+              : 'The planning worktree no longer matches its recorded base commit. Preserve it and reconcile the build before retrying.');
+          }
         }
       } else {
         if (repositoryWorkspace.baseCommit) {
