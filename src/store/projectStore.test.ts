@@ -117,8 +117,11 @@ describe.each(backends)('the project store ($name)', backend => {
     const store = await backend.open();
     await store.create(WS, { id: 'p1', name: 'Checkout', key: 'CHK', description: 'Basket' });
 
-    const updated = await store.update(WS, 'p1', { status: 'completed' });
-    expect(updated).toMatchObject({ name: 'Checkout', description: 'Basket', status: 'completed' });
+    const updated = await store.update(WS, 'p1', {
+      description: 'Keep the project keyboard accessible.', status: 'completed'
+    });
+    expect(updated).toMatchObject({ name: 'Checkout', description: 'Keep the project keyboard accessible.', status: 'completed' });
+    expect(await store.get(WS, 'p1')).toMatchObject({ description: 'Keep the project keyboard accessible.' });
     expect(await store.update(WS, 'no-such-project', { name: 'x' })).toBeNull();
   });
 

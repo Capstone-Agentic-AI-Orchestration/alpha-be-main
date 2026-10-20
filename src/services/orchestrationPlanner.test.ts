@@ -17,6 +17,7 @@ const plan = {
 
 const input = {
   runId: 'run-plan-test', cwd: 'D:/repositories/tasks', goal: 'Implement task creation.',
+  projectContext: 'Keep the workflow keyboard accessible.',
   exclusions: ['No authentication.'], repositoryContext: 'TypeScript API; npm test runs the test suite.',
   availableScripts: ['test'],
   eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }],
@@ -54,6 +55,21 @@ describe('read-only orchestration planner', () => {
       provider: 'OpenAI', modelName: 'fixture-model', cwd: input.cwd
     });
     expect(request?.systemPrompt).toContain('read-only planning orchestrator');
+    expect(request?.prompt).toContain('"projectContext": "Keep the workflow keyboard accessible."');
+  });
+
+  it('explains which planner setup is missing when no model is selected', async () => {
+    const planner = new OrchestrationPlanner(async () => response(JSON.stringify(plan)));
+    await expect(planner.createPlan({ ...input, planner: { ...input.planner, modelName: '' } }))
+      .rejects.toThrow('The planning agent Researcher does not have an available model.');
+  });
+
+  it('stops oversized project context before calling a model', async () => {
+    const turn = vi.fn(async () => response(JSON.stringify(plan)));
+    const planner = new OrchestrationPlanner(turn);
+    await expect(planner.createPlan({ ...input, projectContext: 'x'.repeat(8_001) }))
+      .rejects.toThrow('Project context is too long');
+    expect(turn).not.toHaveBeenCalled();
   });
 
   it('allows one bounded JSON-format repair and still validates the repaired plan', async () => {

@@ -45,8 +45,9 @@ export interface OrchestrationLaunchRequest {
 }
 
 export interface OrchestrationTaskPackage {
-  packageVersion: 2;
+  packageVersion: 3;
   goal: string;
+  projectContext: string;
   exclusions: string[];
   task: {
     id: string;
@@ -969,8 +970,9 @@ export class OrchestrationService {
       ? await this.createReviewInputs(snapshot, task)
       : [];
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 2,
+      packageVersion: 3,
       goal: snapshot.run.plan.goal,
+      projectContext: snapshot.run.plan.projectContext ?? '',
       exclusions: snapshot.run.plan.exclusions,
       task: {
         id: task.id,

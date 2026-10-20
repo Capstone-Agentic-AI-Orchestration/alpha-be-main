@@ -98,6 +98,6 @@ describe('orchestration review checkpoint', () => {
     fs.writeFileSync(path.join(snapshot.run.worktreePath!, 'README.md'), 'changed after review\n');
 
     await expect(assertOrchestrationApprovalCheckpointCurrent(snapshot, store!))
-      .rejects.toThrow(/changed after final validation/);
+      .rejects.toThrow(/changed after final checks/);
   });
 });

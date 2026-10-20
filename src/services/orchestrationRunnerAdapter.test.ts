@@ -83,8 +83,9 @@ describe('orchestration runner adapter', () => {
 
   it('prepares a role-matched shared task branch and binds the real runner to one task package', async () => {
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 2,
+      packageVersion: 3,
       goal: 'Create and complete tasks.',
+      projectContext: '',
       exclusions: ['No authentication.'],
       task: {
         id: 'create-endpoint', title: 'Create endpoint', kind: 'backend', repository: 'example/tasks',

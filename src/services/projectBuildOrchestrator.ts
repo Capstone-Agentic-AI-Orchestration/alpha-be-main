@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Agent, Project, ProjectBuildStep, Squad, SquadMemberAssignment } from '../models/index.js';
+import type { Agent, Project, ProjectBuildStep, RuntimeEngine, Squad, SquadMemberAssignment } from '../models/index.js';
 import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { issueStore, projectStore, squadStore } from '../store/stores.js';
@@ -21,7 +21,7 @@ import { resolveAgent } from './personaService.js';
 import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity } from './orchestrationPlanner.js';
-import { roleCanOwnOrchestrationTask } from './orchestrationContract.js';
+import { MAX_PROJECT_CONTEXT_CHARS, roleCanOwnOrchestrationTask } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
@@ -71,6 +71,24 @@ function blocked(reason: string, project?: Project, repository?: string): Projec
     repositories: repository ? [repository] : undefined,
     reason
   };
+}
+
+/** Resolve an intentionally unpinned role to the first model in its live runtime catalog. */
+function plannerModelName(provider: string, configuredModel: string, runtimes: RuntimeEngine[]): string {
+  const pinned = configuredModel.trim();
+  if (pinned) return pinned;
+  const matching = runtimes.filter(candidate => provider === 'Google Gemini'
+    ? candidate.id === 'antigravity'
+    : candidate.provider === provider
+  );
+  const usable = matching.filter(candidate => candidate.status === 'online' &&
+    candidate.models.some(model => model.trim())
+  );
+  // Prefer the machine's selected runtime; if the provider has more than one,
+  // use a stable order so repeated builds do not depend on scan response order.
+  const runtime = usable.find(candidate => candidate.isDefault) ??
+    [...usable].sort((left, right) => left.id.localeCompare(right.id))[0];
+  return runtime?.models.find(model => model.trim())?.trim() ?? '';
 }
 
 function issueTitle(content: string): string {
@@ -299,6 +317,9 @@ async function startOrchestratedProjectBuild(input: {
   const requestKey = chatBuildRequestKey(workspaceId, input.threadId, input.messageId);
   const cleanGoal = input.content.trim().replace(/^\/build\s*/i, '').trim();
   if (!cleanGoal || cleanGoal.length > 4_000) return blocked('Keep a task-based build request between 1 and 4,000 characters so its accepted scope remains explicit.', project, repository);
+  if ((project.description?.length ?? 0) > MAX_PROJECT_CONTEXT_CHARS) {
+    return blocked(`Project context is over ${MAX_PROJECT_CONTEXT_CHARS.toLocaleString()} characters. Shorten the saved ground rules in Project settings before starting a build.`, project, repository);
+  }
   const expectedIssueId = `chat-build-${requestKey}`;
   const requestFingerprint = orchestrationRequestFingerprint({
     workspaceId, projectId: project.id, issueId: expectedIssueId, repository,
@@ -359,32 +380,44 @@ async function startOrchestratedProjectBuild(input: {
   if (activeLegacyRun) return blocked('A legacy build is already using this project repository. Wait for it to finish before starting a task-based build.', project, repository);
 
   const orderedSteps = [...buildSteps].filter(step => step.enabled).sort((a, b) => a.position - b.position);
+  const runtimes = sqliteService.getRuntimes();
   const eligible = members.map(agent => {
-    const readiness = agentReadiness(agent, sqliteService.getRuntimes());
+    const readiness = agentReadiness(agent, runtimes);
     if (readiness.status !== 'ready') return { agent, readiness, persona: undefined };
     return { agent, readiness, persona: resolveAgent(agent, { projectKey: project.key, includeMemory: false, includeToolPolicy: false }) };
   }).filter((item): item is { agent: Agent; readiness: ReturnType<typeof agentReadiness>; persona: ReturnType<typeof resolveAgent> } => Boolean(item.persona));
 
+  const canPlan = (item: typeof eligible[number]) => roleCanOwnOrchestrationTask('requirements', item.persona.role);
+  const hasPlannerModel = (item: typeof eligible[number]) => Boolean(
+    plannerModelName(item.persona.modelProvider, item.persona.modelName, runtimes)
+  );
   const orchestratorAgent = eligible.find(item => item.persona.role.trim().toLowerCase() === 'orchestrator agent');
   const configuredPlannerStep = orderedSteps.find(step => PLANNING_KINDS.has(step.phase) && step.agentId);
-  const plannerCandidate = orchestratorAgent ?? (configuredPlannerStep
-    ? eligible.find(item => item.agent.id === configuredPlannerStep.agentId)
-    : eligible.find(item => roleCanOwnOrchestrationTask('requirements', item.persona.role)));
+  const planningCandidates = [
+    orchestratorAgent,
+    configuredPlannerStep ? eligible.find(item => item.agent.id === configuredPlannerStep.agentId) : undefined,
+    ...eligible.filter(canPlan)
+  ].filter((item, index, all): item is typeof eligible[number] => Boolean(item) && all.indexOf(item) === index);
+  const plannerCandidate = planningCandidates.find(item => canPlan(item) && hasPlannerModel(item));
   if (!plannerCandidate) {
-    const reason = configuredPlannerStep
-      ? `The Orchestrator Agent is unavailable, and the configured ${configuredPlannerStep.phase} planner is not ready. Make one planning agent available before starting.`
-      : 'No project-visible Orchestrator Agent or planning specialist is ready to prepare the build plan.';
+    const configuredCandidate = configuredPlannerStep
+      ? eligible.find(item => item.agent.id === configuredPlannerStep.agentId)
+      : undefined;
+    if (configuredCandidate && !canPlan(configuredCandidate)) {
+      return blocked(`${configuredCandidate.persona.role} cannot prepare a build plan. Assign a Research, Requirements, Manager, Architecture, or Orchestrator Agent persona to the planning step.`, project, repository);
+    }
+    const modelMissing = planningCandidates.find(canPlan);
+    const reason = modelMissing
+      ? `No model is available for ${modelMissing.persona.name}. Open Runtimes to scan a signed-in model, or choose an available model in Agent settings, then try again.`
+      : `No project-visible planning agent is ready. Make the Orchestrator or a Research, Requirements, Manager, or Architecture Agent available on a signed-in runtime, then try again.`;
     return blocked(reason, project, repository);
-  }
-  if (!roleCanOwnOrchestrationTask('requirements', plannerCandidate.persona.role)) {
-    return blocked(`${plannerCandidate.persona.role} cannot act as the read-only planning orchestrator. Assign a Research, Requirements, Manager, Architecture, or Orchestrator Agent persona to the planning step.`, project, repository);
   }
   const plannerIdentity: PlannerAgentIdentity = {
     id: plannerCandidate.agent.id,
     name: plannerCandidate.persona.name,
     role: plannerCandidate.persona.role,
     provider: plannerCandidate.persona.modelProvider,
-    modelName: plannerCandidate.persona.modelName,
+    modelName: plannerModelName(plannerCandidate.persona.modelProvider, plannerCandidate.persona.modelName, runtimes),
     reasoningEffort: plannerCandidate.persona.reasoningEffort,
     systemPrompt: plannerCandidate.persona.systemPrompt
   };
@@ -455,6 +488,7 @@ async function startOrchestratedProjectBuild(input: {
       runId: reservation.runId,
       cwd: reservation.worktreePath,
       goal: cleanGoal,
+      projectContext: project.description?.trim() ?? '',
       repositoryContext: planningContexts[0]?.context.context ?? '',
       availableScripts: planningContexts[0]?.context.scripts ?? [],
       repositories: planningContexts.map(item => ({
