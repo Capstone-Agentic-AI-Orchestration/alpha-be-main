@@ -101,18 +101,26 @@ describe('read-only orchestration planner', () => {
     expect(requests[1].prompt).toContain('acceptanceCriteria');
   });
 
-  it('blocks role-mismatched and unassignable plans without trying to repair their semantics', async () => {
-    const turn = vi.fn(async () => response(JSON.stringify({
+  it('makes one bounded correction when a task has an ineligible owner', async () => {
+    const requests: CliTurnOptions[] = [];
+    const turn = vi.fn(async (options: CliTurnOptions) => {
+      requests.push(options);
+      return response(requests.length === 1 ? JSON.stringify({
       ...plan,
       tasks: plan.tasks.map(task => ({ ...task, ownerAgentId: 'research-agent' }))
-    })));
+      }) : JSON.stringify(plan));
+    });
     const planner = new OrchestrationPlanner(turn);
 
-    await expect(planner.createPlan(input)).rejects.toMatchObject({ code: 'invalid_plan' });
-    expect(turn).toHaveBeenCalledTimes(1);
+    const result = await planner.createPlan(input);
+
+    expect(result.plan.tasks[0].ownerAgentId).toBe('backend-agent');
+    expect(turn).toHaveBeenCalledTimes(2);
+    expect(requests[1].prompt).toContain('Make the smallest change');
+    expect(requests[1].prompt).toContain('eligible agents');
   });
 
-  it('requires an independent reviewer when the project squad has a reviewer distinct from code owners', async () => {
+  it('corrects duplicate required review handoffs into one independent review', async () => {
     const reviewReadyInput = {
       ...input,
       eligibleAgents: [
@@ -120,9 +128,38 @@ describe('read-only orchestration planner', () => {
         { id: 'reviewer-agent', role: 'Security / Code Quality Agent' }
       ]
     } as const;
-    const planner = new OrchestrationPlanner(async () => response(JSON.stringify(plan)));
+    const reviewTask = (id: string) => ({
+      id, title: `Review implementation ${id}`, description: 'Review the finished task implementation.',
+      kind: 'review', ownerAgentId: 'reviewer-agent', dependsOn: ['create-task-api'],
+      assignmentReason: 'Independent review expertise.', requirementIds: ['REQ-CREATE'],
+      acceptanceCriteria: ['Confirm the implementation meets the stated requirements.'],
+      requiredChecks: [], scope: { includePaths: ['src/**'], excludePaths: [] }, required: true
+    });
+    const duplicatedReviews = { ...plan, tasks: [...plan.tasks, reviewTask('review-one'), reviewTask('review-two')] };
+    const requests: CliTurnOptions[] = [];
+    const planner = new OrchestrationPlanner(async options => {
+      requests.push(options);
+      return response(JSON.stringify(requests.length === 1 ? duplicatedReviews : { ...plan, tasks: [...plan.tasks, reviewTask('review-one')] }));
+    });
 
-    await expect(planner.createPlan(reviewReadyInput)).rejects.toThrow(/required review task owned by an eligible specialist/);
+    const result = await planner.createPlan(reviewReadyInput);
+
+    expect(result.plan.tasks.filter(task => task.required && task.kind === 'review')).toHaveLength(1);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].prompt).toContain('Use one initial independent review task');
+    expect(requests[1].prompt).toContain('Proposed plan to correct');
+  });
+
+  it('stops safely when the one semantic correction still fails validation', async () => {
+    const invalid = {
+      ...plan,
+      tasks: plan.tasks.map(task => ({ ...task, ownerAgentId: 'research-agent' }))
+    };
+    const turn = vi.fn(async () => response(JSON.stringify(invalid)));
+    const planner = new OrchestrationPlanner(turn);
+
+    await expect(planner.createPlan(input)).rejects.toThrow(/tried one correction.*No specialist was started/);
+    expect(turn).toHaveBeenCalledTimes(2);
   });
 
   it('blocks a plan that drops a required configured project step', async () => {

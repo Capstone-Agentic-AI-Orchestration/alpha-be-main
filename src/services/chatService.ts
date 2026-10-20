@@ -415,7 +415,7 @@ export class ChatService extends EventEmitter {
         ? [
             '**Build not started for any repository.**',
             ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
-            'Review the project setup, then try the build again.'
+            'No specialist was started, so no files were changed in this run. Open the Live Build Room to review each reason, then retry when the required correction is clear.'
           ].join('\n\n')
         : builds.length > 1
         ? [
