@@ -4,6 +4,7 @@ export type OrchestrationRunStatus =
   | 'planning'
   | 'awaiting_plan_approval'
   | 'executing'
+  | 'paused'
   | 'validating'
   | 'awaiting_approval'
   | 'publishing'
@@ -165,6 +166,8 @@ export interface OrchestrationRunRecord {
   status: OrchestrationRunStatus;
   revision: number;
   currentTaskId?: string;
+  pauseRequestedAt?: string;
+  pauseRequestedBy?: string;
   stoppedReason?: string;
   branchName?: string;
   baseRef?: string;
@@ -184,7 +187,8 @@ export interface OrchestrationRunRecord {
 export const RUN_TRANSITIONS: Readonly<Record<OrchestrationRunStatus, ReadonlySet<OrchestrationRunStatus>>> = {
   planning: new Set(['awaiting_plan_approval', 'executing', 'blocked', 'failed', 'cancelled']),
   awaiting_plan_approval: new Set(['executing', 'blocked', 'cancelling', 'cancelled']),
-  executing: new Set(['validating', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
+  executing: new Set(['validating', 'paused', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
+  paused: new Set(['executing', 'cancelling', 'cancelled']),
   validating: new Set(['executing', 'awaiting_approval', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
   awaiting_approval: new Set(['publishing', 'cancelling', 'cancelled']),
   publishing: new Set(['completed']),

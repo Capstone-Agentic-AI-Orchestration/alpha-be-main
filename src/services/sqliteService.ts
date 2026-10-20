@@ -142,6 +142,8 @@ function orchestrationRunFromRow(row: any, plan: OrchestrationPlan): Orchestrati
     status: row.status,
     revision: row.revision,
     currentTaskId: row.current_task_id ?? undefined,
+    pauseRequestedAt: row.pause_requested_at ?? undefined,
+    pauseRequestedBy: row.pause_requested_by ?? undefined,
     stoppedReason: row.stopped_reason ?? undefined,
     branchName: row.branch_name ?? undefined,
     baseRef: row.base_ref ?? undefined,
@@ -750,6 +752,8 @@ export class SQLiteService {
         status TEXT NOT NULL,
         revision INTEGER NOT NULL DEFAULT 0,
         current_task_id TEXT,
+        pause_requested_at TEXT,
+        pause_requested_by TEXT,
         stopped_reason TEXT,
         branch_name TEXT,
         base_ref TEXT,
@@ -1073,6 +1077,8 @@ export class SQLiteService {
       ['orchestration_runs', 'base_ref TEXT'],
       ['orchestration_runs', 'base_commit TEXT'],
       ['orchestration_runs', 'worktree_path TEXT'],
+      ['orchestration_runs', 'pause_requested_at TEXT'],
+      ['orchestration_runs', 'pause_requested_by TEXT'],
       ['orchestration_runs', "repository_workspaces_json TEXT NOT NULL DEFAULT '[]'"],
       ['orchestration_tasks', "scope_json TEXT NOT NULL DEFAULT '{}'"],
       /**
@@ -2875,8 +2881,10 @@ export class SQLiteService {
         }
       }
       const { plan: _plan, ...runRow } = run;
-      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, stopped_reason, branch_name, base_ref, base_commit, worktree_path, repository_workspaces_json, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @repositoryWorkspacesJson, @createdAt, @updatedAt)')
-        .run({ ...runRow, workspaceId, currentTaskId: run.currentTaskId ?? null, stoppedReason: run.stoppedReason ?? null,
+      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, pause_requested_at, pause_requested_by, stopped_reason, branch_name, base_ref, base_commit, worktree_path, repository_workspaces_json, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @pauseRequestedAt, @pauseRequestedBy, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @repositoryWorkspacesJson, @createdAt, @updatedAt)')
+        .run({ ...runRow, workspaceId, currentTaskId: run.currentTaskId ?? null,
+          pauseRequestedAt: run.pauseRequestedAt ?? null, pauseRequestedBy: run.pauseRequestedBy ?? null,
+          stoppedReason: run.stoppedReason ?? null,
           branchName: run.branchName ?? null, baseRef: run.baseRef ?? null, baseCommit: run.baseCommit ?? null, worktreePath: run.worktreePath ?? null,
           repositoryWorkspacesJson: JSON.stringify(run.repositoryWorkspaces ?? []) });
       this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -3063,7 +3071,7 @@ export class SQLiteService {
   }
 
   listActiveOrchestrationSnapshots(): OrchestrationSnapshot[] {
-    const statuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
+    const statuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
     const placeholders = statuses.map(() => '?').join(', ');
     const rows = this.db.prepare(`SELECT id FROM orchestration_runs WHERE workspace_id = ? AND status IN (${placeholders}) ORDER BY created_at ASC`)
       .all(this.workspaceId(), ...statuses) as Array<{ id: string }>;
@@ -3071,7 +3079,7 @@ export class SQLiteService {
   }
 
   listAllActiveOrchestrationSnapshots(): OrchestrationSnapshot[] {
-    const statuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
+    const statuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
     const placeholders = statuses.map(() => '?').join(', ');
     const rows = this.db.prepare(`SELECT workspace_id, id FROM orchestration_runs WHERE status IN (${placeholders}) ORDER BY created_at ASC`)
       .all(...statuses) as Array<{ workspace_id: string; id: string }>;
@@ -3158,7 +3166,7 @@ export class SQLiteService {
           createdAt: existing.created_at, created: false
         };
       }
-      const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+      const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
       const placeholders = activeStatuses.map(() => '?').join(', ');
       const active = this.db.prepare(`SELECT id, repository, repository_workspaces_json FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)
         .all(workspaceId, input.projectId, ...activeStatuses) as Array<{ id: string; repository: string; repository_workspaces_json: string }>;
@@ -3440,7 +3448,7 @@ export class SQLiteService {
     status: OrchestrationRunRecord['status'];
     branchName?: string;
   } | undefined {
-    const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+    const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
     const placeholders = activeStatuses.map(() => '?').join(', ');
     const rows = this.db.prepare(`SELECT id, repository, repository_workspaces_json, status, branch_name, created_at FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders}) ORDER BY created_at DESC`)
       .all(this.workspaceId(), projectId, ...activeStatuses) as any[];
@@ -3466,6 +3474,8 @@ export class SQLiteService {
     actorId?: string;
     reason?: string;
     evidence?: Record<string, unknown>;
+    clearPauseRequest?: boolean;
+    clearStoppedReason?: boolean;
     now?: string;
   }): OrchestrationSnapshot {
     const workspaceId = this.workspaceId();
@@ -3565,9 +3575,12 @@ export class SQLiteService {
         throw new Error('Open blocking or critical findings must be resolved before requesting human approval.');
       }
       const updated = transitionRun(snapshot.run, input.nextStatus, input.expectedRevision, now);
-      const result = this.db.prepare('UPDATE orchestration_runs SET status = ?, revision = ?, stopped_reason = ?, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?')
-        .run(updated.status, updated.revision, input.reason === undefined ? (snapshot.run.stoppedReason ?? null) : input.reason,
-          now,
+      const nextStoppedReason = input.clearStoppedReason
+        ? null
+        : input.reason === undefined ? (snapshot.run.stoppedReason ?? null) : input.reason;
+      const result = this.db.prepare('UPDATE orchestration_runs SET status = ?, revision = ?, stopped_reason = ?, pause_requested_at = CASE WHEN ? = 1 THEN NULL ELSE pause_requested_at END, pause_requested_by = CASE WHEN ? = 1 THEN NULL ELSE pause_requested_by END, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?')
+        .run(updated.status, updated.revision, nextStoppedReason,
+          input.clearPauseRequest ? 1 : 0, input.clearPauseRequest ? 1 : 0, now,
           workspaceId, input.runId, input.expectedRevision);
       if (result.changes !== 1) throw new Error('Build changed while its transition was being committed.');
       this.appendOrchestrationEvent(input.runId, `run_${updated.status}`, {
@@ -3577,6 +3590,49 @@ export class SQLiteService {
       }, input.actorId, now);
     });
     change();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  requestOrchestrationPause(input: {
+    runId: string;
+    expectedRevision: number;
+    actorId: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const request = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (snapshot.run.revision !== input.expectedRevision) throw new Error('Build changed before the pause request arrived. Refresh and try again.');
+      if (snapshot.run.status !== 'executing') throw new Error('Only a running build can be paused.');
+      if (snapshot.run.pauseRequestedAt) return;
+      const reason = snapshot.run.currentTaskId
+        ? 'Pause requested. The current specialist will finish this step; Alpha will pause before the next handoff.'
+        : 'Build paused at the current checkpoint.';
+      if (!snapshot.run.currentTaskId) {
+        const updated = transitionRun(snapshot.run, 'paused', input.expectedRevision, now);
+        const result = this.db.prepare(`UPDATE orchestration_runs SET status = ?, revision = ?, stopped_reason = ?,
+          pause_requested_at = NULL, pause_requested_by = NULL, updated_at = ?
+          WHERE workspace_id = ? AND id = ? AND revision = ?`).run(
+          updated.status, updated.revision, reason, now, workspaceId, input.runId, input.expectedRevision
+        );
+        if (result.changes !== 1) throw new Error('Build changed while its pause was being committed.');
+        this.appendOrchestrationEvent(input.runId, 'run_paused', {
+          revision: updated.revision, reason, currentTaskId: undefined
+        }, input.actorId, now);
+        return;
+      }
+      const nextRevision = snapshot.run.revision + 1;
+      const result = this.db.prepare(`UPDATE orchestration_runs SET pause_requested_at = ?, pause_requested_by = ?,
+        revision = ?, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ? AND status = 'executing'`)
+        .run(now, input.actorId, nextRevision, now, workspaceId, input.runId, input.expectedRevision);
+      if (result.changes !== 1) throw new Error('Build changed while its pause request was being saved.');
+      this.appendOrchestrationEvent(input.runId, 'run_pause_requested', {
+        revision: nextRevision, currentTaskId: snapshot.run.currentTaskId, reason
+      }, input.actorId, now);
+    });
+    request();
     return this.getOrchestrationSnapshot(input.runId)!;
   }
 
@@ -5146,7 +5202,7 @@ export class SQLiteService {
     ownerCallId?: string
   ): void {
     if (!repositoryKey) return;
-    const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+    const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
     const placeholders = activeStatuses.map(() => '?').join(', ');
     const activeRuns = this.db.prepare(`SELECT id, repository, status FROM orchestration_runs
       WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)

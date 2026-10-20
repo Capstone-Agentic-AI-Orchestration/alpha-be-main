@@ -468,7 +468,7 @@ export class OrchestrationService {
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
       const snapshot = this.store.getOrchestrationSnapshot(input.runId);
       if (!snapshot) throw new Error('Orchestration run not found.');
-      if (snapshot.run.currentTaskId || !['executing', 'blocked', 'recovery_required'].includes(snapshot.run.status)) return snapshot;
+      if (snapshot.run.currentTaskId || !['executing', 'paused', 'blocked', 'recovery_required'].includes(snapshot.run.status)) return snapshot;
       let ready = snapshot;
       if (snapshot.run.status === 'recovery_required') {
         const interruptedTasks = snapshot.tasks.filter(task => task.status === 'blocked' &&
@@ -500,7 +500,7 @@ export class OrchestrationService {
       if (ready.run.status !== 'executing') {
         ready = this.store.transitionOrchestrationRun({
           runId: input.runId, expectedRevision: ready.run.revision, nextStatus: 'executing',
-          actorId: input.actorId ?? 'orchestrator', now: input.now
+          actorId: input.actorId ?? 'orchestrator', clearPauseRequest: true, clearStoppedReason: true, now: input.now
         });
       }
       return this.dispatchNextUnlocked(ready, input.actorId ?? 'orchestrator', undefined, input.now);
@@ -523,6 +523,23 @@ export class OrchestrationService {
         actorId: input.actorId ?? 'orchestrator', reason: input.reason, now: input.now
       });
     }));
+  }
+
+  async pauseRun(input: {
+    workspaceId: string;
+    runId: string;
+    expectedRevision: number;
+    actorId: string;
+    now?: string;
+  }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () =>
+      this.store.requestOrchestrationPause({
+        runId: input.runId,
+        expectedRevision: input.expectedRevision,
+        actorId: input.actorId,
+        now: input.now
+      })
+    ));
   }
 
   async cancelRun(input: {
@@ -696,6 +713,7 @@ export class OrchestrationService {
     autoRepairVerification = false
   ): Promise<OrchestrationSnapshot> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
+    const pauseWasRequested = Boolean(snapshot.run.pauseRequestedAt);
     const failed = this.store.failOrchestrationAttempt({
       runId: snapshot.run.id,
       taskId,
@@ -706,7 +724,9 @@ export class OrchestrationService {
     });
     if (failed.run.status !== 'executing') return failed;
     const issue = reason.split(/\r?\n/, 1)[0].slice(0, 400);
-    const repairAction = autoRepairVerification
+    const repairAction = pauseWasRequested
+      ? `The current specialist failed while a pause was pending. The work is preserved for review; inspect the failed checks before retrying.`
+      : autoRepairVerification
       ? task.attemptCount >= 2
         ? `The Orchestrator reviewed the checks, but they still fail after ${task.attemptCount} attempts. ${task.ownerAgentId} made the repair attempt. Review the latest failure details for the reported problem, then retry or provide a new direction.`
         : `The Orchestrator reviewed the failed checks (${issue}) and assigned ${task.ownerAgentId} to make a focused repair. It will run the checks again after the repair.`
@@ -716,8 +736,10 @@ export class OrchestrationService {
       expectedRevision: failed.run.revision,
       nextStatus: 'blocked',
       actorId: 'orchestrator',
-      reason: repairAction
+      reason: repairAction,
+      clearPauseRequest: pauseWasRequested
     });
+    if (pauseWasRequested) return blocked;
     const failedTask = blocked.tasks.find(task => task.id === taskId);
     if (!autoRepairVerification || !failedTask || failedTask.attemptCount >= 2) return blocked;
 
@@ -759,6 +781,17 @@ export class OrchestrationService {
     now?: string
   ): Promise<OrchestrationSnapshot> {
     if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId) return snapshot;
+    if (snapshot.run.pauseRequestedAt) {
+      return this.store.transitionOrchestrationRun({
+        runId: snapshot.run.id,
+        expectedRevision: snapshot.run.revision,
+        nextStatus: 'paused',
+        actorId,
+        reason: 'The current step is complete. The build is paused before the next specialist handoff.',
+        clearPauseRequest: true,
+        now
+      });
+    }
     const next = selectNextReadyTask(snapshot.run.plan, snapshot.tasks);
     if (!next) return this.closeSchedulingWindow(snapshot, actorId, now);
 

@@ -243,10 +243,11 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
   if (!ALPHA_ORCHESTRATION_ENABLED) {
     return res.status(409).json({ error: 'The Orchestrator is unavailable in this desktop version. Update the app before continuing this build.' });
   }
+  const userPaused = snapshot.run.status === 'paused';
   const pausedByKillSwitch = snapshot.run.status === 'blocked' &&
     /orchestrator is (?:disabled|unavailable)/i.test(snapshot.run.stoppedReason || '');
   const needsRecovery = snapshot.run.status === 'recovery_required';
-  if (snapshot.run.currentTaskId || (!pausedByKillSwitch && !needsRecovery)) {
+  if (snapshot.run.currentTaskId || (!userPaused && !pausedByKillSwitch && !needsRecovery)) {
     return res.status(409).json({ error: 'This build is not paused at a resumable checkpoint.' });
   }
   try {
@@ -257,6 +258,31 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
       actorId: req.workspace!.userId
     });
     res.json({ runId: next.run.id, status: next.run.status, currentTaskId: next.run.currentTaskId });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+}));
+
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/pause', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res)) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const expectedRevision = req.body?.expectedRevision;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return res.status(400).json({ error: 'expectedRevision must be a non-negative integer.' });
+  }
+  if (snapshot.run.status !== 'executing') {
+    return res.status(409).json({ error: 'Only a running Orchestrator build can be paused.' });
+  }
+  try {
+    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
+    const paused = await orchestrationService.pauseRun({
+      workspaceId: req.workspace!.workspaceId,
+      runId: snapshot.run.id,
+      expectedRevision,
+      actorId: req.workspace!.userId
+    });
+    res.json({ runId: paused.run.id, status: paused.run.status, pauseRequestedAt: paused.run.pauseRequestedAt });
   } catch (error) {
     errorResponse(res, error);
   }

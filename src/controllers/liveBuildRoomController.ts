@@ -33,6 +33,7 @@ interface RoomActivity {
   kind: 'status' | 'stage' | 'assistant' | 'tool' | 'tool_result' | 'file_change' | 'handoff' | 'error' | 'summary' | 'attachment' | 'steering';
   message: string;
   detail?: string;
+  isStreaming?: boolean;
   paths?: string[];
   createdAt: string;
 }
@@ -161,10 +162,31 @@ function roomRunActivity(activities: RunActivity[] = []): RoomActivity[] {
       message: safeOperationalText(activity.message, 320) ?? '',
       toolName,
       detail: safeOperationalText(activity.detail),
+      isStreaming: activity.isStreaming,
       paths: roomRunActivityPaths(activity),
       createdAt: activity.createdAt
     };
   });
+}
+
+function orchestrationRunActivity(run: PrototypeRun): RoomActivity[] {
+  const recentOutput = run.stages
+    .filter(stage => stage.id === 'tests' || stage.status === 'failed')
+    .flatMap((stage, index) => {
+      const output = (stage.logs ?? []).slice(-12).join('\n').slice(-5_000);
+      if (!output) return [];
+      return [{
+        id: `${run.id}:stage-output:${stage.id}`,
+        sequence: 50_000 + index,
+        kind: stage.status === 'failed' ? 'error' as const : 'tool_result' as const,
+        message: `${stage.status === 'failed' ? 'Failed check' : 'Recent check'} output · ${stage.label}`,
+        toolName: 'Verification output',
+        detail: safeOperationalText(output, 5_000),
+        createdAt: stage.completedAt ?? run.updatedAt
+      }];
+    });
+  return [...roomRunActivity(run.activities), ...recentOutput]
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
 }
 
 function roomRunActivityPaths(activity: RunActivity): string[] | undefined {
@@ -252,6 +274,7 @@ function safeOrchestrationProjection(
       })),
       currentTaskId: snapshot.run.currentTaskId,
       stoppedReason: safeOperationalText(snapshot.run.stoppedReason, 500),
+      pauseRequestedAt: snapshot.run.pauseRequestedAt,
       publication: snapshot.run.publication ? {
         repository: safeOperationalText(snapshot.run.publication.repository, 180) ?? snapshot.run.repository,
         branchName: safeOperationalText(snapshot.run.publication.branchName, 180) ?? '',
@@ -650,6 +673,27 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const selectedRun = squadRun && squadRun.squadId === selectedSquad?.id ? squadRun : undefined;
   const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
   const allProjectRuns = (await runStore().list(workspaceId)).filter(run => run.projectId === project.id);
+  const requestedOrchestrationId = typeof req.query.orchestrationRunId === 'string'
+    ? req.query.orchestrationRunId
+    : typeof req.query.runId === 'string' && req.query.runId.startsWith('orchestration-')
+      ? req.query.runId
+      : undefined;
+  const explicitlySelectedLegacyRun = Boolean(requestedRunId && !requestedOrchestrationId);
+  const requestedOrchestration = !IS_CLOUD && requestedOrchestrationId
+    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(requestedOrchestrationId))
+    : undefined;
+  const activeOrchestrationRef = !IS_CLOUD
+    ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id))
+    : undefined;
+  const activeOrchestration = activeOrchestrationRef
+    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(activeOrchestrationRef.runId))
+    : undefined;
+  const latestOrchestration = !IS_CLOUD
+    ? runWithWorkspace(workspaceId, () => sqliteService.getLatestOrchestrationSnapshot(project.id))
+    : undefined;
+  const selectedOrchestration = !explicitlySelectedLegacyRun
+    ? [requestedOrchestration, activeOrchestration, latestOrchestration].find(item => item?.run.projectId === project.id)
+    : undefined;
   // Project-chat calls run on the desktop and remain in that owner's private
   // local history. Cloud rooms use the shared Postgres run telemetry instead;
   // never let a cloud request fall through to the desktop SQLite store.
@@ -667,6 +711,17 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     visible: await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId)
   })));
   const visibleAgentIds = new Set(roomAgentVisibility.filter(item => item.visible).map(item => item.agentId));
+  if (selectedOrchestration) {
+    const taskOwners = [...new Set(selectedOrchestration.tasks.map(task => task.ownerAgentId))];
+    const taskOwnerVisibility = await Promise.all(taskOwners.map(async agentId => ({
+      agentId,
+      visible: await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId)
+    })));
+    taskOwnerVisibility.filter(item => item.visible).forEach(item => visibleAgentIds.add(item.agentId));
+  }
+  const orchestrationPrototypeRuns = selectedOrchestration
+    ? allProjectRuns.filter(run => run.orchestrationRunId === selectedOrchestration.run.id && visibleAgentIds.has(run.agentId))
+    : [];
   const visibleSquadRunIds = new Set(squadRuns.map(run => run.id));
   const visibleSquadRuns = allProjectRuns.filter(run => run.squadRunId && visibleSquadRunIds.has(run.squadRunId) && visibleAgentIds.has(run.agentId));
   const standaloneRunCandidates = allProjectRuns.filter(run => {
@@ -922,6 +977,41 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     });
   }
 
+  const orchestrationTaskById = new Map((selectedOrchestration?.tasks ?? []).map(task => [task.id, task]));
+  for (const run of orchestrationPrototypeRuns) {
+    const agent = membersById.get(run.agentId);
+    if (!agent) continue;
+    const task = run.orchestrationTaskId ? orchestrationTaskById.get(run.orchestrationTaskId) : undefined;
+    const taskIndex = task ? selectedOrchestration!.tasks.findIndex(item => item.id === task.id) : -1;
+    const status = cardStatus(run, undefined, 0);
+    const activity = orchestrationRunActivity(run);
+    agentCards.push({
+      executionId: run.id,
+      source: 'agent_run',
+      sourceLabel: taskIndex >= 0 ? `Orchestrator · Step ${String(taskIndex + 1).padStart(2, '0')}` : 'Orchestrator assignment',
+      agentId: run.agentId,
+      agentName: agent.name,
+      agentRole: agent.role ?? 'Agent',
+      avatar: agent.avatar,
+      color: agent.color,
+      status,
+      progress: progressForRun(run),
+      currentTask: task?.title ?? currentTask(run, status),
+      currentStage: run.stages?.[run.currentStageIndex]?.label,
+      runId: run.id,
+      activity,
+      filePaths: [...new Set(activity.flatMap(item => item.paths ?? []))],
+      branchName: run.branchName,
+      updatedAt: run.updatedAt,
+      isStale: hasStaleAgentSignal(status, run.updatedAt),
+      output: run.prUrl
+        ? { kind: 'pull_request', label: 'Pull request', value: run.prUrl }
+        : run.branchName
+          ? { kind: 'branch', label: 'Working branch', value: run.branchName }
+          : undefined
+    });
+  }
+
   for (const call of liveChatCalls) {
     const agent = membersById.get(call.agentId);
     if (!agent) continue;
@@ -1049,27 +1139,6 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       ?? liveChatCalls.map(issueForCall).find(Boolean)
       ?? (selectedSquad ? issues.find(issue => issue.projectId === project.id && issue.assignedSquadId === selectedSquad.id) : undefined)
       ?? issues.find(issue => issue.projectId === project.id);
-  const requestedOrchestrationId = typeof req.query.orchestrationRunId === 'string'
-    ? req.query.orchestrationRunId
-    : typeof req.query.runId === 'string' && req.query.runId.startsWith('orchestration-')
-      ? req.query.runId
-      : undefined;
-  const explicitlySelectedLegacyRun = Boolean(requestedRunId && !requestedOrchestrationId);
-  const requestedOrchestration = !IS_CLOUD && requestedOrchestrationId
-    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(requestedOrchestrationId))
-    : undefined;
-  const activeOrchestrationRef = !IS_CLOUD
-    ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id))
-    : undefined;
-  const activeOrchestration = activeOrchestrationRef
-    ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(activeOrchestrationRef.runId))
-    : undefined;
-  const latestOrchestration = !IS_CLOUD
-    ? runWithWorkspace(workspaceId, () => sqliteService.getLatestOrchestrationSnapshot(project.id))
-    : undefined;
-  const selectedOrchestration = !explicitlySelectedLegacyRun
-    ? [requestedOrchestration, activeOrchestration, latestOrchestration].find(item => item?.run.projectId === project.id)
-    : undefined;
   const planningReservations = !IS_CLOUD
     ? runWithWorkspace(workspaceId, () => sqliteService.listOrchestrationPlanningReservations(project.id))
     : [];
@@ -1148,14 +1217,6 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     });
   }
   buildRuns.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-  if (selectedOrchestration) {
-    const taskOwners = [...new Set(selectedOrchestration.tasks.map(task => task.ownerAgentId))];
-    const taskOwnerVisibility = await Promise.all(taskOwners.map(async agentId => ({
-      agentId,
-      visible: await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId)
-    })));
-    taskOwnerVisibility.filter(item => item.visible).forEach(item => visibleAgentIds.add(item.agentId));
-  }
   const orchestration = selectedOrchestration
     ? safeOrchestrationProjection(selectedOrchestration, membersById, visibleAgentIds)
     : selectedPlanningReservation ? {
