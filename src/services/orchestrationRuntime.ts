@@ -38,7 +38,7 @@ orchestrationRunnerAdapter.attachResultHandlers({
     if (!ALPHA_ORCHESTRATION_ENABLED && outcome.snapshot.run.status === 'executing') {
       await orchestrationService.pauseScheduling({
         workspaceId: submitted.run.workspaceId, runId: submitted.run.id,
-        reason: 'The task result was saved, but the orchestrator is disabled on this desktop. Enable it and resume the build to dispatch another specialist.'
+        reason: 'The task result was saved, but the Orchestrator is unavailable in this desktop version. Update the app before continuing the build.'
       });
     }
     return runWithWorkspace(submitted.run.workspaceId, () => sqliteService.getOrchestrationSnapshot(submitted.run.id));

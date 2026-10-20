@@ -39,6 +39,16 @@ describe('orchestration runner adapter', () => {
       getProjects: () => [project],
       getAgents: () => [agent],
       getRuntimes: () => [],
+      getOrchestrationSnapshot: (runId: string) => ({ run: {
+        id: runId,
+        repository: 'example/tasks',
+        repositoryWorkspaces: [{
+          repository: 'example/tasks',
+          branchName: 'alpha/orchestration/orchestrationrun123',
+          baseRef: 'HEAD',
+          worktreePath: worktree
+        }]
+      } }),
       isPathAllowed: (candidate: string) => path.resolve(candidate).startsWith(path.resolve(root)),
       bindOrchestrationAttempt: bindAttempt = vi.fn()
     } as unknown as SQLiteService;
@@ -77,7 +87,7 @@ describe('orchestration runner adapter', () => {
       goal: 'Create and complete tasks.',
       exclusions: ['No authentication.'],
       task: {
-        id: 'create-endpoint', title: 'Create endpoint', kind: 'backend',
+        id: 'create-endpoint', title: 'Create endpoint', kind: 'backend', repository: 'example/tasks',
         description: 'Implement task creation.', acceptanceCriteria: ['Persists after reload.'], requiredChecks: ['test'],
         scope: { includePaths: ['src/services/**'], excludePaths: ['src/services/secrets/**'] }
       },

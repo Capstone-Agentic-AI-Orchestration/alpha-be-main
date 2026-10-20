@@ -235,6 +235,7 @@ function safeOrchestrationProjection(
     const agent = visibleAgentIds.has(agentId) ? agentsById.get(agentId) : undefined;
     return safeOperationalText(agent?.name, 100) ?? 'Project specialist';
   };
+  const planTasksById = new Map(snapshot.run.plan.tasks.map(task => [task.id, task]));
   return {
     run: {
       id: snapshot.run.id,
@@ -245,15 +246,28 @@ function safeOrchestrationProjection(
       exclusions: snapshot.run.plan.exclusions.map(item => safeOperationalText(item, 180) ?? ''),
       repository: safeOperationalText(snapshot.run.repository, 180) ?? '',
       branchName: safeOperationalText(snapshot.run.branchName, 180),
+      repositories: (snapshot.run.repositoryWorkspaces ?? []).map(item => ({
+        repository: safeOperationalText(item.repository, 180) ?? '',
+        branchName: safeOperationalText(item.branchName, 180) ?? ''
+      })),
       currentTaskId: snapshot.run.currentTaskId,
       stoppedReason: safeOperationalText(snapshot.run.stoppedReason, 500),
       publication: snapshot.run.publication ? {
+        repository: safeOperationalText(snapshot.run.publication.repository, 180) ?? snapshot.run.repository,
         branchName: safeOperationalText(snapshot.run.publication.branchName, 180) ?? '',
         baseBranch: safeOperationalText(snapshot.run.publication.baseBranch, 180) ?? '',
         resultCommit: safeOperationalText(snapshot.run.publication.resultCommit, 64) ?? '',
         pullRequestUrl: snapshot.run.publication.pullRequestUrl,
         publishedAt: snapshot.run.publication.publishedAt
       } : undefined,
+      publications: snapshot.run.publications?.map(publication => ({
+        repository: safeOperationalText(publication.repository, 180) ?? '',
+        branchName: safeOperationalText(publication.branchName, 180) ?? '',
+        baseBranch: safeOperationalText(publication.baseBranch, 180) ?? '',
+        resultCommit: safeOperationalText(publication.resultCommit, 64) ?? '',
+        pullRequestUrl: publication.pullRequestUrl,
+        publishedAt: publication.publishedAt
+      })),
       createdAt: snapshot.run.createdAt,
       updatedAt: snapshot.run.updatedAt
     },
@@ -266,12 +280,15 @@ function safeOrchestrationProjection(
       title: safeOperationalText(task.title, 180) ?? '',
       description: safeOperationalText(task.description, 700) ?? '',
       kind: task.kind,
+      repository: safeOperationalText(planTasksById.get(task.id)?.repository ?? snapshot.run.repository, 180) ?? '',
       ownerAgentId: safeAgentId(task.ownerAgentId),
       ownerName: safeAgentName(task.ownerAgentId),
       dependsOn: task.dependsOn,
       requirementIds: task.requirementIds,
       acceptanceCriteria: task.acceptanceCriteria.map(item => safeOperationalText(item, 280) ?? ''),
       requiredChecks: task.requiredChecks,
+      assignmentReason: safeOperationalText(planTasksById.get(task.id)?.assignmentReason, 500) ??
+        `This task needs a ${safeAgentName(task.ownerAgentId)} specialist for ${task.kind} work.`,
       scope: {
         includePaths: task.scope.includePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item)),
         excludePaths: task.scope.excludePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item))
@@ -376,7 +393,25 @@ function safeOrchestrationProjection(
         signal: safeOperationalText(command.signal as string | undefined, 40) ?? null
       })),
       resultCommit: safeOperationalText(finalEvidence.resultCommit as string | undefined, 64),
-      noOpenBlockingFindings: finalEvidence.noOpenBlockingFindings === true
+      noOpenBlockingFindings: finalEvidence.noOpenBlockingFindings === true,
+      repositories: Array.isArray(finalEvidence.repositories) ? finalEvidence.repositories.flatMap(item => {
+        if (!item || typeof item !== 'object') return [];
+        const repository = item as Record<string, unknown>;
+        const checks = repository.checks && typeof repository.checks === 'object' ? repository.checks as Record<string, unknown> : {};
+        const commands = Array.isArray(checks.observed) ? checks.observed as Array<Record<string, unknown>> : [];
+        return [{
+          repository: safeOperationalText(repository.repository as string | undefined, 180) ?? '',
+          status: safeOperationalText(checks.status as string | undefined, 40),
+          missingScripts: Array.isArray(checks.missingScripts) ? checks.missingScripts.filter((value): value is string => typeof value === 'string').map(value => safeOperationalText(value, 100) ?? '') : [],
+          commands: commands.map(command => ({
+            script: safeOperationalText(command.script as string | undefined, 100),
+            display: safeOperationalText(command.display as string | undefined, 180),
+            exitCode: typeof command.exitCode === 'number' ? command.exitCode : null,
+            signal: safeOperationalText(command.signal as string | undefined, 40) ?? null
+          })),
+          resultCommit: safeOperationalText(repository.resultCommit as string | undefined, 64)
+        }];
+      }) : []
     } : undefined,
     artifacts: snapshot.artifacts.map(artifact => ({
       id: artifact.id, taskId: artifact.taskId, type: artifact.type,
@@ -1106,6 +1141,14 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     });
   }
   buildRuns.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  if (selectedOrchestration) {
+    const taskOwners = [...new Set(selectedOrchestration.tasks.map(task => task.ownerAgentId))];
+    const taskOwnerVisibility = await Promise.all(taskOwners.map(async agentId => ({
+      agentId,
+      visible: await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId)
+    })));
+    taskOwnerVisibility.filter(item => item.visible).forEach(item => visibleAgentIds.add(item.agentId));
+  }
   const orchestration = selectedOrchestration
     ? safeOrchestrationProjection(selectedOrchestration, membersById, visibleAgentIds)
     : selectedPlanningReservation ? {

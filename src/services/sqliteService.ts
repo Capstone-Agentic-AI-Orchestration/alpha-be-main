@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
 import {
   Project,
@@ -145,6 +146,7 @@ function orchestrationRunFromRow(row: any, plan: OrchestrationPlan): Orchestrati
     baseRef: row.base_ref ?? undefined,
     baseCommit: row.base_commit ?? undefined,
     worktreePath: row.worktree_path ?? undefined,
+    repositoryWorkspaces: parseJson(row.repository_workspaces_json, undefined),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -164,12 +166,14 @@ function isSafeOrchestrationBranchName(value: unknown): value is string {
     !value.endsWith('.lock') && !value.includes('..') && !value.includes('//');
 }
 
-function orchestrationTaskFromRow(row: any): OrchestrationTaskRecord {
+function orchestrationTaskFromRow(row: any, definition?: OrchestrationTaskDefinition): OrchestrationTaskRecord {
   return {
     id: row.task_id,
     title: row.title,
     description: row.description,
     kind: row.kind,
+    repository: definition?.repository,
+    assignmentReason: definition?.assignmentReason,
     ownerAgentId: row.owner_agent_id,
     dependsOn: parseJson(row.depends_on_json, []),
     requirementIds: parseJson(row.requirement_ids_json, []),
@@ -1052,6 +1056,7 @@ export class SQLiteService {
       ['orchestration_runs', 'base_ref TEXT'],
       ['orchestration_runs', 'base_commit TEXT'],
       ['orchestration_runs', 'worktree_path TEXT'],
+      ['orchestration_runs', "repository_workspaces_json TEXT NOT NULL DEFAULT '[]'"],
       ['orchestration_tasks', "scope_json TEXT NOT NULL DEFAULT '{}'"],
       /**
        * Which squad run this run is a member's turn in, and where in the order.
@@ -2832,6 +2837,13 @@ export class SQLiteService {
     if (run.status !== 'planning' || run.revision !== 0 || run.planVersion !== 1) {
       throw new Error('A new orchestration must start at plan version 1 in planning state.');
     }
+    for (const workspace of run.repositoryWorkspaces ?? []) {
+      if (!workspace.repository.trim() || !/^[A-Za-z0-9._/-]{1,200}$/.test(workspace.branchName) ||
+          !/^[a-f0-9]{40,64}$/i.test(workspace.baseCommit) || !path.isAbsolute(workspace.worktreePath) ||
+          !this.isPathAllowed(workspace.worktreePath)) {
+        throw new Error('A selected codebase workspace is incomplete or outside Alpha’s approved project folder.');
+      }
+    }
 
     const create = this.db.transaction(() => {
       if (expectedPlanningOwnerSessionId !== undefined) {
@@ -2844,9 +2856,10 @@ export class SQLiteService {
         }
       }
       const { plan: _plan, ...runRow } = run;
-      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, stopped_reason, branch_name, base_ref, base_commit, worktree_path, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @createdAt, @updatedAt)')
+      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, stopped_reason, branch_name, base_ref, base_commit, worktree_path, repository_workspaces_json, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @repositoryWorkspacesJson, @createdAt, @updatedAt)')
         .run({ ...runRow, workspaceId, currentTaskId: run.currentTaskId ?? null, stoppedReason: run.stoppedReason ?? null,
-          branchName: run.branchName ?? null, baseRef: run.baseRef ?? null, baseCommit: run.baseCommit ?? null, worktreePath: run.worktreePath ?? null });
+          branchName: run.branchName ?? null, baseRef: run.baseRef ?? null, baseCommit: run.baseCommit ?? null, worktreePath: run.worktreePath ?? null,
+          repositoryWorkspacesJson: JSON.stringify(run.repositoryWorkspaces ?? []) });
       this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(workspaceId, run.id, run.planVersion, run.plan.schemaVersion, JSON.stringify(run.plan), planSource, run.createdAt, run.createdAt);
 
@@ -2897,6 +2910,7 @@ export class SQLiteService {
 
   bindOrchestrationWorkspace(input: {
     runId: string;
+    repository?: string;
     branchName: string;
     baseRef: string;
     baseCommit: string;
@@ -2915,6 +2929,14 @@ export class SQLiteService {
       if (!snapshot) throw new Error('Orchestration run not found.');
       if (!['executing', 'blocked'].includes(snapshot.run.status)) throw new Error(`Cannot bind a worktree while the build is ${snapshot.run.status}.`);
       const run = snapshot.run;
+      if (input.repository && run.repositoryWorkspaces?.length) {
+        const authorized = run.repositoryWorkspaces.find(item => canonicalOrchestrationRepository(item.repository) === canonicalOrchestrationRepository(input.repository!));
+        if (!authorized || authorized.branchName !== input.branchName || authorized.baseRef !== input.baseRef ||
+            authorized.baseCommit !== input.baseCommit || path.resolve(authorized.worktreePath) !== path.resolve(input.worktreePath)) {
+          throw new Error('The task workspace differs from the private branch assigned to its selected codebase.');
+        }
+        return;
+      }
       if ((run.branchName && run.branchName !== input.branchName) ||
           (run.baseRef && run.baseRef !== input.baseRef) ||
           (run.worktreePath && path.resolve(run.worktreePath) !== path.resolve(input.worktreePath))) {
@@ -2954,30 +2976,61 @@ export class SQLiteService {
       WHERE workspace_id = ? AND run_id = ? AND event_type = 'run_completed'
       ORDER BY run_sequence DESC LIMIT 1`).get(workspaceId, runId) as { payload_json: string } | undefined;
     const completionPayload = parseJson<{ evidence?: Record<string, unknown> }>(completedEvent?.payload_json, {});
-    const publication = completionPayload.evidence?.decision === 'approved'
-      ? completionPayload.evidence.publication as Record<string, unknown> | undefined
-      : undefined;
+    const completionEvidence = completionPayload.evidence?.decision === 'approved' ? completionPayload.evidence : undefined;
+    const publication = completionEvidence?.publication as Record<string, unknown> | undefined;
+    const publications = Array.isArray(completionEvidence?.publications)
+      ? completionEvidence!.publications as Array<Record<string, unknown>>
+      : publication ? [publication] : [];
     const run = orchestrationRunFromRow(row, plan);
-    const pullUrl = typeof publication?.pullRequestUrl === 'string' ? publication.pullRequestUrl.toLowerCase() : '';
-    const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(run.repository).toLowerCase()}/pull/`;
-    const pullNumber = pullUrl.startsWith(expectedPullPrefix) ? pullUrl.slice(expectedPullPrefix.length) : '';
-    if (publication && isSafeOrchestrationBranchName(publication.branchName) && isSafeOrchestrationBranchName(publication.baseBranch) &&
-        publication.branchName === run.branchName && publication.baseBranch !== publication.branchName &&
-        typeof publication.resultCommit === 'string' && /^[a-f0-9]{40,64}$/i.test(publication.resultCommit) &&
-        typeof publication.pullRequestUrl === 'string' &&
-        /^\d+$/.test(pullNumber) &&
-        typeof publication.publishedAt === 'string' && Number.isFinite(Date.parse(publication.publishedAt))) {
-      run.publication = {
-        branchName: publication.branchName,
-        baseBranch: publication.baseBranch,
-        resultCommit: publication.resultCommit,
-        pullRequestUrl: publication.pullRequestUrl,
-        publishedAt: publication.publishedAt
-      };
+    const expectedWorkspaces = run.repositoryWorkspaces?.length ? run.repositoryWorkspaces : [{
+      repository: run.repository, branchName: run.branchName ?? '', baseRef: run.baseRef ?? '',
+      baseCommit: run.baseCommit ?? '', worktreePath: run.worktreePath ?? ''
+    }];
+    const validation = this.db.prepare(`SELECT payload_json FROM orchestration_events
+      WHERE workspace_id = ? AND run_id = ? AND event_type = 'run_awaiting_approval'
+      ORDER BY run_sequence DESC LIMIT 1`).get(workspaceId, runId) as { payload_json: string } | undefined;
+    const validationEvidence = parseJson<{ evidence?: Record<string, unknown> }>(validation?.payload_json, {}).evidence;
+    const validatedRepositories = Array.isArray(validationEvidence?.repositories)
+      ? validationEvidence!.repositories as Array<Record<string, unknown>> : [];
+    const validPublications = publications.filter(item => {
+      const repo = typeof item.repository === 'string' ? item.repository : run.repository;
+      const workspace = expectedWorkspaces.find(candidate => canonicalOrchestrationRepository(candidate.repository).toLowerCase() ===
+        canonicalOrchestrationRepository(repo).toLowerCase());
+      const validated = validatedRepositories.find(candidate => typeof candidate.repository === 'string' &&
+        canonicalOrchestrationRepository(candidate.repository).toLowerCase() === canonicalOrchestrationRepository(repo).toLowerCase());
+      const resultCommit = typeof validated?.resultCommit === 'string' ? validated.resultCommit
+        : repo.toLowerCase() === run.repository.toLowerCase() ? validationEvidence?.resultCommit : undefined;
+      const branchName = typeof validated?.branchName === 'string' ? validated.branchName
+        : repo.toLowerCase() === run.repository.toLowerCase() ? validationEvidence?.branchName : undefined;
+      const pullUrl = typeof item.pullRequestUrl === 'string' ? item.pullRequestUrl.toLowerCase() : '';
+      const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(repo).toLowerCase()}/pull/`;
+      const pullNumber = pullUrl.startsWith(expectedPullPrefix) ? pullUrl.slice(expectedPullPrefix.length) : '';
+      return Boolean(workspace && isSafeOrchestrationBranchName(item.branchName) &&
+        item.branchName === workspace.branchName && item.baseBranch !== item.branchName &&
+        isSafeOrchestrationBranchName(item.baseBranch) && typeof resultCommit === 'string' &&
+        /^[a-f0-9]{40,64}$/i.test(resultCommit) && item.resultCommit === resultCommit && item.branchName === branchName &&
+        /^\d+$/.test(pullNumber) && typeof item.publishedAt === 'string' && Number.isFinite(Date.parse(item.publishedAt)));
+    });
+    const publishedRepositoryKeys = validPublications.map(item => typeof item.repository === 'string'
+      ? canonicalOrchestrationRepository(item.repository) : canonicalOrchestrationRepository(run.repository));
+    const allRepositoriesCovered = expectedWorkspaces.every(workspace =>
+      publishedRepositoryKeys.includes(canonicalOrchestrationRepository(workspace.repository)));
+    if (publications.length === expectedWorkspaces.length && validPublications.length === expectedWorkspaces.length &&
+        new Set(publishedRepositoryKeys).size === expectedWorkspaces.length && allRepositoriesCovered) {
+      const toRecord = (item: Record<string, unknown>) => ({
+        repository: typeof item.repository === 'string' ? item.repository : run.repository,
+        branchName: item.branchName as string,
+        baseBranch: item.baseBranch as string,
+        resultCommit: item.resultCommit as string,
+        pullRequestUrl: item.pullRequestUrl as string,
+        publishedAt: item.publishedAt as string
+      });
+      run.publications = validPublications.map(toRecord);
+      run.publication = run.publications.find(item => item.repository?.toLowerCase() === run.repository.toLowerCase()) ?? run.publications[0];
     }
     return {
       run,
-      tasks: tasks.map(orchestrationTaskFromRow),
+      tasks: tasks.map(row => orchestrationTaskFromRow(row, plan.tasks.find(task => task.id === row.task_id))),
       attempts: attempts.map(orchestrationAttemptFromRow),
       artifacts: artifacts.map(orchestrationArtifactFromRow),
       findings: findings.map(orchestrationFindingFromRow)
@@ -2991,7 +3044,7 @@ export class SQLiteService {
   }
 
   listActiveOrchestrationSnapshots(): OrchestrationSnapshot[] {
-    const statuses = ['planning', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
+    const statuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
     const placeholders = statuses.map(() => '?').join(', ');
     const rows = this.db.prepare(`SELECT id FROM orchestration_runs WHERE workspace_id = ? AND status IN (${placeholders}) ORDER BY created_at ASC`)
       .all(this.workspaceId(), ...statuses) as Array<{ id: string }>;
@@ -2999,7 +3052,7 @@ export class SQLiteService {
   }
 
   listAllActiveOrchestrationSnapshots(): OrchestrationSnapshot[] {
-    const statuses = ['planning', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
+    const statuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'blocked', 'recovery_required', 'publishing', 'cancelling'];
     const placeholders = statuses.map(() => '?').join(', ');
     const rows = this.db.prepare(`SELECT workspace_id, id FROM orchestration_runs WHERE status IN (${placeholders}) ORDER BY created_at ASC`)
       .all(...statuses) as Array<{ workspace_id: string; id: string }>;
@@ -3086,13 +3139,14 @@ export class SQLiteService {
           createdAt: existing.created_at, created: false
         };
       }
-      const activeStatuses = ['planning', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+      const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
       const placeholders = activeStatuses.map(() => '?').join(', ');
-      const active = this.db.prepare(`SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)
-        .all(workspaceId, input.projectId, ...activeStatuses) as Array<{ id: string }>;
+      const active = this.db.prepare(`SELECT id, repository, repository_workspaces_json FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)
+        .all(workspaceId, input.projectId, ...activeStatuses) as Array<{ id: string; repository: string; repository_workspaces_json: string }>;
       const activeRepo = active.find(row => {
-        const run = this.db.prepare('SELECT repository FROM orchestration_runs WHERE workspace_id = ? AND id = ?').get(workspaceId, row.id) as { repository: string } | undefined;
-        return run && canonicalOrchestrationRepository(run.repository) === repositoryKey;
+        const workspaces = parseJson<Array<{ repository?: string }>>(row.repository_workspaces_json, []);
+        return canonicalOrchestrationRepository(row.repository) === repositoryKey ||
+          workspaces.some(item => typeof item.repository === 'string' && canonicalOrchestrationRepository(item.repository) === repositoryKey);
       });
       if (activeRepo) throw new Error('A task-based build already owns this project repository. Follow or resolve it before planning another.');
 
@@ -3157,7 +3211,7 @@ export class SQLiteService {
     } : undefined;
   }
 
-  getOrchestrationPlanningReservationByRun(projectId: string, runId: string): {
+  getOrchestrationPlanningReservationByRun(projectId: string, runId: string, repository?: string): {
     runId: string;
     repository: string;
     repositoryKey: string;
@@ -3169,11 +3223,13 @@ export class SQLiteService {
     ownerSessionId: string | null;
     createdAt: string;
   } | undefined {
-    const row = this.db.prepare(`SELECT run_id, repository, repository_key, request_key, request_fingerprint,
+    const rows = this.db.prepare(`SELECT run_id, repository, repository_key, request_key, request_fingerprint,
       branch_name, base_commit, worktree_path, owner_session_id, created_at
       FROM orchestration_planning_reservations
       WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
-      .get(this.workspaceId(), projectId, runId) as any;
+      .all(this.workspaceId(), projectId, runId) as any[];
+    const repositoryKey = repository ? canonicalOrchestrationRepository(repository) : undefined;
+    const row = repositoryKey ? rows.find(item => item.repository_key === repositoryKey) : rows[0];
     return row ? {
       runId: row.run_id, repository: row.repository, repositoryKey: row.repository_key,
       requestKey: row.request_key, requestFingerprint: row.request_fingerprint,
@@ -3185,11 +3241,18 @@ export class SQLiteService {
 
   listOrchestrationPlanningReservations(projectId: string, limit = 20): NonNullable<ReturnType<SQLiteService['getOrchestrationPlanningReservationByRun']>>[] {
     const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
-    const rows = this.db.prepare(`SELECT run_id FROM orchestration_planning_reservations
+    const rows = this.db.prepare(`SELECT run_id, repository, repository_key, request_key, request_fingerprint,
+      branch_name, base_commit, worktree_path, owner_session_id, created_at
+      FROM orchestration_planning_reservations
       WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ?`)
-      .all(this.workspaceId(), projectId, safeLimit) as Array<{ run_id: string }>;
-    return rows.map(row => this.getOrchestrationPlanningReservationByRun(projectId, row.run_id))
-      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+      .all(this.workspaceId(), projectId, safeLimit) as any[];
+    return rows.map(row => ({
+      runId: row.run_id, repository: row.repository, repositoryKey: row.repository_key,
+      requestKey: row.request_key, requestFingerprint: row.request_fingerprint,
+      branchName: row.branch_name, baseCommit: row.base_commit,
+      worktreePath: row.worktree_path, ownerSessionId: row.owner_session_id ?? null,
+      createdAt: row.created_at
+    }));
   }
 
   recordOrchestrationPlanningRecovery(input: {
@@ -3358,12 +3421,13 @@ export class SQLiteService {
     status: OrchestrationRunRecord['status'];
     branchName?: string;
   } | undefined {
-    const activeStatuses = ['planning', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+    const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
     const placeholders = activeStatuses.map(() => '?').join(', ');
-    const rows = this.db.prepare(`SELECT id, repository, status, branch_name FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders}) ORDER BY created_at DESC`)
+    const rows = this.db.prepare(`SELECT id, repository, repository_workspaces_json, status, branch_name, created_at FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders}) ORDER BY created_at DESC`)
       .all(this.workspaceId(), projectId, ...activeStatuses) as any[];
     const normalize = canonicalOrchestrationRepository;
-    const matching = repository ? rows.find(row => normalize(row.repository) === normalize(repository)) : rows[0];
+    const matching = repository ? rows.find(row => normalize(row.repository) === normalize(repository) ||
+      parseJson<Array<{ repository?: string }>>(row.repository_workspaces_json, []).some(item => item.repository && normalize(item.repository) === normalize(repository))) : rows[0];
     const reservation = this.getOrchestrationPlanningReservation(projectId, repository);
     if (reservation && (!matching || Date.parse(reservation.createdAt) >= Date.parse(matching.created_at))) return {
       runId: reservation.runId, repository: reservation.repository, status: 'planning', branchName: reservation.branchName
@@ -3401,6 +3465,28 @@ export class SQLiteService {
       if (input.nextStatus === 'awaiting_approval' && !input.evidence) {
         throw new Error('Final validation evidence is required before requesting human approval.');
       }
+      if (input.nextStatus === 'awaiting_approval' && (snapshot.run.repositoryWorkspaces?.length ?? 0) > 1) {
+        const repositoryEvidence = Array.isArray(input.evidence?.repositories)
+          ? input.evidence!.repositories as Array<Record<string, unknown>> : [];
+        const workspaces = snapshot.run.repositoryWorkspaces!;
+        const seenRepositories = new Set<string>();
+        for (const workspace of workspaces) {
+          const repositoryKey = canonicalOrchestrationRepository(workspace.repository);
+          const item = repositoryEvidence.find(candidate => typeof candidate.repository === 'string' &&
+            canonicalOrchestrationRepository(candidate.repository) === repositoryKey);
+          const checks = item?.checks && typeof item.checks === 'object' ? item.checks as Record<string, unknown> : undefined;
+          if (!item || seenRepositories.has(repositoryKey) || item.baseCommit !== workspace.baseCommit ||
+              item.branchName !== workspace.branchName || typeof item.resultCommit !== 'string' ||
+              !/^[a-f0-9]{40,64}$/i.test(item.resultCommit) || !checks || checks.status !== 'passed' ||
+              !Array.isArray(checks.missingScripts) || checks.missingScripts.length ||
+              !Array.isArray(checks.observed) || !checks.observed.length ||
+              checks.observed.some(command => !command || typeof command !== 'object' ||
+                (command as Record<string, unknown>).exitCode !== 0 || (command as Record<string, unknown>).signal !== null)) {
+            throw new Error(`Final validation evidence for ${workspace.repository} is incomplete or did not pass.`);
+          }
+          seenRepositories.add(repositoryKey);
+        }
+      }
       if (input.nextStatus === 'publishing' && snapshot.run.status === 'awaiting_approval' &&
           (!input.evidence || input.evidence.decision !== 'approved' ||
             typeof input.evidence.publicationBaseBranch !== 'string')) {
@@ -3418,16 +3504,39 @@ export class SQLiteService {
           ORDER BY run_sequence DESC LIMIT 1`).get(workspaceId, input.runId) as { payload_json: string } | undefined;
         const validationPayload = parseJson<{ evidence?: Record<string, unknown> }>(validationEvent?.payload_json, {});
         const validated = validationPayload.evidence ?? {};
-        const pullUrl = typeof publication.pullRequestUrl === 'string' ? publication.pullRequestUrl.toLowerCase() : '';
-        const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(snapshot.run.repository)}/pull/`;
-        const mismatchReasons = [
-          !isSafeOrchestrationBranchName(publication.branchName) || publication.branchName !== snapshot.run.branchName ? 'branch' : '',
-          !isSafeOrchestrationBranchName(publication.baseBranch) || publication.baseBranch === publication.branchName ? 'base branch' : '',
-          typeof publication.resultCommit !== 'string' || publication.resultCommit !== validated.resultCommit ||
-            validated.branchName !== publication.branchName ? 'commit' : '',
-          !pullUrl.startsWith(expectedPullPrefix) || !/^\d+$/.test(pullUrl.slice(expectedPullPrefix.length)) ? 'pull request URL' : '',
-          typeof publication.publishedAt !== 'string' || !Number.isFinite(Date.parse(publication.publishedAt)) ? 'publication time' : ''
-        ].filter(Boolean);
+        const expectedWorkspaces = snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces : [{
+          repository: snapshot.run.repository, branchName: snapshot.run.branchName ?? ''
+        }];
+        const publicationRecords = Array.isArray(input.evidence!.publications)
+          ? input.evidence!.publications as Array<Record<string, unknown>> : [publication];
+        const validatedRepositories = Array.isArray(validated.repositories) ? validated.repositories as Array<Record<string, unknown>> : [];
+        const mismatchReasons = publicationRecords.length !== expectedWorkspaces.length ? ['repositories'] : [];
+        const seenPublicationRepositories = new Set<string>();
+        for (const workspace of expectedWorkspaces) {
+          const record = publicationRecords.find(item => typeof item.repository === 'string' &&
+            canonicalOrchestrationRepository(item.repository).toLowerCase() === canonicalOrchestrationRepository(workspace.repository).toLowerCase()) ??
+            (workspace.repository === snapshot.run.repository ? publication : undefined);
+          const publicationRepository = record && typeof record.repository === 'string'
+            ? canonicalOrchestrationRepository(record.repository) : canonicalOrchestrationRepository(workspace.repository);
+          if (seenPublicationRepositories.has(publicationRepository)) mismatchReasons.push('duplicate repository');
+          seenPublicationRepositories.add(publicationRepository);
+          const repoValidation = validatedRepositories.find(item => typeof item.repository === 'string' &&
+            canonicalOrchestrationRepository(item.repository).toLowerCase() === canonicalOrchestrationRepository(workspace.repository).toLowerCase());
+          const resultCommit = typeof repoValidation?.resultCommit === 'string' ? repoValidation.resultCommit
+            : workspace.repository === snapshot.run.repository ? validated.resultCommit : undefined;
+          const branchName = typeof repoValidation?.branchName === 'string' ? repoValidation.branchName
+            : workspace.repository === snapshot.run.repository ? validated.branchName : undefined;
+          const pullUrl = typeof record?.pullRequestUrl === 'string' ? record.pullRequestUrl.toLowerCase() : '';
+          const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(workspace.repository).toLowerCase()}/pull/`;
+          const checks = [
+            !record || !isSafeOrchestrationBranchName(record.branchName) || record.branchName !== workspace.branchName ? 'branch' : '',
+            !record || !isSafeOrchestrationBranchName(record.baseBranch) || record.baseBranch === record.branchName ? 'base branch' : '',
+            typeof record?.resultCommit !== 'string' || record.resultCommit !== resultCommit || branchName !== record.branchName ? 'commit' : '',
+            !pullUrl.startsWith(expectedPullPrefix) || !/^\d+$/.test(pullUrl.slice(expectedPullPrefix.length)) ? 'pull request URL' : '',
+            typeof record?.publishedAt !== 'string' || !Number.isFinite(Date.parse(record.publishedAt)) ? 'publication time' : ''
+          ].filter(Boolean);
+          mismatchReasons.push(...checks);
+        }
         if (mismatchReasons.length) {
           throw new Error(`The published pull request does not match the validated ${mismatchReasons.join(', ')}. Reconcile final review before completing the build.`);
         }
@@ -4009,7 +4118,7 @@ export class SQLiteService {
       if (snapshot.run.plan.tasks.some(task => !nextPlanTasks.has(task.id)) || addedPlanTasks.length !== input.addedTasks.length) {
         throw new Error('A review correction must preserve all prior task identities and add only its explicit correction tasks.');
       }
-      const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+      const same = (left: unknown, right: unknown) => isDeepStrictEqual(left, right);
       for (const [taskId, oldTask] of currentPlanTasks) {
         const nextTask = nextPlanTasks.get(taskId)!;
         if (oldTask.kind === 'validation') {
@@ -4961,7 +5070,7 @@ export class SQLiteService {
     ownerCallId?: string
   ): void {
     if (!repositoryKey) return;
-    const activeStatuses = ['planning', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
+    const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
     const placeholders = activeStatuses.map(() => '?').join(', ');
     const activeRuns = this.db.prepare(`SELECT id, repository, status FROM orchestration_runs
       WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)

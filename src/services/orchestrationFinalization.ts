@@ -20,13 +20,15 @@ export async function synchronizePublishedOrchestrationIssue(
   }
 
   const commentId = `comm-${snapshot.run.id}-${PUBLISHED_COMMENT_SUFFIX}`;
+  const publications = snapshot.run.publications?.length ? snapshot.run.publications : [publication];
+  const pullRequests = publications.map(item => `${item.repository ?? snapshot.run.repository}: ${item.pullRequestUrl}`).join('\n');
   if (!issue.comments.some(comment => comment.id === commentId)) {
     await store.addComment(snapshot.run.workspaceId, {
       id: commentId,
       issueId: issue.id,
       authorType: 'system',
       authorName: 'Alpha Task Workflow',
-      content: `Task build approved and published for review: ${publication.pullRequestUrl}`,
+      content: `Orchestrator build approved and published for review:\n${pullRequests}`,
       createdAt: publication.publishedAt
     });
   }

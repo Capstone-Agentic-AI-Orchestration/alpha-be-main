@@ -5,12 +5,14 @@ import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitRepo, isGitWo
 import { sqliteService, type SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_DIFF_PREVIEW_CHARS = 96_000;
 const MAX_DIFF_BUFFER_BYTES = 1_000_000;
 
 export interface OrchestrationDiffPreview {
+  repository?: string;
   baseCommit: string;
   resultCommit: string;
   branchName: string;
@@ -18,6 +20,16 @@ export interface OrchestrationDiffPreview {
   pathsTruncated: boolean;
   diff: string;
   truncated: boolean;
+  repositories?: Array<{
+    repository: string;
+    baseCommit: string;
+    resultCommit: string;
+    branchName: string;
+    changedPaths: string[];
+    pathsTruncated: boolean;
+    diff: string;
+    truncated: boolean;
+  }>;
 }
 
 export interface FinalValidationEvidence extends Record<string, unknown> {
@@ -30,6 +42,17 @@ export interface FinalValidationEvidence extends Record<string, unknown> {
     missingScripts: string[];
     observed: Array<{ exitCode: number | null; signal: string | null }>;
   };
+  repositories?: Array<{
+    repository: string;
+    baseCommit: string;
+    resultCommit: string;
+    branchName: string;
+    checks: {
+      status: string;
+      missingScripts: string[];
+      observed: Array<{ exitCode: number | null; signal: string | null }>;
+    };
+  }>;
 }
 
 export function getOrchestrationFinalValidationEvidence(
@@ -60,6 +83,27 @@ export function getOrchestrationFinalValidationEvidence(
       record.noOpenBlockingFindings !== true) {
     throw new Error('Final validation evidence is incomplete or did not pass. Re-run the final checks before approval.');
   }
+  if (Array.isArray(record.repositories) && record.repositories.some(item => {
+    if (!item || typeof item !== 'object') return true;
+    const repository = item as Record<string, unknown>;
+    const repoChecks = repository.checks && typeof repository.checks === 'object' ? repository.checks as Record<string, unknown> : undefined;
+    return typeof repository.repository !== 'string' || typeof repository.baseCommit !== 'string' || !/^[a-f0-9]{40,64}$/i.test(repository.baseCommit) ||
+      typeof repository.resultCommit !== 'string' || !/^[a-f0-9]{40,64}$/i.test(repository.resultCommit) ||
+      typeof repository.branchName !== 'string' || !repoChecks || repoChecks.status !== 'passed' ||
+      !Array.isArray(repoChecks.missingScripts) || repoChecks.missingScripts.length > 0 ||
+      !Array.isArray(repoChecks.observed) || repoChecks.observed.length === 0 ||
+      repoChecks.observed.some(command => !command || typeof command !== 'object' ||
+        (command as Record<string, unknown>).exitCode !== 0 || (command as Record<string, unknown>).signal !== null);
+  })) {
+    throw new Error('At least one selected codebase has incomplete final-check evidence. Run the final checks again before approval.');
+  }
+  const workspaces = snapshot.run.repositoryWorkspaces ?? [];
+  const repositoryEvidence = Array.isArray(record.repositories)
+    ? record.repositories as Array<Record<string, unknown>> : undefined;
+  if (workspaces.length > 1 && (!repositoryEvidence || repositoryEvidence.length !== workspaces.length ||
+      workspaces.some(workspace => !repositoryEvidence.some(item => item.repository === workspace.repository)))) {
+    throw new Error('Final checks are missing for one or more selected codebases. Run checks for every codebase before approval.');
+  }
   return { ...record, checks } as FinalValidationEvidence;
 }
 
@@ -71,18 +115,23 @@ export async function assertOrchestrationApprovalCheckpointCurrent(
     throw new Error('This task build is no longer waiting for approval. Refresh its current state.');
   }
   const evidence = getOrchestrationFinalValidationEvidence(snapshot, store);
-  const worktree = snapshot.run.worktreePath ? path.resolve(snapshot.run.worktreePath) : '';
-  if (!worktree || !store.isPathAllowed(worktree) || !snapshot.run.branchName || evidence.branchName !== snapshot.run.branchName ||
-      !(await isGitRepo(worktree))) {
-    throw new Error('The reviewed task build workspace is unavailable or no longer authorized. Reconcile the build before approval.');
-  }
-  const [branchName, headCommit, clean] = await Promise.all([
-    getCurrentBranch(worktree),
-    getHeadCommit(worktree),
-    isGitWorkingTreeClean(worktree)
-  ]);
-  if (branchName !== evidence.branchName || headCommit !== evidence.resultCommit || !clean) {
-    throw new Error('The repository changed after final validation. Refresh and re-run the final checks before approval.');
+  const workspaces = snapshot.run.repositoryWorkspaces?.length
+    ? snapshot.run.repositoryWorkspaces
+    : [repositoryWorkspaceForRun(snapshot.run, snapshot.run.repository)].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  for (const workspace of workspaces) {
+    const repoEvidence = Array.isArray(evidence.repositories)
+      ? evidence.repositories.find(item => item && typeof item === 'object' && (item as Record<string, unknown>).repository === workspace.repository) as Record<string, unknown> | undefined
+      : undefined;
+    const expectedCommit = typeof repoEvidence?.resultCommit === 'string' ? repoEvidence.resultCommit : evidence.resultCommit;
+    const expectedBranch = typeof repoEvidence?.branchName === 'string' ? repoEvidence.branchName : evidence.branchName;
+    const worktree = path.resolve(workspace.worktreePath);
+    if (!worktree || !store.isPathAllowed(worktree) || workspace.branchName !== expectedBranch || !(await isGitRepo(worktree))) {
+      throw new Error(`The reviewed workspace for ${workspace.repository} is unavailable or no longer authorized. Reconcile the build before approval.`);
+    }
+    const [branchName, headCommit, clean] = await Promise.all([getCurrentBranch(worktree), getHeadCommit(worktree), isGitWorkingTreeClean(worktree)]);
+    if (branchName !== expectedBranch || headCommit !== expectedCommit || !clean) {
+      throw new Error(`${workspace.repository} changed after final checks. Refresh and run the final checks again before approval.`);
+    }
   }
 }
 
@@ -94,47 +143,43 @@ export async function getOrchestrationDiffPreview(
     throw new Error('A code review is available after final validation.');
   }
   const evidence = getOrchestrationFinalValidationEvidence(snapshot, store);
-  const baseCommit = snapshot.run.baseCommit;
-  const resultCommit = evidence.resultCommit;
-  const branchName = snapshot.run.branchName;
-  const worktree = snapshot.run.worktreePath ? path.resolve(snapshot.run.worktreePath) : '';
-  if (!baseCommit || !/^[a-f0-9]{40,64}$/i.test(baseCommit) || !branchName || evidence.branchName !== branchName ||
-      !worktree || !store.isPathAllowed(worktree) || !(await isGitRepo(worktree))) {
-    throw new Error('The validated build branch is unavailable for review.');
-  }
-
   if (snapshot.run.status === 'awaiting_approval') {
     await assertOrchestrationApprovalCheckpointCurrent(snapshot, store);
   }
-
-  const changedPaths = await getGitChangedPaths(worktree, baseCommit, resultCommit);
-  let rawDiff = '';
-  let truncated = false;
-  try {
-    const result = await execFileAsync('git', [
-      'diff', '--no-ext-diff', '--no-color', '--no-renames', '--unified=3', baseCommit, resultCommit, '--'
-    ], { cwd: worktree, encoding: 'utf8', maxBuffer: MAX_DIFF_BUFFER_BYTES, windowsHide: true });
-    rawDiff = String(result.stdout ?? '');
-  } catch (error) {
-    const partial = (error as NodeJS.ErrnoException & { stdout?: string | Buffer }).stdout;
-    if (partial === undefined || String(partial).length === 0) {
-      throw new Error(`The validated change preview could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  const workspaces = snapshot.run.repositoryWorkspaces?.length
+    ? snapshot.run.repositoryWorkspaces
+    : [repositoryWorkspaceForRun(snapshot.run, snapshot.run.repository)].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const previews = [];
+  for (const workspace of workspaces) {
+    const repoEvidence = Array.isArray(evidence.repositories)
+      ? evidence.repositories.find(item => item && typeof item === 'object' && (item as Record<string, unknown>).repository === workspace.repository) as Record<string, unknown> | undefined
+      : undefined;
+    const baseCommit = typeof repoEvidence?.baseCommit === 'string' ? repoEvidence.baseCommit : workspace.baseCommit;
+    const resultCommit = typeof repoEvidence?.resultCommit === 'string' ? repoEvidence.resultCommit : evidence.resultCommit;
+    const branchName = typeof repoEvidence?.branchName === 'string' ? repoEvidence.branchName : evidence.branchName;
+    const worktree = path.resolve(workspace.worktreePath);
+    if (!baseCommit || !/^[a-f0-9]{40,64}$/i.test(baseCommit) || !resultCommit || !branchName || workspace.branchName !== branchName ||
+        !store.isPathAllowed(worktree) || !(await isGitRepo(worktree))) {
+      throw new Error(`The validated build branch for ${workspace.repository} is unavailable for review.`);
     }
-    rawDiff = String(partial);
-    truncated = true;
+    const changedPaths = await getGitChangedPaths(worktree, baseCommit, resultCommit);
+    let rawDiff = '';
+    let truncated = false;
+    try {
+      const result = await execFileAsync('git', ['diff', '--no-ext-diff', '--no-color', '--no-renames', '--unified=3', baseCommit, resultCommit, '--'],
+        { cwd: worktree, encoding: 'utf8', maxBuffer: MAX_DIFF_BUFFER_BYTES, windowsHide: true });
+      rawDiff = String(result.stdout ?? '');
+    } catch (error) {
+      const partial = (error as NodeJS.ErrnoException & { stdout?: string | Buffer }).stdout;
+      if (partial === undefined || String(partial).length === 0) throw new Error(`The validated change preview for ${workspace.repository} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      rawDiff = String(partial);
+      truncated = true;
+    }
+    if (rawDiff.length > MAX_DIFF_PREVIEW_CHARS) { rawDiff = rawDiff.slice(0, MAX_DIFF_PREVIEW_CHARS); truncated = true; }
+    previews.push({ repository: workspace.repository, baseCommit, resultCommit, branchName,
+      changedPaths: changedPaths.slice(0, 200), pathsTruncated: changedPaths.length > 200, diff: rawDiff, truncated });
   }
-  if (rawDiff.length > MAX_DIFF_PREVIEW_CHARS) {
-    rawDiff = rawDiff.slice(0, MAX_DIFF_PREVIEW_CHARS);
-    truncated = true;
-  }
-
-  return {
-    baseCommit,
-    resultCommit,
-    branchName,
-    changedPaths: changedPaths.slice(0, 200),
-    pathsTruncated: changedPaths.length > 200,
-    diff: rawDiff,
-    truncated
-  };
+  const primary = previews[0];
+  if (!primary) throw new Error('No codebase is available to review.');
+  return { ...primary, repositories: previews };
 }

@@ -2,6 +2,7 @@ import type { OrchestrationPlan, OrchestrationTaskDefinition } from './orchestra
 
 export type OrchestrationRunStatus =
   | 'planning'
+  | 'awaiting_plan_approval'
   | 'executing'
   | 'validating'
   | 'awaiting_approval'
@@ -128,7 +129,18 @@ export interface OrchestrationSnapshot {
   findings: OrchestrationFindingRecord[];
 }
 
+/** One isolated branch and worktree belonging to a shared product build. */
+export interface OrchestrationRepositoryWorkspace {
+  repository: string;
+  branchName: string;
+  baseRef: string;
+  baseCommit: string;
+  /** Executor-local path; never include this field in a shared cloud projection. */
+  worktreePath: string;
+}
+
 export interface OrchestrationPublicationRecord {
+  repository?: string;
   branchName: string;
   baseBranch: string;
   resultCommit: string;
@@ -159,14 +171,19 @@ export interface OrchestrationRunRecord {
   baseCommit?: string;
   /** Executor-local path; never include this field in a shared cloud projection. */
   worktreePath?: string;
+  /** Every selected codebase participating in this one coordinated product build. */
+  repositoryWorkspaces?: OrchestrationRepositoryWorkspace[];
   /** Remote publication reconciled after explicit human approval. */
   publication?: OrchestrationPublicationRecord;
+  /** All pull requests opened for a coordinated multi-codebase product build. */
+  publications?: OrchestrationPublicationRecord[];
   createdAt: string;
   updatedAt: string;
 }
 
 export const RUN_TRANSITIONS: Readonly<Record<OrchestrationRunStatus, ReadonlySet<OrchestrationRunStatus>>> = {
-  planning: new Set(['executing', 'blocked', 'failed', 'cancelled']),
+  planning: new Set(['awaiting_plan_approval', 'executing', 'blocked', 'failed', 'cancelled']),
+  awaiting_plan_approval: new Set(['executing', 'blocked', 'cancelling', 'cancelled']),
   executing: new Set(['validating', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
   validating: new Set(['executing', 'awaiting_approval', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
   awaiting_approval: new Set(['publishing', 'cancelling', 'cancelled']),

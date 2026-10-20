@@ -11,6 +11,7 @@ import { SQLiteService, sqliteService } from './sqliteService.js';
 import { runnerService, type StartRunParams } from './runnerService.js';
 import { addBranchWorktree, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { roleCanOwnOrchestrationTask } from './orchestrationContract.js';
+import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
 import { logError } from '../utils/logger.js';
 
 export interface RunnerEvents {
@@ -96,8 +97,14 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       if (!roleCanOwnOrchestrationTask(request.taskKind, persona.role)) {
         throw new Error(`${persona.role} in the current persona file cannot own the assigned ${request.taskKind} task. Update the plan or persona before retrying.`);
       }
-      if (normalizeRepository(issue.githubRepo) !== normalizeRepository(request.repository)) {
-        throw new Error('The build issue repository no longer matches the repository authorized for this orchestration run.');
+      const snapshot = this.store.getOrchestrationSnapshot(request.runId);
+      const repositoryWorkspace = snapshot && repositoryWorkspaceForRun(snapshot.run, request.repository);
+      if (!repositoryWorkspace || normalizeRepository(request.repository) !== normalizeRepository(repositoryWorkspace.repository)) {
+        throw new Error('The task names a codebase that was not selected for this orchestrated product build.');
+      }
+      if (normalizeRepository(issue.githubRepo) !== normalizeRepository(snapshot!.run.repository) &&
+          !(snapshot!.run.repositoryWorkspaces ?? []).some(item => normalizeRepository(item.repository) === normalizeRepository(request.repository))) {
+        throw new Error('The build issue no longer matches a codebase authorized for this orchestration run.');
       }
 
       const repository = this.resolveWorkspace(project, request.repository);
@@ -106,13 +113,16 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       }
       this.allowWorkspace(repository, project.name);
 
-      const expectedBranch = orchestrationBranchName(request.runId);
+      const expectedBranch = repositoryWorkspace.branchName || orchestrationBranchName(request.runId);
       if (request.branchName && request.branchName !== expectedBranch) {
         throw new Error('The orchestration run branch does not match its deterministic run identity.');
       }
       const branchName = expectedBranch;
-      const workingDir = this.worktreePathFor(project.id, request.runId);
-      let baseRef = request.baseRef ?? 'HEAD';
+      const workingDir = path.resolve(repositoryWorkspace.worktreePath);
+      if (request.workingDir && path.resolve(request.workingDir) !== workingDir) {
+        throw new Error('The task workspace does not match its selected codebase.');
+      }
+      let baseRef = request.baseRef ?? repositoryWorkspace.baseRef ?? 'HEAD';
       if (fs.existsSync(workingDir)) {
         if (!(await isGitRepo(workingDir))) {
           throw new Error('The orchestration worktree path exists but is not a Git worktree. Preserve it for recovery and inspect it before retrying.');
@@ -124,14 +134,14 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         if (!(await isGitWorkingTreeClean(workingDir))) {
           throw new Error('The previous task left uncheckpointed changes. Preserve the worktree and reconcile those changes before dispatching another task.');
         }
-        if (request.attemptNumber === 1 && request.baseCommit && await getHeadCommit(workingDir) !== request.baseCommit) {
+        if (request.attemptNumber === 1 && repositoryWorkspace.baseCommit && await getHeadCommit(workingDir) !== repositoryWorkspace.baseCommit) {
           throw new Error('The planning worktree no longer matches its recorded base commit. Preserve it and reconcile the build before retrying.');
         }
       } else {
-        if (request.baseCommit) {
+        if (repositoryWorkspace.baseCommit) {
           throw new Error('The persisted orchestration worktree is missing. Do not rebuild it from a different base; reconcile the saved checkpoint first.');
         }
-        if (!request.baseRef && await remoteHasDevBranch(repository.dir)) baseRef = await fetchRemoteBranch(repository.dir, 'dev');
+        if (!request.baseRef && !repositoryWorkspace.baseCommit && await remoteHasDevBranch(repository.dir)) baseRef = await fetchRemoteBranch(repository.dir, 'dev');
         await addBranchWorktree(repository.dir, workingDir, branchName, baseRef);
       }
 
@@ -154,7 +164,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           modelName: persona.modelName,
           branchName,
           baseRef,
-          baseCommit: request.baseCommit ?? startingCommit,
+          baseCommit: repositoryWorkspace.baseCommit ?? request.baseCommit ?? startingCommit,
           startingCommit,
           workspacePathHash: crypto.createHash('sha256').update(path.resolve(workingDir)).digest('hex')
         }
@@ -165,9 +175,12 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
   async launch(request: OrchestrationLaunchRequest): Promise<OrchestrationLaunchReceipt> {
     return runWithWorkspace(request.workspaceId, async () => {
       const { issue, agent, project } = this.loadEntities(request);
-      const expectedWorktree = path.resolve(this.worktreePathFor(project.id, request.runId));
+      const snapshot = this.store.getOrchestrationSnapshot(request.runId);
+      const repositoryWorkspace = snapshot && repositoryWorkspaceForRun(snapshot.run, request.repository);
+      if (!snapshot || !repositoryWorkspace) throw new Error('The task repository is not authorized by this build plan.');
+      const expectedWorktree = path.resolve(repositoryWorkspace.worktreePath);
       const workingDir = path.resolve(request.workingDir ?? '');
-      const expectedBranch = orchestrationBranchName(request.runId);
+      const expectedBranch = repositoryWorkspace.branchName || orchestrationBranchName(request.runId);
       if (!workingDir || workingDir !== expectedWorktree || request.branchName !== expectedBranch) {
         throw new Error('The task executor received a workspace or branch outside the run-scoped allocation.');
       }

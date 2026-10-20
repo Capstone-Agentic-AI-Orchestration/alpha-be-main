@@ -10,6 +10,7 @@ import { SQLiteService } from './sqliteService.js';
 import { OrchestrationService } from './orchestrationService.js';
 import { buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
+import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 
 export interface TaskAcceptanceOutcome {
   decision: 'accepted' | 'rejected' | 'blocked' | 'awaiting_approval';
@@ -308,10 +309,12 @@ export class TaskAcceptanceService {
         check: 'agent_blocker', blockers: report.data.blockers
       });
     }
-    if (result.prototypeRunId !== attempt.prototypeRunId || result.branchName !== snapshot.run.branchName) {
+    const authorizedWorkspace = repositoryWorkspaceForTask(snapshot, task.id);
+    if (!authorizedWorkspace) return fail('The task repository is not part of this build.', { check: 'repository_authority' });
+    if (result.prototypeRunId !== attempt.prototypeRunId || result.branchName !== authorizedWorkspace.branchName) {
       return fail('The submitted result does not match this attempt and its authorized branch.', {
         check: 'attempt_identity', expectedRunId: attempt.prototypeRunId, resultRunId: result.prototypeRunId,
-        expectedBranch: snapshot.run.branchName, resultBranch: result.branchName
+        expectedBranch: authorizedWorkspace.branchName, resultBranch: result.branchName
       });
     }
     if (attempt.contextManifest.planVersion !== snapshot.run.planVersion || attempt.contextManifest.taskId !== task.id) {
@@ -332,10 +335,8 @@ export class TaskAcceptanceService {
       return fail('The saved result artifact differs from the attempt result.', { check: 'artifact_consistency', artifactId: artifact.id });
     }
 
-    const worktreePath = snapshot.run.worktreePath
-      ? path.resolve(snapshot.run.worktreePath)
-      : path.resolve(this.dependencies.worktreePathFor(snapshot.run.projectId, snapshot.run.id));
-    if (!snapshot.run.branchName || !this.store.isPathAllowed(worktreePath)) {
+    const worktreePath = path.resolve(authorizedWorkspace.worktreePath);
+    if (!authorizedWorkspace.branchName || !this.store.isPathAllowed(worktreePath)) {
       return fail('The orchestration branch or approved local worktree is missing.', { check: 'workspace_authority' });
     }
     const [branchName, currentCommit, isClean] = await Promise.all([
@@ -343,9 +344,9 @@ export class TaskAcceptanceService {
       this.dependencies.getHeadCommit(worktreePath),
       this.dependencies.isGitWorkingTreeClean(worktreePath)
     ]);
-    if (branchName !== snapshot.run.branchName || currentCommit !== attempt.resultCommit || !isClean) {
+    if (branchName !== authorizedWorkspace.branchName || currentCommit !== attempt.resultCommit || !isClean) {
       return fail('The repository changed after submission or has uncheckpointed edits. Reconcile it before acceptance.', {
-        check: 'freshness', expectedBranch: snapshot.run.branchName, currentBranch: branchName,
+        check: 'freshness', expectedBranch: authorizedWorkspace.branchName, currentBranch: branchName,
         submittedCommit: attempt.resultCommit, currentCommit, workingTreeClean: isClean
       });
     }
@@ -360,10 +361,10 @@ export class TaskAcceptanceService {
         check: 'deliverable_traceability', changedPath: undeclaredChangedPath
       }, undeclaredChangedPath);
     }
-    if (!snapshot.run.baseCommit) {
+    if (!authorizedWorkspace.baseCommit) {
       return fail('The orchestration has no recorded base commit, so cumulative change scope cannot be verified.', { check: 'base_commit' });
     }
-    const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktreePath, snapshot.run.baseCommit, attempt.resultCommit);
+    const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktreePath, authorizedWorkspace.baseCommit, attempt.resultCommit);
     const readOnlyTask = !CODE_TASK_KINDS.has(task.kind);
     if (readOnlyTask && changedPaths.length) {
       return fail('This planning, review, validation, or delivery task changed repository files.', {
@@ -382,7 +383,8 @@ export class TaskAcceptanceService {
       ? [task.correctionOfTaskId, ...snapshot.tasks.filter(candidate => candidate.correctionOfTaskId === task.correctionOfTaskId).map(candidate => candidate.id)]
       : [task.id]);
     const acceptedPathOwners = new Map<string, { taskId: string; commit: string }>();
-    for (const acceptedTask of snapshot.tasks.filter(candidate => candidate.status === 'accepted')) {
+    for (const acceptedTask of snapshot.tasks.filter(candidate => candidate.status === 'accepted' &&
+      (candidate.repository ?? snapshot.run.repository).toLowerCase() === (task.repository ?? snapshot.run.repository).toLowerCase())) {
       const acceptedAttempt = [...snapshot.attempts].reverse().find(candidate =>
         candidate.taskId === acceptedTask.id && candidate.status === 'accepted' && candidate.resultCommit);
       const acceptedEvidence = acceptedAttempt?.result?.acceptanceEvidence;
@@ -426,7 +428,9 @@ export class TaskAcceptanceService {
         acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
       }, modifiedAcceptedPath);
     }
-    const scopeOwners = snapshot.tasks.filter(candidate => candidate.status === 'accepted' || candidate.id === task.id);
+    const scopeOwners = snapshot.tasks.filter(candidate =>
+      (candidate.status === 'accepted' || candidate.id === task.id) &&
+      (candidate.repository ?? snapshot.run.repository).toLowerCase() === (task.repository ?? snapshot.run.repository).toLowerCase());
     const outsideBuildScope = cumulativeChangedPaths.find(filePath =>
       !scopeOwners.some(candidate => taskAllowsPath(candidate, filePath)));
     if (outsideBuildScope) {
@@ -467,7 +471,9 @@ export class TaskAcceptanceService {
     task: OrchestrationTaskRecord,
     attempt: OrchestrationAttemptRecord
   ): Promise<Record<string, unknown>> {
-    const worktree = snapshot.run.worktreePath ?? this.dependencies.worktreePathFor(snapshot.run.projectId, snapshot.run.id);
+    const authorizedWorkspace = repositoryWorkspaceForTask(snapshot, task.id);
+    if (!authorizedWorkspace) throw new Error(`Task ${task.id} has no authorized repository workspace.`);
+    const worktree = authorizedWorkspace.worktreePath;
     const changedPaths = attempt.startingCommit && attempt.resultCommit
       ? await this.dependencies.getGitChangedPaths(worktree, attempt.startingCommit, attempt.resultCommit)
       : [];
@@ -477,10 +483,11 @@ export class TaskAcceptanceService {
       artifactId: snapshot.artifacts.find(item => item.attemptId === attempt.id && item.type === 'task_result')?.id,
       resultCommit: attempt.resultCommit,
       currentHead: attempt.resultCommit,
-      branchName: snapshot.run.branchName,
+      branchName: authorizedWorkspace.branchName,
+      repository: authorizedWorkspace.repository,
       changedPaths,
-      cumulativeChangedPaths: snapshot.run.baseCommit && attempt.resultCommit
-        ? await this.dependencies.getGitChangedPaths(worktree, snapshot.run.baseCommit, attempt.resultCommit)
+      cumulativeChangedPaths: authorizedWorkspace.baseCommit && attempt.resultCommit
+        ? await this.dependencies.getGitChangedPaths(worktree, authorizedWorkspace.baseCommit, attempt.resultCommit)
         : [],
       scope: { includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths, passed: true },
       requiredChecks: task.requiredChecks,
@@ -494,54 +501,63 @@ export class TaskAcceptanceService {
     actorId: string,
     now?: string
   ): Promise<TaskAcceptanceOutcome> {
-    const worktree = path.resolve(snapshot.run.worktreePath ?? this.dependencies.worktreePathFor(snapshot.run.projectId, snapshot.run.id));
     const current = await this.store.getOrchestrationSnapshot(snapshot.run.id);
     if (!current) throw new Error('The orchestration run disappeared before final validation.');
-    const [branchName, currentCommit, clean] = await Promise.all([
-      this.dependencies.getCurrentBranch(worktree),
-      this.dependencies.getHeadCommit(worktree),
-      this.dependencies.isGitWorkingTreeClean(worktree)
-    ]);
-    const taskCommits = current.attempts.filter(attempt => attempt.status === 'accepted').map(attempt => attempt.resultCommit).filter(Boolean);
-    const latestTaskCommit = taskCommits[taskCommits.length - 1];
-    if (branchName !== current.run.branchName || !clean || (latestTaskCommit && currentCommit !== latestTaskCommit)) {
-      const reason = 'The shared branch changed after the last accepted task; final validation needs a fresh reconciliation.';
-      const blocked = this.store.transitionOrchestrationRun({
-        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now
-      });
+    const repositoryResults: Array<Record<string, unknown> & { repository: string; worktree: string; branchName: string; resultCommit: string; baseCommit: string; cumulativeChangedPaths: string[]; verification: VerificationResult }> = [];
+    for (const workspace of current.run.repositoryWorkspaces?.length
+      ? current.run.repositoryWorkspaces
+      : [repositoryWorkspaceForRun(current.run, current.run.repository)].filter((item): item is NonNullable<typeof item> => Boolean(item))) {
+      const worktree = path.resolve(workspace.worktreePath);
+      const [branchName, currentCommit, clean] = await Promise.all([
+        this.dependencies.getCurrentBranch(worktree), this.dependencies.getHeadCommit(worktree), this.dependencies.isGitWorkingTreeClean(worktree)
+      ]);
+      const taskCommits = current.attempts.filter(attempt => attempt.status === 'accepted' &&
+        (current.tasks.find(task => task.id === attempt.taskId)?.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase())
+        .map(attempt => attempt.resultCommit).filter((value): value is string => Boolean(value));
+      const latestTaskCommit = taskCommits[taskCommits.length - 1];
+      if (branchName !== workspace.branchName || !clean || (latestTaskCommit && currentCommit !== latestTaskCommit)) {
+        const reason = `The ${workspace.repository} branch changed after its last accepted task; final checks need a fresh review.`;
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now });
+        return { decision: 'blocked', snapshot: blocked, reason };
+      }
+      const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktree, workspace.baseCommit, currentCommit);
+      const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
+        (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase());
+      const unownedPath = cumulativeChangedPaths.find(filePath => !acceptedCodeTasks.some(task => taskAllowsPath(task, filePath)));
+      if (unownedPath) {
+        const reason = `Final checks found ${unownedPath} in ${workspace.repository}, outside the accepted task assignments.`;
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence: { check: 'final_scope', repository: workspace.repository, changedPath: unownedPath, cumulativeChangedPaths }, now });
+        return { decision: 'blocked', snapshot: blocked, reason };
+      }
+      const requiredScripts = [...new Set(current.tasks.filter(task => task.required &&
+        (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase()).flatMap(task => task.requiredChecks))];
+      const verification = await this.dependencies.runVerification({ runId: `orchestration-final-${current.run.id}-${Buffer.from(workspace.repository).toString('hex').slice(0, 16)}`, cwd: worktree, requiredScripts: requiredScripts.length ? requiredScripts : undefined });
+      repositoryResults.push({ repository: workspace.repository, worktree, branchName, resultCommit: currentCommit, baseCommit: workspace.baseCommit, cumulativeChangedPaths, verification });
+    }
+    const primary = repositoryResults[0];
+    const verification: VerificationResult = repositoryResults.length === 1 ? primary.verification : {
+      status: repositoryResults.every(item => item.verification.status === 'passed') ? 'passed' : 'failed',
+      missingScripts: repositoryResults.flatMap(item => item.verification.missingScripts.map(script => `${item.repository}: ${script}`)),
+      commands: repositoryResults.flatMap(item => item.verification.commands),
+      summary: repositoryResults.map(item => `${item.repository}: ${item.verification.summary}`).join('\n')
+    };
+    if (!primary) {
+      const reason = 'No selected repository has a private build workspace to validate.';
+      const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now });
       return { decision: 'blocked', snapshot: blocked, reason };
     }
-    if (!current.run.baseCommit) {
-      const reason = 'The orchestration has no recorded base commit for final scope verification.';
-      const blocked = this.store.transitionOrchestrationRun({
-        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now
-      });
-      return { decision: 'blocked', snapshot: blocked, reason };
-    }
-    const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktree, current.run.baseCommit, currentCommit);
-    const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind));
-    const unownedPath = cumulativeChangedPaths.find(filePath =>
-      !acceptedCodeTasks.some(task => taskAllowsPath(task, filePath)));
-    if (unownedPath) {
-      const reason = `Final validation found a repository change to ${unownedPath} outside accepted task scopes.`;
-      const blocked = this.store.transitionOrchestrationRun({
-        runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason,
-        evidence: { check: 'final_scope', changedPath: unownedPath, cumulativeChangedPaths }, now
-      });
-      return { decision: 'blocked', snapshot: blocked, reason };
-    }
-    const requiredScripts = [...new Set(current.tasks.flatMap(task => task.required ? task.requiredChecks : []))];
-    const verification: VerificationResult = await this.dependencies.runVerification({
-      runId: `orchestration-final-${current.run.id}`,
-      cwd: worktree,
-      requiredScripts: requiredScripts.length ? requiredScripts : undefined
-    });
+    const finalRepositoryEvidence = repositoryResults.map(item => ({
+      repository: item.repository, baseCommit: item.baseCommit, resultCommit: item.resultCommit,
+      branchName: item.branchName, cumulativeChangedPaths: item.cumulativeChangedPaths,
+      checks: { status: item.verification.status, missingScripts: item.verification.missingScripts, observed: item.verification.commands.map(command => ({ script: command.command.script, display: command.command.display, exitCode: command.exitCode, signal: command.signal })) }
+    }));
     const evidence = {
       validationVersion: 1,
-      resultCommit: currentCommit,
-      branchName,
+      resultCommit: primary.resultCommit,
+      branchName: primary.branchName,
+      repositories: finalRepositoryEvidence,
       acceptedRequiredTaskIds: current.tasks.filter(task => task.required && task.status === 'accepted').map(task => task.id),
-      cumulativeChangedPaths,
+      cumulativeChangedPaths: primary.cumulativeChangedPaths,
       checks: {
         status: verification.status,
         missingScripts: verification.missingScripts,

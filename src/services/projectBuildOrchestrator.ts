@@ -27,10 +27,11 @@ import { orchestrationSessionId } from './orchestrationSession.js';
 export { isProjectBuildRequest } from './projectBuildIntent.js';
 
 export interface ProjectBuildStartResult {
-  status: 'started' | 'queued' | 'in_progress' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';
+  status: 'started' | 'queued' | 'in_progress' | 'plan_ready' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';
   projectId?: string;
   projectName?: string;
   repository?: string;
+  repositories?: string[];
   issueId?: string;
   issueIdentifier?: string;
   squadId?: string;
@@ -50,7 +51,10 @@ interface StartProjectBuildInput {
   messageId: string;
   content: string;
   requestedRepository?: string;
+  requestedRepositories?: string[];
 }
+
+interface SelectedProjectRepository { repository: string; checkoutDir: string }
 
 const inFlightBuilds = new Map<string, Promise<ProjectBuildStartResult>>();
 // Desktop supplies a fresh ID for every daemon launch; source runs use a
@@ -63,6 +67,7 @@ function blocked(reason: string, project?: Project, repository?: string): Projec
     projectId: project?.id,
     projectName: project?.name,
     repository,
+    repositories: repository ? [repository] : undefined,
     reason
   };
 }
@@ -168,7 +173,7 @@ async function reconcilePlanningReservation(input: {
       reservation: input.reservation
     });
     const durableReservation = runWithWorkspace(input.workspaceId, () =>
-      sqliteService.getOrchestrationPlanningReservationByRun(input.projectId, input.reservation.runId));
+      sqliteService.getOrchestrationPlanningReservationByRun(input.projectId, input.reservation.runId, input.reservation.repository));
     if (durableReservation) {
       runWithWorkspace(input.workspaceId, () => sqliteService.recordOrchestrationPlanningRecovery({
         projectId: input.projectId,
@@ -187,6 +192,27 @@ async function reconcilePlanningReservation(input: {
     input.reservation.ownerSessionId
   ));
   return released ? 'released' : 'reservation_changed';
+}
+
+function planningRequestKey(requestKey: string, repository: string, primaryRepository: string): string {
+  if (repository.toLowerCase() === primaryRepository.toLowerCase()) return requestKey;
+  const suffix = crypto.createHash('sha256').update(repository.toLowerCase()).digest('hex').slice(0, 12);
+  return `${requestKey}-repo-${suffix}`;
+}
+
+async function reconcilePlanningReservations(input: {
+  workspaceId: string;
+  projectId: string;
+  repositories: SelectedProjectRepository[];
+  reservations: PlanningReservation[];
+}): Promise<PlanningReservationCleanup[]> {
+  const byRepository = new Map(input.repositories.map(item => [item.repository.toLowerCase(), item.checkoutDir]));
+  return Promise.all(input.reservations.map(reservation => reconcilePlanningReservation({
+    workspaceId: input.workspaceId,
+    projectId: input.projectId,
+    repositoryDir: byRepository.get(reservation.repository.toLowerCase()) ?? '',
+    reservation
+  })));
 }
 
 function orchestrationBranchName(runId: string): string {
@@ -223,9 +249,10 @@ function repositoryPlanningContext(repositoryDir: string): { context: string; sc
   return { context: context.slice(0, 16_000), scripts: availableScripts };
 }
 
-function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Project, repository: string, squad: Squad): ProjectBuildStartResult {
+function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Project, repository: string, squad?: Squad): ProjectBuildStartResult {
   const active = snapshot.run.currentTaskId ? snapshot.tasks.find(task => task.id === snapshot.run.currentTaskId) : undefined;
   const status: ProjectBuildStartResult['status'] = snapshot.run.status === 'completed' ? 'completed'
+    : snapshot.run.status === 'awaiting_plan_approval' ? 'plan_ready'
     : snapshot.run.status === 'awaiting_approval' ? 'awaiting_review'
     : snapshot.run.status === 'publishing' ? 'in_progress'
     : snapshot.run.status === 'failed' || snapshot.run.status === 'cancelled' ? 'failed'
@@ -236,10 +263,10 @@ function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Proj
     projectId: project.id,
     projectName: project.name,
     repository,
+    repositories: snapshot.run.repositoryWorkspaces?.map(item => item.repository) ?? [repository],
     issueId: snapshot.run.issueId,
     issueIdentifier: sqliteService.getIssues().find(issue => issue.id === snapshot.run.issueId)?.identifier,
-    squadId: squad.id,
-    squadName: `${squad.name} · orchestrated tasks`,
+    squadId: squad?.id,
     orchestrationRunId: snapshot.run.id,
     orchestrationTaskCount: snapshot.tasks.length,
     orchestrationCurrentTask: active ? { id: active.id, title: active.title, ownerAgentId: active.ownerAgentId } : undefined,
@@ -251,18 +278,20 @@ function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Proj
 async function startOrchestratedProjectBuild(input: {
   context: WorkspaceContext;
   project: Project;
-  repository: string;
-  checkoutDir: string;
-  squad: Squad;
+  repositories: SelectedProjectRepository[];
+  squad?: Squad;
   members: Agent[];
   buildSteps: ProjectBuildStep[];
   threadId: string;
   messageId: string;
   content: string;
 }): Promise<ProjectBuildStartResult> {
-  const { context, project, repository, checkoutDir, squad, members, buildSteps } = input;
+  const { context, project, squad, members, buildSteps } = input;
+  const repositories = input.repositories;
+  const repository = repositories[0]?.repository ?? '';
+  const checkoutDir = repositories[0]?.checkoutDir ?? '';
   if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
-  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('Desktop project builds require the orchestrator, but it is unavailable in this desktop runtime. Check the desktop build configuration.', project, repository);
+  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('The Orchestrator is unavailable in this desktop version. Update the app before starting a build.', project, repository);
 
   const workspaceId = context.workspaceId;
   const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${input.threadId}:${input.messageId}`).digest('hex').slice(0, 16);
@@ -271,6 +300,7 @@ async function startOrchestratedProjectBuild(input: {
   const expectedIssueId = `chat-build-${requestKey}`;
   const requestFingerprint = orchestrationRequestFingerprint({
     workspaceId, projectId: project.id, issueId: expectedIssueId, repository,
+    repositories: repositories.map(item => item.repository),
     createdBy: context.userId, originalRequest: cleanGoal
   });
   const priorSnapshot = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
@@ -280,29 +310,25 @@ async function startOrchestratedProjectBuild(input: {
     }
     return orchestrationStartResult(priorSnapshot, project, repository, squad);
   }
-  let activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository));
-  if (activeWorkflow) {
-    const reservation = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationPlanningReservation(project.id, repository));
-    const isPlanningReservation = reservation?.runId === activeWorkflow.runId && activeWorkflow.status === 'planning';
-    const ownsReservation = isPlanningReservation && reservation?.ownerSessionId === orchestrationOwnerSessionId;
-    if (isPlanningReservation && !ownsReservation) {
-      const recovery = await reconcilePlanningReservation({
-        workspaceId,
-        repositoryDir: checkoutDir,
-        projectId: project.id,
-        reservation
-      });
-      if (recovery === 'workspace_preserved') {
-        return blocked('A previous Alpha session stopped while planning and its private workspace no longer matches the recorded clean base. Alpha preserved it and paused this repository so no other build or code call can overwrite the unresolved work.', project, repository);
-      }
-      if (recovery === 'reservation_changed') {
-        return blocked('The interrupted planning reservation changed while Alpha was reconciling it. Refresh the project and retry after checking the active build.', project, repository);
-      }
-      activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository));
+  for (const selected of repositories) {
+    let activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, selected.repository));
+    let reservation = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationPlanningReservation(project.id, selected.repository));
+    const expectedReservationKey = planningRequestKey(requestKey, selected.repository, repository);
+    const ownsReservation = activeWorkflow?.status === 'planning' && reservation?.runId === activeWorkflow.runId &&
+      reservation.requestKey === expectedReservationKey && reservation.requestFingerprint === requestFingerprint &&
+      reservation.ownerSessionId === orchestrationOwnerSessionId;
+    if (activeWorkflow?.status === 'planning' && reservation && !ownsReservation && reservation.ownerSessionId !== orchestrationOwnerSessionId) {
+      const recovery = await reconcilePlanningReservation({ workspaceId, repositoryDir: selected.checkoutDir, projectId: project.id, reservation });
+      if (recovery === 'workspace_preserved') return blocked(`Alpha preserved a changed planning workspace for ${selected.repository}. Review the saved work in the Live Build Room before starting another build.`, project, selected.repository);
+      if (recovery === 'reservation_changed') return blocked(`The saved planning record for ${selected.repository} changed during recovery. Refresh the project and try again.`, project, selected.repository);
+      activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, selected.repository));
+      reservation = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationPlanningReservation(project.id, selected.repository));
     }
-    const isSamePlanningRequest = ownsReservation && reservation?.runId === activeWorkflow?.runId && reservation.requestKey === requestKey;
-    if (activeWorkflow && !isSamePlanningRequest) {
-      return blocked(`A task-based build is ${activeWorkflow.status.replace('_', ' ')} for this repository. Follow or resolve that build before starting another.`, project, repository);
+    const stillOwnsPlanning = activeWorkflow?.status === 'planning' && reservation?.runId === activeWorkflow.runId &&
+      reservation.requestKey === expectedReservationKey && reservation.requestFingerprint === requestFingerprint &&
+      reservation.ownerSessionId === orchestrationOwnerSessionId;
+    if (activeWorkflow && !stillOwnsPlanning) {
+      return blocked(`A build is already underway for ${selected.repository}. Open the Live Build Room to see its plan and current progress.`, project, selected.repository);
     }
   }
 
@@ -317,7 +343,7 @@ async function startOrchestratedProjectBuild(input: {
     return {
       status: previousLegacyRun.status === 'awaiting_approval' ? 'awaiting_review' : previousLegacyRun.status === 'failed' || previousLegacyRun.status === 'cancelled' ? 'failed' : 'in_progress',
       projectId: project.id, projectName: project.name, repository, issueId: issue.id,
-      issueIdentifier: issue.identifier, squadId: squad.id, squadName: squad.name,
+      issueIdentifier: issue.identifier, squadId: squad?.id, squadName: squad?.name,
       squadRunId: previousLegacyRun.id, branchName: firstRun?.branchName ?? previousLegacyRun.branchName,
       reason: previousLegacyRun.stoppedReason
     };
@@ -337,14 +363,15 @@ async function startOrchestratedProjectBuild(input: {
     return { agent, readiness, persona: resolveAgent(agent, { projectKey: project.key, includeMemory: false, includeToolPolicy: false }) };
   }).filter((item): item is { agent: Agent; readiness: ReturnType<typeof agentReadiness>; persona: ReturnType<typeof resolveAgent> } => Boolean(item.persona));
 
+  const orchestratorAgent = eligible.find(item => item.persona.role.trim().toLowerCase() === 'orchestrator agent');
   const configuredPlannerStep = orderedSteps.find(step => PLANNING_KINDS.has(step.phase) && step.agentId);
-  let plannerCandidate = configuredPlannerStep
+  const plannerCandidate = orchestratorAgent ?? (configuredPlannerStep
     ? eligible.find(item => item.agent.id === configuredPlannerStep.agentId)
-    : eligible.find(item => roleCanOwnOrchestrationTask('requirements', item.persona.role));
+    : eligible.find(item => roleCanOwnOrchestrationTask('requirements', item.persona.role)));
   if (!plannerCandidate) {
     const reason = configuredPlannerStep
-      ? `The configured ${configuredPlannerStep.phase} step owner is unavailable or not ready. Update that owner before starting the task workflow.`
-      : 'The project squad has no ready Research, Requirements, Manager, Architecture, or Orchestrator Agent persona to validate the task plan.';
+      ? `The Orchestrator Agent is unavailable, and the configured ${configuredPlannerStep.phase} planner is not ready. Make one planning agent available before starting.`
+      : 'No project-visible Orchestrator Agent or planning specialist is ready to prepare the build plan.';
     return blocked(reason, project, repository);
   }
   if (!roleCanOwnOrchestrationTask('requirements', plannerCandidate.persona.role)) {
@@ -360,51 +387,65 @@ async function startOrchestratedProjectBuild(input: {
     systemPrompt: plannerCandidate.persona.systemPrompt
   };
   const availableAgents = eligible.map(item => ({ id: item.agent.id, role: item.persona.role, ready: true as const }));
-  const activeIndependentCall = runWithWorkspace(workspaceId, () =>
-    sqliteService.getActiveAgentCallProjectLock(project.id, repository));
+  const activeIndependentCall = repositories.map(item => runWithWorkspace(workspaceId, () =>
+    sqliteService.getActiveAgentCallProjectLock(project.id, item.repository)
+  )).find(Boolean);
   if (activeIndependentCall) {
     return blocked('An independent code call or patch is using this repository. Let it finish before starting a task-based build.', project, repository);
   }
 
-  let baseCommit: string;
-  try {
-    baseCommit = await getHeadCommit(checkoutDir);
-  } catch (error) {
-    return blocked(`The selected repository has no stable Git base for planning. ${error instanceof Error ? error.message : ''}`.trim(), project, repository);
-  }
   const proposedRunId = `orchestration-${crypto.randomUUID()}`;
-  let reservation: ReturnType<typeof sqliteService.reserveOrchestrationPlanning>;
+  const reservations: PlanningReservation[] = [];
+  const branchName = orchestrationBranchName(proposedRunId);
   try {
-    reservation = runWithWorkspace(workspaceId, () => sqliteService.reserveOrchestrationPlanning({
-      projectId: project.id,
-      repository,
-      requestKey,
-      requestFingerprint,
-      createdBy: context.userId,
-      runId: proposedRunId,
-      branchName: orchestrationBranchName(proposedRunId),
-      baseCommit,
-      worktreePath: projectRunWorkspacePath(project.id, proposedRunId),
-      ownerSessionId: orchestrationOwnerSessionId
-    }));
+    for (const [index, target] of repositories.entries()) {
+      const baseCommit = await getHeadCommit(target.checkoutDir);
+      const worktreePath = index === 0
+        ? projectRunWorkspacePath(project.id, proposedRunId)
+        : projectRunWorkspacePath(project.id, `${proposedRunId}-${crypto.createHash('sha256').update(target.repository.toLowerCase()).digest('hex').slice(0, 12)}`);
+      reservations.push(runWithWorkspace(workspaceId, () => sqliteService.reserveOrchestrationPlanning({
+        projectId: project.id,
+        repository: target.repository,
+        requestKey: planningRequestKey(requestKey, target.repository, repository),
+        requestFingerprint,
+        createdBy: context.userId,
+        runId: proposedRunId,
+        branchName,
+        baseCommit,
+        worktreePath,
+        ownerSessionId: orchestrationOwnerSessionId
+      })));
+    }
   } catch (error) {
+    await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
     return blocked(error instanceof Error ? error.message : 'The project repository could not be reserved for planning.', project, repository);
   }
 
   try {
-    if (!fs.existsSync(reservation.worktreePath)) {
-      await addBranchWorktree(checkoutDir, reservation.worktreePath, reservation.branchName, reservation.baseCommit);
-    } else if (!(await isGitRepo(reservation.worktreePath)) ||
-        await getCurrentBranch(reservation.worktreePath) !== reservation.branchName ||
-        await getHeadCommit(reservation.worktreePath) !== reservation.baseCommit ||
-        !(await isGitWorkingTreeClean(reservation.worktreePath))) {
-      return blocked('The saved planning worktree does not match its reserved branch and base commit. Alpha preserved it for recovery; review the Live Build Room before retrying.', project, repository);
+    for (let index = 0; index < reservations.length; index++) {
+      const reservation = reservations[index];
+      const selected = repositories[index];
+      if (!fs.existsSync(reservation.worktreePath)) {
+        await addBranchWorktree(selected.checkoutDir, reservation.worktreePath, reservation.branchName, reservation.baseCommit);
+      } else if (!(await isGitRepo(reservation.worktreePath)) ||
+          await getCurrentBranch(reservation.worktreePath) !== reservation.branchName ||
+          await getHeadCommit(reservation.worktreePath) !== reservation.baseCommit ||
+          !(await isGitWorkingTreeClean(reservation.worktreePath))) {
+        throw new Error(`The saved planning workspace for ${selected.repository} does not match its reserved branch and base. Alpha preserved it for review.`);
+      }
     }
   } catch (error) {
-    return blocked(`The isolated planning workspace could not be prepared. ${error instanceof Error ? error.message : 'Inspect the saved build workspace before retrying.'}`, project, repository);
+    const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
+    const preserved = cleanup.some(result => result === 'workspace_preserved');
+    return blocked(`The isolated planning workspaces could not be prepared. ${error instanceof Error ? error.message : 'Inspect the saved build workspaces before retrying.'}${preserved ? ' Changed workspaces were preserved for review.' : ''}`, project, repository);
   }
 
-  const planningContext = repositoryPlanningContext(reservation.worktreePath);
+  const planningContexts = reservations.map(reservation => ({
+    repository: reservation.repository,
+    context: repositoryPlanningContext(reservation.worktreePath)
+  }));
+  const reservation = reservations[0];
+  if (!reservation) return blocked('No selected codebase could be reserved for the build.', project);
   const planner = new OrchestrationPlanner();
   let planned;
   try {
@@ -412,8 +453,13 @@ async function startOrchestratedProjectBuild(input: {
       runId: reservation.runId,
       cwd: reservation.worktreePath,
       goal: cleanGoal,
-      repositoryContext: planningContext.context,
-      availableScripts: planningContext.scripts,
+      repositoryContext: planningContexts[0]?.context.context ?? '',
+      availableScripts: planningContexts[0]?.context.scripts ?? [],
+      repositories: planningContexts.map(item => ({
+        repository: item.repository,
+        repositoryContext: item.context.context,
+        availableScripts: item.context.scripts
+      })),
       eligibleAgents: availableAgents,
       planner: plannerIdentity,
       buildSteps: orderedSteps.map(step => ({
@@ -424,16 +470,17 @@ async function startOrchestratedProjectBuild(input: {
     });
   } catch (error) {
     const detail = error instanceof OrchestrationPlanningError ? error.message : error instanceof Error ? error.message : 'The plan could not be validated.';
-    const cleanup = await reconcilePlanningReservation({ workspaceId, repositoryDir: checkoutDir, projectId: project.id, reservation });
-    const recoveryNote = cleanup === 'released' ? ''
-      : cleanup === 'workspace_preserved'
+    const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
+    const recoveryNote = cleanup.every(result => result === 'released') ? ''
+      : cleanup.includes('workspace_preserved')
         ? ' The private planning workspace did not match its clean checkpoint, so Alpha preserved it and kept the repository paused for recovery.'
         : ' The planning reservation changed during cleanup; refresh the project before retrying.';
     return blocked(`Task planning stopped before any specialist was launched. ${detail}${recoveryNote}`, project, repository);
   }
 
-  if (!issue) {
-    issue = await issueStore().create(workspaceId, {
+  try {
+    if (!issue) {
+      issue = await issueStore().create(workspaceId, {
       id: issueId,
       projectId: project.id,
       githubRepo: repository,
@@ -448,28 +495,40 @@ async function startOrchestratedProjectBuild(input: {
         '- A human remains responsible for final review and approval.',
         '', `Source conversation: ${input.threadId}`
       ].join('\n'),
-      status: 'todo', priority: 'medium', assignedSquadId: squad.id,
-      labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
-    });
-    workspaceRegistry.bind('issues', issue.id, workspaceId);
-    await supabaseService.shareIssue(issue);
-    addCommentAndShare({
-      id: `comm-${issue.id}-chat-build`, issueId: issue.id,
-      authorType: 'system', authorName: 'Alpha Orchestrator',
-      content: `Task workflow planned by ${plannerCandidate.persona.name} for ${squad.name}.`, createdAt: issue.createdAt
-    });
+        status: 'todo', priority: 'medium', assignedSquadId: undefined,
+        labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
+      });
+      workspaceRegistry.bind('issues', issue.id, workspaceId);
+      await supabaseService.shareIssue(issue);
+      addCommentAndShare({
+        id: `comm-${issue.id}-chat-build`, issueId: issue.id,
+        authorType: 'system', authorName: 'Alpha Orchestrator',
+        content: `Task workflow planned by ${plannerCandidate.persona.name}.`, createdAt: issue.createdAt
+      });
+    }
+  } catch (error) {
+    const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
+    const recoveryNote = cleanup.every(result => result === 'released') ? ''
+      : cleanup.includes('workspace_preserved')
+        ? ' Alpha preserved the private planning workspace because its state changed; it remains available for review.'
+        : ' The planning reservation changed during cleanup; refresh the project before retrying.';
+    return blocked(`The build plan was prepared, but its project record could not be saved. ${error instanceof Error ? error.message : 'Retry after checking the project connection.'}${recoveryNote}`, project, repository);
   }
 
   if (issue.id !== expectedIssueId) {
-    const cleanup = await reconcilePlanningReservation({ workspaceId, repositoryDir: checkoutDir, projectId: project.id, reservation });
-    const recoveryNote = cleanup === 'released' ? ''
-      : cleanup === 'workspace_preserved'
+    const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
+    const recoveryNote = cleanup.every(result => result === 'released') ? ''
+      : cleanup.includes('workspace_preserved')
         ? ' The private planning workspace was preserved because its state changed; the repository remains paused for recovery.'
         : ' The planning reservation changed during cleanup; refresh the project before retrying.';
     return blocked(`The existing chat build issue has a different identity than this task workflow request. No specialists were started; contact a project administrator to reconcile the local build record.${recoveryNote}`, project, repository);
   }
 
   try {
+    const repositoryWorkspaces = reservations.map(item => ({
+      repository: item.repository, branchName: item.branchName, baseRef: item.baseCommit,
+      baseCommit: item.baseCommit, worktreePath: item.worktreePath
+    }));
     const { orchestrationService } = await import('./orchestrationRuntime.js');
     const snapshot = await orchestrationService.start({
       workspaceId, projectId: project.id, issueId: issue.id, repository,
@@ -481,20 +540,26 @@ async function startOrchestratedProjectBuild(input: {
       baseRef: reservation.baseCommit,
       baseCommit: reservation.baseCommit,
       worktreePath: reservation.worktreePath,
+      repositoryWorkspaces,
       startingCommit: reservation.baseCommit,
       eligibleAgents: availableAgents,
       plan: planned.plan,
       planSource: 'model'
     });
+    for (const extraReservation of reservations.slice(1)) {
+      runWithWorkspace(workspaceId, () => sqliteService.releaseOrchestrationPlanningReservation(
+        extraReservation.requestKey, requestFingerprint, orchestrationOwnerSessionId
+      ));
+    }
     return orchestrationStartResult(snapshot, project, repository, squad);
   } catch (error) {
     const persisted = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
     let recoveryNote = '';
     if (!persisted) {
-      const cleanup = await reconcilePlanningReservation({ workspaceId, repositoryDir: checkoutDir, projectId: project.id, reservation });
-      recoveryNote = cleanup === 'workspace_preserved'
+      const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
+      recoveryNote = cleanup.includes('workspace_preserved')
         ? ' Alpha preserved the private planning workspace because it changed after reservation; the repository remains paused for recovery.'
-        : cleanup === 'reservation_changed'
+        : cleanup.includes('reservation_changed')
           ? ' The planning reservation changed during cleanup; refresh the project before retrying.'
           : '';
     }
@@ -520,12 +585,12 @@ export function startProjectBuild(input: StartProjectBuildInput): Promise<Projec
 
 /** Start one idempotent orchestrator plan for the selected repository. */
 export function startProjectBuildBatch(
-  input: Omit<StartProjectBuildInput, 'requestedRepository'> & { repositories?: string[] }
+  input: Omit<StartProjectBuildInput, 'requestedRepository' | 'requestedRepositories'> & { repositories?: string[] }
 ): Promise<ProjectBuildStartResult[]> {
   const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
   const desktopProjectBuild = Boolean(input.projectId && !IS_CLOUD);
-  if (desktopProjectBuild && repositories.length > 1) {
-    return Promise.resolve([blocked('Orchestrator plans run against one repository at a time. Choose a single repository for this build.', undefined, repositories.join(', '))]);
+  if (desktopProjectBuild) {
+    return startProjectBuild({ ...input, requestedRepositories: repositories }).then(result => [result]);
   }
   const targets: Array<string | undefined> = repositories.length ? repositories : [undefined];
   return Promise.all(targets.map(async repository => {
@@ -550,7 +615,7 @@ export function startProjectBuildBatch(
 async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<ProjectBuildStartResult> {
   const { context, projectId, threadId, messageId, content } = input;
   if (context.role === 'client') return blocked('Project builds are available to the internal project team.');
-  if (!workspaceRegistry.can(context.role, 'agent.run') || !workspaceRegistry.can(context.role, 'squad.run')) {
+  if (!workspaceRegistry.can(context.role, 'agent.run')) {
     return blocked('Your workspace role cannot start project agent builds. Ask a project administrator to update your access.');
   }
   if (!projectId) return blocked('Choose a project in this conversation before asking Alpha to change repository files.');
@@ -564,68 +629,57 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     if (!project) return blocked('This project is no longer available in the active workspace.');
 
     const repos = repositoryOptions(project);
-    const requested = input.requestedRepository?.trim();
-    if (requested && !repos.some(repo => repo.toLowerCase() === requested.toLowerCase())) {
-      return blocked(`“${requested}” is not a repository attached to ${project.name}. Choose one of this project’s repositories.`, project);
+    const requestedRepos = input.requestedRepositories?.map(repo => repo.trim()).filter(Boolean)
+      ?? (input.requestedRepository ? [input.requestedRepository.trim()] : []);
+    if (requestedRepos.some(requested => !repos.some(repo => repo.toLowerCase() === requested.toLowerCase()))) {
+      const invalid = requestedRepos.find(requested => !repos.some(repo => repo.toLowerCase() === requested.toLowerCase()))!;
+      return blocked(`“${invalid}” is not attached to ${project.name}. Choose codebases listed in this project.`, project);
     }
-    if (!requested && repos.length > 1) {
-      return blocked(`Choose one repository to build: ${repos.join(', ')}.`, project);
-    }
+    const selectedRepositories = requestedRepos.length ? [...new Set(requestedRepos)] : [...repos];
+    if (!selectedRepositories.length) return blocked('Connect at least one repository to this project before starting a build.', project);
 
-    let repository = requested || undefined;
-    if (!repository && repos.length) {
-      const connected: string[] = [];
-      for (const repo of repos) {
-        const checkout = resolveProjectWorkspace(project, repo);
-        if (checkout && fs.existsSync(checkout.dir) && await isGitRepo(checkout.dir)) connected.push(repo);
+    const selectedCheckouts: SelectedProjectRepository[] = [];
+    for (const repo of selectedRepositories) {
+      let checkout = resolveProjectWorkspace(project, repo);
+      if ((!checkout || !fs.existsSync(checkout.dir)) && repo) {
+        try {
+          await cloneAndBindProject(project, repo);
+          checkout = resolveProjectWorkspace(project, repo);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'repository connection failed';
+          return blocked(`Alpha could not connect ${repo} for this build: ${detail} Check the GitHub connection and repository access, then retry.`, project, repo);
+        }
       }
-      if (connected.length === 1) repository = connected[0];
-      else if (connected.length > 1) {
-        return blocked(`Choose which repository to build in: ${connected.join(', ')}.`, project);
-      } else if (repos.length === 1) {
-        repository = repos[0];
-      } else {
-        return blocked(`Connect one of this project’s repositories before starting a build: ${repos.join(', ')}.`, project);
+      if (!checkout || !fs.existsSync(checkout.dir)) {
+        return blocked(`The ${repo} codebase is not checked out on this machine. Clone or attach it from the project’s Repository page, then try again.`, project, repo);
       }
+      if (!(await isGitRepo(checkout.dir))) {
+        return blocked(`The selected folder for ${repo} is not a Git checkout. Attach or clone it before starting a build.`, project, repo);
+      }
+      allowAttachedWorkspace(checkout, project.name);
+      selectedCheckouts.push({ repository: repo, checkoutDir: checkout.dir });
     }
+    const repository = selectedRepositories[0];
+    const checkout = resolveProjectWorkspace(project, repository)!;
 
-    let checkout = resolveProjectWorkspace(project, repository);
-    if ((!checkout || !fs.existsSync(checkout.dir)) && repository) {
-      try {
-        // A repository already attached to the project is enough to build.
-        // Bring its managed working copy onto this runner the first time,
-        // instead of sending the user away to clone it by hand.
-        await cloneAndBindProject(project, repository);
-        checkout = resolveProjectWorkspace(project, repository);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : 'repository connection failed';
-        return blocked(
-          `Alpha could not connect ${repository} for this build: ${detail} Check the GitHub connection and repository access, then retry.`,
-          project,
-          repository
-        );
+    const buildSteps = await projectStore().getBuildSteps(workspaceId, project.id);
+    const useOrchestrator = !IS_CLOUD && Boolean(project.id);
+    if (useOrchestrator) {
+      const availableAgents = sqliteService.getAgents().filter(agent => !agent.isArchived);
+      const projectAgents = (await Promise.all(availableAgents.map(async agent =>
+        await workspaceRegistry.canAccessProjectAgentRun(context, project.id, agent.id) ? agent : null
+      ))).filter((agent): agent is Agent => Boolean(agent));
+      if (!projectAgents.length) {
+        return blocked('No project-visible specialists are available. Add suitable specialists to the workspace or adjust their project access, then try again.', project, repository);
       }
+      return startOrchestratedProjectBuild({
+        context, project, repositories: selectedCheckouts, members: projectAgents,
+        buildSteps: buildSteps ?? [], threadId, messageId, content
+      });
     }
-    if (!checkout || !fs.existsSync(checkout.dir)) {
-      return blocked(
-        repository
-          ? `The ${repository} repository is not checked out on this machine. Clone or attach it from the project’s Repository page, then try again.`
-          : `This project has no local repository checkout. Clone or attach its repository from the project’s Repository page, then try again.`,
-        project,
-        repository
-      );
-    }
-    if (!(await isGitRepo(checkout.dir))) {
-      return blocked('The selected project folder is not a Git checkout. Attach or clone the repository before starting a build.', project, repository);
-    }
-    // Do not block on a dirty source checkout. The squad runner creates a
-    // private Git worktree for this build so user edits stay in the source
-    // directory and cannot be swept into an agent commit.
-    allowAttachedWorkspace(checkout, project.name);
 
     const assignments = await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id);
     const squads = await squadStore().list(workspaceId);
-    const buildSteps = await projectStore().getBuildSteps(workspaceId, project.id);
     const squad = selectSquad(context, project, squads, assignments, buildSteps ?? []);
     const activeAssigned = assignments.filter(item => item.status === 'active');
     if (!squad) {
@@ -657,15 +711,6 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     const agents = sqliteService.getAgents().filter(agent => members.includes(agent.id) && !agent.isArchived);
     const missing = members.filter(id => !agents.some(agent => agent.id === id));
     if (missing.length) return blocked(`${squad.name} includes unavailable agents. Update the squad membership before starting a build.`, project, repository);
-
-    const useOrchestrator = !IS_CLOUD && Boolean(project.id);
-    if (useOrchestrator) {
-      if (!repository) return blocked('Task-based builds require one repository attached to this project.', project);
-      return startOrchestratedProjectBuild({
-        context, project, repository, checkoutDir: checkout.dir, squad, members: agents,
-        buildSteps: buildSteps ?? [], threadId, messageId, content
-      });
-    }
 
     const activeWorkflow = !IS_CLOUD
       ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository))

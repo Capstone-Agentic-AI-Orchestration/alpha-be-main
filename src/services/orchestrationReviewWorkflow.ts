@@ -140,6 +140,7 @@ export function buildOrchestrationReviewAmendment(
       title: `Resolve review findings: ${root.title}`.slice(0, 240),
       description: `Correct the accepted ${root.kind} deliverable from task ${root.id}. Follow the linked review findings and keep all changes inside this task’s original scope.`,
       kind: root.kind,
+      repository: root.repository ?? snapshot.run.repository,
       ownerAgentId: root.ownerAgentId,
       dependsOn: [reviewTask.id],
       requirementIds: [...root.requirementIds],

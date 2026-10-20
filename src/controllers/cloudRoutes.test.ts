@@ -473,7 +473,7 @@ describe('approving a run on the web', () => {
   });
 });
 
-// Project-creation fixtures state the required execution owner explicitly.
+// Some project tests still exercise the optional legacy project-owner field.
 async function createOwnedProject(app: express.Express, input: Record<string, unknown>, headers: Record<string, string> = {}) {
   await call(app, 'GET', '/api/agents', undefined, headers);
   const { agentStore } = await import('../store/stores.js');
@@ -482,11 +482,20 @@ async function createOwnedProject(app: express.Express, input: Record<string, un
   return call(app, 'POST', '/api/projects', { ...input, leadAgentId: 'agent-research' }, headers);
 }
 
-describe('required project execution ownership', () => {
+describe('Orchestrator project build defaults', () => {
   beforeEach(() => { session = { login: 'PM1', role: 'pm' }; });
-  it('rejects missing and ambiguous owners without creating a project', async () => {
+  it('creates a project with the Orchestrator as build lead and no squad assignment', async () => {
     const app = await startCloudApi();
-    expect((await call(app, 'POST', '/api/projects', { name: 'Unassigned', key: 'UNA' })).status).toBe(400);
+    const created = await call(app, 'POST', '/api/projects', { name: 'Unassigned', key: 'UNA' });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ leadName: 'Orchestrator', leadType: 'agent' });
+    expect(created.body.leadAgentId).toBeUndefined();
+    expect(created.body.leadSquadId).toBeUndefined();
+    const { projectStore } = await import('../store/stores.js');
+    expect(await projectStore().get('ws-default', created.body.id)).toMatchObject({ leadName: 'Orchestrator' });
+  });
+  it('rejects ambiguous owners without creating the project', async () => {
+    const app = await startCloudApi();
     expect((await call(app, 'POST', '/api/projects', { name: 'Two owners', key: 'TWO', leadAgentId: 'a', leadSquadId: 's' })).status).toBe(400);
     expect((await db.query('select id from projects')).rows).toEqual([]);
   });
@@ -517,6 +526,11 @@ describe('required project execution ownership', () => {
     expect(next.status).toBe(200);
     expect(next.body.leadSquadId).toBe('squad-next');
     expect((await projectStore().get('ws-default', created.body.id))?.leadSquadId).toBe('squad-next');
+    const unassigned = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadAgentId: '', leadSquadId: '' });
+    expect(unassigned.status).toBe(200);
+    expect(unassigned.body).toMatchObject({ leadName: 'Orchestrator' });
+    expect(unassigned.body.leadAgentId).toBeUndefined();
+    expect(unassigned.body.leadSquadId).toBeUndefined();
 
   });
 });
