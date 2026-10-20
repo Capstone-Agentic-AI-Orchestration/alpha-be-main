@@ -494,8 +494,8 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
 }));
 
 /**
- * Local, per-project opt-in for the task-driven build pilot. The project
- * preference is machine-local; the global operator switch remains the kill
+ * Local, per-project opt-in for orchestrated task builds. The project
+ * preference is machine-local; the desktop operator switch remains the kill
  * switch, and neither setting grants repository or agent permissions.
  */
 dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request, res: Response) => {
@@ -509,7 +509,7 @@ dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request
   }
   const setting = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id));
   res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
-    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The desktop operator has not enabled the orchestration pilot.' });
+    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The orchestrator is disabled on this desktop.' });
 }));
 
 dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async (req: Request, res: Response) => {
@@ -522,7 +522,7 @@ dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async 
     sqliteService.setProjectOrchestrationEnabled(project.id, req.body.enabled, req.workspace!.userId)
   );
   res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
-    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'Saved for this desktop; the operator kill switch is still off.' });
+    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'Saved for this desktop; the orchestrator remains disabled here.' });
 }));
 
 // --- Project Build Room ---

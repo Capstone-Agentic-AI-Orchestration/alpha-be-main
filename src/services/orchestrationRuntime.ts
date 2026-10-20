@@ -8,7 +8,7 @@ import { logError, logInfo } from '../utils/logger.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
 
-/** One local coordinator/runner pair for the desktop's authoritative executor. */
+/** One local orchestrator/runner pair for the desktop's authoritative executor. */
 export const orchestrationRunnerAdapter = new OrchestrationRunnerAdapter({ store: sqliteService });
 export const orchestrationService = new OrchestrationService(sqliteService, orchestrationRunnerAdapter);
 export const taskAcceptanceService = new TaskAcceptanceService(sqliteService, orchestrationService);
@@ -38,7 +38,7 @@ orchestrationRunnerAdapter.attachResultHandlers({
     if (!ALPHA_ORCHESTRATION_ENABLED && outcome.snapshot.run.status === 'executing') {
       await orchestrationService.pauseScheduling({
         workspaceId: submitted.run.workspaceId, runId: submitted.run.id,
-        reason: 'The task result was saved, but the desktop orchestration kill switch is off. Enable it and resume the build to dispatch another specialist.'
+        reason: 'The task result was saved, but the orchestrator is disabled on this desktop. Enable it and resume the build to dispatch another specialist.'
       });
     }
     return runWithWorkspace(submitted.run.workspaceId, () => sqliteService.getOrchestrationSnapshot(submitted.run.id));

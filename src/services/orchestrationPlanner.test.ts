@@ -53,7 +53,7 @@ describe('read-only orchestration planner', () => {
       mode: 'chat', skills: [], mcpServers: [], priorSession: null,
       provider: 'OpenAI', modelName: 'fixture-model', cwd: input.cwd
     });
-    expect(request?.systemPrompt).toContain('read-only planning coordinator');
+    expect(request?.systemPrompt).toContain('read-only planning orchestrator');
   });
 
   it('allows one bounded JSON-format repair and still validates the repaired plan', async () => {

@@ -17,7 +17,7 @@ export const orchestrationRouter = Router();
 function errorResponse(res: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : 'The task workflow action failed.';
   const status = /not found|unavailable/i.test(message) ? 404
-    : /cannot|only |already|changed|retry|stale|no longer|kill switch|validation|review/i.test(message) ? 409
+    : /cannot|only |already|changed|retry|stale|no longer|disabled|validation|review/i.test(message) ? 409
       : 500;
   res.status(status).json({ error: message });
 }
@@ -207,10 +207,10 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   if (!ALPHA_ORCHESTRATION_ENABLED) {
-    return res.status(409).json({ error: 'The desktop orchestration kill switch is off. Enable the local pilot before resuming this build.' });
+    return res.status(409).json({ error: 'The orchestrator is disabled on this desktop. Enable it before resuming this build.' });
   }
   const pausedByKillSwitch = snapshot.run.status === 'blocked' &&
-    snapshot.run.stoppedReason?.toLowerCase().includes('kill switch is off');
+    snapshot.run.stoppedReason?.toLowerCase().includes('orchestrator is disabled');
   const needsRecovery = snapshot.run.status === 'recovery_required';
   if (snapshot.run.currentTaskId || (!pausedByKillSwitch && !needsRecovery)) {
     return res.status(409).json({ error: 'This build is not paused at a resumable checkpoint.' });

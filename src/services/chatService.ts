@@ -322,7 +322,7 @@ export class ChatService extends EventEmitter {
           : build.orchestrationRunId
             ? [
                 `**${statusText(build)}**`,
-                `The coordinator validated a plan with ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
+                `The orchestrator validated a plan with ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
                 build.reason,
                 build.repository ? `**Repository:** ${build.repository}` : undefined,
                 build.branchName ? `**Working branch:** ${build.branchName}` : undefined,

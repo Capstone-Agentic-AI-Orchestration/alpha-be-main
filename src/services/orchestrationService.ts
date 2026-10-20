@@ -160,7 +160,7 @@ function parseAgentReport(text: string): { report?: Record<string, unknown>; err
 }
 
 /**
- * Deterministic, single-active-task coordinator. Planning is already complete
+ * Deterministic, single-active-task orchestrator. Planning is already complete
  * when this service is called; it validates the plan, persists it, selects one
  * owner at a time, and only dispatches the next task after acceptance.
  */

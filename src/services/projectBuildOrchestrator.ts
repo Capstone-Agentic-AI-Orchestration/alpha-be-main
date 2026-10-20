@@ -262,7 +262,7 @@ async function startOrchestratedProjectBuild(input: {
 }): Promise<ProjectBuildStartResult> {
   const { context, project, repository, checkoutDir, squad, members, buildSteps } = input;
   if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
-  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('This project is opted into task-based builds, but the desktop operator kill switch is off. Enable the local orchestration pilot or turn off this project opt-in.', project, repository);
+  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('This project is opted into task-based builds, but the orchestrator is disabled on this desktop. Enable it in the desktop environment or turn off this project opt-in.', project, repository);
 
   const workspaceId = context.workspaceId;
   const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${input.threadId}:${input.messageId}`).digest('hex').slice(0, 16);
@@ -348,7 +348,7 @@ async function startOrchestratedProjectBuild(input: {
     return blocked(reason, project, repository);
   }
   if (!roleCanOwnOrchestrationTask('requirements', plannerCandidate.persona.role)) {
-    return blocked(`${plannerCandidate.persona.role} cannot act as the read-only planning coordinator. Assign a Research, Manager, or Architecture persona to the planning step.`, project, repository);
+    return blocked(`${plannerCandidate.persona.role} cannot act as the read-only planning orchestrator. Assign a Research, Manager, or Architecture persona to the planning step.`, project, repository);
   }
   const plannerIdentity: PlannerAgentIdentity = {
     id: plannerCandidate.agent.id,
@@ -439,7 +439,7 @@ async function startOrchestratedProjectBuild(input: {
       githubRepo: repository,
       title: issueTitle(cleanGoal),
       description: [
-        'Build requested from project chat using the task-driven coordinator.', '',
+        'Build requested from project chat using the task-driven orchestrator.', '',
         'Original request:', cleanGoal, '',
         'Build expectations:',
         '- Work is assigned as separate, role-qualified tasks by Alpha’s validated plan.',
@@ -498,7 +498,7 @@ async function startOrchestratedProjectBuild(input: {
           ? ' The planning reservation changed during cleanup; refresh the project before retrying.'
           : '';
     }
-    return blocked(`Task workflow could not start safely. ${error instanceof Error ? error.message : 'The coordinator rejected the start request.'}${recoveryNote}`, project, repository);
+    return blocked(`Task workflow could not start safely. ${error instanceof Error ? error.message : 'The orchestrator rejected the start request.'}${recoveryNote}`, project, repository);
   }
 }
 

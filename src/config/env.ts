@@ -46,8 +46,10 @@ export const ALPHA_TICKETING_TRIAGE_ENABLED = process.env.ALPHA_TICKETING_TRIAGE
 // the additive lifecycle migration is installed and the full system is tested.
 export const ALPHA_TICKETING_WORKFLOW_ENABLED = process.env.ALPHA_TICKETING_WORKFLOW_ENABLED === '1';
 
-/** Local-only orchestration pilot. Disabled by default and must be enabled by the desktop operator. */
-export const ALPHA_ORCHESTRATION_ENABLED = process.env.ALPHA_ORCHESTRATION_ENABLED === '1';
+/** Orchestrator is available locally by default; set to 0 to disable it. Cloud execution stays off. */
+export const ALPHA_ORCHESTRATION_ENABLED = !IS_CLOUD &&
+  process.env.ALPHA_ORCHESTRATION_ENABLED !== '0' &&
+  (process.env.NODE_ENV !== 'test' || process.env.ALPHA_ORCHESTRATION_ENABLED === '1');
 
 // Phase 3: cloud-only email rollout. Unset/off leaves existing behavior intact.
 export const ALPHA_TICKETING_ACK_EMAIL_ENABLED = process.env.ALPHA_TICKETING_ACK_EMAIL_ENABLED === '1';

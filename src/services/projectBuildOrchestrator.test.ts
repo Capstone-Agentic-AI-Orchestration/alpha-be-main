@@ -325,7 +325,7 @@ describe('project builds triggered from chat', () => {
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 
-  it('routes an opted-in single-repository chat build through the planner and task coordinator', async () => {
+  it('routes an opted-in single-repository chat build through the planner and task orchestrator', async () => {
     const service = await load(true);
     const input = {
       context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,

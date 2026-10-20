@@ -28,7 +28,7 @@ const plan = parseOrchestrationPlan({
   ]
 });
 
-describe('deterministic orchestration coordinator', () => {
+describe('deterministic orchestration orchestrator', () => {
   let directory = '';
   let store: SQLiteService | undefined;
 
@@ -40,7 +40,7 @@ describe('deterministic orchestration coordinator', () => {
   });
 
   it('runs only the next task owner and waits for acceptance before dispatching dependent work', async () => {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-coordinator-'));
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-orchestrator-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
     const executor: OrchestrationExecutor = {
@@ -49,7 +49,7 @@ describe('deterministic orchestration coordinator', () => {
         return { prototypeRunId: `prototype-${request.attemptId}` };
       }
     };
-    const coordinator = new OrchestrationService(store, executor);
+    const orchestrator = new OrchestrationService(store, executor);
     const input = {
       workspaceId: 'workspace-test',
       projectId: 'project-test',
@@ -66,7 +66,7 @@ describe('deterministic orchestration coordinator', () => {
       plan
     };
 
-    let snapshot = await coordinator.start(input);
+    let snapshot = await orchestrator.start(input);
     const branchName = 'alpha/orchestration/test-run';
     store.addAllowedPath(directory, 'orchestration test workspace');
     snapshot = runWithWorkspace(input.workspaceId, () => store!.bindOrchestrationWorkspace({
@@ -85,7 +85,7 @@ describe('deterministic orchestration coordinator', () => {
 
     // Retrying the same chat request resumes its persisted run; it never starts
     // a second attempt while the first is active.
-    snapshot = await coordinator.start(input);
+    snapshot = await orchestrator.start(input);
     expect(snapshot.attempts).toHaveLength(1);
     expect(launches).toHaveLength(1);
 
@@ -108,16 +108,16 @@ describe('deterministic orchestration coordinator', () => {
       activities: [{ id: 'summary', sequence: 1, kind: 'assistant', message: 'Endpoint submitted.', createdAt: '2026-10-19T00:00:00.000Z' }],
       stages: [{ id: 'tests', status: 'success' }]
     } as any;
-    snapshot = (await coordinator.handleRunnerCompleted(runEvent))!;
+    snapshot = (await orchestrator.handleRunnerCompleted(runEvent))!;
     expect(snapshot.tasks[0].status).toBe('submitted');
     expect(snapshot.attempts[0].result).toMatchObject({
       summary: 'Endpoint submitted.', verification: { stageStatus: 'success' }
     });
     // A repeated process event is ignored after the durable submission.
     const submittedEventCount = store.listOrchestrationEvents(snapshot.run.id).length;
-    snapshot = (await coordinator.handleRunnerCompleted(runEvent))!;
+    snapshot = (await orchestrator.handleRunnerCompleted(runEvent))!;
     expect(store.listOrchestrationEvents(snapshot.run.id)).toHaveLength(submittedEventCount);
-    snapshot = await coordinator.acceptAttempt({
+    snapshot = await orchestrator.acceptAttempt({
       workspaceId: input.workspaceId,
       runId: snapshot.run.id,
       taskId: 'create-endpoint',
@@ -134,7 +134,7 @@ describe('deterministic orchestration coordinator', () => {
     expect(launches.some(request => request.ownerAgentId === 'mobile-agent')).toBe(false);
 
     const secondAttempt = snapshot.attempts.find(attempt => attempt.taskId === 'complete-endpoint')!;
-    snapshot = await coordinator.submitResult({
+    snapshot = await orchestrator.submitResult({
       workspaceId: input.workspaceId,
       runId: snapshot.run.id,
       taskId: 'complete-endpoint',
@@ -143,7 +143,7 @@ describe('deterministic orchestration coordinator', () => {
       result: { summary: 'Completion endpoint submitted.' },
       resultCommit: 'commit-complete'
     });
-    snapshot = await coordinator.acceptAttempt({
+    snapshot = await orchestrator.acceptAttempt({
       workspaceId: input.workspaceId,
       runId: snapshot.run.id,
       taskId: 'complete-endpoint',
@@ -198,7 +198,7 @@ describe('deterministic orchestration coordinator', () => {
       .toMatchObject({ type: 'run_completed', payload: { evidence: { decision: 'approved', approvedBy: 'reviewer-user' } } });
     expect(runWithWorkspace(input.workspaceId, () => store!.listAllPublishedOrchestrationSnapshots().map(item => item.run.id)))
       .toEqual([snapshot.run.id]);
-    await expect(coordinator.cancelRun({ workspaceId: input.workspaceId, runId: snapshot.run.id, actorId: 'reviewer-user' }))
+    await expect(orchestrator.cancelRun({ workspaceId: input.workspaceId, runId: snapshot.run.id, actorId: 'reviewer-user' }))
       .resolves.toMatchObject({ run: { status: 'completed' } });
   });
 
@@ -217,7 +217,7 @@ describe('deterministic orchestration coordinator', () => {
         ...plan.tasks
       ]
     });
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) {
         launches.push(request);
         return { prototypeRunId: `prototype-${request.attemptId}` };
@@ -231,18 +231,18 @@ describe('deterministic orchestration coordinator', () => {
       ] as const, plan: optionalPlan
     };
 
-    let snapshot = await coordinator.start(input);
+    let snapshot = await orchestrator.start(input);
     expect(launches.map(request => request.taskId)).toEqual(['create-endpoint']);
     for (const taskId of ['create-endpoint', 'complete-endpoint']) {
       const attempt = snapshot.attempts.find(item => item.taskId === taskId)!;
       const task = snapshot.tasks.find(item => item.id === taskId)!;
-      snapshot = await coordinator.submitResult({
+      snapshot = await orchestrator.submitResult({
         workspaceId: input.workspaceId, runId: snapshot.run.id, taskId, attemptId: attempt.id,
         expectedTaskRevision: task.revision, result: { summary: `${task.title} submitted.` },
         resultCommit: `${taskId.replace(/-/g, '').padEnd(40, 'a')}`
       });
       const submittedTask = snapshot.tasks.find(item => item.id === taskId)!;
-      snapshot = await coordinator.acceptAttempt({
+      snapshot = await orchestrator.acceptAttempt({
         workspaceId: input.workspaceId, runId: snapshot.run.id, taskId, attemptId: attempt.id,
         expectedTaskRevision: submittedTask.revision, acceptedBy: 'orchestrator', evidence: { accepted: true }
       });
@@ -257,7 +257,7 @@ describe('deterministic orchestration coordinator', () => {
   it('rejects a reused request key whose request fingerprint changed', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-idempotency-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) { return { prototypeRunId: `prototype-${request.attemptId}` }; }
     });
     const input = {
@@ -265,8 +265,8 @@ describe('deterministic orchestration coordinator', () => {
       requestKey: 'same-request', requestFingerprint: 'original-fingerprint', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    await coordinator.start(input);
-    await expect(coordinator.start({ ...input, requestFingerprint: 'changed-fingerprint' }))
+    await orchestrator.start(input);
+    await expect(orchestrator.start({ ...input, requestFingerprint: 'changed-fingerprint' }))
       .rejects.toThrow(/different build request/);
   });
 
@@ -274,7 +274,7 @@ describe('deterministic orchestration coordinator', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-late-event-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) {
         launches.push(request);
         return { prototypeRunId: `prototype-${request.attemptId}` };
@@ -286,9 +286,9 @@ describe('deterministic orchestration coordinator', () => {
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
 
-    let snapshot = await coordinator.start(input);
+    let snapshot = await orchestrator.start(input);
     const firstRequest = launches[0];
-    const failed = await coordinator.handleRunnerFailed({
+    const failed = await orchestrator.handleRunnerFailed({
       id: `prototype-${firstRequest.attemptId}`,
       workspaceId: input.workspaceId,
       orchestrationRunId: snapshot.run.id,
@@ -300,7 +300,7 @@ describe('deterministic orchestration coordinator', () => {
     expect(failed?.run.status).toBe('blocked');
     expect(failed?.attempts[0].status).toBe('failed');
 
-    snapshot = await coordinator.retryTask({
+    snapshot = await orchestrator.retryTask({
       workspaceId: input.workspaceId,
       runId: snapshot.run.id,
       taskId: firstRequest.taskId,
@@ -312,7 +312,7 @@ describe('deterministic orchestration coordinator', () => {
     expect(launches[1].ownerAgentId).toBe('backend-agent');
 
     const eventCount = runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id).length);
-    const late = await coordinator.handleRunnerCompleted({
+    const late = await orchestrator.handleRunnerCompleted({
       id: `prototype-${firstRequest.attemptId}`,
       workspaceId: input.workspaceId,
       orchestrationRunId: snapshot.run.id,
@@ -332,7 +332,7 @@ describe('deterministic orchestration coordinator', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-cancel-event-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) {
         launches.push(request);
         return { prototypeRunId: `prototype-${request.attemptId}` };
@@ -344,9 +344,9 @@ describe('deterministic orchestration coordinator', () => {
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
 
-    const started = await coordinator.start(input);
+    const started = await orchestrator.start(input);
     const active = launches[0];
-    const cancelled = await coordinator.handleRunnerCancelled({
+    const cancelled = await orchestrator.handleRunnerCancelled({
       id: `prototype-${active.attemptId}`,
       workspaceId: input.workspaceId,
       orchestrationRunId: started.run.id,
@@ -358,7 +358,7 @@ describe('deterministic orchestration coordinator', () => {
     expect(cancelled?.attempts[0].status).toBe('cancelled');
 
     const eventCount = runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(started.run.id).length);
-    await coordinator.handleRunnerCompleted({
+    await orchestrator.handleRunnerCompleted({
       id: `prototype-${active.attemptId}`,
       workspaceId: input.workspaceId,
       orchestrationRunId: started.run.id,
@@ -377,7 +377,7 @@ describe('deterministic orchestration coordinator', () => {
     const launches: OrchestrationLaunchRequest[] = [];
     let confirmStopped!: () => void;
     const stopConfirmation = new Promise<void>(resolve => { confirmStopped = resolve; });
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) {
         launches.push(request);
         return { prototypeRunId: `prototype-${request.attemptId}` };
@@ -389,10 +389,10 @@ describe('deterministic orchestration coordinator', () => {
       requestKey: 'request-stop-wait', requestFingerprint: 'fingerprint-stop-wait', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    const started = await coordinator.start(input);
+    const started = await orchestrator.start(input);
 
-    let stopped: Awaited<ReturnType<typeof coordinator.cancelRun>> | undefined;
-    const stopping = coordinator.cancelRun({ workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test' })
+    let stopped: Awaited<ReturnType<typeof orchestrator.cancelRun>> | undefined;
+    const stopping = orchestrator.cancelRun({ workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test' })
       .then(snapshot => { stopped = snapshot; });
     await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -409,7 +409,7 @@ describe('deterministic orchestration coordinator', () => {
   it('keeps a failed stop request in cancelling state and does not release the repository', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-stop-unconfirmed-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) { return { prototypeRunId: `prototype-${request.attemptId}` }; },
       async cancel() { throw new Error('Process exit could not be confirmed.'); }
     });
@@ -418,9 +418,9 @@ describe('deterministic orchestration coordinator', () => {
       requestKey: 'request-stop-unconfirmed', requestFingerprint: 'fingerprint-stop-unconfirmed', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    const started = await coordinator.start(input);
+    const started = await orchestrator.start(input);
 
-    await expect(coordinator.cancelRun({ workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test' }))
+    await expect(orchestrator.cancelRun({ workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test' }))
       .rejects.toThrow('Process exit could not be confirmed.');
 
     expect(runWithWorkspace(input.workspaceId, () => store!.getOrchestrationSnapshot(started.run.id)?.run.status)).toBe('cancelling');
@@ -428,7 +428,7 @@ describe('deterministic orchestration coordinator', () => {
 
     const activeTask = started.tasks.find(task => task.id === started.run.currentTaskId)!;
     const activeAttempt = started.attempts.find(attempt => attempt.taskId === activeTask.id)!;
-    await coordinator.handleRunnerCompleted({
+    await orchestrator.handleRunnerCompleted({
       id: activeAttempt.prototypeRunId,
       workspaceId: input.workspaceId,
       orchestrationRunId: started.run.id,
@@ -446,7 +446,7 @@ describe('deterministic orchestration coordinator', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-recovery-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
-    const coordinator = new OrchestrationService(store, {
+    const orchestrator = new OrchestrationService(store, {
       async launch(request) {
         launches.push(request);
         return { prototypeRunId: `prototype-${request.attemptId}` };
@@ -457,7 +457,7 @@ describe('deterministic orchestration coordinator', () => {
       requestKey: 'request-recovery', requestFingerprint: 'fingerprint-recovery', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    const started = await coordinator.start(input);
+    const started = await orchestrator.start(input);
     runWithWorkspace(input.workspaceId, () => store!.markOrchestrationRecoveryRequired({
       runId: started.run.id,
       actorId: 'orchestrator',
@@ -470,13 +470,13 @@ describe('deterministic orchestration coordinator', () => {
     expect(preserved.tasks[0].status).toBe('blocked');
     expect(launches).toHaveLength(1);
 
-    await expect(coordinator.retryTask({
+    await expect(orchestrator.retryTask({
       workspaceId: input.workspaceId, runId: started.run.id, taskId: preserved.tasks[0].id,
       expectedTaskRevision: preserved.tasks[0].revision, actorId: 'user-test'
     })).rejects.toThrow(/use Resume/);
     expect(launches).toHaveLength(1);
 
-    const resumed = await coordinator.resume({
+    const resumed = await orchestrator.resume({
       workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test'
     });
 
