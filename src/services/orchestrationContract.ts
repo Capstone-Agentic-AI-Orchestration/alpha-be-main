@@ -12,6 +12,7 @@ export const MAX_PLAN_TASKS = 64;
 export const MAX_TASK_DEPENDENCIES = 8;
 export const MAX_TASK_REQUIREMENTS = 12;
 export const MAX_TASK_ACCEPTANCE_CRITERIA = 12;
+export const MAX_PROJECT_CONTEXT_CHARS = 8_000;
 
 export const orchestrationTaskKindSchema = z.enum([
   'requirements',
@@ -40,6 +41,8 @@ const scopePattern = z.string().trim().min(1).max(240).refine(value =>
 export const orchestrationPlanSchema = z.object({
   schemaVersion: z.literal(ORCHESTRATION_PLAN_SCHEMA_VERSION),
   goal: z.string().trim().min(1).max(4_000),
+  /** Snapshot of saved project rules carried to each specialist. Set by Alpha, not trusted from model output. */
+  projectContext: z.string().max(MAX_PROJECT_CONTEXT_CHARS).optional(),
   exclusions: z.array(shortText).max(20).default([]),
   requirements: z.array(z.object({
     id: identifier,

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const selectedRepo = 'acme/shop-fe';
 const repositoryList = [selectedRepo, 'acme/shop-be'];
-const project = { id: 'project-1', name: 'Calculator', leadName: 'Orchestrator', resources: [] };
+const project = { id: 'project-1', name: 'Calculator', description: 'Keep the interface accessible.', leadName: 'Orchestrator', resources: [] };
 const agents = [
   { id: 'agent-1', name: 'Planner', role: 'Research Agent', modelProvider: 'OpenAI', modelName: 'test-model', isArchived: false },
   { id: 'agent-2', name: 'Frontend Builder', role: 'Frontend Agent', modelProvider: 'OpenAI', modelName: 'test-model', isArchived: false },
@@ -30,8 +30,16 @@ let removeWorktree: ReturnType<typeof vi.fn>;
 let recordPlanningRecovery: ReturnType<typeof vi.fn>;
 let previousOrchestrationFlag: string | undefined;
 
-async function load(runtimeOrchestrationAvailable = true, staleReservation?: any) {
+async function load(
+  runtimeOrchestrationAvailable = true,
+  staleReservation?: any,
+  runtimeCatalog: any[] = [],
+  plannerModel?: string,
+  agentRoster: any[] = agents,
+  projectDescription = project.description
+) {
   checkoutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-project-build-'));
+  const selectedProject = { ...project, description: projectDescription };
   if (typeof staleReservation === 'function') staleReservation = staleReservation(checkoutDir);
   previousOrchestrationFlag = process.env.ALPHA_ORCHESTRATION_ENABLED;
   if (runtimeOrchestrationAvailable) process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
@@ -140,7 +148,7 @@ async function load(runtimeOrchestrationAvailable = true, staleReservation?: any
   vi.resetModules();
   vi.doMock('../store/stores.js', () => ({
     projectStore: () => ({
-      get: vi.fn(async () => project),
+      get: vi.fn(async () => selectedProject),
       getBuildSteps: vi.fn(async () => steps)
     }),
     issueStore: () => ({
@@ -182,7 +190,7 @@ async function load(runtimeOrchestrationAvailable = true, staleReservation?: any
   vi.doMock('../services/agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready', detail: 'Ready' }) }));
   vi.doMock('./personaService.js', () => ({
     resolveAgent: (agent: any) => ({
-      id: agent.id, name: agent.name, role: agent.role, modelProvider: 'OpenAI', modelName: 'test-model',
+      id: agent.id, name: agent.name, role: agent.role, modelProvider: 'OpenAI', modelName: plannerModel ?? agent.modelName ?? '',
       reasoningEffort: 'medium', systemPrompt: `You are the ${agent.role}.`
     })
   }));
@@ -194,8 +202,8 @@ async function load(runtimeOrchestrationAvailable = true, staleReservation?: any
   vi.doMock('../services/githubIssueMapping.js', () => ({ reposForProject: () => repositoryList }));
   vi.doMock('./sqliteService.js', () => ({
     sqliteService: {
-      getAgents: () => agents,
-      getRuntimes: () => [],
+      getAgents: () => agentRoster,
+      getRuntimes: () => runtimeCatalog,
       getSquadRuns: () => squadRuns,
       getRunsForSquadRun: () => [],
       getIssues: () => issueRows,
@@ -334,6 +342,7 @@ describe('project builds triggered from chat', () => {
     }));
     expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
       goal: 'Build a full stack calculator.',
+      projectContext: 'Keep the interface accessible.',
       planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
       eligibleAgents: [
         { id: 'agent-1', role: 'Research Agent', ready: true },
@@ -343,6 +352,72 @@ describe('project builds triggered from chat', () => {
     }));
     expect(startOrchestration).toHaveBeenCalledTimes(1);
     expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('uses a live runtime model when the planning agent intentionally has no pinned model', async () => {
+    const service = await load(true, undefined, [{ id: 'codex', provider: 'OpenAI', status: 'online', models: ['gpt-default'] }], '');
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.',
+      requestedRepository: selectedRepo
+    });
+
+    expect(result.status).toBe('plan_ready');
+    expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
+      planner: expect.objectContaining({ modelName: 'gpt-default' }),
+      projectContext: 'Keep the interface accessible.'
+    }));
+  });
+
+  it('falls back to another planning-capable project agent when the Orchestrator has no usable model', async () => {
+    const roster = [
+      { ...agents[0], role: 'Orchestrator Agent', modelName: '' },
+      agents[1],
+      { ...agents[2], role: 'Architecture Agent', modelName: 'architecture-model' }
+    ];
+    const service = await load(true, undefined, [], undefined, roster);
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.', requestedRepository: selectedRepo
+    });
+
+    expect(result.status).toBe('plan_ready');
+    expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
+      planner: expect.objectContaining({ id: 'agent-3', role: 'Architecture Agent', modelName: 'architecture-model' })
+    }));
+  });
+
+  it('explains missing planner models before creating a task or reserving a workspace', async () => {
+    const roster = agents.map(agent => ({ ...agent, modelName: '' }));
+    const service = await load(true, undefined, [], undefined, roster);
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.', requestedRepository: selectedRepo
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: expect.stringContaining('No model is available') });
+    expect(reservePlanning).not.toHaveBeenCalled();
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(plannerCreatePlan).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversized ground rules before making a plan or reserving a workspace', async () => {
+    const service = await load(true, undefined, [], undefined, agents, 'x'.repeat(8_001));
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.', requestedRepository: selectedRepo
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: expect.stringContaining('8,000 characters') });
+    expect(reservePlanning).not.toHaveBeenCalled();
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(plannerCreatePlan).not.toHaveBeenCalled();
   });
 
   it('reconciles a clean planning reservation from a stopped daemon before starting a new build', async () => {

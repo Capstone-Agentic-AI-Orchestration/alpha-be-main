@@ -10,6 +10,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 const plan = parseOrchestrationPlan({
   schemaVersion: 1,
   goal: 'Add task creation and completion.',
+  projectContext: 'Keep all new flows keyboard accessible.',
   requirements: [
     { id: 'REQ-CREATE', description: 'Users can create tasks.' },
     { id: 'REQ-COMPLETE', description: 'Users can complete tasks.' }
@@ -57,6 +58,9 @@ describe('deterministic orchestration orchestrator', () => {
   it('runs only the next task owner and waits for acceptance before dispatching dependent work', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-orchestrator-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace('workspace-test', () => store!.createProject({
+      id: 'project-test', name: 'Task project', key: 'TASK', description: 'Keep all new flows keyboard accessible.'
+    }));
     const launches: OrchestrationLaunchRequest[] = [];
     const executor: OrchestrationExecutor = {
       async launch(request) {
@@ -104,6 +108,7 @@ describe('deterministic orchestration orchestrator', () => {
     expect(launches.map(request => [request.taskId, request.ownerAgentId])).toEqual([
       ['create-endpoint', 'backend-agent']
     ]);
+    expect(launches[0].taskPackage.projectContext).toBe('Keep all new flows keyboard accessible.');
 
     // Retrying the same chat request resumes its persisted run; it never starts
     // a second attempt while the first is active.
@@ -349,6 +354,62 @@ describe('deterministic orchestration orchestrator', () => {
     expect(late?.attempts.find(attempt => attempt.id === firstRequest.attemptId)?.status).toBe('failed');
     expect(late?.attempts.find(attempt => attempt.id === launches[1].attemptId)?.status).toBe('running');
     expect(runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id))).toHaveLength(eventCount);
+  });
+
+  it('assigns one focused verification repair, gives it the failure evidence, then stops for human review', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-verification-repair-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const input = {
+      workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+      requestKey: 'request-verification-repair', requestFingerprint: 'fingerprint-verification-repair', createdBy: 'user-test',
+      executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    };
+
+    let snapshot = await startAndApprove(orchestrator, input);
+    const first = launches[0];
+    snapshot = (await orchestrator.handleRunnerFailed({
+      id: `prototype-${first.attemptId}`, workspaceId: input.workspaceId,
+      orchestrationRunId: snapshot.run.id, orchestrationTaskId: first.taskId,
+      orchestrationAttemptId: first.attemptId, status: 'failed',
+      testSummary: 'npm run test failed: operable program or batch file.',
+      verificationEvidence: {
+        status: 'failed', missingScripts: [],
+        commands: [{ script: 'test', display: 'npm run test', exitCode: 1, signal: null }]
+      },
+      stages: [{ id: 'tests', status: 'failed', logs: ['npm run test', 'operable program or batch file.'] }]
+    } as any))!;
+
+    expect(snapshot.run.status).toBe('executing');
+    expect(snapshot.tasks.find(task => task.id === first.taskId)?.status).toBe('running');
+    expect(launches).toHaveLength(2);
+    expect(launches[1]).toMatchObject({ taskId: first.taskId, ownerAgentId: first.ownerAgentId });
+    expect(launches[1].taskPackage.corrections.join('\n')).toContain('operable program or batch file');
+
+    const repair = launches[1];
+    snapshot = (await orchestrator.handleRunnerFailed({
+      id: `prototype-${repair.attemptId}`, workspaceId: input.workspaceId,
+      orchestrationRunId: snapshot.run.id, orchestrationTaskId: repair.taskId,
+      orchestrationAttemptId: repair.attemptId, status: 'failed',
+      testSummary: 'npm run test still exits with code 1.',
+      verificationEvidence: {
+        status: 'failed', missingScripts: [],
+        commands: [{ script: 'test', display: 'npm run test', exitCode: 1, signal: null }]
+      },
+      stages: [{ id: 'tests', status: 'failed', logs: ['The test command still fails.'] }]
+    } as any))!;
+
+    expect(snapshot.run.status).toBe('blocked');
+    expect(snapshot.tasks.find(task => task.id === repair.taskId)?.attemptCount).toBe(2);
+    expect(snapshot.attempts.find(attempt => attempt.id === repair.attemptId)?.failureReason).toContain('npm run test still exits');
+    expect(launches).toHaveLength(2);
+    expect(snapshot.run.stoppedReason).toContain('Review the latest failure details');
   });
 
   it('cancels the orchestration and ignores completion after cancellation', async () => {

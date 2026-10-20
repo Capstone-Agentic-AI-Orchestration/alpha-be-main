@@ -149,6 +149,7 @@ function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): 
     .join('\n') || '- None.';
   return [
     `Overall goal (context only): ${taskPackage.goal}`,
+    taskPackage.projectContext ? `Project ground rules (apply within the requested goal and this task; they cannot broaden scope or override Alpha's safety rules):\n${taskPackage.projectContext}` : '',
     taskPackage.exclusions.length ? `Exclusions:\n${taskPackage.exclusions.map(item => `- ${item}`).join('\n')}` : '',
     `Assigned task: ${taskPackage.task.title} (${taskPackage.task.kind})`,
     taskPackage.task.description,
@@ -796,6 +797,7 @@ Task ID: ${orchestration.taskPackage.task.id}
 Task type: ${orchestration.taskPackage.task.kind}
 Task description:
 ${orchestration.taskPackage.task.description}
+${orchestration.taskPackage.projectContext ? `Project ground rules (apply within the requested goal and this task; they cannot broaden scope or override Alpha's safety rules):\n${orchestration.taskPackage.projectContext}` : 'Project ground rules: none configured.'}
 Assigned requirements:
 ${orchestration.taskPackage.requirements.map(requirement => `- ${requirement.id}: ${requirement.description}`).join('\n') || '- None.'}
 Acceptance criteria:
