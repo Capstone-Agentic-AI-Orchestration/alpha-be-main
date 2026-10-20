@@ -3,6 +3,7 @@ import type { Agent, PrototypeRun } from '../models/index.js';
 import {
   orchestrationAgentReportSchema,
   MAX_INITIAL_PLAN_TASKS,
+  ensureTaskAssignmentReasons,
   parseOrchestrationPlan,
   validateOrchestrationPlan,
   type OrchestrationTaskKind
@@ -14,6 +15,7 @@ import type { OrchestrationReviewAmendment } from './orchestrationReviewWorkflow
 import { getGitChangedPaths, getGitDiffPatch } from '../utils/gitUtils.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
+import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 
 const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
 
@@ -50,6 +52,7 @@ export interface OrchestrationTaskPackage {
     id: string;
     title: string;
     kind: OrchestrationTaskKind;
+    repository: string;
     description: string;
     acceptanceCriteria: string[];
     requiredChecks: Array<'verify' | 'check' | 'validate' | 'ci' | 'test' | 'typecheck' | 'lint'>;
@@ -65,6 +68,7 @@ export interface OrchestrationTaskPackage {
   reviewInputs: Array<{
     taskId: string;
     title: string;
+    repository: string;
     ownerAgentId: string;
     startingCommit: string;
     resultCommit: string;
@@ -127,6 +131,7 @@ export interface StartOrchestrationInput {
   baseRef?: string;
   baseCommit?: string;
   worktreePath?: string;
+  repositoryWorkspaces?: OrchestrationSnapshot['run']['repositoryWorkspaces'];
   eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[];
   plan: unknown;
   planSource?: 'template' | 'model' | 'manual';
@@ -160,9 +165,8 @@ function parseAgentReport(text: string): { report?: Record<string, unknown>; err
 }
 
 /**
- * Deterministic, single-active-task orchestrator. Planning is already complete
- * when this service is called; it validates the plan, persists it, selects one
- * owner at a time, and only dispatches the next task after acceptance.
+ * Deterministic, single-active-task orchestrator. It validates and saves a plan
+ * first; a human starts the planned work before any specialist is dispatched.
  */
 export class OrchestrationService {
   private readonly transitionQueues = new Map<string, Promise<unknown>>();
@@ -211,7 +215,8 @@ export class OrchestrationService {
             approvedAt: input.now ?? new Date().toISOString(),
             resultCommit: publicationTarget.resultCommit,
             branchName: snapshot.run.branchName,
-            publicationBaseBranch: publicationTarget.publicationBaseBranch
+            publicationBaseBranch: publicationTarget.publicationBaseBranch,
+            publicationTargets: publicationTarget.publicationTargets
           }
         });
       }
@@ -226,7 +231,9 @@ export class OrchestrationService {
         (event.payload.evidence as Record<string, unknown>).decision === 'approved');
       if (!approval) throw new Error('The durable human approval event is missing. Reopen the final review before retrying publication.');
 
-      const publication = await this.publication.publish(snapshot);
+      const publications = await this.publication.publishAll(snapshot);
+      const publication = publications.find(item => item.repository?.toLowerCase() === snapshot.run.repository.toLowerCase()) ?? publications[0];
+      if (!publication) throw new Error('No codebase pull request was published.');
       const completed = this.store.transitionOrchestrationRun({
         runId: input.runId,
         expectedRevision: snapshot.run.revision,
@@ -235,7 +242,8 @@ export class OrchestrationService {
         now: input.now,
         evidence: {
           ...approval.payload.evidence as Record<string, unknown>,
-          publication
+          publication,
+          publications
         }
       });
       await this.publication.synchronizePublishedIssue(completed);
@@ -245,8 +253,12 @@ export class OrchestrationService {
 
   async start(input: StartOrchestrationInput): Promise<OrchestrationSnapshot> {
     return runWithWorkspace(input.workspaceId, async () => {
-      const plan = parseOrchestrationPlan(input.plan);
-      const issues = validateOrchestrationPlan(plan, input.eligibleAgents, { maxTaskCount: MAX_INITIAL_PLAN_TASKS, initialPlan: true });
+      const plan = ensureTaskAssignmentReasons(parseOrchestrationPlan(input.plan), input.eligibleAgents);
+      const issues = validateOrchestrationPlan(plan, input.eligibleAgents, {
+        maxTaskCount: MAX_INITIAL_PLAN_TASKS,
+        initialPlan: true,
+        repositories: input.repositoryWorkspaces?.map(item => item.repository)
+      });
       if (issues.length) throw new OrchestrationPlanError(issues);
 
       const existing = this.store.getOrchestrationByRequestKey(input.requestKey);
@@ -281,18 +293,60 @@ export class OrchestrationService {
         baseRef: input.baseRef,
         baseCommit: input.baseCommit,
         worktreePath: input.worktreePath,
+        repositoryWorkspaces: input.repositoryWorkspaces,
         createdAt: now,
         updatedAt: now
       }, initialTaskRecords(plan), input.planSource ?? 'template', input.planningOwnerSessionId);
-      const executing = this.store.transitionOrchestrationRun({
+      return this.store.transitionOrchestrationRun({
         runId: run.run.id,
         expectedRevision: run.run.revision,
-        nextStatus: 'executing',
+        nextStatus: 'awaiting_plan_approval',
         actorId: input.createdBy,
-        now
+        now,
+        evidence: { decision: 'plan_ready_for_review', taskCount: plan.tasks.length, planVersion: run.run.planVersion }
       });
-      return this.serialize(input.workspaceId, run.run.id, () => this.dispatchNextUnlocked(executing, input.createdBy, input.startingCommit));
     });
+  }
+
+  /** Recheck the saved assignments and start only after an authorized user reviews the plan. */
+  async startPlannedWork(input: {
+    workspaceId: string;
+    runId: string;
+    expectedRevision: number;
+    actorId: string;
+    now?: string;
+  }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (snapshot.run.status === 'executing') {
+        return snapshot.run.currentTaskId ? snapshot : this.dispatchNextUnlocked(snapshot, input.actorId, undefined, input.now);
+      }
+      if (snapshot.run.status !== 'awaiting_plan_approval') {
+        throw new Error('This build plan is no longer waiting to start. Refresh the Live Build Room to see its current state.');
+      }
+      if (!Number.isSafeInteger(input.expectedRevision) || snapshot.run.revision !== input.expectedRevision) {
+        throw new Error('The build plan changed after you opened it. Refresh the Live Build Room before starting work.');
+      }
+      const eligibleAgents = this.store.getAgents().filter(agent => !agent.isArchived);
+      if (eligibleAgents.length) {
+        const issues = validateOrchestrationPlan(snapshot.run.plan, eligibleAgents, {
+          maxTaskCount: MAX_INITIAL_PLAN_TASKS,
+          initialPlan: true,
+          repositories: snapshot.run.repositoryWorkspaces?.map(item => item.repository)
+        });
+        if (issues.length) throw new OrchestrationPlanError(issues);
+      }
+      const executing = this.store.transitionOrchestrationRun({
+        runId: input.runId,
+        expectedRevision: snapshot.run.revision,
+        nextStatus: 'executing',
+        actorId: input.actorId,
+        now: input.now,
+        evidence: { decision: 'plan_approved', approvedBy: input.actorId, approvedAt: input.now ?? new Date().toISOString() }
+      });
+      return this.dispatchNextUnlocked(executing, input.actorId, undefined, input.now);
+    }));
   }
 
   async submitResult(input: {
@@ -668,18 +722,21 @@ export class OrchestrationService {
     let baseRequest: OrchestrationLaunchRequest;
     let prepared: PreparedOrchestrationTask = {};
     try {
+      const taskRepository = next.repository ?? snapshot.run.repository;
+      const taskWorkspace = repositoryWorkspaceForTask(snapshot, next.id) ?? legacySingleRepositoryWorkspace(snapshot.run, taskRepository);
+      if (!taskWorkspace) throw new Error(`The repository assigned to task ${next.id} is not part of this build.`);
       const taskPackage = await this.createTaskPackage(snapshot, next.id);
       baseRequest = {
         runId: snapshot.run.id,
         workspaceId: snapshot.run.workspaceId,
         projectId: snapshot.run.projectId,
         issueId: snapshot.run.issueId,
-        repository: snapshot.run.repository,
+        repository: taskWorkspace.repository,
         planVersion: snapshot.run.planVersion,
-        branchName: snapshot.run.branchName,
-        workingDir: snapshot.run.worktreePath,
-        baseRef: snapshot.run.baseRef,
-        baseCommit: snapshot.run.baseCommit,
+        branchName: taskWorkspace.branchName,
+        workingDir: taskWorkspace.worktreePath,
+        baseRef: taskWorkspace.baseRef,
+        baseCommit: taskWorkspace.baseCommit,
         taskId: next.id,
         taskTitle: next.title,
         taskDescription: next.description,
@@ -721,6 +778,7 @@ export class OrchestrationService {
     if (prepared.branchName && prepared.workingDir && prepared.baseRef && prepared.startingCommit) {
       this.store.bindOrchestrationWorkspace({
         runId: snapshot.run.id,
+        repository: baseRequest.repository,
         branchName: prepared.branchName,
         baseRef: prepared.baseRef,
         baseCommit: prepared.startingCommit,
@@ -874,6 +932,7 @@ export class OrchestrationService {
         id: task.id,
         title: task.title,
         kind: task.kind,
+        repository: task.repository ?? snapshot.run.repository,
         description: task.description,
         acceptanceCriteria: task.acceptanceCriteria,
         requiredChecks: task.requiredChecks,
@@ -928,13 +987,14 @@ export class OrchestrationService {
       }
     }
 
-    const worktree = snapshot.run.worktreePath;
     if (!codeTasks.size) return [];
-    if (!worktree) throw new Error('The independent reviewer has no authorized orchestration worktree. Preserve the build and use human review.');
 
     const results: OrchestrationTaskPackage['reviewInputs'] = [];
     let totalBytes = 0;
     for (const codeTask of codeTasks.values()) {
+      const repositoryWorkspace = repositoryWorkspaceForTask(snapshot, codeTask.id);
+      if (!repositoryWorkspace) throw new Error(`The accepted code task ${codeTask.id} has no authorized repository workspace. Preserve the build and use human review.`);
+      const worktree = repositoryWorkspace.worktreePath;
       const attempt = [...snapshot.attempts].reverse().find(item => item.taskId === codeTask.id && item.status === 'accepted');
       if (!attempt?.startingCommit || !attempt.resultCommit) {
         throw new Error(`Accepted task ${codeTask.id} is missing its immutable diff commits. Preserve the build and use human review.`);
@@ -961,6 +1021,7 @@ export class OrchestrationService {
       results.push({
         taskId: codeTask.id,
         title: codeTask.title,
+        repository: repositoryWorkspace.repository,
         ownerAgentId: codeTask.ownerAgentId,
         startingCommit: attempt.startingCommit,
         resultCommit: attempt.resultCommit,
@@ -986,13 +1047,35 @@ export class OrchestrationService {
   }
 }
 
+/** Preserve direct one-repository service integrations while product builds use saved per-repository workspaces. */
+function legacySingleRepositoryWorkspace(
+  run: OrchestrationSnapshot['run'],
+  repository: string
+): { repository: string; branchName: string; baseRef: string; baseCommit: string; worktreePath: string } | undefined {
+  const canonical = (value: string) => value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase();
+  if (run.repositoryWorkspaces?.length || canonical(repository) !== canonical(run.repository)) return undefined;
+  const suffix = run.id.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase();
+  if (!suffix) return undefined;
+  return {
+    repository: run.repository,
+    branchName: run.branchName ?? `alpha/orchestration/${suffix}`,
+    baseRef: run.baseRef ?? 'HEAD',
+    baseCommit: run.baseCommit ?? '',
+    worktreePath: run.worktreePath ?? ''
+  };
+}
+
 export function orchestrationRequestFingerprint(input: {
   workspaceId: string;
   projectId: string;
   issueId: string;
   repository: string;
+  repositories?: readonly string[];
   createdBy: string;
   originalRequest: string;
 }): string {
-  return createHash('sha256').update(JSON.stringify(input)).digest('hex');
+  const repositories = [...new Set((input.repositories ?? [input.repository]).map(value =>
+    value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase()
+  ))].sort();
+  return createHash('sha256').update(JSON.stringify({ ...input, repositories })).digest('hex');
 }

@@ -51,7 +51,11 @@ export const orchestrationPlanSchema = z.object({
     title: shortText,
     description: detailText,
     kind: orchestrationTaskKindSchema,
+    /** Selected project repository this task changes. Omitted only for older single-repository plans. */
+    repository: z.string().trim().min(1).max(200).optional(),
     ownerAgentId: identifier,
+    /** Short, user-visible role-fit explanation; never private model reasoning. */
+    assignmentReason: z.string().trim().min(1).max(500).optional(),
     dependsOn: z.array(identifier).max(MAX_TASK_DEPENDENCIES).default([]),
     requirementIds: z.array(identifier).min(1).max(MAX_TASK_REQUIREMENTS),
     acceptanceCriteria: z.array(detailText).min(1).max(MAX_TASK_ACCEPTANCE_CRITERIA),
@@ -117,7 +121,8 @@ export type OrchestrationAgentReport = z.infer<typeof orchestrationAgentReportSc
 export interface PlanValidationIssue {
   code: 'duplicate_id' | 'duplicate_requirement_id' | 'no_required_tasks' | 'unknown_owner' | 'role_mismatch' | 'unknown_dependency'
     | 'self_dependency' | 'dependency_cycle' | 'unknown_requirement' | 'uncovered_requirement' | 'too_many_tasks'
-    | 'missing_independent_review' | 'review_not_independent' | 'review_dependency_missing' | 'validation_after_review_missing';
+    | 'missing_independent_review' | 'review_not_independent' | 'review_dependency_missing' | 'validation_after_review_missing'
+    | 'unknown_repository' | 'unassigned_repository';
   taskId?: string;
   detail: string;
 }
@@ -145,7 +150,7 @@ export function roleCanOwnOrchestrationTask(kind: OrchestrationTaskKind, role: s
 export function validateOrchestrationPlan(
   plan: OrchestrationPlan,
   eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[],
-  options: { maxTaskCount?: number; initialPlan?: boolean } = {}
+  options: { maxTaskCount?: number; initialPlan?: boolean; repositories?: readonly string[] } = {}
 ): PlanValidationIssue[] {
   const issues: PlanValidationIssue[] = [];
   const maxTaskCount = options.maxTaskCount ?? MAX_PLAN_TASKS;
@@ -173,13 +178,24 @@ export function validateOrchestrationPlan(
   }
 
   const agents = new Map(eligibleAgents.map(agent => [agent.id, agent]));
+  const repositories = options.repositories ? new Set(options.repositories.map(value => value.toLowerCase())) : undefined;
+  const assignedRepositories = new Set<string>();
   const requirementIds = new Set(plan.requirements.map(requirement => requirement.id));
   const covered = new Set<string>();
 
   for (const task of plan.tasks) {
+    if (task.repository) {
+      if (repositories && !repositories.has(task.repository.toLowerCase())) {
+        issues.push({ code: 'unknown_repository', taskId: task.id, detail: `Task ${task.id} names a repository that was not selected for this build.` });
+      } else {
+        assignedRepositories.add(task.repository.toLowerCase());
+      }
+    } else if (repositories?.size && repositories.size > 1) {
+      issues.push({ code: 'unknown_repository', taskId: task.id, detail: `Task ${task.id} must name the selected repository it belongs to.` });
+    }
     const owner = agents.get(task.ownerAgentId);
     if (!owner) {
-      issues.push({ code: 'unknown_owner', taskId: task.id, detail: `Task owner "${task.ownerAgentId}" is not an eligible project squad member.` });
+      issues.push({ code: 'unknown_owner', taskId: task.id, detail: `Task owner "${task.ownerAgentId}" is not an eligible project specialist.` });
     } else if (!roleCanOwnOrchestrationTask(task.kind, owner.role)) {
       issues.push({ code: 'role_mismatch', taskId: task.id, detail: `${owner.role} is not an approved owner role for ${task.kind} tasks.` });
     }
@@ -198,6 +214,12 @@ export function validateOrchestrationPlan(
       } else if (!tasks.has(dependencyId)) {
         issues.push({ code: 'unknown_dependency', taskId: task.id, detail: `Task depends on unknown task "${dependencyId}".` });
       }
+    }
+  }
+
+  for (const repository of repositories ?? []) {
+    if (!assignedRepositories.has(repository)) {
+      issues.push({ code: 'unassigned_repository', detail: `No task is assigned to selected repository ${repository}.` });
     }
   }
 
@@ -288,6 +310,21 @@ export function validateOrchestrationPlan(
   }
 
   return issues;
+}
+
+export function ensureTaskAssignmentReasons(
+  plan: OrchestrationPlan,
+  eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[]
+): OrchestrationPlan {
+  const agents = new Map(eligibleAgents.map(agent => [agent.id, agent]));
+  return {
+    ...plan,
+    tasks: plan.tasks.map(task => ({
+      ...task,
+      assignmentReason: task.assignmentReason?.trim() ||
+        `This task needs ${agents.get(task.ownerAgentId)?.role ?? 'specialist'} expertise for ${task.kind} work.`
+    }))
+  };
 }
 
 export function parseOrchestrationPlan(input: unknown): OrchestrationPlan {

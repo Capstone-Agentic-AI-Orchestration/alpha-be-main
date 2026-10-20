@@ -304,15 +304,24 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
   const { createdBy: _claimed, ...input } = req.body ?? {};
   const workspaceId = req.workspace!.workspaceId;
   if (!String(input.name ?? '').trim()) return res.status(400).json({ error: 'Project name is required.' });
-  if (!!input.leadAgentId === !!input.leadSquadId) return res.status(400).json({ error: 'Choose one agent or squad to own execution for this project.' });
-  const ownerId = input.leadAgentId || input.leadSquadId;
-  if (typeof ownerId !== 'string') return res.status(400).json({ error: 'Choose a valid execution owner.' });
-  const owner = input.leadAgentId ? await agentStore().get(workspaceId, ownerId) : await squadStore().get(workspaceId, ownerId);
-  if (!owner || ('isArchived' in owner && owner.isArchived)) return res.status(400).json({ error: 'The execution owner is no longer available in this workspace.' });
+  if ((input.leadAgentId != null && typeof input.leadAgentId !== 'string') || (input.leadSquadId != null && typeof input.leadSquadId !== 'string')) {
+    return res.status(400).json({ error: 'Choose a valid project owner.' });
+  }
+  const leadAgentId = typeof input.leadAgentId === 'string' ? input.leadAgentId.trim() : '';
+  const leadSquadId = typeof input.leadSquadId === 'string' ? input.leadSquadId.trim() : '';
+  if (leadAgentId && leadSquadId) return res.status(400).json({ error: 'Choose one project owner.' });
+  const ownerId = leadAgentId || leadSquadId;
+  if (ownerId && typeof ownerId !== 'string') return res.status(400).json({ error: 'Choose a valid project owner.' });
+  const owner = ownerId
+    ? leadAgentId ? await agentStore().get(workspaceId, ownerId) : await squadStore().get(workspaceId, ownerId)
+    : undefined;
+  if (ownerId && (!owner || ('isArchived' in owner && owner.isArchived))) return res.status(400).json({ error: 'The project owner is no longer available in this workspace.' });
   const project = await projectStore().create(workspaceId, {
     ...input,
     leadType: 'agent',
-    leadName: owner.name,
+    leadName: owner?.name ?? 'Orchestrator',
+    leadAgentId: leadAgentId || undefined,
+    leadSquadId: leadSquadId || undefined,
     status: 'planned',
     createdBy: req.workspace!.userId
   });
@@ -458,14 +467,20 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
   // Who created it is not something an edit can change.
   const { createdBy: _owner, leadName: _leadName, leadType: _leadType, ...changes } = req.body ?? {};
   if (Object.prototype.hasOwnProperty.call(changes, 'leadAgentId') || Object.prototype.hasOwnProperty.call(changes, 'leadSquadId')) {
-    if (!!changes.leadAgentId === !!changes.leadSquadId) return res.status(400).json({ error: 'Choose one agent or squad to own execution for this project.' });
-    const ownerId = changes.leadAgentId || changes.leadSquadId;
-    if (typeof ownerId !== 'string') return res.status(400).json({ error: 'Choose a valid execution owner.' });
-    const owner = changes.leadAgentId ? await agentStore().get(req.workspace!.workspaceId, ownerId) : await squadStore().get(req.workspace!.workspaceId, ownerId);
-    if (!owner || ('isArchived' in owner && owner.isArchived)) return res.status(400).json({ error: 'The execution owner is no longer available in this workspace.' });
-    changes.leadAgentId = changes.leadAgentId || '';
-    changes.leadSquadId = changes.leadSquadId || '';
-    changes.leadName = owner.name;
+    if ((changes.leadAgentId != null && typeof changes.leadAgentId !== 'string') || (changes.leadSquadId != null && typeof changes.leadSquadId !== 'string')) {
+      return res.status(400).json({ error: 'Choose a valid project owner.' });
+    }
+    const leadAgentId = typeof changes.leadAgentId === 'string' ? changes.leadAgentId.trim() : '';
+    const leadSquadId = typeof changes.leadSquadId === 'string' ? changes.leadSquadId.trim() : '';
+    if (leadAgentId && leadSquadId) return res.status(400).json({ error: 'Choose one project owner.' });
+    const ownerId = leadAgentId || leadSquadId;
+    const owner = ownerId
+      ? leadAgentId ? await agentStore().get(req.workspace!.workspaceId, ownerId) : await squadStore().get(req.workspace!.workspaceId, ownerId)
+      : undefined;
+    if (ownerId && (!owner || ('isArchived' in owner && owner.isArchived))) return res.status(400).json({ error: 'The project owner is no longer available in this workspace.' });
+    changes.leadAgentId = leadAgentId;
+    changes.leadSquadId = leadSquadId;
+    changes.leadName = owner?.name ?? 'Orchestrator';
     changes.leadType = 'agent';
   }
   const updated = await projectStore().update(req.workspace!.workspaceId, req.params.id, changes);
@@ -494,9 +509,9 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
 }));
 
 /**
- * Local, per-project opt-in for orchestrated task builds. The project
- * preference is machine-local; the desktop operator switch remains the kill
- * switch, and neither setting grants repository or agent permissions.
+ * Local capability endpoint for desktop project builds. Orchestration is
+ * always enabled on desktop; neither this endpoint nor its compatibility
+ * write route grants repository or agent permissions.
  */
 dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
@@ -508,21 +523,22 @@ dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request
       reason: 'Task orchestration runs on an authorized Alpha desktop with the repository checkout.' });
   }
   const setting = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id));
-  res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
-    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The orchestrator is disabled on this desktop.' });
+  res.json({ ...setting, enabled: true, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
+    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The Orchestrator is unavailable in this desktop version. Update the app before starting a build.' });
 }));
 
 dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.update')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
   if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  if (!req.body.enabled) return res.status(400).json({ error: 'Project orchestration is always enabled on desktop.' });
   const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
   const setting = runWithWorkspace(req.workspace!.workspaceId, () =>
     sqliteService.setProjectOrchestrationEnabled(project.id, req.body.enabled, req.workspace!.userId)
   );
   res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
-    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'Saved for this desktop; the orchestrator remains disabled here.' });
+    reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The Orchestrator is unavailable in this desktop version. Update the app before starting a build.' });
 }));
 
 // --- Project Build Room ---

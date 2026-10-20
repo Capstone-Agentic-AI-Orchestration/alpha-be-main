@@ -28,6 +28,21 @@ const plan = parseOrchestrationPlan({
   ]
 });
 
+async function startAndApprove(orchestrator: OrchestrationService, input: {
+  workspaceId: string;
+  createdBy: string;
+  requestKey: string;
+  [key: string]: unknown;
+}) {
+  const savedPlan = await orchestrator.start(input as any);
+  return orchestrator.startPlannedWork({
+    workspaceId: input.workspaceId,
+    runId: savedPlan.run.id,
+    expectedRevision: savedPlan.run.revision,
+    actorId: input.createdBy
+  });
+}
+
 describe('deterministic orchestration orchestrator', () => {
   let directory = '';
   let store: SQLiteService | undefined;
@@ -67,6 +82,13 @@ describe('deterministic orchestration orchestrator', () => {
     };
 
     let snapshot = await orchestrator.start(input);
+    expect(snapshot.run.status).toBe('awaiting_plan_approval');
+    expect(snapshot.tasks.map(task => task.status)).toEqual(['ready', 'pending']);
+    expect(launches).toHaveLength(0);
+    snapshot = await orchestrator.startPlannedWork({
+      workspaceId: input.workspaceId, runId: snapshot.run.id,
+      expectedRevision: snapshot.run.revision, actorId: input.createdBy
+    });
     const branchName = 'alpha/orchestration/test-run';
     store.addAllowedPath(directory, 'orchestration test workspace');
     snapshot = runWithWorkspace(input.workspaceId, () => store!.bindOrchestrationWorkspace({
@@ -231,7 +253,7 @@ describe('deterministic orchestration orchestrator', () => {
       ] as const, plan: optionalPlan
     };
 
-    let snapshot = await orchestrator.start(input);
+    let snapshot = await startAndApprove(orchestrator, input);
     expect(launches.map(request => request.taskId)).toEqual(['create-endpoint']);
     for (const taskId of ['create-endpoint', 'complete-endpoint']) {
       const attempt = snapshot.attempts.find(item => item.taskId === taskId)!;
@@ -265,7 +287,8 @@ describe('deterministic orchestration orchestrator', () => {
       requestKey: 'same-request', requestFingerprint: 'original-fingerprint', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    await orchestrator.start(input);
+    const savedPlan = await orchestrator.start(input);
+    expect(savedPlan.run.status).toBe('awaiting_plan_approval');
     await expect(orchestrator.start({ ...input, requestFingerprint: 'changed-fingerprint' }))
       .rejects.toThrow(/different build request/);
   });
@@ -286,7 +309,7 @@ describe('deterministic orchestration orchestrator', () => {
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
 
-    let snapshot = await orchestrator.start(input);
+    let snapshot = await startAndApprove(orchestrator, input);
     const firstRequest = launches[0];
     const failed = await orchestrator.handleRunnerFailed({
       id: `prototype-${firstRequest.attemptId}`,
@@ -344,7 +367,7 @@ describe('deterministic orchestration orchestrator', () => {
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
 
-    const started = await orchestrator.start(input);
+    const started = await startAndApprove(orchestrator, input);
     const active = launches[0];
     const cancelled = await orchestrator.handleRunnerCancelled({
       id: `prototype-${active.attemptId}`,
@@ -389,7 +412,7 @@ describe('deterministic orchestration orchestrator', () => {
       requestKey: 'request-stop-wait', requestFingerprint: 'fingerprint-stop-wait', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    const started = await orchestrator.start(input);
+    const started = await startAndApprove(orchestrator, input);
 
     let stopped: Awaited<ReturnType<typeof orchestrator.cancelRun>> | undefined;
     const stopping = orchestrator.cancelRun({ workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test' })
@@ -418,7 +441,7 @@ describe('deterministic orchestration orchestrator', () => {
       requestKey: 'request-stop-unconfirmed', requestFingerprint: 'fingerprint-stop-unconfirmed', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    const started = await orchestrator.start(input);
+    const started = await startAndApprove(orchestrator, input);
 
     await expect(orchestrator.cancelRun({ workspaceId: input.workspaceId, runId: started.run.id, actorId: 'user-test' }))
       .rejects.toThrow('Process exit could not be confirmed.');
@@ -457,7 +480,7 @@ describe('deterministic orchestration orchestrator', () => {
       requestKey: 'request-recovery', requestFingerprint: 'fingerprint-recovery', createdBy: 'user-test',
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
-    const started = await orchestrator.start(input);
+    const started = await startAndApprove(orchestrator, input);
     runWithWorkspace(input.workspaceId, () => store!.markOrchestrationRecoveryRequired({
       runId: started.run.id,
       actorId: 'orchestrator',

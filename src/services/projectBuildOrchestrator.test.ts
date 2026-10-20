@@ -6,10 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const selectedRepo = 'acme/shop-fe';
 const repositoryList = [selectedRepo, 'acme/shop-be'];
-const project = { id: 'project-1', name: 'Calculator', leadSquadId: 'squad-1', resources: [] };
+const project = { id: 'project-1', name: 'Calculator', leadName: 'Orchestrator', resources: [] };
 const agents = [
   { id: 'agent-1', name: 'Planner', role: 'Research Agent', modelProvider: 'OpenAI', modelName: 'test-model', isArchived: false },
-  { id: 'agent-2', name: 'Frontend Builder', role: 'Frontend Agent', modelProvider: 'OpenAI', modelName: 'test-model', isArchived: false }
+  { id: 'agent-2', name: 'Frontend Builder', role: 'Frontend Agent', modelProvider: 'OpenAI', modelName: 'test-model', isArchived: false },
+  { id: 'agent-3', name: 'Backend Builder', role: 'Backend Agent', modelProvider: 'OpenAI', modelName: 'test-model', isArchived: false }
 ];
 const steps = [
   { id: 'step-1', position: 1, enabled: true, label: 'Plan acceptance criteria', phase: 'requirements', agentId: 'agent-1' },
@@ -29,11 +30,11 @@ let removeWorktree: ReturnType<typeof vi.fn>;
 let recordPlanningRecovery: ReturnType<typeof vi.fn>;
 let previousOrchestrationFlag: string | undefined;
 
-async function load(orchestrationEnabled = false, staleReservation?: any) {
+async function load(runtimeOrchestrationAvailable = true, staleReservation?: any) {
   checkoutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-project-build-'));
   if (typeof staleReservation === 'function') staleReservation = staleReservation(checkoutDir);
   previousOrchestrationFlag = process.env.ALPHA_ORCHESTRATION_ENABLED;
-  if (orchestrationEnabled) process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
+  if (runtimeOrchestrationAvailable) process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
   else delete process.env.ALPHA_ORCHESTRATION_ENABLED;
   issueRows = [];
   squadRuns = [];
@@ -86,18 +87,29 @@ async function load(orchestrationEnabled = false, staleReservation?: any) {
       }
     ]
   };
-  plannerCreatePlan = vi.fn(async () => ({ plan, planSource: 'model', planHash: 'plan-hash', formatRepairCount: 0 }));
+  plannerCreatePlan = vi.fn(async (input: any) => {
+    const repositories = input.repositories ?? [{ repository: selectedRepo }];
+    const plannedTasks: any[] = plan.tasks.map((task: any) => ({ ...task, repository: repositories[0].repository }));
+    if (repositories.length > 1) plannedTasks.push({
+      id: 'backend-task', title: 'Build the calculator service', description: 'Provide the API used by the calculator interface.',
+      kind: 'backend', ownerAgentId: 'agent-3', repository: repositories[1].repository,
+      dependsOn: ['requirements-task'], requirementIds: ['REQ-1'], acceptanceCriteria: ['The interface can load and save calculations.'],
+      requiredChecks: ['test'], scope: { includePaths: ['src/**'], excludePaths: [] }, required: true
+    });
+    return { plan: { ...plan, tasks: plannedTasks }, planSource: 'model', planHash: 'plan-hash', formatRepairCount: 0 };
+  });
   startOrchestration = vi.fn(async (input: any) => ({
     run: {
       id: input.runId ?? 'orchestration-planned', workspaceId: input.workspaceId, projectId: input.projectId,
       issueId: input.issueId, repository: input.repository, requestKey: input.requestKey,
       requestFingerprint: input.requestFingerprint, createdBy: input.createdBy,
       executorId: input.executorId, ownershipEpoch: 1, workflowVersion: 1, planVersion: 1,
-      plan, status: 'executing', revision: 1, currentTaskId: 'requirements-task',
+      plan: input.plan, status: 'awaiting_plan_approval', revision: 1,
       branchName: input.branchName, baseRef: input.baseRef, baseCommit: input.baseCommit,
-      worktreePath: input.worktreePath, createdAt: '2026-10-18T00:00:00.000Z', updatedAt: '2026-10-18T00:00:00.000Z'
+      worktreePath: input.worktreePath, repositoryWorkspaces: input.repositoryWorkspaces,
+      createdAt: '2026-10-18T00:00:00.000Z', updatedAt: '2026-10-18T00:00:00.000Z'
     },
-    tasks: [{ id: 'requirements-task', title: 'Confirm requirements', ownerAgentId: 'agent-1' }],
+    tasks: input.plan.tasks.map((task: any) => ({ id: task.id, title: task.title, ownerAgentId: task.ownerAgentId, repository: task.repository })),
     attempts: [], artifacts: [], findings: []
   }));
   reservePlanning = vi.fn((input: any) => ({
@@ -135,7 +147,7 @@ async function load(orchestrationEnabled = false, staleReservation?: any) {
       list: vi.fn(async () => issueRows),
       create: createdIssue
     }),
-    squadStore: () => ({ list: vi.fn(async () => [{ id: 'squad-1', name: 'Product Squad', topology: 'Sequential', memberAgentIds: ['agent-1', 'agent-2'] }]) })
+    squadStore: () => ({ list: vi.fn(async () => []) })
   }));
   vi.doMock('../utils/gitUtils.js', () => ({
     isGitRepo: vi.fn(async () => true),
@@ -157,7 +169,8 @@ async function load(orchestrationEnabled = false, staleReservation?: any) {
       can: () => true,
       canAccessProject: () => true,
       canAccessSquad: () => true,
-      listSquadProjectAssignments: vi.fn(async () => [{ squadId: 'squad-1', status: 'active' }]),
+      canAccessProjectAgentRun: vi.fn(async () => true),
+      listSquadProjectAssignments: vi.fn(async () => []),
       bind: vi.fn()
     }
   }));
@@ -194,7 +207,8 @@ async function load(orchestrationEnabled = false, staleReservation?: any) {
       getActiveAgentCallProjectLock: () => undefined,
       reserveOrchestrationPlanning: reservePlanning,
       releaseOrchestrationPlanningReservation: releasePlanning,
-      getProjectOrchestrationSetting: () => ({ enabled: orchestrationEnabled })
+      // Simulate a row written by an older build that had orchestration off.
+      getProjectOrchestrationSetting: () => ({ enabled: false })
     }
   }));
   vi.doMock('./boardWriteThrough.js', () => ({ addCommentAndShare: vi.fn() }));
@@ -218,115 +232,8 @@ afterEach(() => {
 });
 
 describe('project builds triggered from chat', () => {
-  it('targets the selected repository, starts the configured agents in order, and deduplicates retries', async () => {
+  it('routes project builds through the Orchestrator without a squad despite an old disabled setting', async () => {
     const service = await load();
-    const input = {
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a calculator with keyboard support.',
-      requestedRepository: selectedRepo
-    };
-
-    const first = await service.startProjectBuild(input);
-    const retry = await service.startProjectBuild(input);
-
-    expect(first).toMatchObject({ status: 'started', repository: selectedRepo, issueIdentifier: 'CALC-1', branchName: 'build/CALC-1' });
-    expect(retry).toMatchObject({ status: 'in_progress', repository: selectedRepo, issueIdentifier: 'CALC-1' });
-    expect(issueRows).toHaveLength(1);
-    expect(issueRows[0]).toMatchObject({ projectId: project.id, githubRepo: selectedRepo, createdBy: 'user-1' });
-    expect(issueRows[0].description).toContain('Complete your assigned build stage in the project repository');
-    expect(startSquadRun).toHaveBeenCalledTimes(1);
-    expect(startSquadRun).toHaveBeenCalledWith(expect.objectContaining({
-      squadId: 'squad-1',
-      issueId: issueRows[0].id,
-      baseWorkspaceDir: checkoutDir,
-      memberAgentIds: ['agent-1', 'agent-2'],
-      memberAssignments: [
-        expect.objectContaining({
-          agentId: 'agent-1',
-          stageLabel: 'Plan acceptance criteria',
-          phase: 'requirements',
-          instructions: expect.stringContaining('Do not begin implementation')
-        }),
-        expect.objectContaining({
-          agentId: 'agent-2',
-          stageLabel: 'Build calculator interface',
-          phase: 'implementation',
-          instructions: expect.stringContaining('Implement only the feature slice')
-        })
-      ]
-    }));
-    const squadCall = startSquadRun.mock.calls[0][0];
-    expect(squadCall.plan.join('\n')).not.toContain('Implement the complete project change');
-    expect(squadCall.plan.join('\n')).not.toContain('final agent must run');
-  });
-
-  it('starts and deduplicates separate sequential builds for every selected repository', async () => {
-    const service = await load();
-    const input = {
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a full stack calculator.',
-      repositories: [selectedRepo, 'acme/shop-be']
-    };
-
-    const first = await service.startProjectBuildBatch(input);
-    const retry = await service.startProjectBuildBatch(input);
-
-    expect(first).toMatchObject([
-      { status: 'started', repository: selectedRepo, issueIdentifier: 'CALC-1', branchName: 'build/CALC-1' },
-      { status: 'started', repository: 'acme/shop-be', issueIdentifier: 'CALC-2', branchName: 'build/CALC-2' }
-    ]);
-    expect(retry).toMatchObject([
-      { status: 'in_progress', repository: selectedRepo, issueIdentifier: 'CALC-1' },
-      { status: 'in_progress', repository: 'acme/shop-be', issueIdentifier: 'CALC-2' }
-    ]);
-    expect(issueRows).toHaveLength(2);
-    expect(issueRows.map(issue => issue.githubRepo)).toEqual([selectedRepo, 'acme/shop-be']);
-    expect(startSquadRun).toHaveBeenCalledTimes(2);
-  });
-
-  it('does not guess a single repository when a multi-repo build has no selection', async () => {
-    const service = await load();
-    const result = await service.startProjectBuild({
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a full stack calculator.'
-    });
-
-    expect(result).toMatchObject({ status: 'blocked', reason: 'Choose one or more repositories to build: acme/shop-fe, acme/shop-be.' });
-    expect(createdIssue).not.toHaveBeenCalled();
-    expect(startSquadRun).not.toHaveBeenCalled();
-  });
-
-  it('does not split an opted-in task plan across multiple repositories', async () => {
-    const service = await load(true);
-    const result = await service.startProjectBuildBatch({
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a full stack calculator.',
-      repositories: [selectedRepo, 'acme/shop-be']
-    });
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({
-      status: 'blocked',
-      reason: 'Task-based builds support one repository per plan. Choose a single repository; this request was not split into unrelated workflows.'
-    });
-    expect(createdIssue).not.toHaveBeenCalled();
-    expect(startSquadRun).not.toHaveBeenCalled();
-  });
-
-  it('routes an opted-in single-repository chat build through the planner and task orchestrator', async () => {
-    const service = await load(true);
     const input = {
       context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
       projectId: project.id,
@@ -339,26 +246,102 @@ describe('project builds triggered from chat', () => {
     const result = await service.startProjectBuild(input);
 
     expect(result).toMatchObject({
-      status: 'started', repository: selectedRepo, issueIdentifier: 'CALC-1',
-      orchestrationRunId: expect.any(String), orchestrationCurrentTask: {
-        id: 'requirements-task', ownerAgentId: 'agent-1'
-      }
+      status: 'plan_ready', repository: selectedRepo, issueIdentifier: 'CALC-1',
+      orchestrationRunId: expect.any(String), orchestrationCurrentTask: undefined
     });
-    expect(reservePlanning).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: project.id, repository: selectedRepo, ownerSessionId: expect.any(String)
-    }));
-    expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
-      goal: 'Build a calculator with keyboard support.',
-      planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
-      eligibleAgents: [
-        { id: 'agent-1', role: 'Research Agent', ready: true },
-        { id: 'agent-2', role: 'Frontend Agent', ready: true }
-      ]
-    }));
+    expect(issueRows).toHaveLength(1);
+    expect(issueRows[0]).toMatchObject({ projectId: project.id, githubRepo: selectedRepo, createdBy: 'user-1' });
+    expect(issueRows[0].assignedSquadId).toBeUndefined();
+    expect(startOrchestration).toHaveBeenCalledTimes(1);
     expect(startOrchestration).toHaveBeenCalledWith(expect.objectContaining({
       projectId: project.id, repository: selectedRepo, planSource: 'model',
       planningOwnerSessionId: expect.any(String), plan: expect.objectContaining({ tasks: expect.any(Array) })
     }));
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('creates one shared Orchestrator plan for frontend and backend repositories', async () => {
+    const service = await load();
+    const input = {
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.',
+      repositories: [selectedRepo, 'acme/shop-be']
+    };
+
+    const result = await service.startProjectBuildBatch(input);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ status: 'plan_ready', repositories: repositoryList, orchestrationRunId: expect.any(String) });
+    expect(createdIssue).toHaveBeenCalledTimes(1);
+    expect(startOrchestration).toHaveBeenCalledTimes(1);
+    expect(startOrchestration.mock.calls[0][0].repositoryWorkspaces.map((item: any) => item.repository)).toEqual(repositoryList);
+    expect(startOrchestration.mock.calls[0][0].plan.tasks.map((task: any) => task.repository)).toEqual(expect.arrayContaining(repositoryList));
+    expect(startOrchestration.mock.calls[0][0].plan.tasks.find((task: any) => task.id === 'backend-task')).toMatchObject({ repository: 'acme/shop-be', ownerAgentId: 'agent-3' });
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('selects every attached repository when the user starts a product build without narrowing the list', async () => {
+    const service = await load();
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.'
+    });
+
+    expect(result).toMatchObject({ status: 'plan_ready', repositories: repositoryList });
+    expect(createdIssue).toHaveBeenCalledTimes(1);
+    expect(startOrchestration.mock.calls[0][0].repositoryWorkspaces.map((item: any) => item.repository)).toEqual(repositoryList);
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to the legacy squad runner if the desktop orchestrator is unavailable', async () => {
+    const service = await load(false);
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a calculator with keyboard support.',
+      requestedRepository: selectedRepo
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: expect.stringContaining('Orchestrator is unavailable') });
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(startOrchestration).not.toHaveBeenCalled();
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('routes a selected single-repository request through the planner and task orchestrator', async () => {
+    const service = await load();
+    const result = await service.startProjectBuildBatch({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.',
+      repositories: [selectedRepo]
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ status: 'plan_ready', repository: selectedRepo, orchestrationRunId: expect.any(String) });
+    expect(reservePlanning).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: project.id, repository: selectedRepo, ownerSessionId: expect.any(String)
+    }));
+    expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
+      goal: 'Build a full stack calculator.',
+      planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
+      eligibleAgents: [
+        { id: 'agent-1', role: 'Research Agent', ready: true },
+        { id: 'agent-2', role: 'Frontend Agent', ready: true },
+        { id: 'agent-3', role: 'Backend Agent', ready: true }
+      ]
+    }));
+    expect(startOrchestration).toHaveBeenCalledTimes(1);
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 
@@ -385,7 +368,7 @@ describe('project builds triggered from chat', () => {
 
     const result = await service.startProjectBuild(input);
 
-    expect(result.status).toBe('started');
+    expect(result.status).toBe('plan_ready');
     expect(removeWorktree).toHaveBeenCalledWith(checkoutDir, reservation.worktreePath);
     expect(fs.existsSync(reservation.worktreePath)).toBe(false);
     expect(releasePlanning).toHaveBeenCalledWith('old-request', 'old-fingerprint', 'old-session');
@@ -412,7 +395,8 @@ describe('project builds triggered from chat', () => {
     });
 
     expect(result.status).toBe('blocked');
-    expect(result.reason).toContain('preserved it and paused this repository');
+    expect(result.reason).toContain('preserved');
+    expect(result.reason).toContain('Review');
     expect(fs.existsSync(reservation.worktreePath)).toBe(true);
     expect(removeWorktree).not.toHaveBeenCalled();
     expect(recordPlanningRecovery).toHaveBeenCalledWith(expect.objectContaining({

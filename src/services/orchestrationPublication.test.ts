@@ -103,16 +103,20 @@ describe('orchestration publication', () => {
     });
 
     const target = await service.prepare(snapshot(cwd, 'awaiting_approval', resultCommit));
-    expect(target).toEqual({ publicationBaseBranch: 'dev', resultCommit });
+    expect(target).toEqual({
+      publicationBaseBranch: 'dev', resultCommit,
+      publicationTargets: [{ repository: 'acme/shop', branchName, resultCommit, publicationBaseBranch: 'dev' }]
+    });
     events = [validation, event('run_publishing', {
       decision: 'approved', approvedBy: 'user-1', approvedAt: '2026-10-20T00:02:00.000Z',
-      resultCommit, branchName, publicationBaseBranch: target.publicationBaseBranch
+      resultCommit, branchName, publicationBaseBranch: target.publicationBaseBranch,
+      publicationTargets: target.publicationTargets
     })];
 
     const publication = await service.publish(snapshot(cwd, 'publishing', resultCommit));
 
     expect(publication).toEqual({
-      branchName, baseBranch: 'dev', resultCommit, pullRequestUrl: pullUrl, publishedAt: '2026-10-20T00:03:00.000Z'
+      repository: 'acme/shop', branchName, baseBranch: 'dev', resultCommit, pullRequestUrl: pullUrl, publishedAt: '2026-10-20T00:03:00.000Z'
     });
     expect(github.pushBranch).toHaveBeenCalledWith(cwd, branchName, 'acme/shop');
     expect(github.createPullRequest).toHaveBeenCalledWith(
@@ -138,6 +142,11 @@ describe('orchestration publication', () => {
     const pushBranch = vi.fn(async () => {});
     const service = new OrchestrationPublicationService({
       store: { isPathAllowed: () => true, listOrchestrationEvents: () => events } as any,
+      issues: {
+        async get() { return issueFixture(); },
+        async update() { return issueFixture(); },
+        async addComment(_workspaceId, comment) { return comment; }
+      },
       github: {
         async checkAuth() { return { authenticated: true }; },
         async inspectLocalRepo() { return { isRepo: true, ownerRepo: 'acme/shop', branch: branchName }; },

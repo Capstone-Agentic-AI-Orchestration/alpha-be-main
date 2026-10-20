@@ -13,6 +13,16 @@ const workspaceId = 'workspace-acceptance-test';
 const projectId = 'project-acceptance-test';
 const issueId = 'issue-acceptance-test';
 
+async function startAndApprove(orchestration: OrchestrationService, input: any) {
+  const plan = await orchestration.start(input);
+  return orchestration.startPlannedWork({
+    workspaceId: input.workspaceId,
+    runId: plan.run.id,
+    expectedRevision: plan.run.revision,
+    actorId: input.createdBy
+  });
+}
+
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
@@ -160,7 +170,7 @@ describe('task acceptance and targeted correction', () => {
       plan
     };
 
-    let snapshot = await orchestration.start(input);
+    let snapshot = await startAndApprove(orchestration, input);
     expect(snapshot.run.baseCommit).toBe(baseCommit);
     expect(snapshot.run.worktreePath).toBe(repository);
     const firstRequest = launches[0];
@@ -307,7 +317,7 @@ describe('task acceptance and targeted correction', () => {
         commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
       })
     });
-    let snapshot = await orchestration.start({
+    let snapshot = await startAndApprove(orchestration, {
       workspaceId, projectId, issueId, repository: 'acme/tasks', requestKey: 'request-review-correction',
       requestFingerprint: 'fingerprint-review-correction', createdBy: 'user-test', executorId: 'desktop-test',
       eligibleAgents, plan, baseRef: 'main', baseCommit
@@ -442,7 +452,7 @@ describe('task acceptance and targeted correction', () => {
         commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
       })
     });
-    const snapshot = await orchestration.start({
+    const snapshot = await startAndApprove(orchestration, {
       workspaceId, projectId, issueId, repository: 'acme/payloads', requestKey: 'request-review-context-limit',
       requestFingerprint: 'fingerprint-review-context-limit', createdBy: 'user-test', executorId: 'desktop-test',
       eligibleAgents, plan, baseRef: 'main'

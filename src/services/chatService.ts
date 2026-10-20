@@ -290,10 +290,11 @@ export class ChatService extends EventEmitter {
       });
       const build = builds[0];
       const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
-        ? result.status === 'completed' ? `Task workflow approved · ${result.issueIdentifier}`
-          : result.status === 'awaiting_review' ? `Task workflow ready for review · ${result.issueIdentifier}`
-          : result.status === 'blocked' ? `Task workflow paused · ${result.issueIdentifier}`
-            : `Task workflow ${result.status === 'in_progress' ? 'in progress' : 'started'} · ${result.issueIdentifier}`
+        ? result.status === 'completed' ? `Orchestrator build complete · ${result.issueIdentifier}`
+          : result.status === 'plan_ready' ? `Orchestrator plan ready · ${result.issueIdentifier}`
+            : result.status === 'awaiting_review' ? `Orchestrator build ready for final review · ${result.issueIdentifier}`
+              : result.status === 'blocked' ? `Orchestrator build paused · ${result.issueIdentifier}`
+                : `Orchestrator ${result.status === 'in_progress' ? 'working' : 'starting'} · ${result.issueIdentifier}`
         : result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
         : result.status === 'in_progress' ? `Build already in progress · ${result.issueIdentifier}`
           : result.status === 'awaiting_review' ? `Build ready for review · ${result.issueIdentifier}`
@@ -322,11 +323,14 @@ export class ChatService extends EventEmitter {
           : build.orchestrationRunId
             ? [
                 `**${statusText(build)}**`,
-                `The orchestrator validated a plan with ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
+                build.repositories && build.repositories.length > 1 ? `**One shared build across:** ${build.repositories.join(', ')}` : undefined,
+                build.status === 'plan_ready'
+                  ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Live Build Room, then choose **Start planned work**.`
+                  : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
                 build.reason,
                 build.repository ? `**Repository:** ${build.repository}` : undefined,
                 build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-                'The next specialist starts only after the current result passes its checks. Open the Live Build Room to review task evidence and findings.'
+                build.status === 'plan_ready' ? undefined : 'The next specialist starts only after the current result passes its checks. Open the Live Build Room to review task evidence and findings.'
               ].filter(Boolean).join('\n\n')
           : [
               `**${statusText(build)}**`,

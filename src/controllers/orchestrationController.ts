@@ -84,6 +84,40 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/diff', deskt
   }
 }));
 
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/start', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res)) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  if (!ALPHA_ORCHESTRATION_ENABLED) {
+    return res.status(409).json({ error: 'The Orchestrator is unavailable on this desktop. Update the desktop app before starting planned work.' });
+  }
+  const expectedRevision = req.body?.expectedRevision;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return res.status(400).json({ error: 'expectedRevision must be a non-negative integer.' });
+  }
+  if (snapshot.run.status !== 'awaiting_plan_approval') {
+    return res.status(409).json({ error: 'This plan is no longer waiting to start. Refresh the Live Build Room to see its current state.' });
+  }
+  const taskOwners = [...new Set(snapshot.tasks.map(task => task.ownerAgentId))];
+  const ownerVisibility = await Promise.all(taskOwners.map(agentId =>
+    workspaceRegistry.canAccessProjectAgentRun(req.workspace!, req.params.projectId, agentId)));
+  if (ownerVisibility.some(visible => !visible)) {
+    return res.status(409).json({ error: 'A specialist in this plan is no longer available to this project. Cancel this plan and create a fresh one.' });
+  }
+  try {
+    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
+    const started = await orchestrationService.startPlannedWork({
+      workspaceId: req.workspace!.workspaceId,
+      runId: snapshot.run.id,
+      expectedRevision,
+      actorId: req.workspace!.userId
+    });
+    res.json({ runId: started.run.id, status: started.run.status, currentTaskId: started.run.currentTaskId });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+}));
+
 orchestrationRouter.get('/projects/:projectId/planning-recoveries/:runId/diff', desktopOnly, route(async (req: Request, res: Response) => {
   if (!authorizedProject(req, res)) return;
   const recovery = runWithWorkspace(req.workspace!.workspaceId, () =>
@@ -207,10 +241,10 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   if (!ALPHA_ORCHESTRATION_ENABLED) {
-    return res.status(409).json({ error: 'The orchestrator is disabled on this desktop. Enable it before resuming this build.' });
+    return res.status(409).json({ error: 'The Orchestrator is unavailable in this desktop version. Update the app before continuing this build.' });
   }
   const pausedByKillSwitch = snapshot.run.status === 'blocked' &&
-    snapshot.run.stoppedReason?.toLowerCase().includes('orchestrator is disabled');
+    /orchestrator is (?:disabled|unavailable)/i.test(snapshot.run.stoppedReason || '');
   const needsRecovery = snapshot.run.status === 'recovery_required';
   if (snapshot.run.currentTaskId || (!pausedByKillSwitch && !needsRecovery)) {
     return res.status(409).json({ error: 'This build is not paused at a resumable checkpoint.' });
