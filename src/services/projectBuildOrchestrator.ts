@@ -239,7 +239,7 @@ function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Proj
     issueId: snapshot.run.issueId,
     issueIdentifier: sqliteService.getIssues().find(issue => issue.id === snapshot.run.issueId)?.identifier,
     squadId: squad.id,
-    squadName: `${squad.name} · coordinated tasks`,
+    squadName: `${squad.name} · orchestrated tasks`,
     orchestrationRunId: snapshot.run.id,
     orchestrationTaskCount: snapshot.tasks.length,
     orchestrationCurrentTask: active ? { id: active.id, title: active.title, ownerAgentId: active.ownerAgentId } : undefined,

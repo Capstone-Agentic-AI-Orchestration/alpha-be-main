@@ -58,7 +58,7 @@ describe('seeding runs once', () => {
     const svc = await startDaemon();
     expect(svc.getSkills()).toHaveLength(5);
     const agents = svc.getAgents();
-    expect(agents).toHaveLength(10);
+    expect(agents).toHaveLength(OFFICIAL_AGENT_TEMPLATES.length);
     expect(agents.map(agent => agent.templateKey).sort()).toEqual(
       OFFICIAL_AGENT_TEMPLATES.map(template => template.key).sort()
     );
@@ -118,14 +118,14 @@ describe('seeding runs once', () => {
     const second = await startDaemon();
     expect(second.getProjects()).toHaveLength(0);
     expect(second.getSkills()).toHaveLength(5);
-    expect(second.getAgents()).toHaveLength(10);
+    expect(second.getAgents()).toHaveLength(OFFICIAL_AGENT_TEMPLATES.length);
   });
 
   it('does not duplicate anything on an ordinary restart', async () => {
     await startDaemon();
     const svc = await startDaemon();
     expect(svc.getSkills()).toHaveLength(5);
-    expect(svc.getAgents()).toHaveLength(10);
+    expect(svc.getAgents()).toHaveLength(OFFICIAL_AGENT_TEMPLATES.length);
     expect(svc.getSquads()).toHaveLength(1);
   });
 
@@ -176,7 +176,7 @@ describe('seeding runs once', () => {
       phase: 'Planning',
       isSeeded: true
     });
-    expect(second.getAgents()).toHaveLength(10);
+    expect(second.getAgents()).toHaveLength(OFFICIAL_AGENT_TEMPLATES.length);
   });
 
   it('keeps a custom agent when its id collides with a newly seeded role', async () => {
@@ -203,6 +203,6 @@ describe('seeding runs once', () => {
     });
     const officialResearch = second.getAgents().find(agent => agent.templateKey === 'research');
     expect(officialResearch?.id).toBe('agent-research-official');
-    expect(second.getAgents()).toHaveLength(11);
+    expect(second.getAgents()).toHaveLength(OFFICIAL_AGENT_TEMPLATES.length + 1);
   });
 });

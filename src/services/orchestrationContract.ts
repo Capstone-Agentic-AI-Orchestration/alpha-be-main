@@ -123,7 +123,7 @@ export interface PlanValidationIssue {
 }
 
 const ROLE_CAPABILITIES: Record<OrchestrationTaskKind, ReadonlySet<string>> = {
-  requirements: new Set(['researcher', 'research agent', 'triager', 'manager agent', 'architect', 'architecture agent']),
+  requirements: new Set(['researcher', 'research agent', 'triager', 'manager agent', 'orchestrator agent', 'architect', 'architecture agent']),
   architecture: new Set(['architect', 'architecture agent']),
   database: new Set(['database agent', 'coder']),
   backend: new Set(['backend agent', 'coder']),

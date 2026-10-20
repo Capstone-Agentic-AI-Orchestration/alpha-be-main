@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   orchestrationPlanSchema,
   parseOrchestrationPlan,
+  roleCanOwnOrchestrationTask,
   validateOrchestrationPlan
 } from './orchestrationContract.js';
 import {
@@ -42,6 +43,10 @@ describe('orchestration plan contract', () => {
 
   it('validates the example DAG and maps each task to an eligible role', () => {
     expect(validateOrchestrationPlan(plan, eligibleAgents)).toEqual([]);
+  });
+
+  it('allows the Orchestrator Agent to own requirements planning', () => {
+    expect(roleCanOwnOrchestrationTask('requirements', 'Orchestrator Agent')).toBe(true);
   });
 
   it('detects role mismatch, missing requirements, unknown dependencies, and cycles', () => {
