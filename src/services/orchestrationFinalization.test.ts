@@ -76,7 +76,7 @@ describe('orchestration publication finalization', () => {
     expect(fixture.issue.comments).toHaveLength(1);
     expect(fixture.issue.comments[0]).toMatchObject({
       id: 'comm-orchestration-1-orchestration-published',
-      content: 'Task build approved and published for review: https://github.com/acme/shop/pull/42',
+      content: 'Orchestrator build approved and published for review:\nacme/shop: https://github.com/acme/shop/pull/42',
       createdAt: '2026-10-20T00:01:00.000Z'
     });
     expect(fixture.updateCount).toBe(1);
