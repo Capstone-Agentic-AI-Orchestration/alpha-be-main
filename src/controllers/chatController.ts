@@ -365,7 +365,12 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       shareThread(scopedThread);
     }
 
-    const buildRequested = intent === 'build' || (intent !== 'ask' && isProjectBuildRequest(content));
+    // A direct @mention is an explicit request for an agent to answer in chat.
+    // Keep project-build detection for ordinary product requests, while the
+    // Build control still routes to the Orchestrator even if the text contains
+    // a mention.
+    const directlyAddressesAgent = /(?:^|[\s(\[{])@[a-zA-Z0-9_-]+/.test(content);
+    const buildRequested = intent === 'build' || (intent !== 'ask' && !directlyAddressesAgent && isProjectBuildRequest(content));
     const buildRequest = req.workspace!.role !== 'client' && buildRequested
       ? { context: req.workspace!, repositories: requestedRepositories }
       : undefined;
