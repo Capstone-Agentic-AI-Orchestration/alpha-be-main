@@ -954,6 +954,16 @@ ${instructions}${remoteSection}${hostingSection}`;
       // Keep the command result in the existing run log. Output is bounded by
       // verificationService, and each line is stored separately so it remains
       // readable after a reload rather than becoming one collapsed paragraph.
+      if (verification.preparation) {
+        const preparation = verification.preparation;
+        const exit = preparation.exitCode === null
+          ? `signal ${preparation.signal || 'unknown'}`
+          : `exit ${preparation.exitCode}`;
+        this.appendLog(runId, 'tests', `$ ${preparation.command.display} (${exit})`);
+        for (const line of preparation.output.split(/\r?\n/).map(value => value.trimEnd()).filter(Boolean).slice(-120)) {
+          this.appendLog(runId, 'tests', `[${preparation.command.display}] ${line}`);
+        }
+      }
       for (const result of verification.commands) {
         const exit = result.exitCode === null
           ? `signal ${result.signal || 'unknown'}`
@@ -977,6 +987,11 @@ ${instructions}${remoteSection}${hostingSection}`;
           verificationEvidence: {
             status: verification.status,
             missingScripts: verification.missingScripts,
+            preparation: verification.preparation ? {
+              display: verification.preparation.command.display,
+              exitCode: verification.preparation.exitCode,
+              signal: verification.preparation.signal
+            } : undefined,
             commands: verification.commands.map(result => ({
               script: result.command.script,
               display: result.command.display,

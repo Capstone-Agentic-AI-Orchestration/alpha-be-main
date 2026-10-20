@@ -2,6 +2,7 @@ import type { ChatMessage, ChatThread } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
 import { supabaseService } from './supabaseService.js';
 import { flushChatSyncOutbox } from './chatSyncService.js';
+import { chatAttachmentService } from './chatAttachmentService.js';
 
 function enqueue(
   ownerId: string | undefined,
@@ -51,7 +52,10 @@ export function saveChatMessageAndShare(message: ChatMessage): ChatMessage {
   sqliteService.saveChatMessage(message);
   const saved = message;
   const thread = sqliteService.getChatThreads().find(candidate => candidate.id === saved.threadId);
-  enqueue(thread?.ownerId, saved.threadId, 'share_message', saved);
+  // Local file references stay with the local transcript. Cloud chat sync gets
+  // the text and ordinary message metadata, never attachment IDs or bytes.
+  const { attachments: _localAttachments, ...sharedMessage } = saved;
+  enqueue(thread?.ownerId, saved.threadId, 'share_message', sharedMessage);
   /*
    * The thread carries the snippet and the time of its last message, which
    * `saveChatMessage` has just moved on. Published too, or the list on the web
@@ -63,6 +67,7 @@ export function saveChatMessageAndShare(message: ChatMessage): ChatMessage {
 
 export function deleteThreadAndShare(threadId: string): boolean {
   const thread = sqliteService.getChatThreads().find(candidate => candidate.id === threadId);
+  chatAttachmentService.deleteThread(threadId);
   const deleted = sqliteService.deleteChatThread(threadId);
   if (deleted && thread) enqueue(thread.ownerId, threadId, 'delete_thread');
   return deleted;
@@ -70,6 +75,7 @@ export function deleteThreadAndShare(threadId: string): boolean {
 
 export function clearMessagesAndShare(threadId: string): number {
   const before = sqliteService.getChatThreads().find(candidate => candidate.id === threadId);
+  if (before) chatAttachmentService.deleteThread(threadId);
   const removed = sqliteService.clearChatMessages(threadId);
   if (removed >= 0 && before) {
     enqueue(before.ownerId, threadId, 'clear_messages');

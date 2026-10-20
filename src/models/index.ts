@@ -385,6 +385,11 @@ export interface RunUsage {
 export interface RunVerificationEvidence {
   status: 'passed' | 'failed' | 'skipped' | 'cancelled';
   missingScripts: string[];
+  preparation?: {
+    display: string;
+    exitCode: number | null;
+    signal: string | null;
+  };
   commands: Array<{
     script: string;
     display: string;
@@ -580,6 +585,8 @@ export type AgentCallActivityKind =
   | 'tool'
   | 'tool_result'
   | 'file_change'
+  | 'attachment'
+  | 'steering'
   | 'handoff'
   | 'error'
   | 'summary';
@@ -662,7 +669,24 @@ export interface ChatMessage {
   operationMode?: AgentCallMode;
   agentCallStatus?: AgentCallStatus;
   revisionTarget?: AgentCallTarget;
+  /** Local-only file references. File bytes never leave the desktop attachment store. */
+  attachments?: ChatAttachmentReference[];
   timestamp: string;
+}
+
+export interface ChatAttachmentReference {
+  id: string;
+  name: string;
+  contentType: string;
+  byteLength: number;
+  inspection: 'included_text' | 'available_to_runtime' | 'stored_only';
+}
+
+export interface ChatAttachmentRecord extends ChatAttachmentReference {
+  threadId: string;
+  messageId?: string;
+  storageName: string;
+  createdAt: string;
 }
 
 export type RuntimeStatus = 'online' | 'degraded' | 'offline' | 'scanning';

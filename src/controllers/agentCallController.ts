@@ -336,7 +336,7 @@ agentCallRouter.get('/projects/:projectId/chat/threads/:threadId/agent-calls', d
     workspaceId: req.workspace!.workspaceId,
     projectId: project.id,
     threadId: thread.id
-  }).filter(call => call.origin !== 'chat_turn');
+  }).filter(call => call.origin !== 'chat_turn' || call.requestedBy === req.workspace!.userId);
   res.json({ calls });
 }));
 

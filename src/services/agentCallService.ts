@@ -48,7 +48,7 @@ export interface StartChatTurnActivityInput {
   project: Project;
   threadId: string;
   messageId: string;
-  squadId: string;
+  squadId?: string;
   agent: Agent;
   requestedBy: string;
   instruction: string;
@@ -174,7 +174,9 @@ export class AgentCallService extends EventEmitter {
       projectId: input.project.id,
       threadId: input.threadId,
       messageId: input.messageId,
-      squadId: input.squadId,
+      // Chat participation is independent of squad membership. This reserved
+      // value keeps standalone Alpha replies in the same activity timeline.
+      squadId: input.squadId ?? 'alpha-chat',
       agentId: input.agent.id,
       requestedBy: input.requestedBy,
       operationMode: 'ask',
@@ -201,6 +203,27 @@ export class AgentCallService extends EventEmitter {
 
   recordChatTurnHandoff(id: string, fromAgentName: string): void {
     this.recordActivity(id, 'handoff', `Received project chat context from ${fromAgentName.slice(0, 80)}`);
+  }
+
+  recordChatTurnAttachment(id: string, name: string, contentType: string): void {
+    this.recordActivity(id, 'attachment', `Attached ${name.slice(0, 100)} (${contentType.slice(0, 80)})`);
+  }
+
+  recordChatTurnSteering(id: string, instruction: string, state: 'queued' | 'applied'): void {
+    this.recordActivity(id, 'steering', state === 'queued' ? 'User direction queued for the next safe point' : 'User direction applied', {
+      detail: instruction.slice(0, 300)
+    });
+  }
+
+  cancelChatTurn(id: string, reason = 'The user stopped this chat turn.'): void {
+    const current = sqliteService.getAgentCall(id);
+    if (!current || current.origin !== 'chat_turn' || current.status !== 'running') return;
+    const updated = sqliteService.updateAgentCall(id, {
+      status: 'cancelled', error: reason.slice(0, 500), completedAt: new Date().toISOString()
+    });
+    if (!updated) return;
+    this.recordActivity(id, 'status', 'Chat turn stopped after the specialist process exited');
+    this.emit('agent_call.cancelled', sqliteService.getAgentCall(id));
   }
 
   completeChatTurn(id: string, resultMessageId: string): void {

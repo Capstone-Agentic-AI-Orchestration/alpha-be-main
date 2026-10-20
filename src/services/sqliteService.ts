@@ -26,7 +26,8 @@ import {
   BuildStepPhase,
   AgentCall,
   AgentCallTarget,
-  AgentCallArtifact
+  AgentCallArtifact,
+  ChatAttachmentRecord
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -635,8 +636,23 @@ export class SQLiteService {
         operation_mode TEXT,
         agent_call_status TEXT,
         revision_target TEXT,
-        timestamp TEXT NOT NULL
+        timestamp TEXT NOT NULL,
+        attachments_json TEXT NOT NULL DEFAULT '[]'
       );
+
+      CREATE TABLE IF NOT EXISTS chat_attachments (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+        message_id TEXT,
+        name TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        byte_length INTEGER NOT NULL,
+        inspection TEXT NOT NULL,
+        storage_name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_attachments_thread
+        ON chat_attachments(thread_id, created_at);
 
       /* Durable, ordered publication of the owner's local chat changes. */
       CREATE TABLE IF NOT EXISTS chat_sync_outbox (
@@ -1125,6 +1141,7 @@ export class SQLiteService {
       // more agents.
       ['chat_threads', 'target_agent_id TEXT'],
       ['chat_threads', 'target_squad_id TEXT'],
+      ['chat_messages', "attachments_json TEXT NOT NULL DEFAULT '[]'"],
       /**
        * Whose conversation this is.
        *
@@ -4731,6 +4748,7 @@ export class SQLiteService {
       operationMode: r.operation_mode ?? undefined,
       agentCallStatus: r.agent_call_status ?? undefined,
       revisionTarget: parseJson<AgentCallTarget | undefined>(r.revision_target, undefined),
+      attachments: parseJson<ChatMessage['attachments']>(r.attachments_json, []),
       timestamp: r.timestamp
     }));
   }
@@ -4835,12 +4853,12 @@ export class SQLiteService {
       INSERT INTO chat_messages (
         id, thread_id, sender_type, sender_name, agent_id, content,
         thinking_process, tools_executed, message_type, agent_call_id,
-        squad_id, operation_mode, agent_call_status, revision_target, timestamp
+        squad_id, operation_mode, agent_call_status, revision_target, timestamp, attachments_json
       )
       VALUES (
         @id, @threadId, @senderType, @senderName, @agentId, @content,
         @thinkingProcess, @toolsExecuted, @messageType, @agentCallId,
-        @squadId, @operationMode, @agentCallStatus, @revisionTarget, @timestamp
+        @squadId, @operationMode, @agentCallStatus, @revisionTarget, @timestamp, @attachments
       )
     `);
     stmt.run({
@@ -4853,7 +4871,8 @@ export class SQLiteService {
       squadId: msg.squadId || null,
       operationMode: msg.operationMode || null,
       agentCallStatus: msg.agentCallStatus || null,
-      revisionTarget: msg.revisionTarget ? JSON.stringify(msg.revisionTarget) : null
+      revisionTarget: msg.revisionTarget ? JSON.stringify(msg.revisionTarget) : null,
+      attachments: JSON.stringify(msg.attachments ?? [])
     });
 
     const updateThread = this.db.prepare(`
@@ -4867,6 +4886,59 @@ export class SQLiteService {
 
   deleteChatMessage(messageId: string): boolean {
     return this.db.prepare('DELETE FROM chat_messages WHERE id = ?').run(messageId).changes > 0;
+  }
+
+  saveChatAttachment(record: ChatAttachmentRecord): ChatAttachmentRecord {
+    this.db.prepare(`INSERT INTO chat_attachments (
+      id, thread_id, message_id, name, content_type, byte_length, inspection, storage_name, created_at
+    ) VALUES (@id, @threadId, @messageId, @name, @contentType, @byteLength, @inspection, @storageName, @createdAt)`)
+      .run({
+        id: record.id, threadId: record.threadId, messageId: record.messageId ?? null,
+        name: record.name, contentType: record.contentType, byteLength: record.byteLength,
+        inspection: record.inspection, storageName: record.storageName, createdAt: record.createdAt
+      });
+    return record;
+  }
+
+  getChatAttachments(ids: readonly string[], threadId?: string): ChatAttachmentRecord[] {
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(`SELECT * FROM chat_attachments WHERE id IN (${placeholders})${threadId ? ' AND thread_id = ?' : ''}`)
+      .all(...ids, ...(threadId ? [threadId] : [])) as any[];
+    return rows.map(row => ({
+      id: row.id, threadId: row.thread_id, messageId: row.message_id ?? undefined,
+      name: row.name, contentType: row.content_type, byteLength: Number(row.byte_length),
+      inspection: row.inspection, storageName: row.storage_name, createdAt: row.created_at
+    }));
+  }
+
+  linkChatAttachments(threadId: string, messageId: string, ids: readonly string[]): void {
+    if (!ids.length) return;
+    const update = this.db.prepare('UPDATE chat_attachments SET message_id = ? WHERE thread_id = ? AND id = ? AND message_id IS NULL');
+    this.db.transaction(() => { for (const id of ids) update.run(messageId, threadId, id); })();
+  }
+
+  deleteChatAttachment(id: string, threadId: string): ChatAttachmentRecord | null {
+    const row = this.db.prepare('SELECT * FROM chat_attachments WHERE id = ? AND thread_id = ? AND message_id IS NULL').get(id, threadId) as any;
+    const record: ChatAttachmentRecord | undefined = row ? {
+      id: row.id, threadId: row.thread_id, messageId: undefined,
+      name: row.name, contentType: row.content_type, byteLength: Number(row.byte_length),
+      inspection: row.inspection, storageName: row.storage_name, createdAt: row.created_at
+    } : undefined;
+    if (!record) return null;
+    this.db.prepare('DELETE FROM chat_attachments WHERE id = ? AND thread_id = ? AND message_id IS NULL').run(id, threadId);
+    return record;
+  }
+
+  deleteChatAttachments(threadId: string): ChatAttachmentRecord[] {
+    const rows = this.db.prepare('SELECT * FROM chat_attachments WHERE thread_id = ?').all(threadId) as any[];
+    const records = rows.map(row => ({
+      id: row.id, threadId: row.thread_id, messageId: row.message_id ?? undefined,
+      name: row.name, contentType: row.content_type, byteLength: Number(row.byte_length),
+      inspection: row.inspection, storageName: row.storage_name, createdAt: row.created_at
+    } as ChatAttachmentRecord));
+    this.db.prepare('DELETE FROM chat_attachments WHERE thread_id = ?').run(threadId);
+    return records;
   }
 
   createChatThread(thread: Partial<ChatThread>): ChatThread {

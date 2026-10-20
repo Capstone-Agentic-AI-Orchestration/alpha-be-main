@@ -146,6 +146,7 @@ export interface CliTurnResult {
    * other "could not reach", and the second is worth a "is it signed in?".
    */
   failureKind: 'spawn' | 'empty' | null;
+  cancelled?: boolean;
 }
 
 
@@ -700,6 +701,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     // replaced matched on top-level `type: 'text' | 'tool_use'`, which never
     // occurs: those are content blocks nested inside an assistant message.
     const parser = new StreamParser(family);
+    let cancelled = false;
 
     await new Promise<void>((resolve) => {
       const child = processManager.spawnProcess({
@@ -720,7 +722,10 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
           */
         env: { ...options.env, ...invocation.env, ...agentCredentialEnv() },
         stdin: invocation.stdin,
-        onExit: () => resolve()
+        onExit: (_code, _signal, terminationReason) => {
+          cancelled = terminationReason === 'cancelled';
+          resolve();
+        }
       });
 
       if (child.stdout) {
@@ -748,6 +753,13 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
 
     const content = turn.getContent();
     const thinking = turn.getThinking(idleThinking);
+
+    if (cancelled) {
+      return {
+        content: '', thinking, tools: turn.getTools(), sessionId: parser.getSessionId() ?? null,
+        bin, failureDetail: null, failureKind: null, cancelled: true
+      };
+    }
 
     if (!content.trim()) {
       // Report the real reason instead of a reassuring placeholder. The old
@@ -793,7 +805,8 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       sessionId: null,
       bin,
       failureDetail: err?.message ?? String(err),
-      failureKind: 'spawn'
+        failureKind: 'spawn',
+        cancelled: false
     };
   } finally {
     // The config exists only for the duration of the spawn. Leaving it would

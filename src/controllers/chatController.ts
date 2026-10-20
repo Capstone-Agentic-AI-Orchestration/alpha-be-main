@@ -17,6 +17,7 @@ import { isProjectBuildRequest } from '../services/projectBuildIntent.js';
 import { IS_CLOUD } from '../config/env.js';
 import { supabaseService } from '../services/supabaseService.js';
 import { retryChatSync } from '../services/chatSyncService.js';
+import { chatAttachmentService, MAX_CHAT_ATTACHMENT_BYTES } from '../services/chatAttachmentService.js';
 
 export const chatRouter = Router();
 
@@ -240,6 +241,52 @@ chatRouter.get('/chat/threads/:id/messages', route(async (req: Request, res: Res
   res.json(messages);
 }));
 
+/** Store one chat attachment in the desktop's private local data directory. */
+chatRouter.post('/chat/threads/:id/attachments', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
+  if (!Buffer.isBuffer(req.body) || req.body.byteLength < 1 || req.body.byteLength > MAX_CHAT_ATTACHMENT_BYTES) {
+    return res.status(400).json({ error: 'Choose a file smaller than 10 MB.' });
+  }
+  let name = '';
+  try { name = decodeURIComponent(String(req.headers['x-chat-file-name'] ?? '')); }
+  catch { return res.status(400).json({ error: 'The file name could not be read.' }); }
+  try {
+    const attachment = await chatAttachmentService.upload({
+      threadId: req.params.id, name,
+      contentType: String(req.headers['x-chat-file-type'] ?? 'application/octet-stream'),
+      bytes: req.body
+    });
+    res.status(201).json({ attachment });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'The attachment could not be saved.' });
+  }
+}));
+
+chatRouter.delete('/chat/threads/:threadId/attachments/:attachmentId', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.threadId)) return;
+  const removed = chatAttachmentService.deletePending(req.params.threadId, req.params.attachmentId);
+  if (!removed) return res.status(404).json({ error: 'This attachment is already linked to a message or no longer exists.' });
+  res.json({ success: true });
+});
+
+chatRouter.post('/chat/threads/:threadId/messages/:messageId/stop', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.threadId)) return;
+  try { res.json(await chatService.stopTurn(req.params.threadId, req.params.messageId)); }
+  catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : 'This chat turn could not be stopped.' }); }
+}));
+
+chatRouter.post('/chat/threads/:threadId/messages/:messageId/steer', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.threadId)) return;
+  try {
+    const result = chatService.steerTurn(req.params.threadId, req.params.messageId, String(req.body?.instruction ?? ''));
+    res.json(result);
+  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : 'This chat turn could not be steered.' }); }
+}));
+
 /**
  * Delete a conversation, or empty one.
  *
@@ -268,7 +315,7 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -280,6 +327,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     }
     if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || !clientMessageId.trim() || clientMessageId.length > 200)) {
       return res.status(400).json({ error: 'clientMessageId must be a non-empty string of at most 200 characters' });
+    }
+    if (attachmentIds !== undefined && (!Array.isArray(attachmentIds) || attachmentIds.length > 8 || attachmentIds.some((id: unknown) => typeof id !== 'string'))) {
+      return res.status(400).json({ error: 'attachmentIds must be a list of up to 8 attachment ids' });
     }
     if (
       (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') ||
@@ -327,6 +377,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       targetSquadId,
       projectId: scopedProjectId,
       clientMessageId,
+      attachmentIds,
       workspaceId: req.workspace!.workspaceId,
       userId: req.workspace!.userId,
       buildRequest
@@ -334,5 +385,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     res.status(201).json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to process chat message' });
+  } finally {
+    if (typeof req.body?.threadId === 'string' && typeof req.body?.clientMessageId === 'string') {
+      chatService.finishTurn(req.body.threadId, req.body.clientMessageId);
+    }
   }
 });

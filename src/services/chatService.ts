@@ -26,6 +26,8 @@ import { agentCallService } from './agentCallService.js';
 import { randomUUID } from 'node:crypto';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { startProjectBuildBatch, type ProjectBuildStartResult } from './projectBuildOrchestrator.js';
+import { processManager } from './processManager.js';
+import { chatAttachmentService } from './chatAttachmentService.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -38,6 +40,8 @@ export interface SendMessageParams {
   projectId?: string;
   /** Stable client id, reused when a transport retry repeats the same send. */
   clientMessageId?: string;
+  /** Local attachment identifiers uploaded for this message. */
+  attachmentIds?: string[];
   /**
    * Workspace the message belongs to. Optional: requests that go through
    * runWithWorkspace already carry it ambiently via currentWorkspaceId().
@@ -150,6 +154,16 @@ export interface SendMessageResult {
   builds?: ProjectBuildStartResult[];
 }
 
+interface ActiveChatTurn {
+  threadId: string;
+  messageId: string;
+  stopRequested: boolean;
+  currentRunId?: string;
+  currentCallId?: string;
+  currentAgentName?: string;
+  steering: string[];
+}
+
 /**
  * The directory an agent inspects for this thread.
  *
@@ -232,6 +246,89 @@ function describeWorkspaceForAlpha(workspaceId?: string): string {
 }
 
 export class ChatService extends EventEmitter {
+  private readonly activeTurns = new Map<string, ActiveChatTurn>();
+
+  private turnKey(threadId: string, messageId: string): string {
+    return `${threadId}\u0000${messageId}`;
+  }
+
+  finishTurn(threadId: string, messageId: string): void {
+    this.activeTurns.delete(this.turnKey(threadId, messageId));
+  }
+
+  async stopTurn(threadId: string, messageId: string): Promise<{ status: 'stopping' | 'stopped' }> {
+    const turn = this.activeTurns.get(this.turnKey(threadId, messageId));
+    if (!turn) throw new Error('This chat turn is no longer running.');
+    turn.stopRequested = true;
+    if (turn.currentRunId) await processManager.terminateProcessAndWait(turn.currentRunId, 'cancelled');
+    if (turn.currentCallId) agentCallService.cancelChatTurn(turn.currentCallId);
+    this.emit('chat_turn.stopped', { threadId, messageId, agentCallId: turn.currentCallId });
+    return { status: 'stopped' };
+  }
+
+  steerTurn(threadId: string, messageId: string, instruction: string): { status: 'queued'; position: number } {
+    const turn = this.activeTurns.get(this.turnKey(threadId, messageId));
+    const clean = instruction.trim();
+    if (!turn || turn.stopRequested) throw new Error('This chat turn is no longer accepting directions.');
+    if (!clean || clean.length > 4_000) throw new Error('Enter a direction up to 4,000 characters.');
+    if (turn.steering.length >= 10) throw new Error('There are already 10 directions waiting for this turn.');
+    turn.steering.push(clean);
+    if (turn.currentCallId) agentCallService.recordChatTurnSteering(turn.currentCallId, clean, 'queued');
+    this.emit('chat_turn.steering', { threadId, messageId, position: turn.steering.length });
+    return { status: 'queued', position: turn.steering.length };
+  }
+
+  private async runWithSteering<T>(turn: ActiveChatTurn, initialPrompt: string, run: (prompt: string) => Promise<T>): Promise<T | null> {
+    if (turn.stopRequested) return null;
+    const initiallyQueued = turn.steering.splice(0);
+    for (const direction of initiallyQueued) {
+      if (turn.currentCallId) agentCallService.recordChatTurnSteering(turn.currentCallId, direction, 'applied');
+    }
+    let prompt = initiallyQueued.length
+      ? `${initialPrompt}\n\nAdditional direction from the user before the response began:\n${initiallyQueued.map(item => `- ${item}`).join('\n')}`
+      : initialPrompt;
+    let result = await run(prompt);
+    while (!turn.stopRequested && turn.steering.length) {
+      const directions = turn.steering.splice(0);
+      for (const direction of directions) {
+        if (turn.currentCallId) agentCallService.recordChatTurnSteering(turn.currentCallId, direction, 'applied');
+      }
+      prompt = `Additional direction from the user while you were working:\n${directions.map(item => `- ${item}`).join('\n')}\n\nContinue the same conversation and apply these directions before you finish.`;
+      result = await run(prompt);
+    }
+    return turn.stopRequested ? null : result;
+  }
+
+  private async startProjectChatActivity(input: {
+    params: SendMessageParams;
+    project?: import('../models/index.js').Project;
+    threadId: string;
+    messageId: string;
+    agent: any;
+    instruction: string;
+    turn: ActiveChatTurn;
+    squadId?: string;
+  }): Promise<string | undefined> {
+    const { params, project, threadId, messageId, agent, instruction, turn } = input;
+    if (!project || !params.workspaceId || !params.userId) return undefined;
+    try {
+      const call = await agentCallService.startChatTurn({
+        workspaceId: params.workspaceId, project, threadId, messageId,
+        squadId: input.squadId, agent, requestedBy: params.userId, instruction
+      });
+      turn.currentCallId = call.id;
+      turn.currentRunId = call.id;
+      turn.currentAgentName = agent.name;
+      for (const attachment of params.attachmentIds?.length ? chatAttachmentService.references(threadId, params.attachmentIds, messageId) : []) {
+        agentCallService.recordChatTurnAttachment(call.id, attachment.name, attachment.contentType);
+      }
+      return call.id;
+    } catch (error) {
+      logInfo(`Chat activity session could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  }
+
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
     const { threadId, content, senderName = 'You', workspaceId, workspaceRole } = params;
     const now = new Date().toISOString();
@@ -262,15 +359,27 @@ export class ChatService extends EventEmitter {
     if (existingUserMessage && (existingUserMessage.senderType !== 'user' || existingUserMessage.content !== content)) {
       throw new Error('This message id already belongs to a different conversation message.');
     }
+    const attachmentIds = params.attachmentIds ?? existingUserMessage?.attachments?.map(item => item.id) ?? [];
+    const attachmentContext = chatAttachmentService.promptContext(threadId, attachmentIds, messageId);
     const userMessage: ChatMessage = existingUserMessage ?? {
       id: messageId,
       threadId,
       senderType: 'user',
       senderName,
       content,
+      attachments: attachmentContext.references.map(reference => params.buildRequest
+        ? { ...reference, inspection: 'stored_only' as const }
+        : reference),
       timestamp: now
     };
-    if (!existingUserMessage) saveChatMessageAndShare(userMessage);
+    if (existingUserMessage && attachmentIds.length &&
+        JSON.stringify(existingUserMessage.attachments?.map(item => item.id) ?? []) !== JSON.stringify(attachmentIds)) {
+      throw new Error('This message id already belongs to a different attachment set.');
+    }
+    if (!existingUserMessage) {
+      chatAttachmentService.linkToMessage(threadId, messageId, attachmentIds);
+      saveChatMessageAndShare(userMessage);
+    }
 
     if (params.buildRequest) {
       const existingBuildReply = existingUserMessage
@@ -280,12 +389,13 @@ export class ChatService extends EventEmitter {
 
       const repositories = [...new Set((params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []))
         .map(repository => repository.trim()).filter(Boolean))];
+      const buildAttachmentContext = chatAttachmentService.promptContext(threadId, attachmentIds, messageId, false, false);
       const builds = await startProjectBuildBatch({
         context: params.buildRequest.context,
         projectId: thread.projectId,
         threadId,
         messageId: userMessage.id,
-        content,
+        content: `${content}${buildAttachmentContext.text}`,
         repositories
       });
       const build = builds[0];
@@ -355,6 +465,15 @@ export class ChatService extends EventEmitter {
       return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
     }
 
+    const turn: ActiveChatTurn = {
+      threadId,
+      messageId: userMessage.id,
+      stopRequested: false,
+      steering: []
+    };
+    this.activeTurns.set(this.turnKey(threadId, userMessage.id), turn);
+    const requestContent = `${content}${attachmentContext.text}`;
+
     /**
      * 2. Resolve who is being addressed — and only from THIS message.
      *
@@ -381,9 +500,32 @@ export class ChatService extends EventEmitter {
       : resolveChatTarget(targetAgentId, targetSquadId, agents, squads);
 
     if (!addressed.length) {
-      const reply = await this.generateDefaultReply(content, threadId);
+      const projectForChat = thread.projectId
+        ? sqliteService.getProjects().find(item => item.id === thread!.projectId)
+        : undefined;
+      const activityCallId = await this.startProjectChatActivity({
+        params, project: projectForChat, threadId, messageId: userMessage.id,
+        agent: DEFAULT_ASSISTANT, instruction: requestContent, turn
+      });
+      const runId = activityCallId ?? `chat-${randomUUID()}`;
+      turn.currentCallId = activityCallId;
+      turn.currentRunId = runId;
+      turn.currentAgentName = DEFAULT_ASSISTANT.name;
+      const reply = await this.runWithSteering(turn, requestContent, prompt =>
+        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId)
+      );
+      if (!reply || turn.stopRequested) {
+        if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
+        const stopped = this.stoppedMessage(threadId);
+        saveChatMessageAndShare(stopped);
+        return { userMessage, agentMessage: stopped, agentMessages: [stopped] };
+      }
       saveChatMessageAndShare(reply);
       this.emit('chat_message', reply);
+      if (activityCallId) {
+        if (reply.senderType === 'system') agentCallService.failChatTurn(activityCallId, 'The selected runtime could not complete this chat turn.');
+        else agentCallService.completeChatTurn(activityCallId, reply.id);
+      }
       return { userMessage, agentMessage: reply, agentMessages: [reply] };
     }
 
@@ -416,7 +558,7 @@ export class ChatService extends EventEmitter {
       ? sqliteService.getProjects().find(item => item.id === thread!.projectId)
       : undefined;
     let activeSquadAssignments: Array<{ squadId: string; status: string }> = [];
-    if (project && workspaceId) {
+      if (project && workspaceId) {
       try {
         activeSquadAssignments = (await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id))
           .filter(assignment => assignment.status === 'active');
@@ -431,22 +573,11 @@ export class ChatService extends EventEmitter {
         sqliteService.getSquads().some(squad => squad.id === assignment.squadId && squad.memberAgentIds.includes(agent.id))
       )?.squadId;
       let activityCallId: string | undefined;
-      if (project && workspaceId && params.userId && squadId) {
-        try {
-          const call = await agentCallService.startChatTurn({
-            workspaceId,
-            project,
-            threadId,
-            messageId: userMessage.id,
-            squadId,
-            agent,
-            requestedBy: params.userId,
-            instruction: content
-          });
-          activityCallId = call.id;
-        } catch (error) {
-          logInfo(`Chat activity session could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
-        }
+      if (project && workspaceId && params.userId) {
+        activityCallId = await this.startProjectChatActivity({
+          params, project, threadId, messageId: userMessage.id, squadId, agent,
+          instruction: requestContent, turn
+        });
         if (index > 0 && agentMessages[index - 1]) {
           try {
             if (activityCallId) agentCallService.recordChatTurnHandoff(activityCallId, agentMessages[index - 1].senderName);
@@ -457,7 +588,21 @@ export class ChatService extends EventEmitter {
       }
       let reply: Awaited<ReturnType<ChatService['generateAgentReply']>>;
       try {
-        reply = await this.generateAgentReply(agent, content, threadId, priorTurn, activityCallId);
+        const runId = activityCallId ?? `chat-${randomUUID()}`;
+        turn.currentCallId = activityCallId;
+        turn.currentRunId = runId;
+        turn.currentAgentName = agent.name;
+        const steeredReply = await this.runWithSteering(turn, requestContent, prompt =>
+          this.generateAgentReply(agent, prompt, threadId, priorTurn, activityCallId, runId)
+        );
+        if (!steeredReply || turn.stopRequested) {
+          if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
+          const stopped = this.stoppedMessage(threadId);
+          saveChatMessageAndShare(stopped);
+          agentMessages.push(stopped);
+          break;
+        }
+        reply = steeredReply;
       } catch (error) {
         try {
           if (activityCallId) agentCallService.failChatTurn(activityCallId, error instanceof Error ? error.message : String(error));
@@ -492,7 +637,20 @@ export class ChatService extends EventEmitter {
       }
     }
 
+    if (!agentMessages.length) {
+      const stopped = this.stoppedMessage(threadId);
+      saveChatMessageAndShare(stopped);
+      agentMessages.push(stopped);
+    }
     return { userMessage, agentMessage: agentMessages[0], agentMessages };
+  }
+
+  private stoppedMessage(threadId: string): ChatMessage {
+    return {
+      id: `msg-${Date.now()}-${randomUUID()}-stopped`, threadId, senderType: 'system',
+      senderName: 'Alpha', content: 'This chat turn was stopped. No more agents will start for it.',
+      timestamp: new Date().toISOString()
+    };
   }
 
 
@@ -505,7 +663,13 @@ export class ChatService extends EventEmitter {
    * It keeps its own CLI session per thread, keyed by DEFAULT_ASSISTANT.id, so
    * a plain conversation has continuity without borrowing an agent's transcript.
    */
-  private async generateDefaultReply(prompt: string, threadId: string, workspaceId?: string): Promise<ChatMessage> {
+  private async generateDefaultReply(
+    prompt: string,
+    threadId: string,
+    workspaceId: string | undefined,
+    runId: string,
+    activityCallId?: string
+  ): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
       id: `msg-${Date.now()}-${randomUUID()}-alpha`,
@@ -531,12 +695,13 @@ export class ChatService extends EventEmitter {
     }
 
     const priorSession = sqliteService.getThreadSession(threadId, DEFAULT_ASSISTANT.id);
+    const cwd = chatWorkspace(threadId);
 
     logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}`);
 
     const turn = await runCliTurn({
-      runId: `chat-${Date.now()}`,
-      cwd: chatWorkspace(threadId),
+      runId,
+      cwd,
       provider: runtime.provider,
       modelName: runtime.modelName,
       // The tool policy still applies: a chat inspects, it does not mutate.
@@ -549,7 +714,8 @@ export class ChatService extends EventEmitter {
 `),
       personaName: DEFAULT_ASSISTANT.name,
       prompt,
-      priorSession: priorSession?.cliSessionId ?? null
+      priorSession: priorSession?.cliSessionId ?? null,
+      onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
     });
 
     if (turn.sessionId) {
@@ -594,7 +760,8 @@ export class ChatService extends EventEmitter {
     prompt: string,
     threadId: string,
     priorTurn?: string,
-    activityCallId?: string
+    activityCallId?: string,
+    runId = activityCallId ?? `chat-${randomUUID()}`
   ): Promise<{ content: string; thinking?: string; tools: any[]; activityCallId?: string; failed?: boolean }> {
     /**
      * Resume the CLI's own session so the agent remembers this thread.
@@ -677,7 +844,7 @@ export class ChatService extends EventEmitter {
 
     const cwd = chatWorkspace(threadId);
     const turn = await runCliTurn({
-      runId: activityCallId || `chat-${Date.now()}`,
+      runId,
       cwd,
       provider: persona.modelProvider,
       modelName: persona.modelName,
