@@ -494,9 +494,9 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
 }));
 
 /**
- * Local, per-project opt-in for orchestrated task builds. The project
- * preference is machine-local; the desktop operator switch remains the kill
- * switch, and neither setting grants repository or agent permissions.
+ * Local capability endpoint for desktop project builds. Orchestration is
+ * always enabled on desktop; neither this endpoint nor its compatibility
+ * write route grants repository or agent permissions.
  */
 dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
@@ -508,7 +508,7 @@ dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request
       reason: 'Task orchestration runs on an authorized Alpha desktop with the repository checkout.' });
   }
   const setting = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id));
-  res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
+  res.json({ ...setting, enabled: true, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
     reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The orchestrator is disabled on this desktop.' });
 }));
 
@@ -516,6 +516,7 @@ dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async 
   if (!requireWorkspaceCapability(req, res, 'project.update')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
   if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  if (!req.body.enabled) return res.status(400).json({ error: 'Project orchestration is always enabled on desktop.' });
   const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
   const setting = runWithWorkspace(req.workspace!.workspaceId, () =>

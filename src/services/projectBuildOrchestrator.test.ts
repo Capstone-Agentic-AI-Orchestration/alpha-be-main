@@ -29,11 +29,11 @@ let removeWorktree: ReturnType<typeof vi.fn>;
 let recordPlanningRecovery: ReturnType<typeof vi.fn>;
 let previousOrchestrationFlag: string | undefined;
 
-async function load(orchestrationEnabled = false, staleReservation?: any) {
+async function load(runtimeOrchestrationAvailable = true, staleReservation?: any) {
   checkoutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-project-build-'));
   if (typeof staleReservation === 'function') staleReservation = staleReservation(checkoutDir);
   previousOrchestrationFlag = process.env.ALPHA_ORCHESTRATION_ENABLED;
-  if (orchestrationEnabled) process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
+  if (runtimeOrchestrationAvailable) process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
   else delete process.env.ALPHA_ORCHESTRATION_ENABLED;
   issueRows = [];
   squadRuns = [];
@@ -194,7 +194,8 @@ async function load(orchestrationEnabled = false, staleReservation?: any) {
       getActiveAgentCallProjectLock: () => undefined,
       reserveOrchestrationPlanning: reservePlanning,
       releaseOrchestrationPlanningReservation: releasePlanning,
-      getProjectOrchestrationSetting: () => ({ enabled: orchestrationEnabled })
+      // Simulate a row written by an older build that had orchestration off.
+      getProjectOrchestrationSetting: () => ({ enabled: false })
     }
   }));
   vi.doMock('./boardWriteThrough.js', () => ({ addCommentAndShare: vi.fn() }));
@@ -218,115 +219,8 @@ afterEach(() => {
 });
 
 describe('project builds triggered from chat', () => {
-  it('targets the selected repository, starts the configured agents in order, and deduplicates retries', async () => {
+  it('routes project builds through the orchestrator by default despite an old disabled setting', async () => {
     const service = await load();
-    const input = {
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a calculator with keyboard support.',
-      requestedRepository: selectedRepo
-    };
-
-    const first = await service.startProjectBuild(input);
-    const retry = await service.startProjectBuild(input);
-
-    expect(first).toMatchObject({ status: 'started', repository: selectedRepo, issueIdentifier: 'CALC-1', branchName: 'build/CALC-1' });
-    expect(retry).toMatchObject({ status: 'in_progress', repository: selectedRepo, issueIdentifier: 'CALC-1' });
-    expect(issueRows).toHaveLength(1);
-    expect(issueRows[0]).toMatchObject({ projectId: project.id, githubRepo: selectedRepo, createdBy: 'user-1' });
-    expect(issueRows[0].description).toContain('Complete your assigned build stage in the project repository');
-    expect(startSquadRun).toHaveBeenCalledTimes(1);
-    expect(startSquadRun).toHaveBeenCalledWith(expect.objectContaining({
-      squadId: 'squad-1',
-      issueId: issueRows[0].id,
-      baseWorkspaceDir: checkoutDir,
-      memberAgentIds: ['agent-1', 'agent-2'],
-      memberAssignments: [
-        expect.objectContaining({
-          agentId: 'agent-1',
-          stageLabel: 'Plan acceptance criteria',
-          phase: 'requirements',
-          instructions: expect.stringContaining('Do not begin implementation')
-        }),
-        expect.objectContaining({
-          agentId: 'agent-2',
-          stageLabel: 'Build calculator interface',
-          phase: 'implementation',
-          instructions: expect.stringContaining('Implement only the feature slice')
-        })
-      ]
-    }));
-    const squadCall = startSquadRun.mock.calls[0][0];
-    expect(squadCall.plan.join('\n')).not.toContain('Implement the complete project change');
-    expect(squadCall.plan.join('\n')).not.toContain('final agent must run');
-  });
-
-  it('starts and deduplicates separate sequential builds for every selected repository', async () => {
-    const service = await load();
-    const input = {
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a full stack calculator.',
-      repositories: [selectedRepo, 'acme/shop-be']
-    };
-
-    const first = await service.startProjectBuildBatch(input);
-    const retry = await service.startProjectBuildBatch(input);
-
-    expect(first).toMatchObject([
-      { status: 'started', repository: selectedRepo, issueIdentifier: 'CALC-1', branchName: 'build/CALC-1' },
-      { status: 'started', repository: 'acme/shop-be', issueIdentifier: 'CALC-2', branchName: 'build/CALC-2' }
-    ]);
-    expect(retry).toMatchObject([
-      { status: 'in_progress', repository: selectedRepo, issueIdentifier: 'CALC-1' },
-      { status: 'in_progress', repository: 'acme/shop-be', issueIdentifier: 'CALC-2' }
-    ]);
-    expect(issueRows).toHaveLength(2);
-    expect(issueRows.map(issue => issue.githubRepo)).toEqual([selectedRepo, 'acme/shop-be']);
-    expect(startSquadRun).toHaveBeenCalledTimes(2);
-  });
-
-  it('does not guess a single repository when a multi-repo build has no selection', async () => {
-    const service = await load();
-    const result = await service.startProjectBuild({
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a full stack calculator.'
-    });
-
-    expect(result).toMatchObject({ status: 'blocked', reason: 'Choose one or more repositories to build: acme/shop-fe, acme/shop-be.' });
-    expect(createdIssue).not.toHaveBeenCalled();
-    expect(startSquadRun).not.toHaveBeenCalled();
-  });
-
-  it('does not split an opted-in task plan across multiple repositories', async () => {
-    const service = await load(true);
-    const result = await service.startProjectBuildBatch({
-      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
-      projectId: project.id,
-      threadId: 'thread-1',
-      messageId: `message-${crypto.randomUUID()}`,
-      content: 'Build a full stack calculator.',
-      repositories: [selectedRepo, 'acme/shop-be']
-    });
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({
-      status: 'blocked',
-      reason: 'Task-based builds support one repository per plan. Choose a single repository; this request was not split into unrelated workflows.'
-    });
-    expect(createdIssue).not.toHaveBeenCalled();
-    expect(startSquadRun).not.toHaveBeenCalled();
-  });
-
-  it('routes an opted-in single-repository chat build through the planner and task orchestrator', async () => {
-    const service = await load(true);
     const input = {
       context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
       projectId: project.id,
@@ -344,21 +238,96 @@ describe('project builds triggered from chat', () => {
         id: 'requirements-task', ownerAgentId: 'agent-1'
       }
     });
+    expect(issueRows).toHaveLength(1);
+    expect(issueRows[0]).toMatchObject({ projectId: project.id, githubRepo: selectedRepo, createdBy: 'user-1' });
+    expect(startOrchestration).toHaveBeenCalledTimes(1);
+    expect(startOrchestration).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: project.id, repository: selectedRepo, planSource: 'model',
+      planningOwnerSessionId: expect.any(String), plan: expect.objectContaining({ tasks: expect.any(Array) })
+    }));
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('keeps orchestrator plans to one selected repository at a time', async () => {
+    const service = await load();
+    const input = {
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.',
+      repositories: [selectedRepo, 'acme/shop-be']
+    };
+
+    const result = await service.startProjectBuildBatch(input);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      status: 'blocked',
+      reason: 'Orchestrator plans run against one repository at a time. Choose a single repository for this build.'
+    });
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(startOrchestration).not.toHaveBeenCalled();
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('does not guess a single repository when a multi-repo build has no selection', async () => {
+    const service = await load();
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.'
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: 'Choose one repository to build: acme/shop-fe, acme/shop-be.' });
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to the legacy squad runner if the desktop orchestrator is unavailable', async () => {
+    const service = await load(false);
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a calculator with keyboard support.',
+      requestedRepository: selectedRepo
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: expect.stringContaining('Desktop project builds require the orchestrator') });
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(startOrchestration).not.toHaveBeenCalled();
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('routes a selected single-repository request through the planner and task orchestrator', async () => {
+    const service = await load();
+    const result = await service.startProjectBuildBatch({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-1',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build a full stack calculator.',
+      repositories: [selectedRepo]
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ status: 'started', repository: selectedRepo, orchestrationRunId: expect.any(String) });
     expect(reservePlanning).toHaveBeenCalledWith(expect.objectContaining({
       projectId: project.id, repository: selectedRepo, ownerSessionId: expect.any(String)
     }));
     expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
-      goal: 'Build a calculator with keyboard support.',
+      goal: 'Build a full stack calculator.',
       planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
       eligibleAgents: [
         { id: 'agent-1', role: 'Research Agent', ready: true },
         { id: 'agent-2', role: 'Frontend Agent', ready: true }
       ]
     }));
-    expect(startOrchestration).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: project.id, repository: selectedRepo, planSource: 'model',
-      planningOwnerSessionId: expect.any(String), plan: expect.objectContaining({ tasks: expect.any(Array) })
-    }));
+    expect(startOrchestration).toHaveBeenCalledTimes(1);
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 

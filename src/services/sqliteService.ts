@@ -437,7 +437,7 @@ export class SQLiteService {
       CREATE TABLE IF NOT EXISTS project_orchestration_settings (
         workspace_id TEXT NOT NULL,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
         updated_by TEXT,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (workspace_id, project_id)
@@ -2121,7 +2121,9 @@ export class SQLiteService {
     const row = this.db.prepare(`SELECT enabled, updated_at, updated_by
       FROM project_orchestration_settings WHERE workspace_id = ? AND project_id = ?`)
       .get(this.workspaceId(), projectId) as { enabled: number; updated_at: string; updated_by: string | null } | undefined;
-    return row ? { enabled: row.enabled === 1, updatedAt: row.updated_at, updatedBy: row.updated_by ?? undefined } : { enabled: false };
+    // Keep old per-project rows readable for migration history, but an old
+    // disabled value can no longer route desktop builds around the orchestrator.
+    return row ? { enabled: true, updatedAt: row.updated_at, updatedBy: row.updated_by ?? undefined } : { enabled: true };
   }
 
   setProjectOrchestrationEnabled(projectId: string, enabled: boolean, updatedBy: string): { enabled: boolean; updatedAt: string; updatedBy: string } {
@@ -2130,12 +2132,13 @@ export class SQLiteService {
     return this.db.transaction(() => {
       const project = this.db.prepare('SELECT id FROM projects WHERE workspace_id = ? AND id = ?').get(workspaceId, projectId);
       if (!project) throw new Error('Project not found');
+      if (!enabled) throw new Error('Project orchestration is always enabled on desktop');
       this.db.prepare(`INSERT INTO project_orchestration_settings (workspace_id, project_id, enabled, updated_by, updated_at)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(workspace_id, project_id) DO UPDATE SET enabled = excluded.enabled,
           updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-        .run(workspaceId, projectId, enabled ? 1 : 0, updatedBy, now);
-      return { enabled, updatedAt: now, updatedBy };
+        .run(workspaceId, projectId, 1, updatedBy, now);
+      return { enabled: true, updatedAt: now, updatedBy };
     })();
   }
 

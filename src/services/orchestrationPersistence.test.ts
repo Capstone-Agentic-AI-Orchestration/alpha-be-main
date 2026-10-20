@@ -158,19 +158,25 @@ describe('task orchestration persistence', () => {
     expect(store.listDueOrchestrationOutbox('2026-10-19T00:00:02.000Z', 100)).toEqual([]);
   });
 
-  it('keeps the project orchestration opt-in durable and workspace-scoped', () => {
+  it('keeps desktop orchestration always on and workspace-scoped', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-setting-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     runWithWorkspace('ws-default', () => store!.createProject({ id: 'project-opt-in', name: 'Opt in', key: 'OPT' }));
 
-    expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-opt-in').enabled)).toBe(false);
+    expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-opt-in').enabled)).toBe(true);
+    runWithWorkspace('ws-default', () => {
+      (store as any).db.prepare(`INSERT INTO project_orchestration_settings
+        (workspace_id, project_id, enabled, updated_by, updated_at) VALUES (?, ?, 0, ?, ?)`)
+        .run('ws-default', 'project-opt-in', 'legacy-user', '2026-10-20T00:00:00.000Z');
+    });
+    expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-opt-in').enabled)).toBe(true);
     runWithWorkspace('ws-default', () => store!.setProjectOrchestrationEnabled('project-opt-in', true, 'user-1'));
     expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-opt-in'))).toMatchObject({
       enabled: true, updatedBy: 'user-1'
     });
-    expect(runWithWorkspace('other-workspace', () => store!.getProjectOrchestrationSetting('project-opt-in').enabled)).toBe(false);
     expect(() => runWithWorkspace('other-workspace', () => store!.setProjectOrchestrationEnabled('project-opt-in', false, 'user-2'))).toThrow(/Project not found/);
     expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-opt-in').enabled)).toBe(true);
+    expect(() => runWithWorkspace('ws-default', () => store!.setProjectOrchestrationEnabled('project-opt-in', false, 'user-1'))).toThrow(/always enabled on desktop/);
   });
 
   it('adds orchestration tables when opening a populated database from before orchestration', () => {
@@ -206,7 +212,7 @@ describe('task orchestration persistence', () => {
       id: 'legacy-project', name: 'Legacy', key: 'LEG'
     });
     expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('legacy-project'))).toMatchObject({
-      enabled: false
+      enabled: true
     });
     expect(store!.listDueOrchestrationOutbox(new Date().toISOString(), 10)).toEqual([]);
   });

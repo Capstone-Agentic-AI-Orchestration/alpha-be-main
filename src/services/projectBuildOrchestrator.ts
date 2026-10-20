@@ -262,7 +262,7 @@ async function startOrchestratedProjectBuild(input: {
 }): Promise<ProjectBuildStartResult> {
   const { context, project, repository, checkoutDir, squad, members, buildSteps } = input;
   if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
-  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('This project is opted into task-based builds, but the orchestrator is disabled on this desktop. Enable it in the desktop environment or turn off this project opt-in.', project, repository);
+  if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('Desktop project builds require the orchestrator, but it is unavailable in this desktop runtime. Check the desktop build configuration.', project, repository);
 
   const workspaceId = context.workspaceId;
   const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${input.threadId}:${input.messageId}`).digest('hex').slice(0, 16);
@@ -344,11 +344,11 @@ async function startOrchestratedProjectBuild(input: {
   if (!plannerCandidate) {
     const reason = configuredPlannerStep
       ? `The configured ${configuredPlannerStep.phase} step owner is unavailable or not ready. Update that owner before starting the task workflow.`
-      : 'The project squad has no ready Research, Requirements, Manager, or Architecture persona to validate the task plan.';
+      : 'The project squad has no ready Research, Requirements, Manager, Architecture, or Orchestrator Agent persona to validate the task plan.';
     return blocked(reason, project, repository);
   }
   if (!roleCanOwnOrchestrationTask('requirements', plannerCandidate.persona.role)) {
-    return blocked(`${plannerCandidate.persona.role} cannot act as the read-only planning orchestrator. Assign a Research, Manager, or Architecture persona to the planning step.`, project, repository);
+    return blocked(`${plannerCandidate.persona.role} cannot act as the read-only planning orchestrator. Assign a Research, Requirements, Manager, Architecture, or Orchestrator Agent persona to the planning step.`, project, repository);
   }
   const plannerIdentity: PlannerAgentIdentity = {
     id: plannerCandidate.agent.id,
@@ -518,15 +518,14 @@ export function startProjectBuild(input: StartProjectBuildInput): Promise<Projec
   return pending;
 }
 
-/** Start one independent, idempotent squad build for each selected repository. */
+/** Start one idempotent orchestrator plan for the selected repository. */
 export function startProjectBuildBatch(
   input: Omit<StartProjectBuildInput, 'requestedRepository'> & { repositories?: string[] }
 ): Promise<ProjectBuildStartResult[]> {
   const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
-  const projectOptedIn = Boolean(input.projectId && !IS_CLOUD && typeof sqliteService.getProjectOrchestrationSetting === 'function' &&
-    runWithWorkspace(input.context.workspaceId, () => sqliteService.getProjectOrchestrationSetting(input.projectId!).enabled));
-  if (projectOptedIn && repositories.length > 1) {
-    return Promise.resolve([blocked('Task-based builds support one repository per plan. Choose a single repository; this request was not split into unrelated workflows.', undefined, repositories.join(', '))]);
+  const desktopProjectBuild = Boolean(input.projectId && !IS_CLOUD);
+  if (desktopProjectBuild && repositories.length > 1) {
+    return Promise.resolve([blocked('Orchestrator plans run against one repository at a time. Choose a single repository for this build.', undefined, repositories.join(', '))]);
   }
   const targets: Array<string | undefined> = repositories.length ? repositories : [undefined];
   return Promise.all(targets.map(async repository => {
@@ -570,7 +569,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       return blocked(`“${requested}” is not a repository attached to ${project.name}. Choose one of this project’s repositories.`, project);
     }
     if (!requested && repos.length > 1) {
-      return blocked(`Choose one or more repositories to build: ${repos.join(', ')}.`, project);
+      return blocked(`Choose one repository to build: ${repos.join(', ')}.`, project);
     }
 
     let repository = requested || undefined;
@@ -659,9 +658,8 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     const missing = members.filter(id => !agents.some(agent => agent.id === id));
     if (missing.length) return blocked(`${squad.name} includes unavailable agents. Update the squad membership before starting a build.`, project, repository);
 
-    const orchestrationOptedIn = !IS_CLOUD && typeof sqliteService.getProjectOrchestrationSetting === 'function' &&
-      runWithWorkspace(workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id).enabled);
-    if (orchestrationOptedIn) {
+    const useOrchestrator = !IS_CLOUD && Boolean(project.id);
+    if (useOrchestrator) {
       if (!repository) return blocked('Task-based builds require one repository attached to this project.', project);
       return startOrchestratedProjectBuild({
         context, project, repository, checkoutDir: checkout.dir, squad, members: agents,
