@@ -141,7 +141,9 @@ describe('deterministic orchestration orchestrator', () => {
         requirementCoverage: [{ requirementId: 'REQ-CREATE', evidence: 'The endpoint creates a task.' }],
         criteriaEvidence: [{ criterion: 'A created task survives a database reload.', evidence: 'Persistence is implemented.' }],
         deliverables: [{ summary: 'Task creation endpoint.', paths: ['src/tasks.ts'] }],
-        reportedChecks: [],
+        reportedChecks: [{
+          script: 'npm test', result: 'blocked', evidence: 'The check could not run because the test runner was unavailable.'
+        }],
         blockers: []
       }), createdAt: '2026-10-19T00:00:00.000Z' }],
       stages: [{ id: 'tests', status: 'success' }]
@@ -149,7 +151,9 @@ describe('deterministic orchestration orchestrator', () => {
     snapshot = (await orchestrator.handleRunnerCompleted(runEvent))!;
     expect(snapshot.tasks[0].status).toBe('submitted');
     expect(snapshot.attempts[0].result).toMatchObject({
-      summary: 'Endpoint submitted.', verification: { stageStatus: 'success' }
+      summary: 'Endpoint submitted.',
+      verification: { stageStatus: 'success' },
+      agentReport: { reportedChecks: [{ script: 'npm test', result: 'not_run' }] }
     });
     // A repeated process event is ignored after the durable submission.
     const submittedEventCount = store.listOrchestrationEvents(snapshot.run.id).length;

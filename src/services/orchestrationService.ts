@@ -8,6 +8,7 @@ import {
   ensureTaskAssignmentReasons,
   parseOrchestrationPlan,
   validateOrchestrationPlan,
+  type OrchestrationRequiredCheck,
   type OrchestrationTaskKind
 } from './orchestrationContract.js';
 import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
@@ -71,7 +72,7 @@ export interface OrchestrationTaskPackage {
     repository: string;
     description: string;
     acceptanceCriteria: string[];
-    requiredChecks: Array<'verify' | 'check' | 'validate' | 'ci' | 'test' | 'typecheck' | 'lint'>;
+    requiredChecks: OrchestrationRequiredCheck[];
     scope: { includePaths: string[]; excludePaths: string[] };
   };
   requirements: Array<{ id: string; description: string }>;
@@ -246,6 +247,29 @@ function normalizeReportFieldAliases(value: unknown): unknown {
       return check;
     });
   }
+  if (Array.isArray(report.reviewFindings)) {
+    normalized.reviewFindings = report.reviewFindings.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+      const finding = { ...(item as Record<string, unknown>) };
+      const aliases: Array<[string, string]> = [
+        ['targetTaskId', 'taskId'],
+        ['requirementId', 'requirement'],
+        ['path', 'file'],
+        ['instruction', 'recommendation']
+      ];
+      for (const [field, alias] of aliases) {
+        if (finding[field] === undefined && typeof finding[alias] === 'string') {
+          finding[field] = finding[alias];
+          delete finding[alias];
+        } else if (finding[field] === finding[alias]) {
+          delete finding[alias];
+        }
+      }
+      const severity = normalizeReviewFindingSeverity(finding.severity);
+      if (severity !== undefined) finding.severity = severity;
+      return finding;
+    });
+  }
   return normalized;
 }
 
@@ -255,7 +279,19 @@ function normalizeReportedCheckResult(value: unknown): 'passed' | 'failed' | 'no
   const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (['passed', 'pass', 'success', 'successful', 'succeeded', 'ok'].includes(normalized)) return 'passed';
   if (['failed', 'fail', 'failure', 'error', 'errored'].includes(normalized)) return 'failed';
-  if (['not_run', 'skipped', 'skip', 'not_executed', 'unrun'].includes(normalized)) return 'not_run';
+  // A blocked check did not execute. Preserve the specialist's explanation in
+  // evidence while keeping the version 1 result vocabulary consistent.
+  if (['not_run', 'skipped', 'skip', 'not_executed', 'unrun', 'blocked'].includes(normalized)) return 'not_run';
+  return undefined;
+}
+
+/** Normalize standard review severity labels to Alpha's blocking vocabulary. */
+function normalizeReviewFindingSeverity(value: unknown): 'warning' | 'blocking' | 'critical' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (['warning', 'warn', 'info', 'informational', 'low', 'minor'].includes(normalized)) return 'warning';
+  if (['blocking', 'blocker', 'medium', 'moderate', 'high', 'major'].includes(normalized)) return 'blocking';
+  if (['critical', 'severe'].includes(normalized)) return 'critical';
   return undefined;
 }
 
