@@ -13,8 +13,8 @@ Implemented in source:
 - Reviewers receive the accepted change set and, for an empty change set, a small set of readable source/test files limited to approved task paths. If Alpha cannot supply safe review material, it blocks before launching a reviewer.
 - Reviewer instructions point to the available read-only inspection tools and do not rely on shell commands. The review process stays unable to edit files, change Git state, publish, or deploy.
 - Alpha records field-level report errors and the bounded original response. A malformed or incomplete report can be returned to the same specialist for a bounded read-only correction; it does not use a code-work attempt or create an implementation-owner task.
-- The Live Build Room separates **Build plan** from **Live work**, keeps the recovery notice and detailed report evidence readable, and directs artifact actions to the producing agent when known. Plan tasks can open their exact attempt; the inspector can return to the linked task.
-- Live work shows one compact card per assigned specialist, including planned specialists who have not started. A card shows the current or next assignment and the specialist's latest run; retry history stays in the build plan. Opening an older plan task can show its exact run in the inspector without creating a duplicate card.
+- The Live Build Room separates **Orchestrator build** from **Live agent workflows & actions**, keeps the recovery notice and detailed report evidence readable, and directs artifact actions to the producing agent when known. Plan tasks can open their exact attempt; the inspector can return to the linked task.
+- Live work renders one interactive node per assigned specialist, including agents that have not started. Arrows follow task dependencies and recorded handoffs; a running node has a traveling border trace, while active handoffs animate along their edge. Retry history stays in the build plan. Opening an older plan task can show its exact run in the inspector without creating a duplicate node.
 - Task retry eligibility is projected by the backend from the run state, task state, desktop capability, and work-attempt count. Chat and Live Build Room use that value for the button, while the retry endpoint checks the state and limit again before dispatch.
 - Natural-language requests such as “rerun the build” stay attached to the exact saved build and use its authorized recovery action; ambiguous or missing build context is surfaced instead of being sent to a regular chat agent that cannot run the build.
 - A report with the common `requirement`/`requirementId` key mismatch is safely normalized when unambiguous. If a report still fails after Alpha’s automatic format correction, the result details show the exact error and offer one additional user-authorized, read-only correction from the same specialist.
@@ -24,7 +24,7 @@ Implemented in source during this completion:
 - Process-start transport failures have a separate, bounded retry count and do not consume code-repair attempts. Elapsed-time, optional token/cost, and recovery-window limits are checked before another handoff; packaged builds receive the allowlisted settings.
 - Restart recovery checks that the prior writer is confirmed stopped and that the saved worktree, branch, clean state, and accepted checkpoint still match. It never silently resets or cleans a mismatched workspace; unsafe or ambiguous work remains blocked for inspection.
 - Final-validation evidence can create a versioned correction chain routed to the accepted code owners, followed by a different reviewer and fresh final validation. Missing or unassignable evidence remains blocked for human inspection.
-- Live Build Room now has persistent Build plan and Live work tabs, one roster card per assigned agent with the latest run, exact task-to-attempt and inspector-to-task navigation, producer-aware artifact targeting, bounded long content, and keyboard-operable tab controls.
+- Live Build Room has persistent Orchestrator build and Live agent workflows & actions tabs, one graph node per assigned agent, exact task-to-attempt and inspector-to-task navigation, producer-aware artifact targeting, bounded long content, keyboard-operable graph controls, and reduced-motion support. The graph implementation and artifact reflow are in frontend source; source visual acceptance remains outstanding.
 - A separate source test-file expectation was updated for the current task-package version. Automated test suites and installed-app visual scenarios were not run in this task.
 
 Remaining acceptance gate:
@@ -183,9 +183,9 @@ Use `chatWriteThrough` and existing ownership/sync rules. Persist bounded, sanit
 
 ### Design diagnosis and direction
 
-The current source places the Orchestrator plan and the live agent grid/inspector in one long page. Agent cards, the inspector, filters, and artifact tiles use different densities and competing containers. The artifact grid can request three columns while sharing space with a 360 px inspector, and several text/command/path containers need a full parent-to-child width audit. These are source-level overflow risks; confirm the actual failures with rendered long-content fixtures before calling the overflow fixed.
+The Live Build Room now separates Orchestrator decisions from live execution. The live view uses an interactive handoff graph in place of the agent card grid, with the existing agent inspector and artifact actions beside it. Artifact names and details can be long, so keep them wrapped inside a bounded, scrollable list.
 
-Use the Orchestrator plan portion as the visual reference: its typography hierarchy, restrained violet/slate palette, surface treatment, spacing, borders, status language, and disclosure patterns. Retain semantic success, warning, and failure colors. Improve the existing system without introducing another font, icon family, decorative dashboard style, or large unrelated redesign.
+Use the Orchestrator plan portion as the visual reference: its typography hierarchy, restrained violet/slate palette, surface treatment, spacing, borders, status language, and disclosure patterns. The [Nodeflow node-based UI kit](https://www.figma.com/community/file/1677318731566772022/nodeflow-node-based-ai-system-ui-kit-free-version) is a reference for clear node states and workflow canvases; keep Alpha's own components, icons, and semantic colors. Retain accessible success, warning, failure, and waiting states.
 
 The key distinction should be between deciding what happens and inspecting what is happening. Give each view enough space and a clear purpose, with direct navigation between a planned task and its live execution.
 
@@ -207,15 +207,15 @@ Keep the room header outside both panels: project/build selectors, build identit
 - Preserve direct-agent and legacy-build visibility. Give the plan tab an honest empty state when there is no coordinated plan; keep execution history accessible in the live tab.
 - Use proper tab/tabpanel relationships, selected state, roving keyboard focus, arrow-key and Home/End behavior, visible focus, and touch-sized controls. Inactive panels must not expose hidden controls to keyboard or assistive technology.
 
-### Live agent composition
+### Live agent graph and inspector
 
-- Give the live view one concise heading and state summary. Keep agent search and status filters in the same workspace toolbar instead of another competing card above the cards.
-- Show every distinct specialist assigned to the selected build together, including specialists who have not started. Render one compact card per agent, never one card per task attempt. If one agent owns multiple tasks, show the active or next assignment, a task count, and the latest run's activity; keep earlier attempts in the build plan/timeline.
-- Sort the roster by active work, review, stopped work, queued work, then completed work. Make the number of assigned specialists and tasks visible, and keep the full roster on one responsive page with optional search/status filters rather than pagination.
-- Keep each card to the agent/role, one status, current or next task, optional assignment count, and one recent activity line. Put full activity, tools, files, and historical attempts in the inspector or build plan. Avoid rendering a log excerpt in every card.
+- Every graph node represents one assigned specialist, never a task attempt. Show the agent name/role, current status, current or next assignment, and one recent activity line; keep full activity, tools, files, and historical attempts in the existing inspector or build plan.
+- Build forward arrows from actual task dependencies or recorded runtime handoffs. Show review-correction arrows back to the implementation owner only when the run records a correction cycle. Do not invent edges for independent tasks. Distinguish completed, active, waiting, and attention handoffs.
+- Animate a short glowing trace around the border of a running agent node to communicate ongoing work. Animate a moving pulse along an active handoff. Keep inactive edges still, make active motion restrained, and honor the system's reduced-motion preference.
+- Keep agent search and status filters in the graph toolbar. Make specialist and handoff counts visible. Use inner scrolling and fit/zoom controls when the graph is wider than its pane; keep the page itself within its parent width.
 - A plan task must open that task's exact run in the inspector while highlighting the agent's single roster card. A card click returns the inspector to that agent's latest run. If its current/next task differs from the latest run's task, expose both destinations clearly so the agent assignment and inspected attempt are not confused.
 - Give the selected execution a clear but restrained border/surface treatment. Keep the execution status, task acceptance status, and whole-build status distinct; a process that finished does not by itself mean its work was accepted.
-- Size the card grid from available content width. Start with one usable column, increase when the actual container can support it, and account for the open inspector and the application's navigation sidebar. Do not base all column changes solely on viewport width.
+- Let the graph canvas adapt to the available pane width. The inspector can sit beside the graph when there is room and move below it on narrower layouts. Do not base this change solely on viewport width.
 - On wide layouts, use a readable card workspace plus a bounded inspector. On smaller layouts, use an inline detail section or an accessible sheet with close/focus-return behavior. Avoid squeezing a fixed-width inspector beside narrow cards.
 - Align the inspector's Activity, Handoff, Files, and Tools controls with the plan section's disclosure/focus styling. Keep current work visible, put verbose output behind disclosure, and preserve selection while activity updates.
 - Distinguish live, waiting, completed, stopped, stale/no-signal, and retrying states. Show useful empty/loading/error states without fabricated activity, timestamps, or progress.
@@ -243,21 +243,22 @@ Chat links should preserve the originating build and recovery episode. After the
 ### Frontend implementation boundaries
 
 - Refactor `LiveBuildRoomView.tsx` into a shared room shell plus separate build and live-workflow panels. Keep fetches, build selection, socket subscriptions, and authorized actions in the owning room/controller layer.
-- Reuse `OrchestrationWorkflowPanel.tsx` as the plan view. Extract the agent workspace/inspector and artifact presentation into focused components rather than expanding the already large room file further.
+- Reuse `OrchestrationWorkflowPanel.tsx` as the plan view. Keep the graph in `AgentHandoffGraph.tsx`; leave live-room fetching, session state, agent selection, and authorized actions in `LiveBuildRoomView.tsx`. Keep artifact producer navigation tied to the existing inspector action.
 - Use `AppContext` tab-session state for the sub-tab and appropriate view state. Add only the artifact metadata needed for correct producer/run targeting to `shared/types` and the backend projection; do not invent file-serving endpoints for this redesign.
 - Keep UI work independently reviewable from recovery-policy changes, with a shared contract for recovery state and available actions.
 
 ### UI acceptance gate
 
 1. The two sub-tabs separate the plan from live workflows; switching them preserves the selected run, filters, agent, and recorded activity.
-2. The room shows one card for every distinct assigned specialist, including not-yet-started specialists. A retry does not add a duplicate card; a task click can still open its exact attempt in the inspector, and a card click returns to the latest run.
-3. An artifact opens the correct output/producer rather than whichever agent happened to be selected.
-4. The plan and live view share typography, surfaces, spacing, state labels, and recovery actions. Active and resolved failures are visually distinct.
-5. At 320, 390, 768, 1024, 1280, and 1366 px widths, including the application's sidebar and an open inspector, the page has no unintended horizontal overflow. Also verify a larger desktop and browser zoom/text expansion.
-6. Long unbroken paths, 200-character names, deep repository paths, multiline errors, large command output, and many artifacts do not obscure controls or expand the room beyond its container. The full content remains accessible and copyable.
-7. Tabs, cards, inspector controls, file details, and recovery actions work by keyboard and touch, with focus restored on close and no hidden-panel controls in the tab sequence.
-8. A polling/socket refresh does not reset the sub-tab or inspector, remount the entire interaction unnecessarily, create duplicate streams, or steal focus.
-9. Capture and inspect both sub-tabs on laptop and narrow layouts, with empty, running, repairing, waiting-for-developer, stopped, and completed fixtures. Record visual and interaction findings before packaging.
+2. The graph shows one node for every distinct assigned specialist, including not-yet-started specialists. A retry does not add a duplicate node; a task click can still open its exact attempt in the inspector, and a node click selects the matching agent activity.
+3. Graph edges map to task dependencies or recorded handoffs. Review-correction arrows return to the implementation owner. Running nodes show a traveling border trace, active edges show motion, and reduced-motion settings disable those effects.
+4. An artifact opens the correct output/producer rather than whichever agent happened to be selected.
+5. The plan and live view share typography, surfaces, spacing, state labels, and recovery actions. Active and resolved failures are visually distinct.
+6. At 320, 390, 768, 1024, 1280, and 1366 px widths, including the application's sidebar and an open inspector, the page has no unintended horizontal overflow. Also verify a larger desktop and browser zoom/text expansion.
+7. Long unbroken paths, 200-character names, deep repository paths, multiline errors, large command output, and many artifacts do not obscure controls or expand the room beyond its container. The full content remains accessible and copyable.
+8. Tabs, nodes, inspector controls, file details, and recovery actions work by keyboard and touch, with focus restored on close and no hidden-panel controls in the tab sequence.
+9. A polling/socket refresh does not reset the sub-tab or inspector, remount the entire interaction unnecessarily, create duplicate streams, or steal focus.
+10. Capture and inspect both sub-tabs on laptop and narrow layouts, with empty, running, repairing, waiting-for-developer, stopped, and completed fixtures. Record visual and interaction findings before packaging.
 
 ## Review access and agent handoff reliability
 
