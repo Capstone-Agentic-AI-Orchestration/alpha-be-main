@@ -697,6 +697,7 @@ export type OrchestrationRecoveryPhase =
 
 export type OrchestrationRecoveryActionName =
   | 'explain_failure'
+  | 'retry_report_format'
   | 'repair_and_continue'
   | 'provide_guidance'
   | 'recheck_prerequisite'
