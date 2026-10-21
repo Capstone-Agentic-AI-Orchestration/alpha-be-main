@@ -97,7 +97,7 @@ describe('orchestration runner adapter', () => {
       readinessFor: () => ({ status: 'ready', detail: 'Ready.' })
     });
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 3,
+      packageVersion: 5,
       goal: 'Create and complete tasks.',
       projectContext: '',
       exclusions: ['No authentication.'],

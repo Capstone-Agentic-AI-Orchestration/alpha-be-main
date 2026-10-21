@@ -8,6 +8,7 @@ import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { orchestrationRecoveryService } from '../services/orchestrationRecoveryService.js';
 import { route } from './asyncRoute.js';
 import { desktopOnly } from './desktopOnly.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -17,7 +18,7 @@ export const orchestrationRouter = Router();
 function errorResponse(res: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : 'The task workflow action failed.';
   const status = /not found|unavailable/i.test(message) ? 404
-    : /cannot|only |already|changed|retry|stale|no longer|disabled|validation|review/i.test(message) ? 409
+    : /cannot|only |already|changed|retry|stale|no longer|disabled|validation|review|action key|refresh|under \d+ characters|add the direction/i.test(message) ? 409
       : 500;
   res.status(status).json({ error: message });
 }
@@ -40,6 +41,79 @@ function scopedSnapshot(req: Request, res: Response) {
   }
   return snapshot;
 }
+
+orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
+  if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
+  if (!workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, req.params.projectId)) {
+    return res.status(404).json({ error: 'This project build is not available to this account.' });
+  }
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  try {
+    const state = await orchestrationRecoveryService.getState({
+      workspaceId: req.workspace!.workspaceId,
+      runId: snapshot.run.id,
+      canControl: workspaceRegistry.can(req.workspace!.role, 'squad.run')
+    });
+    res.json(state);
+  } catch (error) {
+    errorResponse(res, error);
+  }
+}));
+
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/recovery/actions', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res)) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+  const actionNames = ['explain_failure', 'repair_and_continue', 'provide_guidance', 'recheck_prerequisite',
+    'plan_final_validation_corrections', 'resume_checkpoint', 'review_saved_changes', 'keep_paused', 'cancel_build'] as const;
+  const integerFields = ['expectedRunRevision', 'expectedRecoveryRevision'] as const;
+  if (!integerFields.every(key => Number.isSafeInteger(body[key]) && Number(body[key]) >= 0) ||
+      (body.expectedTaskRevision !== undefined && (!Number.isSafeInteger(body.expectedTaskRevision) || Number(body.expectedTaskRevision) < 0))) {
+    return res.status(400).json({ error: 'The build and recovery versions must be non-negative whole numbers.' });
+  }
+  if (typeof body.recoveryId !== 'string' || body.recoveryId.length > 160 ||
+      typeof body.idempotencyKey !== 'string' || !/^[A-Za-z0-9:_-]{8,160}$/.test(body.idempotencyKey) ||
+      typeof body.action !== 'string' || !actionNames.includes(body.action as typeof actionNames[number])) {
+    return res.status(400).json({ error: 'Choose a valid recovery action and refresh the build details before continuing.' });
+  }
+  if (body.guidance !== undefined && (typeof body.guidance !== 'string' || body.guidance.length > 2_000)) {
+    return res.status(400).json({ error: 'Keep your direction under 2,000 characters.' });
+  }
+  if (body.threadId !== undefined && (typeof body.threadId !== 'string' || body.threadId.length > 200)) {
+    return res.status(400).json({ error: 'This chat could not be linked to the selected build. Refresh and try again.' });
+  }
+  const episode = runWithWorkspace(req.workspace!.workspaceId, () =>
+    sqliteService.getOrchestrationRecoveryEpisode(snapshot.run.id, body.recoveryId as string));
+  if (episode?.taskId) {
+    const task = snapshot.tasks.find(item => item.id === episode.taskId);
+    if (!task || !await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, req.params.projectId, task.ownerAgentId)) {
+      return res.status(404).json({ error: 'This recovery is not available to this account.' });
+    }
+  }
+  try {
+    const result = await orchestrationRecoveryService.executeAction({
+      workspaceId: req.workspace!.workspaceId,
+      projectId: req.params.projectId,
+      runId: snapshot.run.id,
+      recoveryId: body.recoveryId as string,
+      actorId: req.workspace!.userId,
+      canControl: workspaceRegistry.can(req.workspace!.role, 'squad.run'),
+      expectedRunRevision: Number(body.expectedRunRevision),
+      expectedRecoveryRevision: Number(body.expectedRecoveryRevision),
+      expectedTaskRevision: body.expectedTaskRevision === undefined ? undefined : Number(body.expectedTaskRevision),
+      idempotencyKey: body.idempotencyKey as string,
+      action: body.action as typeof actionNames[number],
+      guidance: typeof body.guidance === 'string' ? body.guidance : undefined,
+      threadId: typeof body.threadId === 'string' ? body.threadId : undefined
+    });
+    res.json(result);
+  } catch (error) {
+    errorResponse(res, error);
+  }
+}));
 
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/events', desktopOnly, route(async (req: Request, res: Response) => {
   if (!authorizedProject(req, res)) return;

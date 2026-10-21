@@ -27,7 +27,11 @@ import {
   AgentCall,
   AgentCallTarget,
   AgentCallArtifact,
-  ChatAttachmentRecord
+  ChatAttachmentRecord,
+  OrchestrationRecoveryEpisode,
+  OrchestrationRecoveryActionRecord,
+  OrchestrationRecoveryActionName,
+  OrchestrationRecoveryMilestone
 } from '../models/index.js';
 import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
@@ -130,6 +134,8 @@ function orchestrationRunFromRow(row: any, plan: OrchestrationPlan): Orchestrati
     workspaceId: row.workspace_id,
     projectId: row.project_id,
     issueId: row.issue_id,
+    originChatThreadId: row.origin_chat_thread_id ?? undefined,
+    originBuildMessageId: row.origin_build_message_id ?? undefined,
     repository: row.repository,
     requestKey: row.request_key,
     requestFingerprint: row.request_fingerprint,
@@ -152,6 +158,72 @@ function orchestrationRunFromRow(row: any, plan: OrchestrationPlan): Orchestrati
     repositoryWorkspaces: parseJson(row.repository_workspaces_json, undefined),
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function orchestrationRecoveryEpisodeFromRow(row: any): OrchestrationRecoveryEpisode {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    runId: row.run_id,
+    issueId: row.issue_id,
+    taskId: row.task_id ?? undefined,
+    attemptId: row.attempt_id ?? undefined,
+    source: row.source,
+    category: row.category,
+    code: row.error_code,
+    summary: row.summary,
+    fingerprint: row.fingerprint,
+    phase: row.phase,
+    episodeNumber: row.episode_number,
+    repairBudget: row.repair_budget,
+    attemptsUsed: row.attempts_used,
+    guidance: row.guidance ?? undefined,
+    evidence: parseJson(row.evidence_json, {}),
+    threadId: row.thread_id ?? undefined,
+    buildMessageId: row.build_message_id ?? undefined,
+    initiatedBy: row.initiated_by,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    resolvedAt: row.resolved_at ?? undefined
+  };
+}
+
+function orchestrationRecoveryActionFromRow(row: any): OrchestrationRecoveryActionRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    runId: row.run_id,
+    recoveryId: row.recovery_id,
+    actorId: row.actor_id,
+    idempotencyKey: row.idempotency_key,
+    expectedRunRevision: row.expected_run_revision,
+    expectedRecoveryRevision: row.expected_recovery_revision,
+    expectedTaskRevision: row.expected_task_revision ?? undefined,
+    action: row.action,
+    guidance: row.guidance ?? undefined,
+    status: row.status,
+    result: row.result_json ? parseJson(row.result_json, {}) : undefined,
+    errorCode: row.error_code ?? undefined,
+    createdAt: row.created_at,
+    completedAt: row.completed_at ?? undefined
+  };
+}
+
+function orchestrationRecoveryMilestoneFromRow(row: any): OrchestrationRecoveryMilestone {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    runId: row.run_id,
+    recoveryId: row.recovery_id,
+    milestoneKey: row.milestone_key,
+    threadId: row.thread_id,
+    messageId: row.message_id,
+    content: row.content,
+    createdAt: row.created_at,
+    deliveredAt: row.delivered_at ?? undefined
   };
 }
 
@@ -741,6 +813,8 @@ export class SQLiteService {
         workspace_id TEXT NOT NULL,
         project_id TEXT NOT NULL,
         issue_id TEXT NOT NULL,
+        origin_chat_thread_id TEXT,
+        origin_build_message_id TEXT,
         repository TEXT NOT NULL,
         request_key TEXT NOT NULL,
         request_fingerprint TEXT NOT NULL,
@@ -944,6 +1018,81 @@ export class SQLiteService {
       CREATE INDEX IF NOT EXISTS idx_orchestration_events_cursor
         ON orchestration_events(workspace_id, run_id, id);
 
+      CREATE TABLE IF NOT EXISTS orchestration_recovery_episodes (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        task_id TEXT,
+        attempt_id TEXT,
+        source TEXT NOT NULL,
+        category TEXT NOT NULL,
+        error_code TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN ('repairing', 'waiting_for_user', 'ready_to_continue', 'resolved', 'cancelled')),
+        episode_number INTEGER NOT NULL DEFAULT 1,
+        repair_budget INTEGER NOT NULL DEFAULT 2,
+        attempts_used INTEGER NOT NULL DEFAULT 0,
+        guidance TEXT,
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        thread_id TEXT,
+        build_message_id TEXT,
+        initiated_by TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE (workspace_id, id),
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestration_one_open_recovery
+        ON orchestration_recovery_episodes(workspace_id, run_id)
+        WHERE phase IN ('repairing', 'waiting_for_user', 'ready_to_continue');
+      CREATE INDEX IF NOT EXISTS idx_orchestration_recovery_project
+        ON orchestration_recovery_episodes(workspace_id, project_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS orchestration_recovery_actions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        recovery_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        expected_run_revision INTEGER NOT NULL,
+        expected_recovery_revision INTEGER NOT NULL,
+        expected_task_revision INTEGER,
+        action TEXT NOT NULL,
+        guidance TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+        result_json TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE (workspace_id, recovery_id, idempotency_key),
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, recovery_id) REFERENCES orchestration_recovery_episodes(workspace_id, id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS orchestration_recovery_milestones (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        recovery_id TEXT NOT NULL,
+        milestone_key TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        message_id TEXT NOT NULL UNIQUE,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        delivered_at TEXT,
+        UNIQUE (workspace_id, recovery_id, milestone_key),
+        FOREIGN KEY (workspace_id, run_id) REFERENCES orchestration_runs(workspace_id, id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, recovery_id) REFERENCES orchestration_recovery_episodes(workspace_id, id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_recovery_milestones_pending
+        ON orchestration_recovery_milestones(workspace_id, delivered_at, created_at);
+
       CREATE TABLE IF NOT EXISTS orchestration_outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         workspace_id TEXT NOT NULL,
@@ -1074,6 +1223,8 @@ export class SQLiteService {
       ['prototype_runs', 'checkpoint_commit TEXT'],
       ['prototype_runs', 'verification_evidence TEXT'],
       ['orchestration_runs', 'branch_name TEXT'],
+      ['orchestration_runs', 'origin_chat_thread_id TEXT'],
+      ['orchestration_runs', 'origin_build_message_id TEXT'],
       ['orchestration_runs', 'base_ref TEXT'],
       ['orchestration_runs', 'base_commit TEXT'],
       ['orchestration_runs', 'worktree_path TEXT'],
@@ -2881,8 +3032,11 @@ export class SQLiteService {
         }
       }
       const { plan: _plan, ...runRow } = run;
-      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, pause_requested_at, pause_requested_by, stopped_reason, branch_name, base_ref, base_commit, worktree_path, repository_workspaces_json, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @pauseRequestedAt, @pauseRequestedBy, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @repositoryWorkspacesJson, @createdAt, @updatedAt)')
-        .run({ ...runRow, workspaceId, currentTaskId: run.currentTaskId ?? null,
+      this.db.prepare('INSERT INTO orchestration_runs (id, workspace_id, project_id, issue_id, origin_chat_thread_id, origin_build_message_id, repository, request_key, request_fingerprint, created_by, executor_id, ownership_epoch, workflow_version, plan_version, status, revision, current_task_id, pause_requested_at, pause_requested_by, stopped_reason, branch_name, base_ref, base_commit, worktree_path, repository_workspaces_json, created_at, updated_at) VALUES (@id, @workspaceId, @projectId, @issueId, @originChatThreadId, @originBuildMessageId, @repository, @requestKey, @requestFingerprint, @createdBy, @executorId, @ownershipEpoch, @workflowVersion, @planVersion, @status, @revision, @currentTaskId, @pauseRequestedAt, @pauseRequestedBy, @stoppedReason, @branchName, @baseRef, @baseCommit, @worktreePath, @repositoryWorkspacesJson, @createdAt, @updatedAt)')
+        .run({ ...runRow, workspaceId,
+          originChatThreadId: run.originChatThreadId ?? null,
+          originBuildMessageId: run.originBuildMessageId ?? null,
+          currentTaskId: run.currentTaskId ?? null,
           pauseRequestedAt: run.pauseRequestedAt ?? null, pauseRequestedBy: run.pauseRequestedBy ?? null,
           stoppedReason: run.stoppedReason ?? null,
           branchName: run.branchName ?? null, baseRef: run.baseRef ?? null, baseCommit: run.baseCommit ?? null, worktreePath: run.worktreePath ?? null,
@@ -3062,6 +3216,283 @@ export class SQLiteService {
       artifacts: artifacts.map(orchestrationArtifactFromRow),
       findings: findings.map(orchestrationFindingFromRow)
     };
+  }
+
+  bindOrchestrationChat(input: {
+    runId: string;
+    threadId: string;
+    buildMessageId: string;
+    actorId: string;
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const bind = this.db.transaction(() => {
+      const run = this.db.prepare(`SELECT project_id, created_by, origin_chat_thread_id, origin_build_message_id, revision
+        FROM orchestration_runs WHERE workspace_id = ? AND id = ?`).get(workspaceId, input.runId) as any;
+      if (!run) throw new Error('Orchestration run not found.');
+      if (run.created_by !== input.actorId) throw new Error('Only the build owner can bind its recovery conversation.');
+      const thread = this.db.prepare(`SELECT project_id, owner_id FROM chat_threads WHERE workspace_id = ? AND id = ?`)
+        .get(workspaceId, input.threadId) as any;
+      if (!thread || thread.project_id !== run.project_id || thread.owner_id !== input.actorId) {
+        throw new Error('The build conversation is not owned by the initiating project member.');
+      }
+      const message = this.db.prepare(`SELECT thread_id, message_type, orchestration_run_id FROM chat_messages
+        WHERE thread_id = ? AND id = ?`).get(input.threadId, input.buildMessageId) as any;
+      if (!message || message.thread_id !== input.threadId || message.message_type !== 'build' || message.orchestration_run_id !== input.runId) {
+        throw new Error('The build message does not identify this orchestration run.');
+      }
+      if ((run.origin_chat_thread_id && run.origin_chat_thread_id !== input.threadId) ||
+          (run.origin_build_message_id && run.origin_build_message_id !== input.buildMessageId)) {
+        throw new Error('This build is already bound to another chat message.');
+      }
+      if (run.origin_chat_thread_id === input.threadId && run.origin_build_message_id === input.buildMessageId) return;
+      const updated = this.db.prepare(`UPDATE orchestration_runs SET origin_chat_thread_id = ?, origin_build_message_id = ?,
+        revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?`)
+        .run(input.threadId, input.buildMessageId, now, workspaceId, input.runId, run.revision);
+      if (updated.changes !== 1) throw new Error('The build changed before its chat conversation could be bound.');
+      this.appendOrchestrationEvent(input.runId, 'chat_bound', { threadId: input.threadId, buildMessageId: input.buildMessageId }, input.actorId, now);
+    });
+    bind();
+    const snapshot = this.getOrchestrationSnapshot(input.runId);
+    if (!snapshot) throw new Error('The build disappeared after binding its chat conversation.');
+    return snapshot;
+  }
+
+  getOrchestrationChatBinding(runId: string): { runId: string; projectId: string; threadId: string; buildMessageId: string; ownerId: string } | undefined {
+    const workspaceId = this.workspaceId();
+    let run = this.db.prepare(`SELECT project_id, created_by, origin_chat_thread_id, origin_build_message_id
+      FROM orchestration_runs WHERE workspace_id = ? AND id = ?`).get(workspaceId, runId) as any;
+    if (!run) return undefined;
+    if (!run.origin_chat_thread_id || !run.origin_build_message_id) {
+      const candidates = this.db.prepare(`SELECT m.thread_id, m.id AS message_id, t.owner_id
+        FROM chat_messages m JOIN chat_threads t ON t.id = m.thread_id AND t.workspace_id = ?
+        WHERE m.orchestration_run_id = ? AND m.message_type = 'build' AND t.project_id = ? AND t.owner_id = ?
+        ORDER BY m.timestamp ASC LIMIT 2`).all(workspaceId, runId, run.project_id, run.created_by) as any[];
+      if (candidates.length !== 1) return undefined;
+      const candidate = candidates[0];
+      this.db.prepare(`UPDATE orchestration_runs SET origin_chat_thread_id = ?, origin_build_message_id = ?
+        WHERE workspace_id = ? AND id = ? AND origin_chat_thread_id IS NULL AND origin_build_message_id IS NULL`)
+        .run(candidate.thread_id, candidate.message_id, workspaceId, runId);
+      run = this.db.prepare(`SELECT project_id, created_by, origin_chat_thread_id, origin_build_message_id
+        FROM orchestration_runs WHERE workspace_id = ? AND id = ?`).get(workspaceId, runId) as any;
+    }
+    const thread = this.db.prepare('SELECT owner_id FROM chat_threads WHERE workspace_id = ? AND id = ?')
+      .get(workspaceId, run.origin_chat_thread_id) as { owner_id: string | null } | undefined;
+    if (!thread || !thread.owner_id || thread.owner_id !== run.created_by || !run.origin_build_message_id) return undefined;
+    return {
+      runId,
+      projectId: run.project_id,
+      threadId: run.origin_chat_thread_id,
+      buildMessageId: run.origin_build_message_id,
+      ownerId: thread.owner_id
+    };
+  }
+
+  listOrchestrationRecoveryEpisodes(runId: string): OrchestrationRecoveryEpisode[] {
+    const rows = this.db.prepare(`SELECT * FROM orchestration_recovery_episodes
+      WHERE workspace_id = ? AND run_id = ? ORDER BY episode_number ASC, created_at ASC`)
+      .all(this.workspaceId(), runId) as any[];
+    return rows.map(orchestrationRecoveryEpisodeFromRow);
+  }
+
+  getOpenOrchestrationRecoveryEpisode(runId: string): OrchestrationRecoveryEpisode | undefined {
+    const row = this.db.prepare(`SELECT * FROM orchestration_recovery_episodes
+      WHERE workspace_id = ? AND run_id = ? AND phase IN ('repairing', 'waiting_for_user', 'ready_to_continue')
+      ORDER BY created_at DESC LIMIT 1`).get(this.workspaceId(), runId) as any;
+    return row ? orchestrationRecoveryEpisodeFromRow(row) : undefined;
+  }
+
+  getOrchestrationRecoveryEpisode(runId: string, recoveryId: string): OrchestrationRecoveryEpisode | undefined {
+    const row = this.db.prepare(`SELECT * FROM orchestration_recovery_episodes
+      WHERE workspace_id = ? AND run_id = ? AND id = ?`).get(this.workspaceId(), runId, recoveryId) as any;
+    return row ? orchestrationRecoveryEpisodeFromRow(row) : undefined;
+  }
+
+  saveOrchestrationRecoveryEpisode(input: {
+    episode: OrchestrationRecoveryEpisode;
+    expectedRevision?: number;
+    milestone?: { key: string; content: string };
+    actorId?: string;
+    now?: string;
+  }): { episode: OrchestrationRecoveryEpisode; changed: boolean; milestone?: OrchestrationRecoveryMilestone } {
+    const workspaceId = this.workspaceId();
+    const episode = input.episode;
+    if (episode.workspaceId !== workspaceId) throw new Error('Recovery episode belongs to a different workspace.');
+    const now = input.now ?? episode.updatedAt ?? new Date().toISOString();
+    let saved!: OrchestrationRecoveryEpisode;
+    let changed = false;
+    let milestone: OrchestrationRecoveryMilestone | undefined;
+    const save = this.db.transaction(() => {
+      const current = this.db.prepare(`SELECT * FROM orchestration_recovery_episodes
+        WHERE workspace_id = ? AND id = ?`).get(workspaceId, episode.id) as any;
+      if (current) {
+        const currentEpisode = orchestrationRecoveryEpisodeFromRow(current);
+        const same = currentEpisode.phase === episode.phase && currentEpisode.taskId === episode.taskId &&
+          currentEpisode.attemptId === episode.attemptId && currentEpisode.category === episode.category &&
+          currentEpisode.code === episode.code && currentEpisode.summary === episode.summary &&
+          currentEpisode.fingerprint === episode.fingerprint && currentEpisode.attemptsUsed === episode.attemptsUsed &&
+          currentEpisode.guidance === episode.guidance && JSON.stringify(currentEpisode.evidence) === JSON.stringify(episode.evidence) &&
+          currentEpisode.resolvedAt === episode.resolvedAt;
+        if (same) {
+          saved = currentEpisode;
+        } else {
+          const expectedRevision = input.expectedRevision ?? currentEpisode.revision;
+          if (currentEpisode.revision !== expectedRevision) throw new Error('Recovery changed while this action was open. Refresh the build before continuing.');
+          const revision = currentEpisode.revision + 1;
+          const updated = this.db.prepare(`UPDATE orchestration_recovery_episodes SET
+            task_id = ?, attempt_id = ?, source = ?, category = ?, error_code = ?, summary = ?, fingerprint = ?, phase = ?,
+            episode_number = ?, repair_budget = ?, attempts_used = ?, guidance = ?, evidence_json = ?, thread_id = ?,
+            build_message_id = ?, initiated_by = ?, revision = ?, updated_at = ?, resolved_at = ?
+            WHERE workspace_id = ? AND id = ? AND revision = ?`).run(
+            episode.taskId ?? null, episode.attemptId ?? null, episode.source, episode.category, episode.code,
+            episode.summary, episode.fingerprint, episode.phase, episode.episodeNumber, episode.repairBudget,
+            episode.attemptsUsed, episode.guidance ?? null, JSON.stringify(episode.evidence), episode.threadId ?? null,
+            episode.buildMessageId ?? null, episode.initiatedBy, revision, now, episode.resolvedAt ?? null,
+            workspaceId, episode.id, expectedRevision
+          );
+          if (updated.changes !== 1) throw new Error('Recovery changed while this action was being saved. Refresh the build.');
+          saved = { ...episode, revision, updatedAt: now };
+          changed = true;
+          this.appendOrchestrationEvent(episode.runId, `recovery_${episode.phase}`, {
+            recoveryId: episode.id, phase: episode.phase, category: episode.category, code: episode.code,
+            taskId: episode.taskId, attemptsUsed: episode.attemptsUsed, summary: episode.summary
+          }, input.actorId ?? episode.initiatedBy, now);
+        }
+      } else {
+        const open = this.getOpenOrchestrationRecoveryEpisode(episode.runId);
+        if (open) throw new Error('Another recovery is already active for this build. Refresh the recovery panel.');
+        this.db.prepare(`INSERT INTO orchestration_recovery_episodes (
+          id, workspace_id, project_id, run_id, issue_id, task_id, attempt_id, source, category, error_code,
+          summary, fingerprint, phase, episode_number, repair_budget, attempts_used, guidance, evidence_json,
+          thread_id, build_message_id, initiated_by, revision, created_at, updated_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          episode.id, workspaceId, episode.projectId, episode.runId, episode.issueId, episode.taskId ?? null,
+          episode.attemptId ?? null, episode.source, episode.category, episode.code, episode.summary,
+          episode.fingerprint, episode.phase, episode.episodeNumber, episode.repairBudget, episode.attemptsUsed,
+          episode.guidance ?? null, JSON.stringify(episode.evidence), episode.threadId ?? null,
+          episode.buildMessageId ?? null, episode.initiatedBy, episode.revision, episode.createdAt, now,
+          episode.resolvedAt ?? null
+        );
+        saved = { ...episode, updatedAt: now };
+        changed = true;
+        this.appendOrchestrationEvent(episode.runId, `recovery_${episode.phase}`, {
+          recoveryId: episode.id, phase: episode.phase, category: episode.category, code: episode.code,
+          taskId: episode.taskId, attemptsUsed: episode.attemptsUsed, summary: episode.summary
+        }, input.actorId ?? episode.initiatedBy, now);
+      }
+      if (input.milestone && saved.threadId) {
+        const milestoneId = `recovery-milestone-${episode.id}-${createHash('sha256').update(input.milestone.key).digest('hex').slice(0, 20)}`;
+        const messageId = milestoneId;
+        this.db.prepare(`INSERT OR IGNORE INTO orchestration_recovery_milestones
+          (id, workspace_id, run_id, recovery_id, milestone_key, thread_id, message_id, content, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          milestoneId, workspaceId, episode.runId, episode.id, input.milestone.key, saved.threadId,
+          messageId, input.milestone.content.slice(0, 1200), now
+        );
+        const row = this.db.prepare(`SELECT * FROM orchestration_recovery_milestones
+          WHERE workspace_id = ? AND recovery_id = ? AND milestone_key = ?`)
+          .get(workspaceId, episode.id, input.milestone.key) as any;
+        milestone = row ? orchestrationRecoveryMilestoneFromRow(row) : undefined;
+      }
+    });
+    save();
+    return { episode: saved, changed, milestone };
+  }
+
+  createOrchestrationRecoveryAction(input: {
+    id: string;
+    runId: string;
+    recoveryId: string;
+    actorId: string;
+    idempotencyKey: string;
+    expectedRunRevision: number;
+    expectedRecoveryRevision: number;
+    expectedTaskRevision?: number;
+    action: OrchestrationRecoveryActionName;
+    guidance?: string;
+    now?: string;
+  }): { action: OrchestrationRecoveryActionRecord; created: boolean } {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const existingRow = this.db.prepare(`SELECT * FROM orchestration_recovery_actions
+      WHERE workspace_id = ? AND recovery_id = ? AND idempotency_key = ?`)
+      .get(workspaceId, input.recoveryId, input.idempotencyKey) as any;
+    if (existingRow) {
+      const existingAction = orchestrationRecoveryActionFromRow(existingRow);
+      if (existingAction.actorId !== input.actorId || existingAction.action !== input.action ||
+          existingAction.guidance !== input.guidance || existingAction.expectedRunRevision !== input.expectedRunRevision ||
+          existingAction.expectedRecoveryRevision !== input.expectedRecoveryRevision ||
+          existingAction.expectedTaskRevision !== input.expectedTaskRevision) {
+        throw new Error('This action key was already used for a different recovery request.');
+      }
+      return { action: existingAction, created: false };
+    }
+    const currentRun = this.db.prepare('SELECT revision FROM orchestration_runs WHERE workspace_id = ? AND id = ?')
+      .get(workspaceId, input.runId) as { revision: number } | undefined;
+    const currentRecovery = this.getOrchestrationRecoveryEpisode(input.runId, input.recoveryId);
+    if (!currentRun || !currentRecovery || currentRun.revision !== input.expectedRunRevision ||
+        currentRecovery.revision !== input.expectedRecoveryRevision) {
+      throw new Error('The build or recovery changed. Refresh its current status before acting.');
+    }
+    if (input.expectedTaskRevision !== undefined) {
+      const task = this.db.prepare(`SELECT revision FROM orchestration_tasks
+        WHERE workspace_id = ? AND run_id = ? AND task_id = ?`).get(workspaceId, input.runId,
+        currentRecovery.taskId ?? '') as { revision: number } | undefined;
+      if (!task || task.revision !== input.expectedTaskRevision) throw new Error('This task changed. Refresh the build before retrying.');
+    }
+    const result = this.db.prepare(`INSERT OR IGNORE INTO orchestration_recovery_actions
+      (id, workspace_id, run_id, recovery_id, actor_id, idempotency_key, expected_run_revision,
+       expected_recovery_revision, expected_task_revision, action, guidance, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`)
+      .run(input.id, workspaceId, input.runId, input.recoveryId, input.actorId, input.idempotencyKey,
+        input.expectedRunRevision, input.expectedRecoveryRevision, input.expectedTaskRevision ?? null,
+        input.action, input.guidance ?? null, now);
+    const row = this.db.prepare(`SELECT * FROM orchestration_recovery_actions
+      WHERE workspace_id = ? AND recovery_id = ? AND idempotency_key = ?`)
+      .get(workspaceId, input.recoveryId, input.idempotencyKey) as any;
+    if (!row) throw new Error('Recovery action could not be recorded.');
+    const action = orchestrationRecoveryActionFromRow(row);
+    if (action.actorId !== input.actorId || action.action !== input.action || action.guidance !== input.guidance ||
+        action.expectedRunRevision !== input.expectedRunRevision || action.expectedRecoveryRevision !== input.expectedRecoveryRevision ||
+        action.expectedTaskRevision !== input.expectedTaskRevision) {
+      throw new Error('This action key was already used for a different recovery request.');
+    }
+    return { action, created: result.changes === 1 };
+  }
+
+  finishOrchestrationRecoveryAction(input: {
+    recoveryId: string;
+    idempotencyKey: string;
+    actorId: string;
+    status: 'completed' | 'failed';
+    result?: Record<string, unknown>;
+    errorCode?: string;
+    now?: string;
+  }): OrchestrationRecoveryActionRecord | undefined {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    this.db.prepare(`UPDATE orchestration_recovery_actions SET status = ?, result_json = ?, error_code = ?, completed_at = ?
+      WHERE workspace_id = ? AND recovery_id = ? AND idempotency_key = ? AND actor_id = ? AND status = 'pending'`)
+      .run(input.status, input.result ? JSON.stringify(input.result) : null, input.errorCode ?? null, now,
+        workspaceId, input.recoveryId, input.idempotencyKey, input.actorId);
+    const row = this.db.prepare(`SELECT * FROM orchestration_recovery_actions
+      WHERE workspace_id = ? AND recovery_id = ? AND idempotency_key = ? AND actor_id = ?`)
+      .get(workspaceId, input.recoveryId, input.idempotencyKey, input.actorId) as any;
+    return row ? orchestrationRecoveryActionFromRow(row) : undefined;
+  }
+
+  listPendingOrchestrationRecoveryMilestones(limit = 100): OrchestrationRecoveryMilestone[] {
+    const rows = this.db.prepare(`SELECT * FROM orchestration_recovery_milestones
+      WHERE workspace_id = ? AND delivered_at IS NULL ORDER BY created_at, id LIMIT ?`)
+      .all(this.workspaceId(), Math.max(1, Math.min(limit, 500))) as any[];
+    return rows.map(orchestrationRecoveryMilestoneFromRow);
+  }
+
+  markOrchestrationRecoveryMilestoneDelivered(id: string, now = new Date().toISOString()): boolean {
+    return this.db.prepare(`UPDATE orchestration_recovery_milestones SET delivered_at = ?
+      WHERE workspace_id = ? AND id = ? AND delivered_at IS NULL`)
+      .run(now, this.workspaceId(), id).changes === 1;
   }
 
   getOrchestrationByRequestKey(requestKey: string): OrchestrationSnapshot | undefined {
@@ -3476,6 +3907,7 @@ export class SQLiteService {
     evidence?: Record<string, unknown>;
     clearPauseRequest?: boolean;
     clearStoppedReason?: boolean;
+    clearCurrentTaskId?: boolean;
     now?: string;
   }): OrchestrationSnapshot {
     const workspaceId = this.workspaceId();
@@ -3578,9 +4010,9 @@ export class SQLiteService {
       const nextStoppedReason = input.clearStoppedReason
         ? null
         : input.reason === undefined ? (snapshot.run.stoppedReason ?? null) : input.reason;
-      const result = this.db.prepare('UPDATE orchestration_runs SET status = ?, revision = ?, stopped_reason = ?, pause_requested_at = CASE WHEN ? = 1 THEN NULL ELSE pause_requested_at END, pause_requested_by = CASE WHEN ? = 1 THEN NULL ELSE pause_requested_by END, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?')
+      const result = this.db.prepare('UPDATE orchestration_runs SET status = ?, revision = ?, stopped_reason = ?, current_task_id = CASE WHEN ? = 1 THEN NULL ELSE current_task_id END, pause_requested_at = CASE WHEN ? = 1 THEN NULL ELSE pause_requested_at END, pause_requested_by = CASE WHEN ? = 1 THEN NULL ELSE pause_requested_by END, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ?')
         .run(updated.status, updated.revision, nextStoppedReason,
-          input.clearPauseRequest ? 1 : 0, input.clearPauseRequest ? 1 : 0, now,
+          input.clearCurrentTaskId ? 1 : 0, input.clearPauseRequest ? 1 : 0, input.clearPauseRequest ? 1 : 0, now,
           workspaceId, input.runId, input.expectedRevision);
       if (result.changes !== 1) throw new Error('Build changed while its transition was being committed.');
       this.appendOrchestrationEvent(input.runId, `run_${updated.status}`, {
@@ -3717,7 +4149,8 @@ export class SQLiteService {
       const nextStatus = latest.run.status === 'planning' ? 'blocked' : 'recovery_required';
       this.transitionOrchestrationRun({
         runId: input.runId, expectedRevision: latest.run.revision,
-        nextStatus, actorId: input.actorId ?? 'orchestrator', reason: input.reason, now
+        nextStatus, actorId: input.actorId ?? 'orchestrator', reason: input.reason,
+        clearCurrentTaskId: Boolean(task), now
       });
     });
     recover();
@@ -4333,6 +4766,145 @@ export class SQLiteService {
       }, input.acceptedBy, now);
     });
     accept();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  /** Append a versioned owner-correction chain after observed final checks fail. */
+  appendOrchestrationFinalValidationAmendment(input: {
+    runId: string;
+    expectedRunRevision: number;
+    expectedPlanVersion: number;
+    actorId: string;
+    evidence: Record<string, unknown>;
+    plan: OrchestrationPlan;
+    addedTasks: readonly OrchestrationTaskRecord[];
+    findings: readonly PersistedReviewFinding[];
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    if (input.findings.length > 20) throw new Error('Final validation can route at most 20 code-owner findings.');
+    const amend = this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId ||
+          snapshot.run.revision !== input.expectedRunRevision || snapshot.run.planVersion !== input.expectedPlanVersion) {
+        throw new Error('The build changed since final validation was reviewed. Refresh before creating correction tasks.');
+      }
+      if (!snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted')) {
+        throw new Error('Final-validation corrections require all existing required tasks to remain accepted.');
+      }
+      const latestValidation = this.listOrchestrationEvents(input.runId, 0, 500).slice().reverse().find(event =>
+        ['run_blocked', 'run_recovery_required'].includes(event.type) && event.payload.evidence &&
+        typeof event.payload.evidence === 'object' &&
+        (event.payload.evidence as Record<string, unknown>).validationVersion === 1);
+      if (!latestValidation || !isDeepStrictEqual(latestValidation.payload.evidence, input.evidence)) {
+        throw new Error('The saved final-check evidence changed. Refresh the recovery details before assigning corrections.');
+      }
+      const evidence = input.evidence;
+      const checks = evidence.checks && typeof evidence.checks === 'object' ? evidence.checks as Record<string, unknown> : undefined;
+      const observed = Array.isArray(checks?.observed) ? checks.observed as Array<Record<string, unknown>> : [];
+      if (evidence.check !== undefined || checks?.status !== 'failed' || !observed.some(check => check.exitCode !== 0 || check.signal != null)) {
+        throw new Error('This blocker is not a failed final repository check that can be routed safely. Review the workspace and saved evidence first.');
+      }
+
+      const plan = parseOrchestrationPlan(input.plan);
+      if (plan.tasks.length > MAX_PLAN_TASKS || plan.goal !== snapshot.run.plan.goal ||
+          JSON.stringify(plan.exclusions) !== JSON.stringify(snapshot.run.plan.exclusions) ||
+          JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements)) {
+        throw new Error('A final-validation correction cannot change the approved goal, exclusions, requirements, or task ceiling.');
+      }
+      const currentPlanTasks = new Map(snapshot.run.plan.tasks.map(task => [task.id, task]));
+      const nextPlanTasks = new Map(plan.tasks.map(task => [task.id, task]));
+      const addedPlanTasks = plan.tasks.filter(task => !currentPlanTasks.has(task.id));
+      if (snapshot.run.plan.tasks.some(task => !nextPlanTasks.has(task.id)) || addedPlanTasks.length !== input.addedTasks.length) {
+        throw new Error('A final-validation correction must preserve every previous task and add only its owner, review, and validation tasks.');
+      }
+      const same = (left: unknown, right: unknown) => isDeepStrictEqual(left, right);
+      for (const [taskId, oldTask] of currentPlanTasks) {
+        const nextTask = nextPlanTasks.get(taskId)!;
+        if (oldTask.kind === 'validation') {
+          const { required: _oldRequired, ...oldStable } = oldTask;
+          const { required: nextRequired, ...nextStable } = nextTask;
+          if (!same(oldStable, nextStable) || (oldTask.required !== nextRequired && !(oldTask.required && nextRequired === false))) {
+            throw new Error('A correction plan may retire an old validation gate but cannot rewrite its contract.');
+          }
+        } else if (oldTask.kind === 'delivery') {
+          const { dependsOn: _oldDependencies, ...oldStable } = oldTask;
+          const { dependsOn: _newDependencies, ...nextStable } = nextTask;
+          if (!same(oldStable, nextStable)) throw new Error('A correction plan cannot rewrite a delivery task.');
+        } else if (!same(oldTask, nextTask)) {
+          throw new Error(`A final-validation correction cannot rewrite prior task ${taskId}.`);
+        }
+      }
+      const newTaskRecords = new Map(input.addedTasks.map(task => [task.id, task]));
+      if (newTaskRecords.size !== input.addedTasks.length || addedPlanTasks.some(definition => !newTaskRecords.has(definition.id))) {
+        throw new Error('The correction-task records do not match the amended plan.');
+      }
+      for (const definition of addedPlanTasks) {
+        const record = newTaskRecords.get(definition.id)!;
+        const { status: _status, revision: _revision, attemptCount: _attemptCount, acceptedRevision: _acceptedRevision,
+          updatedAt: _updatedAt, correctionOfTaskId: _correctionOfTaskId, correctionCycle: _correctionCycle, ...recordDefinition } = record;
+        if (!same(recordDefinition, definition)) throw new Error(`Correction task ${definition.id} does not match its plan definition.`);
+      }
+      if (!addedPlanTasks.some(task => task.kind === 'review' && task.required) ||
+          !addedPlanTasks.some(task => task.kind === 'validation' && task.required) ||
+          !input.addedTasks.filter(task => ['database', 'backend', 'frontend', 'mobile'].includes(task.kind)).every(task => task.correctionOfTaskId && task.scope.includePaths.length)) {
+        throw new Error('A final-validation amendment must include scoped owner corrections followed by independent review and validation gates.');
+      }
+      const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived));
+      if (issues.length) throw new Error(`The final-validation correction plan is invalid: ${issues.map(issue => issue.detail).join(' ')}`);
+
+      const nextPlanVersion = snapshot.run.planVersion + 1;
+      this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(workspaceId, input.runId, nextPlanVersion, plan.schemaVersion, JSON.stringify(plan), 'recovery', now, now);
+      this.db.prepare('UPDATE orchestration_tasks SET plan_version = ? WHERE workspace_id = ? AND run_id = ? AND plan_version = ?')
+        .run(nextPlanVersion, workspaceId, input.runId, input.expectedPlanVersion);
+      const updateDefinition = this.db.prepare(`UPDATE orchestration_tasks SET title = ?, description = ?, kind = ?, owner_agent_id = ?, depends_on_json = ?, requirement_ids_json = ?, acceptance_json = ?, checks_json = ?, scope_json = ?, required = ?
+        WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND plan_version = ?`);
+      for (const definition of plan.tasks) {
+        if (!currentPlanTasks.has(definition.id)) continue;
+        const changed = updateDefinition.run(definition.title, definition.description, definition.kind, definition.ownerAgentId,
+          JSON.stringify(definition.dependsOn), JSON.stringify(definition.requirementIds), JSON.stringify(definition.acceptanceCriteria),
+          JSON.stringify(definition.requiredChecks), JSON.stringify(definition.scope), definition.required ? 1 : 0,
+          workspaceId, input.runId, definition.id, nextPlanVersion);
+        if (changed.changes !== 1) throw new Error(`Task ${definition.id} disappeared while the recovery plan was being amended.`);
+      }
+      const insertTask = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, accepted_revision, correction_of_task_id, correction_cycle, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const task of input.addedTasks) {
+        insertTask.run(workspaceId, input.runId, nextPlanVersion, task.id, task.title, task.description, task.kind,
+          task.ownerAgentId, JSON.stringify(task.dependsOn), JSON.stringify(task.requirementIds), JSON.stringify(task.acceptanceCriteria),
+          JSON.stringify(task.requiredChecks), JSON.stringify(task.scope), task.required ? 1 : 0, task.status,
+          0, 0, null, task.correctionOfTaskId ?? null, task.correctionCycle ?? null, now);
+      }
+      const findingRows = this.db.prepare('INSERT INTO orchestration_findings (id, workspace_id, run_id, task_id, source_task_id, severity, requirement_id, path, evidence, status, correction_task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const finding of input.findings) {
+        const target = snapshot.tasks.find(task => task.id === finding.taskId);
+        const source = snapshot.tasks.find(task => task.id === finding.sourceTaskId);
+        const finalValidationOrigin = finding.evidence?.origin === 'final_validation';
+        if (!target || target.status !== 'accepted' || !['database', 'backend', 'frontend', 'mobile'].includes(target.kind) ||
+            !source || source.status !== 'accepted' || (!finalValidationOrigin && source.kind !== 'review') ||
+            (finalValidationOrigin && source.id !== target.id) ||
+            !finding.correctionTaskId || !newTaskRecords.has(finding.correctionTaskId)) {
+          throw new Error('Each final-check finding must identify an accepted code owner and its explicit correction task.');
+        }
+        findingRows.run(randomUUID(), workspaceId, input.runId, finding.taskId, finding.sourceTaskId, finding.severity,
+          finding.requirementId ?? null, finding.path ?? null, JSON.stringify(finding.evidence), 'open', finding.correctionTaskId, now);
+      }
+      const runUpdate = this.db.prepare("UPDATE orchestration_runs SET plan_version = ?, status = 'executing', current_task_id = NULL, stopped_reason = NULL, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND status = 'blocked' AND revision = ? AND plan_version = ? AND current_task_id IS NULL")
+        .run(nextPlanVersion, now, workspaceId, input.runId, input.expectedRunRevision, input.expectedPlanVersion);
+      if (runUpdate.changes !== 1) throw new Error('The build changed before its final-validation correction plan could be saved.');
+      this.appendOrchestrationEvent(input.runId, 'plan_amended', {
+        planVersion: nextPlanVersion,
+        reason: 'Final repository checks failed; scoped corrections were routed to their accepted code owners.',
+        addedTaskIds: input.addedTasks.map(task => task.id),
+        validationEvidence: { repository: evidence.repository, resultCommit: evidence.resultCommit, checks: evidence.checks },
+        supersedesValidationTaskIds: [...currentPlanTasks.values()].filter(task => task.kind === 'validation' && task.required).map(task => task.id)
+      }, input.actorId, now);
+      this.appendOrchestrationEvent(input.runId, 'run_resumed', {
+        reason: 'A versioned, scope-preserving correction plan was accepted after final validation failed.', planVersion: nextPlanVersion
+      }, input.actorId, now);
+    });
+    amend();
     return this.getOrchestrationSnapshot(input.runId)!;
   }
 
