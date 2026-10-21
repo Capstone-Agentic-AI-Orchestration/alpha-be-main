@@ -57,7 +57,7 @@ export function codexModelConfigArgs(
   endpoint: string | undefined,
   options: { home?: string; config?: string } = {}
 ): string[] {
-  if (!modelName || !endpoint) return [];
+  if (!modelName) return [];
   const home = options.home ?? codexHome();
   let config = options.config;
   if (config === undefined) {
@@ -68,7 +68,17 @@ export function codexModelConfigArgs(
     }
   }
 
-  const baseUrl = localBaseUrl(endpoint);
+  /**
+   * The scanned gateway first, then the operator's own `openai_base_url`.
+   *
+   * The runtime scan gives the gateway 1.5s to list its models. When it is
+   * slow, the scan falls back to Codex's model cache and records no endpoint —
+   * and every Codex turn until the next scan ran without the gateway, so a
+   * gateway-only model such as `gpt-6-astra` answered with nothing but
+   * "Model metadata ... not found". The configured local gateway is the same
+   * one the scan would have found, so it is used when the scan missed it.
+   */
+  const baseUrl = localBaseUrl(endpoint) ?? localBaseUrl(rootTomlString(config, 'openai_base_url'));
   const catalogPath = catalogPathInsideCodexHome(config, home);
   if (!baseUrl || !catalogPath) return [];
 

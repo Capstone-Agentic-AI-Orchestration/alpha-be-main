@@ -49,6 +49,25 @@ describe('codexModelConfigArgs', () => {
   it('does nothing when no model is selected', () => {
     const { home } = createCodexHome({ models: [{ slug: 'gpt-6-astra' }] });
     expect(codexModelConfigArgs(undefined, 'http://127.0.0.1:10100/v1', { home })).toEqual([]);
+  });
+
+  it('uses the configured local gateway when the runtime scan recorded no endpoint', () => {
+    const { home, catalogPath } = createCodexHome({ models: [{ slug: 'gpt-6-astra' }] });
+    expect(codexModelConfigArgs('gpt-6-astra', undefined, { home })).toEqual([
+      '--config', 'openai_base_url="http://127.0.0.1:10100/v1"',
+      '--config', `model_catalog_json=${JSON.stringify(catalogPath)}`
+    ]);
+  });
+
+  it('never falls back to a configured gateway that is not on this machine', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-codex-model-config-'));
+    temporaryHomes.push(home);
+    const catalogPath = path.join(home, 'catalog.json');
+    fs.writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: 'gpt-6-astra' }] }));
+    fs.writeFileSync(path.join(home, 'config.toml'), [
+      'openai_base_url = "https://gateway.example.com/v1"',
+      `model_catalog_json = ${JSON.stringify(catalogPath)}`
+    ].join('\n'));
     expect(codexModelConfigArgs('gpt-6-astra', undefined, { home })).toEqual([]);
   });
 });

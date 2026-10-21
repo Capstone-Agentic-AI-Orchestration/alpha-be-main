@@ -210,8 +210,11 @@ describe('buildTurnInvocation — Codex', () => {
     expect(codex().stdin).toContain('What does this service do?');
   });
 
-  it('does not repeat the persona once a session exists', () => {
-    expect(codex({ priorSession: 'sess-9' }).stdin).toBe('What does this service do?');
+  it('repeats the persona on every turn, because codex exec never resumes the saved session', () => {
+    const stdin = codex({ priorSession: 'sess-9' }).stdin!;
+    expect(stdin).toContain('You are Ada.');
+    expect(stdin).toContain('What does this service do?');
+    expect(stdin).not.toContain('Your instructions have been updated');
   });
 
   it('passes the model, with no positional prompt to protect it from', () => {
@@ -252,8 +255,12 @@ describe('buildTurnInvocation — Codex', () => {
 });
 
 describe('persona re-injection mid-session', () => {
-  const codex = (over: Partial<CliTurnOptions> = {}) =>
-    buildTurnInvocation(options({ provider: 'OpenAI', ...over }), noMcp);
+  // Antigravity continues its saved conversation, so it is the family where
+  // "the persona is already in the transcript" is actually true.
+  const codex = (over: Partial<CliTurnOptions> = {}) => {
+    const { args } = buildTurnInvocation(options({ provider: 'Antigravity', ...over }), noMcp);
+    return { stdin: valueOf(args, '-p') };
+  };
 
   it('omits the persona on a continuing session when nothing changed', () => {
     expect(codex({ priorSession: 'sess-1' }).stdin).toBe('What does this service do?');
