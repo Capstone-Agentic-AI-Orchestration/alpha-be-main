@@ -1,6 +1,6 @@
 # Orchestrator recovery, project chat, and Live Build Room
 
-Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. The Windows installer was not produced because Electron Builder could not reach GitHub to download Electron; installed-app acceptance and publishing remain outstanding.
+Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. A local Windows v2.0.45 package and update metadata were produced after cloud verification passed; the package is unsigned. Installed-app acceptance and publishing remain outstanding while GitHub CLI authentication is renewed.
 Source review: 2026-10-21, Asia/Manila. This describes the checked-out source, not a verification of the installed desktop app.
 
 ## Implementation status
@@ -27,8 +27,8 @@ Implemented in source during this completion:
 
 Release and acceptance gates still outstanding:
 
-- Run the documented end-to-end recovery scenarios and interactive responsive/keyboard checks on the packaged Windows app.
-- Produce the installer and publish it only after the package's Supabase/cloud preflight succeeds. Packaging currently stops because the environment cannot resolve GitHub while fetching Electron; the GitHub CLI token is also invalid, so pushing or publishing requires re-authentication.
+- Exercise the documented end-to-end recovery scenarios and responsive/keyboard behavior in the packaged Windows app; these acceptance checks were not run.
+- Publish v2.0.45 after GitHub CLI authentication is renewed. The local setup, portable executable, blockmap, and `latest.yml` were produced, and the Supabase/cloud preflight accepted the key. The package has no code-signing certificate, so Windows will identify it as unsigned.
 
 ## Product outcome
 
