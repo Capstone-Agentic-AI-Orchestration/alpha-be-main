@@ -1,6 +1,6 @@
 # Orchestrator recovery, project chat, and Live Build Room
 
-Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. Windows v2.0.45 is published and confirmed as the latest release with setup, portable, blockmap, and updater metadata; its release notes include installer checksums. The package is unsigned. Installed-app acceptance remains outstanding.
+Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Frontend and backend typechecks/builds passed, along with 414 frontend tests. Windows v2.0.46 is published with setup, portable, blockmap, and updater metadata; its release notes identify the source branches and include installer checksums. The package is unsigned. Browser visual acceptance and installed-app update verification remain outstanding.
 Source review: 2026-10-21, Asia/Manila. This describes the checked-out source, not a verification of the installed desktop app.
 
 ## Implementation status
@@ -25,7 +25,7 @@ Implemented in source during this completion:
 - Restart recovery checks that the prior writer is confirmed stopped and that the saved worktree, branch, clean state, and accepted checkpoint still match. It never silently resets or cleans a mismatched workspace; unsafe or ambiguous work remains blocked for inspection.
 - Final-validation evidence can create a versioned correction chain routed to the accepted code owners, followed by a different reviewer and fresh final validation. Missing or unassignable evidence remains blocked for human inspection.
 - Live Build Room has persistent Orchestrator build and Live agent workflows & actions tabs, one graph node per assigned agent, exact task-to-attempt and inspector-to-task navigation, producer-aware artifact targeting, bounded long content, keyboard-operable graph controls, and reduced-motion support. The graph implementation and artifact reflow are in frontend source; source visual acceptance remains outstanding.
-- A separate source test-file expectation was updated for the current task-package version. Automated test suites and installed-app visual scenarios were not run in this task.
+- A separate source test-file expectation was updated for the current task-package version. The frontend suite passed (414 tests), and the 2.0.46 package passed its staged Electron runtime and Supabase checks. Browser visual acceptance and installed-app update scenarios were not run in this task.
 
 Remaining acceptance gate:
 
