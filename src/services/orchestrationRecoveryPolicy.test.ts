@@ -26,6 +26,28 @@ describe('orchestration recovery classification and report retry', () => {
     })).toBe('review_input');
   });
 
+  it('prioritizes a current repository-access blocker over stale report-format findings', () => {
+    const reason = 'The specialist reported a blocker: Repository read access is required to inspect the current source and tests and complete the independent review.';
+    const category = classifyRecoveryCategory({
+      reason,
+      taskKind: 'review',
+      hasTask: true,
+      hasReportError: true,
+      finalValidation: false
+    });
+    const recovery = recoveryAvailableActions({
+      snapshot: blockedReviewSnapshot(3),
+      category,
+      taskId: 'review-calculator',
+      canControl: true,
+      episodeAgeMs: 0
+    });
+
+    expect(category).toBe('review_input');
+    expect(recovery.availableActions).toContain('recheck_prerequisite');
+    expect(recovery.availableActions).not.toContain('retry_report_format');
+  });
+
   it('classifies local permission and missing-runtime preparation errors before offering code repair', () => {
     expect(classifyRecoveryCategory({
       reason: 'spawn git ENOENT', taskKind: 'backend', hasTask: true, hasReportError: false, finalValidation: false
