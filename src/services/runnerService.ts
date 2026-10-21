@@ -6,7 +6,7 @@ import { sqliteService } from './sqliteService.js';
 import { ProcessTerminationReason, processManager } from './processManager.js';
 import { classifyProcessExit } from './runLifecycle.js';
 import { StreamParser, RunTelemetry } from './streamParser.js';
-import { buildTurnInvocation, writeTurnPersona } from './cliRunner.js';
+import { buildTurnInvocation, codexGatewayArgs, writeTurnPersona } from './cliRunner.js';
 import { resolveAgentLogged } from './personaService.js';
 import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
 import { agentReadiness } from './agentReadiness.js';
@@ -669,7 +669,9 @@ export class RunnerService extends EventEmitter {
         priorSession: null,
         env,
         customCliArgs: agent.customCliArgs,
-        skills: taskIsReadOnly ? [] : persona.skills
+        skills: taskIsReadOnly ? [] : persona.skills,
+        // The same local gateway chat uses, so a Codex specialist reaches its model.
+        codexConfigArgs: codexGatewayArgs(persona.modelProvider, persona.modelName)
       },
       mcp
     );

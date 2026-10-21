@@ -8,6 +8,7 @@ import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import { codexModelConfigArgs } from './codexModelConfig.js';
+import { sqliteService } from './sqliteService.js';
 import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
@@ -257,6 +258,11 @@ function reasoningArgs(provider: string, effort?: ReasoningEffort): string[] {
  * subprocess, which is the only way to catch a regression like
  * `--system-prompt` in place of `--append-system-prompt` without a live CLI.
  */
+/** Whether a provider's CLI family continues a saved session on the next turn. */
+export function providerResumesSessions(provider: string): boolean {
+  return provider !== 'OpenAI';
+}
+
 export function buildTurnInvocation(
   options: CliTurnOptions,
   mcp: ReturnType<typeof writeRunMcpConfig>
@@ -300,6 +306,16 @@ export function buildTurnInvocation(
 
   const isWin = process.platform === 'win32';
   const isCodex = provider === 'OpenAI';
+  /**
+   * Whether this family continues the saved session.
+   *
+   * Claude Code resumes with `--resume` and agy with `--conversation`.
+   * `codex exec` is started fresh every turn (resume is a different argv
+   * shape and is not wired), so a saved Codex session id does not mean the
+   * persona is already in its transcript. Treating it as if it did dropped the
+   * persona from every Codex chat turn after the first.
+   */
+  const resumesSession = Boolean(priorSession) && providerResumesSessions(provider);
   const isAntigravity = provider === 'Antigravity' || provider === 'Google Gemini';
 
   /**
@@ -326,7 +342,7 @@ export function buildTurnInvocation(
     if (!persona) return message;
     // Already in the transcript and unchanged — repeating it every turn would
     // grow the context without adding anything.
-    if (priorSession && !options.personaChanged) return message;
+    if (resumesSession && !options.personaChanged) return message;
 
     const stayInCharacter = personaName
       ? `Stay in character as ${personaName} at all times. If asked who or what ` +
@@ -343,7 +359,7 @@ export function buildTurnInvocation(
      * conversation that is already running.
      */
     const preamble =
-      priorSession && options.personaChanged
+      resumesSession && options.personaChanged
         ? 'Your instructions have been updated. Everything below replaces any ' +
           'earlier instructions in this conversation; follow it from now on.\n\n'
         : '';
@@ -662,6 +678,28 @@ export function buildTurnInvocation(
   };
 }
 
+/**
+ * The local gateway the runtime scan found for Codex, if any.
+ *
+ * Chat passes it explicitly. The Orchestrator planner and other callers did
+ * not, so their `codex exec` ran with `--ignore-user-config` and no gateway:
+ * a model only the local gateway serves (`gpt-6-luna`) went to the default
+ * endpoint, Codex exited 1, and planning reported "not a single valid JSON
+ * object" before any specialist started.
+ */
+function scannedCodexEndpoint(): string | undefined {
+  try {
+    return sqliteService.getRuntimes().find(runtime => runtime.provider === 'OpenAI' && runtime.endpoint)?.endpoint;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Gateway and model-catalog flags for a Codex turn; empty for other providers. */
+export function codexGatewayArgs(provider: string, modelName: string | undefined, baseUrl?: string): string[] {
+  return provider === 'OpenAI' ? codexModelConfigArgs(modelName, baseUrl ?? scannedCodexEndpoint()) : [];
+}
+
 export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
   const { runId, cwd, provider, modelName } = options;
 
@@ -701,7 +739,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   }
 
   try {
-    const codexArgs = provider === 'OpenAI' ? codexModelConfigArgs(modelName, options.codexBaseUrl) : [];
+    const codexArgs = codexGatewayArgs(provider, modelName, options.codexBaseUrl);
     const invocation = buildTurnInvocation(
       {
         ...options,

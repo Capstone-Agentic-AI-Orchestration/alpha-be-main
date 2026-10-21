@@ -663,10 +663,12 @@ export interface ChatMessage {
   content: string;
   thinkingProcess?: string;
   toolsExecuted?: ToolExecutionRecord[];
-  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build' | 'build_milestone';
+  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build' | 'build_milestone' | 'build_proposal' | 'project_needed';
   agentCallId?: string;
   /** The task workflow shown beneath an Orchestrator build message. */
   orchestrationRunId?: string;
+  /** A build Alpha proposed instead of starting, awaiting the user's answer. */
+  routeProposal?: ChatRouteProposal;
   squadId?: string;
   operationMode?: AgentCallMode;
   agentCallStatus?: AgentCallStatus;
@@ -674,6 +676,15 @@ export interface ChatMessage {
   /** Local-only file references. File bytes never leave the desktop attachment store. */
   attachments?: ChatAttachmentReference[];
   timestamp: string;
+}
+
+/** A build Alpha proposed in chat, kept so the user's answer can start it later. */
+export interface ChatRouteProposal {
+  /** The user message the proposal answers. */
+  sourceMessageId: string;
+  goal: string;
+  repositories: string[];
+  status: 'open' | 'accepted' | 'dismissed';
 }
 
 export type OrchestrationRecoveryCategory =

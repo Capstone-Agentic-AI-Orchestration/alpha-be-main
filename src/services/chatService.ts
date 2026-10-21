@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
 import { ChatMessage, ChatThread, Squad } from '../models/index.js';
-import { runCliTurn } from './cliRunner.js';
+import { providerResumesSessions, runCliTurn } from './cliRunner.js';
 import {
   ensureWorkspacesRoot,
   resolveProjectWorkspace,
@@ -28,6 +28,37 @@ import type { WorkspaceContext } from './workspaceRegistry.js';
 import { startProjectBuildBatch, type ProjectBuildStartResult } from './projectBuildOrchestrator.js';
 import { processManager } from './processManager.js';
 import { chatAttachmentService } from './chatAttachmentService.js';
+import {
+  chooseBuildRepositories,
+  orchestratorRoutingPrompt,
+  parseAlphaRoute,
+  parseChatOverride
+} from './chatRouter.js';
+import { isProjectBuildRequest } from './projectBuildIntent.js';
+import { reposForProject } from './githubIssueMapping.js';
+
+/**
+ * How Alpha may route an unaddressed message.
+ *
+ * Present for internal workspace members. Alpha answers as the Orchestrator and
+ * may start a build, but only through the checks in `applyAlphaRoute`.
+ */
+export interface ChatRoutingContext {
+  context: WorkspaceContext;
+  /** Codebases selected in the composer. Alpha may narrow them, never widen. */
+  repositories?: string[];
+  /** Whether this user's role may start builds. */
+  canBuild: boolean;
+  /** The user asked for an answer only (`/ask`). */
+  answerOnly?: boolean;
+}
+
+/** A refusal the route endpoint reports with a specific HTTP status. */
+export class ChatRouteError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
 import { runWithWorkspace } from './workspaceContext.js';
 
 export interface SendMessageParams {
@@ -55,6 +86,8 @@ export interface SendMessageParams {
   workspaceRole?: WorkspaceRole;
   /** A clear project implementation request, routed through the real runner. */
   buildRequest?: { context: WorkspaceContext; repository?: string; repositories?: string[] };
+  /** Let Alpha decide, as the Orchestrator, whether this message is a build. */
+  routing?: ChatRoutingContext;
 }
 
 /**
@@ -246,8 +279,26 @@ function describeWorkspaceForAlpha(workspaceId?: string): string {
   return describeAlphaWorkspace(agents, squads);
 }
 
+/**
+ * The last few messages before the current one, for a runtime without session
+ * resume. Bounded so a long thread cannot crowd out the instructions.
+ */
+function describeRecentConversation(threadId: string, limit = 8): string | undefined {
+  const messages = sqliteService.getChatMessages(threadId);
+  const lastUser = messages.map(message => message.senderType).lastIndexOf('user');
+  const earlier = (lastUser >= 0 ? messages.slice(0, lastUser) : messages).slice(-limit);
+  if (!earlier.length) return undefined;
+  const lines = earlier.map(message => {
+    const text = message.content.replace(/\s+/g, ' ').trim();
+    return `- ${message.senderName}: ${text.length > 600 ? `${text.slice(0, 600)}…` : text}`;
+  });
+  return ['## Recent conversation (context only; follow the current message)', ...lines].join('\n');
+}
+
 export class ChatService extends EventEmitter {
   private readonly activeTurns = new Map<string, ActiveChatTurn>();
+  /** Alpha replies that report a runtime failure rather than an answer. */
+  private readonly failedDefaultReplies = new WeakSet<ChatMessage>();
 
   private turnKey(threadId: string, messageId: string): string {
     return `${threadId}\u0000${messageId}`;
@@ -383,106 +434,19 @@ export class ChatService extends EventEmitter {
     }
 
     if (params.buildRequest) {
-      const existingBuildReply = existingUserMessage
-        ? sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`)
-        : undefined;
-      if (existingBuildReply) {
-        if (existingBuildReply.orchestrationRunId && workspaceId && params.userId) {
-          runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({
-            runId: existingBuildReply.orchestrationRunId!,
-            threadId,
-            buildMessageId: existingBuildReply.id,
-            actorId: params.userId!
-          }));
-        }
-        return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
-      }
-
-      const repositories = [...new Set((params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []))
-        .map(repository => repository.trim()).filter(Boolean))];
-      const buildAttachmentContext = chatAttachmentService.promptContext(threadId, attachmentIds, messageId, false, false);
-      const builds = await startProjectBuildBatch({
+      return this.startChatBuild({
+        threadId, thread, userMessage,
         context: params.buildRequest.context,
-        projectId: thread.projectId,
-        threadId,
-        messageId: userMessage.id,
-        content: `${content}${buildAttachmentContext.text}`,
-        repositories
+        request: parseChatOverride(content).content || content,
+        repositories: params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []),
+        attachmentIds
       });
-      const build = builds[0];
-      const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
-        ? result.status === 'completed' ? `Orchestrator build complete · ${result.issueIdentifier}`
-          : result.status === 'plan_ready' ? `Orchestrator plan ready · ${result.issueIdentifier}`
-            : result.status === 'awaiting_review' ? `Orchestrator build ready for final review · ${result.issueIdentifier}`
-              : result.status === 'blocked' ? `Orchestrator build paused · ${result.issueIdentifier}`
-                : `Orchestrator ${result.status === 'in_progress' ? 'working' : 'starting'} · ${result.issueIdentifier}`
-        : result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
-        : result.status === 'in_progress' ? `Build already in progress · ${result.issueIdentifier}`
-          : result.status === 'awaiting_review' ? `Build ready for review · ${result.issueIdentifier}`
-            : result.status === 'failed' ? `Build stopped · ${result.issueIdentifier}`
-              : result.status === 'blocked' ? 'Build not started'
-                : `Build started · ${result.issueIdentifier}`;
-      const summary = builds.length > 1 && builds.every(result => result.status === 'blocked')
-        ? [
-            '**Build not started for any repository.**',
-            ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
-            'No specialist was started, so no files were changed in this run. Open the Live Build Room to review each reason, then retry when the required correction is clear.'
-          ].join('\n\n')
-        : builds.length > 1
-        ? [
-            `**Build requested for ${builds.length} repositories**`,
-            ...builds.map(result => [
-              `**${result.repository ?? 'Repository'} · ${statusText(result)}**`,
-              result.reason,
-              result.squadName ? `Agent sequence: ${result.squadName}` : undefined,
-              result.branchName ? `Working branch: ${result.branchName}` : undefined
-            ].filter(Boolean).join(' · ')),
-            'Open the Live Build Room and choose a build to follow its agents, handoffs, changed files, and verification.'
-          ].join('\n\n')
-        : build.status === 'blocked'
-          ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
-          : build.orchestrationRunId
-            ? [
-                `**${statusText(build)}**`,
-                build.repositories && build.repositories.length > 1 ? `**One shared build across:** ${build.repositories.join(', ')}` : undefined,
-                build.status === 'plan_ready'
-                  ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Live Build Room, then choose **Start planned work**.`
-                  : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
-                build.reason,
-                build.repository ? `**Repository:** ${build.repository}` : undefined,
-                build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-                build.status === 'plan_ready' ? undefined : 'The next specialist starts only after the current result passes its checks. Open the Live Build Room to review task evidence and findings.'
-              ].filter(Boolean).join('\n\n')
-          : [
-              `**${statusText(build)}**`,
-              build.reason,
-              build.projectName ? `**Project:** ${build.projectName}` : undefined,
-              build.repository ? `**Repository:** ${build.repository}` : undefined,
-              build.squadName ? `**Agent sequence:** ${build.squadName}` : undefined,
-              build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-              'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
-            ].filter(Boolean).join('\n\n');
-      const reply: ChatMessage = {
-        id: `${messageId}-build`,
-        threadId,
-        senderType: 'agent',
-        senderName: 'Alpha Orchestrator',
-        content: summary,
-        messageType: 'build',
-        orchestrationRunId: build.orchestrationRunId,
-        timestamp: new Date().toISOString()
-      };
-      saveChatMessageAndShare(reply);
-      if (build.orchestrationRunId && workspaceId && params.userId) {
-        runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({
-          runId: build.orchestrationRunId!,
-          threadId,
-          buildMessageId: reply.id,
-          actorId: params.userId!
-        }));
-      }
-      this.emit('chat_message', reply);
-      return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
+    }
+
+    // A transport retry of a message Alpha already turned into a build returns that build.
+    if (existingUserMessage) {
+      const existingBuildReply = sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`);
+      if (existingBuildReply) return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
     }
 
     const turn: ActiveChatTurn = {
@@ -531,14 +495,29 @@ export class ChatService extends EventEmitter {
       turn.currentCallId = activityCallId;
       turn.currentRunId = runId;
       turn.currentAgentName = DEFAULT_ASSISTANT.name;
+      const routingPrompt = params.routing ? this.routingPromptFor(params.routing, thread) : undefined;
       const reply = await this.runWithSteering(turn, requestContent, prompt =>
-        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId)
+        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId, routingPrompt)
       );
       if (!reply || turn.stopRequested) {
         if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
         const stopped = this.stoppedMessage(threadId);
         saveChatMessageAndShare(stopped);
         return { userMessage, agentMessage: stopped, agentMessages: [stopped] };
+      }
+      if (params.routing) {
+        const routed = await this.applyAlphaRoute({
+          routing: params.routing,
+          thread,
+          userMessage,
+          reply,
+          request: parseChatOverride(content).content || content,
+          attachmentIds
+        });
+        if (routed) {
+          if (activityCallId) agentCallService.completeChatTurn(activityCallId, routed.agentMessage.id);
+          return routed;
+        }
       }
       saveChatMessageAndShare(reply);
       this.emit('chat_message', reply);
@@ -665,6 +644,284 @@ export class ChatService extends EventEmitter {
     return { userMessage, agentMessage: agentMessages[0], agentMessages };
   }
 
+  /**
+   * Start the Orchestrator for one chat message and post its status reply.
+   *
+   * Idempotent on the source message: a transport retry, or a second click on
+   * "Plan this build", returns the reply already written for that message.
+   */
+  private async startChatBuild(input: {
+    threadId: string;
+    thread: ChatThread;
+    userMessage: ChatMessage;
+    context: WorkspaceContext;
+    /** The planning brief: Alpha's restated goal, or the user's own words. */
+    request: string;
+    /** The user's words, kept beside Alpha's restatement for the planner. */
+    originalRequest?: string;
+    repositories?: string[];
+    attachmentIds?: string[];
+    /** One extra line for the user, such as how the request was routed. */
+    note?: string;
+  }): Promise<SendMessageResult> {
+    const { threadId, thread, userMessage } = input;
+    const messageId = userMessage.id;
+    // Links the run to this chat so recovery updates and milestones reach it.
+    const bindToChat = (runId: string | undefined, buildMessageId: string) => {
+      const { workspaceId, userId } = input.context;
+      if (!runId || !workspaceId || !userId) return;
+      runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({ runId, threadId, buildMessageId, actorId: userId }));
+    };
+    const existingBuildReply = sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`);
+    if (existingBuildReply) {
+      bindToChat(existingBuildReply.orchestrationRunId, existingBuildReply.id);
+      return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
+    }
+
+    const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
+    const buildAttachmentContext = chatAttachmentService.promptContext(threadId, input.attachmentIds ?? [], messageId, false, false);
+    const original = input.originalRequest?.trim();
+    const brief = original && original !== input.request.trim()
+      ? `${input.request.trim()}\n\nThe user's original message:\n${original}`
+      : input.request.trim();
+    const builds = await startProjectBuildBatch({
+      context: input.context,
+      projectId: thread.projectId,
+      threadId,
+      messageId,
+      content: `${brief}${buildAttachmentContext.text}`,
+      repositories
+    });
+    const build = builds[0];
+    const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
+      ? result.status === 'completed' ? `Orchestrator build complete · ${result.issueIdentifier}`
+        : result.status === 'plan_ready' ? `Orchestrator plan ready · ${result.issueIdentifier}`
+          : result.status === 'awaiting_review' ? `Orchestrator build ready for final review · ${result.issueIdentifier}`
+            : result.status === 'blocked' ? `Orchestrator build paused · ${result.issueIdentifier}`
+              : `Orchestrator ${result.status === 'in_progress' ? 'working' : 'starting'} · ${result.issueIdentifier}`
+      : result.status === 'queued' ? `Build queued · ${result.issueIdentifier}`
+      : result.status === 'in_progress' ? `Build already in progress · ${result.issueIdentifier}`
+        : result.status === 'awaiting_review' ? `Build ready for review · ${result.issueIdentifier}`
+          : result.status === 'failed' ? `Build stopped · ${result.issueIdentifier}`
+            : result.status === 'blocked' ? 'Build not started'
+              : `Build started · ${result.issueIdentifier}`;
+    const summary = builds.length > 1 && builds.every(result => result.status === 'blocked')
+      ? [
+          '**Build not started for any repository.**',
+          ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
+          'No specialist was started, so no files were changed in this run. Open the Live Build Room to review each reason, then retry when the required correction is clear.'
+        ].join('\n\n')
+      : builds.length > 1
+      ? [
+          `**Build requested for ${builds.length} repositories**`,
+          ...builds.map(result => [
+            `**${result.repository ?? 'Repository'} · ${statusText(result)}**`,
+            result.reason,
+            result.squadName ? `Agent sequence: ${result.squadName}` : undefined,
+            result.branchName ? `Working branch: ${result.branchName}` : undefined
+          ].filter(Boolean).join(' · ')),
+          'Open the Live Build Room and choose a build to follow its agents, handoffs, changed files, and verification.'
+        ].join('\n\n')
+      : build.status === 'blocked'
+        ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
+        : build.orchestrationRunId
+          ? [
+              `**${statusText(build)}**`,
+              build.repositories && build.repositories.length > 1 ? `**One shared build across:** ${build.repositories.join(', ')}` : undefined,
+              build.status === 'plan_ready'
+                ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Live Build Room, then choose **Start planned work**.`
+                : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
+              build.reason,
+              build.repository ? `**Repository:** ${build.repository}` : undefined,
+              build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
+              build.status === 'plan_ready' ? undefined : 'The next specialist starts only after the current result passes its checks. Open the Live Build Room to review task evidence and findings.'
+            ].filter(Boolean).join('\n\n')
+        : [
+            `**${statusText(build)}**`,
+            build.reason,
+            build.projectName ? `**Project:** ${build.projectName}` : undefined,
+            build.repository ? `**Repository:** ${build.repository}` : undefined,
+            build.squadName ? `**Agent sequence:** ${build.squadName}` : undefined,
+            build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
+            'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
+          ].filter(Boolean).join('\n\n');
+    const reply: ChatMessage = {
+      id: `${messageId}-build`,
+      threadId,
+      senderType: 'agent',
+      senderName: 'Alpha Orchestrator',
+      content: input.note ? `${summary}\n\n_${input.note}_` : summary,
+      messageType: 'build',
+      orchestrationRunId: build.orchestrationRunId,
+      timestamp: new Date().toISOString()
+    };
+    saveChatMessageAndShare(reply);
+    bindToChat(build.orchestrationRunId, reply.id);
+    this.emit('chat_message', reply);
+    return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
+  }
+
+  /** Orchestrator instructions describing what this conversation can build. */
+  private routingPromptFor(routing: ChatRoutingContext, thread: ChatThread): string {
+    const project = thread.projectId
+      ? sqliteService.getProjects().find(item => item.id === thread.projectId)
+      : undefined;
+    return orchestratorRoutingPrompt({
+      projectName: project?.name,
+      repositories: project ? reposForProject(project) : [],
+      selectedRepositories: routing.repositories,
+      workspaceProjects: workspaceRegistry.scopeProjects(sqliteService.getProjects(), routing.context)
+        .map(item => item.key ? `${item.name} (${item.key})` : item.name),
+      canBuild: routing.canBuild,
+      answerOnly: routing.answerOnly
+    });
+  }
+
+  /**
+   * Act on the decision Alpha wrote, after the server's own checks.
+   *
+   * Returns a finished result when the message became a build. Otherwise it
+   * rewrites `reply` in place — removing the decision line, or turning it into
+   * a proposal the user answers — and returns null so the caller saves it.
+   */
+  private async applyAlphaRoute(input: {
+    routing: ChatRoutingContext;
+    thread: ChatThread;
+    userMessage: ChatMessage;
+    reply: ChatMessage;
+    request: string;
+    attachmentIds: string[];
+  }): Promise<SendMessageResult | null> {
+    const { routing, thread, userMessage, reply, request } = input;
+    const projectId = thread.projectId;
+
+    if (this.failedDefaultReplies.has(reply)) {
+      // Alpha could not answer. Keep the old keyword routing so a clear build
+      // request still reaches the Orchestrator instead of failing outright.
+      if (routing.answerOnly || !routing.canBuild || !projectId || !isProjectBuildRequest(request)) return null;
+      return this.startChatBuild({
+        threadId: thread.id, thread, userMessage, context: routing.context, request,
+        repositories: routing.repositories, attachmentIds: input.attachmentIds,
+        note: 'Alpha could not reach its runtime, so this request was routed by its wording.'
+      });
+    }
+
+    const parsed = parseAlphaRoute(reply.content);
+    if (!parsed.decision && !parsed.malformed) return null;
+    reply.content = parsed.message;
+
+    if (routing.answerOnly || !routing.canBuild) {
+      if (!reply.content) {
+        reply.content = routing.answerOnly
+          ? 'I did not start a build. Send the message without /ask if you want me to plan this change.'
+          : 'This sounds like a product change, but your workspace role cannot start builds. Ask a project manager to update your access.';
+      }
+      return null;
+    }
+
+    // An unreadable decision becomes a question to the user, never a build.
+    const decision = parsed.decision ?? { route: 'confirm_build' as const, goal: request, repositories: [] };
+    const goal = decision.goal || request;
+    const repositories = chooseBuildRepositories(routing.repositories, decision.repositories);
+
+    if (decision.route === 'build' && projectId) {
+      return this.startChatBuild({
+        threadId: thread.id, thread, userMessage, context: routing.context,
+        request: goal, originalRequest: request, repositories, attachmentIds: input.attachmentIds
+      });
+    }
+
+    const needsProject = !projectId;
+    reply.messageType = needsProject ? 'project_needed' : 'build_proposal';
+    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, status: 'open' };
+    if (!reply.content) {
+      reply.content = needsProject
+        ? 'Which project is this for? Choose one in the header and I will plan the build.'
+        : 'Do you want me to plan a build for this, or only answer it?';
+    }
+    return null;
+  }
+
+  /**
+   * The user's answer to how a message should be handled.
+   *
+   * Backs "Plan this build", "Just answer", "Build this instead", and "This was
+   * just a question". `messageId` is always the user's own message, so every
+   * path is idempotent on it.
+   */
+  async routeMessage(input: {
+    threadId: string;
+    messageId: string;
+    action: 'build' | 'answer';
+    routing: ChatRoutingContext;
+    userId: string;
+  }): Promise<SendMessageResult> {
+    const thread = sqliteService.getChatThreads().find(item => item.id === input.threadId);
+    if (!thread) throw new ChatRouteError('Conversation not found.', 404);
+    const messages = sqliteService.getChatMessages(thread.id);
+    const userMessage = messages.find(message => message.id === input.messageId && message.senderType === 'user');
+    if (!userMessage) throw new ChatRouteError('That message is no longer in this conversation.', 404);
+
+    const proposals = messages.filter(message =>
+      message.routeProposal?.sourceMessageId === userMessage.id && message.routeProposal.status === 'open');
+    const settle = (status: 'accepted' | 'dismissed') => {
+      for (const message of proposals) {
+        sqliteService.updateChatMessageRouteProposal(thread.id, message.id, { ...message.routeProposal!, status });
+      }
+    };
+    const request = parseChatOverride(userMessage.content).content || userMessage.content;
+    const attachmentIds = userMessage.attachments?.map(item => item.id) ?? [];
+
+    if (input.action === 'build') {
+      if (!input.routing.canBuild) {
+        throw new ChatRouteError('Your workspace role cannot start builds. Ask a project manager to update your access.', 403);
+      }
+      if (!thread.projectId) throw new ChatRouteError('Choose a project for this conversation before planning a build.', 409);
+      const proposal = proposals.at(-1)?.routeProposal;
+      const result = await this.startChatBuild({
+        threadId: thread.id, thread, userMessage, context: input.routing.context,
+        request: proposal?.goal || request,
+        originalRequest: request,
+        repositories: input.routing.repositories?.length ? input.routing.repositories : proposal?.repositories,
+        attachmentIds
+      });
+      settle('accepted');
+      return result;
+    }
+
+    // "Just answer" or "This was just a question": withdraw an unstarted plan first.
+    const buildReply = messages.find(message => message.id === `${userMessage.id}-build`);
+    if (buildReply?.orchestrationRunId) {
+      const status = sqliteService.getOrchestrationSnapshot(buildReply.orchestrationRunId)?.run.status;
+      if (status && !['planning', 'awaiting_plan_approval', 'cancelled', 'failed', 'blocked'].includes(status)) {
+        throw new ChatRouteError('Specialists have already started this build. Stop it from its build controls first.', 409);
+      }
+      if (status === 'planning' || status === 'awaiting_plan_approval') {
+        const { orchestrationService } = await import('./orchestrationRuntime.js');
+        await orchestrationService.cancelRun({
+          workspaceId: input.routing.context.workspaceId,
+          runId: buildReply.orchestrationRunId,
+          actorId: input.userId,
+          reason: 'The user asked for an answer instead of a build.'
+        });
+      }
+    }
+    settle('dismissed');
+
+    const reply = await this.generateDefaultReply(
+      `${request}\n\nThe user wants an answer to this message, not a build. Answer it directly.`,
+      thread.id,
+      input.routing.context.workspaceId,
+      `chat-${randomUUID()}`,
+      undefined,
+      this.routingPromptFor({ ...input.routing, answerOnly: true }, thread)
+    );
+    reply.content = parseAlphaRoute(reply.content).message || reply.content;
+    saveChatMessageAndShare(reply);
+    this.emit('chat_message', reply);
+    return { userMessage, agentMessage: reply, agentMessages: [reply] };
+  }
+
   private stoppedMessage(threadId: string): ChatMessage {
     return {
       id: `msg-${Date.now()}-${randomUUID()}-stopped`, threadId, senderType: 'system',
@@ -688,7 +945,9 @@ export class ChatService extends EventEmitter {
     threadId: string,
     workspaceId: string | undefined,
     runId: string,
-    activityCallId?: string
+    activityCallId?: string,
+    /** Orchestrator instructions for this turn, when Alpha may route it. */
+    routingPrompt?: string
   ): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
@@ -703,7 +962,7 @@ export class ChatService extends EventEmitter {
 
     const runtime = pickDefaultRuntime(sqliteService.getRuntimes());
     if (!runtime) {
-      return {
+      const unavailable: ChatMessage = {
         ...base,
         senderType: 'system',
         content: [
@@ -712,10 +971,17 @@ export class ChatService extends EventEmitter {
           'Install and sign in to one of the agent CLIs — the Runtimes page shows what it found.'
         ].join('\n')
       };
+      this.failedDefaultReplies.add(unavailable);
+      return unavailable;
     }
 
     const priorSession = sqliteService.getThreadSession(threadId, DEFAULT_ASSISTANT.id);
     const cwd = chatWorkspace(threadId);
+    // A routed turn on a runtime that starts fresh each turn sees no earlier
+    // messages, so "yes, go ahead" would mean nothing. Give it the recent ones.
+    const recentConversation = routingPrompt && !providerResumesSessions(runtime.provider)
+      ? describeRecentConversation(threadId)
+      : undefined;
 
     logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}`);
 
@@ -726,7 +992,7 @@ export class ChatService extends EventEmitter {
       modelName: runtime.modelName,
       codexBaseUrl: runtime.endpoint,
       // The tool policy still applies: a chat inspects, it does not mutate.
-      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, describeWorkspaceForAlpha(workspaceId), describeChatToolPolicy()]
+      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), describeChatToolPolicy()]
         .filter(Boolean)
         .join(`
 
@@ -745,7 +1011,7 @@ export class ChatService extends EventEmitter {
 
     if (turn.failureKind) {
       const cli = turn.bin.replace('.cmd', '');
-      return {
+      const failed: ChatMessage = {
         ...base,
         content:
           `I could not reach the ${runtime.provider} CLI, so I have no answer for you.
@@ -757,6 +1023,8 @@ export class ChatService extends EventEmitter {
           `Check that \`${cli}\` is installed and signed in — the Runtimes page shows its status.`,
         thinkingProcess: turn.thinking
       };
+      this.failedDefaultReplies.add(failed);
+      return failed;
     }
 
     return {
