@@ -74,6 +74,23 @@ describe('structured specialist report parsing', () => {
     }]);
   });
 
+  it('binds a report to the version expected by its task and preserves the received version on rejection', () => {
+    const parsed = parseAgentReport(JSON.stringify({ ...validReviewReport([]), schemaVersion: 2 }), 1);
+
+    expect(parsed.report).toBeUndefined();
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed.error).toContain('expects specialist report schema version 1');
+    expect(parsed.error).toContain('returned version 2');
+  });
+
+  it('rejects an unknown report schema version instead of validating it as the current version', () => {
+    const parsed = parseAgentReport(JSON.stringify({ ...validReviewReport([]), schemaVersion: 99 }));
+
+    expect(parsed.report).toBeUndefined();
+    expect(parsed.schemaVersion).toBe(99);
+    expect(parsed.error).toContain('does not support specialist report schema version 99');
+  });
+
   it('normalizes common review-finding aliases and severity labels', () => {
     const raw = JSON.stringify({
       ...validReviewReport([]),

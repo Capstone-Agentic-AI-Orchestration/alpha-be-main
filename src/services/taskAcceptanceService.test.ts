@@ -109,6 +109,122 @@ describe('task acceptance and targeted correction', () => {
     directory = '';
   });
 
+  it('revalidates legacy report aliases at acceptance and gives the next agent canonical prerequisite evidence', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-canonical-handoff-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'base.ts'), 'export const ready = true;\n');
+    commit(repository, 'Initial handoff fixture');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'canonical handoff fixture'));
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        const branchName = `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1,
+      goal: 'Complete a small API change and continue to a dependent validation task.',
+      exclusions: [],
+      requirements: [
+        { id: 'REQ-API', description: 'Implement the API behavior.' },
+        { id: 'REQ-VALIDATE', description: 'Validate the accepted API behavior.' }
+      ],
+      tasks: [
+        {
+          id: 'implement-api', title: 'Implement API', description: 'Implement the API.', kind: 'backend',
+          ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-API'],
+          acceptanceCriteria: ['The API behavior is implemented.'], requiredChecks: ['test'],
+          scope: { includePaths: ['src/**'], excludePaths: [] }
+        },
+        {
+          id: 'validate-api', title: 'Validate API', description: 'Review the accepted API evidence.', kind: 'validation',
+          ownerAgentId: 'validation-agent', dependsOn: ['implement-api'], requirementIds: ['REQ-VALIDATE'],
+          acceptanceCriteria: ['The accepted API change is validated.'], requiredChecks: [],
+          scope: { includePaths: [], excludePaths: [] }
+        }
+      ]
+    });
+    const eligibleAgents = [
+      { id: 'backend-agent', role: 'Backend Agent' },
+      { id: 'validation-agent', role: 'Validation / Checking Agent' }
+    ] as const;
+    const snapshot = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/canonical-handoff',
+      requestKey: 'canonical-handoff', requestFingerprint: 'canonical-handoff-fingerprint',
+      createdBy: 'user-test', executorId: 'desktop-test', eligibleAgents, plan, baseRef: 'main'
+    });
+    const request = launches[0];
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export function api() { return true; }\n');
+    const resultCommit = commit(repository, 'Implement API');
+    const rawReport = JSON.parse(completedRun(request, resultCommit, ['src/api.ts']).activities[0].message);
+    rawReport.reportedChecks = [{
+      name: 'npm test', status: 'blocked', evidence: 'The agent could not run this check in its isolated tools.'
+    }];
+    const running = runWithWorkspace(workspaceId, () => store!.getOrchestrationSnapshot(snapshot.run.id))!;
+    const submitted = runWithWorkspace(workspaceId, () => store!.submitOrchestrationAttempt({
+      runId: snapshot.run.id,
+      taskId: request.taskId,
+      attemptId: request.attemptId,
+      expectedTaskRevision: running.tasks.find(task => task.id === request.taskId)!.revision,
+      resultCommit,
+      result: {
+        resultSchemaVersion: 1,
+        summary: rawReport.summary,
+        prototypeRunId: `prototype-${request.attemptId}`,
+        branchName: request.branchName,
+        agentReport: rawReport,
+        agentReportResponse: JSON.stringify(rawReport),
+        agentReportSchemaVersionExpected: 1,
+        agentReportSchemaVersionReceived: 1,
+        verification: {
+          stageStatus: 'success',
+          observed: {
+            status: 'passed', missingScripts: [],
+            commands: [{ script: 'test', display: 'npm test', exitCode: 0, signal: null }]
+          }
+        }
+      }
+    }));
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
+      })
+    });
+
+    const outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted.run.id, taskId: request.taskId,
+      attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+
+    expect(outcome.decision, outcome.reason).toBe('accepted');
+    expect(outcome.snapshot.attempts.find(attempt => attempt.id === request.attemptId)?.result?.agentReport)
+      .toMatchObject({ reportedChecks: [{ script: 'npm test', result: 'not_run' }] });
+    expect(launches[1].taskPackage.acceptedDependencies[0]).toMatchObject({
+      taskId: 'implement-api',
+      acceptedRevision: expect.any(Number),
+      resultCommit,
+      requirementCoverage: [{ requirementId: 'REQ-API', evidence: expect.any(String) }],
+      deliverables: [{ paths: ['src/api.ts'] }],
+      verificationStatus: 'passed',
+      observedChecks: [{ script: 'test', result: 'passed' }],
+      changedPaths: ['src/api.ts']
+    });
+  });
+
   it('rejects an out-of-scope edit, targets its owner, and accepts only after the bad edit is removed', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });
@@ -426,6 +542,13 @@ describe('task acceptance and targeted correction', () => {
     let submitted = await orchestration.handleRunnerCompleted(
       completedRun(request, resultCommit, ['src/api.ts'], { reportedChecks: invalidReportedChecks })
     );
+    expect(submitted!.attempts.find(attempt => attempt.id === request.attemptId)?.result).toMatchObject({
+      agentReport: null,
+      agentReportSchemaVersionExpected: 1,
+      agentReportSchemaVersionReceived: 1,
+      agentReportError: expect.stringContaining('reportedChecks.0'),
+      agentReportResponseTruncated: false
+    });
     let outcome = await acceptance.evaluateAndAccept({
       workspaceId, runId: submitted!.run.id, taskId: 'api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
     });

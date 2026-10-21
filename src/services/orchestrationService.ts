@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Agent, PrototypeRun } from '../models/index.js';
 import {
-  orchestrationAgentReportSchema,
+  ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
   MAX_INITIAL_PLAN_TASKS,
   ensureTaskAssignmentReasons,
   parseOrchestrationPlan,
@@ -11,6 +11,8 @@ import {
   type OrchestrationRequiredCheck,
   type OrchestrationTaskKind
 } from './orchestrationContract.js';
+import { parseAgentReport } from './orchestrationAgentReport.js';
+export { parseAgentReport } from './orchestrationAgentReport.js';
 import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -61,7 +63,8 @@ export interface OrchestrationLaunchRequest {
 }
 
 export interface OrchestrationTaskPackage {
-  packageVersion: 5;
+  packageVersion: 6;
+  reportSchemaVersion: number;
   goal: string;
   projectContext: string;
   exclusions: string[];
@@ -78,9 +81,18 @@ export interface OrchestrationTaskPackage {
   requirements: Array<{ id: string; description: string }>;
   acceptedDependencies: Array<{
     taskId: string;
+    taskKind: OrchestrationTaskKind;
     ownerAgentId: string;
+    acceptedRevision: number;
     summary: string;
     resultCommit?: string;
+    resultArtifactHash?: string;
+    requirementCoverage: Array<{ requirementId: string; evidence: string }>;
+    deliverables: Array<{ summary: string; paths: string[] }>;
+    verificationStatus: 'passed' | 'failed' | 'skipped' | 'cancelled' | 'not_recorded';
+    missingScripts: string[];
+    observedChecks: Array<{ script: string; result: 'passed' | 'failed' | 'not_run' }>;
+    changedPaths: string[];
   }>;
   reviewInputs: Array<{
     taskId: string;
@@ -175,147 +187,6 @@ export class OrchestrationPlanError extends Error {
     super(issues.map(issue => issue.detail).join(' '));
     this.name = 'OrchestrationPlanError';
   }
-}
-
-function extractJsonObjects(text: string): string[] {
-  const objects: string[] = [];
-  for (let start = 0; start < text.length; start += 1) {
-    if (text[start] !== '{') continue;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let index = start; index < text.length; index += 1) {
-      const char = text[index];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === '"') inString = false;
-        continue;
-      }
-      if (char === '"') inString = true;
-      else if (char === '{') depth += 1;
-      else if (char === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          objects.push(text.slice(start, index + 1));
-          start = index;
-          break;
-        }
-      }
-    }
-    if (objects.length >= 8) break;
-  }
-  return objects;
-}
-
-function normalizeReportFieldAliases(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  const report = value as Record<string, unknown>;
-  const normalized: Record<string, unknown> = { ...report };
-  if (Array.isArray(report.requirementCoverage)) {
-    normalized.requirementCoverage = report.requirementCoverage.map(item => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
-      const coverage = { ...(item as Record<string, unknown>) };
-      if (typeof coverage.requirementId !== 'string' && typeof coverage.requirement === 'string') {
-        coverage.requirementId = coverage.requirement;
-        delete coverage.requirement;
-      } else if (coverage.requirementId === coverage.requirement) {
-        delete coverage.requirement;
-      }
-      return coverage;
-    });
-  }
-  if (Array.isArray(report.reportedChecks)) {
-    normalized.reportedChecks = report.reportedChecks.map(item => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
-      const check = { ...(item as Record<string, unknown>) };
-      if (check.script === undefined && typeof check.name === 'string') {
-        check.script = check.name;
-        delete check.name;
-      } else if (check.script === check.name) {
-        delete check.name;
-      }
-
-      const rawResult = check.result !== undefined ? check.result : check.status;
-      const normalizedResult = normalizeReportedCheckResult(rawResult);
-      if (normalizedResult !== undefined) {
-        check.result = normalizedResult;
-        if (check.status !== undefined && normalizeReportedCheckResult(check.status) === normalizedResult) {
-          delete check.status;
-        }
-      }
-      return check;
-    });
-  }
-  if (Array.isArray(report.reviewFindings)) {
-    normalized.reviewFindings = report.reviewFindings.map(item => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
-      const finding = { ...(item as Record<string, unknown>) };
-      const aliases: Array<[string, string]> = [
-        ['targetTaskId', 'taskId'],
-        ['requirementId', 'requirement'],
-        ['path', 'file'],
-        ['instruction', 'recommendation']
-      ];
-      for (const [field, alias] of aliases) {
-        if (finding[field] === undefined && typeof finding[alias] === 'string') {
-          finding[field] = finding[alias];
-          delete finding[alias];
-        } else if (finding[field] === finding[alias]) {
-          delete finding[alias];
-        }
-      }
-      const severity = normalizeReviewFindingSeverity(finding.severity);
-      if (severity !== undefined) finding.severity = severity;
-      return finding;
-    });
-  }
-  return normalized;
-}
-
-/** Convert common report wording only when it has one clear contract meaning. */
-function normalizeReportedCheckResult(value: unknown): 'passed' | 'failed' | 'not_run' | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (['passed', 'pass', 'success', 'successful', 'succeeded', 'ok'].includes(normalized)) return 'passed';
-  if (['failed', 'fail', 'failure', 'error', 'errored'].includes(normalized)) return 'failed';
-  // A blocked check did not execute. Preserve the specialist's explanation in
-  // evidence while keeping the version 1 result vocabulary consistent.
-  if (['not_run', 'skipped', 'skip', 'not_executed', 'unrun', 'blocked'].includes(normalized)) return 'not_run';
-  return undefined;
-}
-
-/** Normalize standard review severity labels to Alpha's blocking vocabulary. */
-function normalizeReviewFindingSeverity(value: unknown): 'warning' | 'blocking' | 'critical' | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (['warning', 'warn', 'info', 'informational', 'low', 'minor'].includes(normalized)) return 'warning';
-  if (['blocking', 'blocker', 'medium', 'moderate', 'high', 'major'].includes(normalized)) return 'blocking';
-  if (['critical', 'severe'].includes(normalized)) return 'critical';
-  return undefined;
-}
-
-export function parseAgentReport(text: string): { report?: Record<string, unknown>; error?: string } {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  const payload = fenced ? fenced[1] : trimmed;
-  const candidates = [payload, ...extractJsonObjects(payload).filter(candidate => candidate !== payload)];
-  let lastError = 'The specialist response is not a single valid JSON task report.';
-  for (const candidate of candidates) {
-    let value: unknown;
-    try {
-      value = JSON.parse(candidate);
-    } catch {
-      continue;
-    }
-    const parsed = orchestrationAgentReportSchema.safeParse(normalizeReportFieldAliases(value));
-    if (parsed.success) return { report: parsed.data as unknown as Record<string, unknown> };
-    const issues = parsed.error.issues.slice(0, 8).map(issue =>
-      `${issue.path.join('.') || 'report'} ${issue.message}`
-    );
-    lastError = `The specialist report does not match version 1: ${issues.join('; ')}.`;
-  }
-  return { error: lastError };
 }
 
 /**
@@ -525,6 +396,7 @@ export class OrchestrationService {
     expectedTaskRevision: number;
     acceptedBy: string;
     evidence: Record<string, unknown>;
+    canonicalReport?: Record<string, unknown>;
     dispatchNext?: boolean;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
@@ -545,6 +417,7 @@ export class OrchestrationService {
     expectedPlanVersion: number;
     acceptedBy: string;
     evidence: Record<string, unknown>;
+    canonicalReport?: Record<string, unknown>;
     amendment: OrchestrationReviewAmendment;
     dispatchNext?: boolean;
     now?: string;
@@ -558,6 +431,7 @@ export class OrchestrationService {
         expectedPlanVersion: input.expectedPlanVersion,
         acceptedBy: input.acceptedBy,
         evidence: input.evidence,
+        canonicalReport: input.canonicalReport,
         plan: input.amendment.plan,
         addedTasks: input.amendment.addedTasks,
         findings: input.amendment.findings,
@@ -915,7 +789,10 @@ export class OrchestrationService {
         .find(activity => activity.kind === 'assistant' && !activity.isStreaming)?.message
         ?? [...(run.activities ?? [])].reverse().find(activity => activity.kind === 'summary')?.message
         ?? 'The runner completed without a structured specialist summary.';
-      const agentReport = parseAgentReport(rawSummary);
+      const expectedReportSchemaVersion = typeof attempt.contextManifest.reportSchemaVersion === 'number'
+        ? attempt.contextManifest.reportSchemaVersion
+        : undefined;
+      const agentReport = parseAgentReport(rawSummary, expectedReportSchemaVersion);
       const agentSummary = typeof agentReport.report?.summary === 'string'
         ? agentReport.report.summary
         : 'The specialist response did not match Alpha’s required task-report format.';
@@ -934,10 +811,12 @@ export class OrchestrationService {
           branchName: run.branchName,
           agentReport: agentReport.report ?? null,
           agentReportError: agentReport.error,
-          ...(agentReport.report ? {} : {
-            agentReportResponse: rawSummary.slice(0, 12_000),
-            agentReportResponseTruncated: rawSummary.length > 12_000
-          }),
+          agentReportSchemaVersionExpected: expectedReportSchemaVersion ?? ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
+          agentReportSchemaVersionReceived: agentReport.schemaVersion,
+          // Keep bounded raw output next to the canonical report so every
+          // normalisation and correction remains auditable after restart.
+          agentReportResponse: rawSummary.slice(0, 12_000),
+          agentReportResponseTruncated: rawSummary.length > 12_000,
           changedFiles: run.changedFiles ?? 0,
           insertions: run.insertions ?? 0,
           deletions: run.deletions ?? 0,
@@ -1224,7 +1103,9 @@ export class OrchestrationService {
     }
     const finalContextManifest = {
       ...contextManifest,
-      ...(prepared.contextManifest ?? {})
+      ...(prepared.contextManifest ?? {}),
+      packageVersion: baseRequest.taskPackage.packageVersion,
+      reportSchemaVersion: baseRequest.taskPackage.reportSchemaVersion
     };
     if (prepared.branchName && prepared.workingDir && prepared.baseRef && prepared.startingCommit) {
       this.store.bindOrchestrationWorkspace({
@@ -1403,6 +1284,7 @@ export class OrchestrationService {
       .map(item => ({ taskId: item.id, revision: item.acceptedRevision ?? item.revision }));
     return {
       manifestVersion: 1,
+      reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       runId: snapshot.run.id,
       planVersion: snapshot.run.planVersion,
       taskId,
@@ -1428,18 +1310,87 @@ export class OrchestrationService {
           .find(attempt => attempt.taskId === item.id && attempt.status === 'accepted');
         const result = acceptedAttempt?.result ?? {};
         const summary = typeof result.summary === 'string' ? result.summary.slice(0, 2_000) : 'Accepted; no summary was submitted.';
+        const report = result.agentReport && typeof result.agentReport === 'object'
+          ? result.agentReport as Record<string, unknown>
+          : {};
+        const acceptanceEvidence = result.acceptanceEvidence && typeof result.acceptanceEvidence === 'object'
+          ? result.acceptanceEvidence as Record<string, unknown>
+          : {};
+        const verification = result.verification && typeof result.verification === 'object'
+          ? result.verification as Record<string, unknown>
+          : {};
+        const observed = verification.observed && typeof verification.observed === 'object'
+          ? verification.observed as Record<string, unknown>
+          : {};
+        const commands = Array.isArray(observed.commands)
+          ? observed.commands as Array<Record<string, unknown>>
+          : [];
+        const verificationStatus: OrchestrationTaskPackage['acceptedDependencies'][number]['verificationStatus'] =
+          ['passed', 'failed', 'skipped', 'cancelled'].includes(String(observed.status))
+          ? observed.status as 'passed' | 'failed' | 'skipped' | 'cancelled'
+          : 'not_recorded';
+        const missingScripts = Array.isArray(observed.missingScripts)
+          ? observed.missingScripts.filter((script): script is string => typeof script === 'string').slice(0, 20)
+          : [];
+        const coverage = Array.isArray(report.requirementCoverage)
+          ? report.requirementCoverage as Array<Record<string, unknown>>
+          : [];
+        const deliverables = Array.isArray(report.deliverables)
+          ? report.deliverables as Array<Record<string, unknown>>
+          : [];
+        const artifact = acceptedAttempt && snapshot.artifacts.find(candidate =>
+          candidate.attemptId === acceptedAttempt.id && candidate.type === 'task_result'
+        );
         return {
           taskId: item.id,
+          taskKind: item.kind,
           ownerAgentId: item.ownerAgentId,
+          acceptedRevision: item.acceptedRevision ?? item.revision,
           summary,
-          resultCommit: acceptedAttempt?.resultCommit
+          resultCommit: acceptedAttempt?.resultCommit,
+          resultArtifactHash: artifact?.contentHash,
+          requirementCoverage: coverage.slice(0, 12).flatMap(item =>
+            typeof item.requirementId === 'string' && typeof item.evidence === 'string'
+              ? [{ requirementId: item.requirementId.slice(0, 80), evidence: item.evidence.slice(0, 500) }]
+              : []
+          ),
+          deliverables: deliverables.slice(0, 20).flatMap(item =>
+            typeof item.summary === 'string'
+              ? [{
+                  summary: item.summary.slice(0, 500),
+                  paths: Array.isArray(item.paths)
+                    ? item.paths.filter((filePath): filePath is string => typeof filePath === 'string').slice(0, 60)
+                    : []
+                }]
+              : []
+          ),
+          verificationStatus,
+          missingScripts,
+          observedChecks: commands.slice(0, 20).map(command => {
+            const commandInfo = command.command && typeof command.command === 'object'
+              ? command.command as Record<string, unknown>
+              : {};
+            const script = command.script ?? commandInfo.script ?? command.display ?? commandInfo.display;
+            const exitCode = command.exitCode;
+            const signal = command.signal;
+            return {
+              script: typeof script === 'string' ? script.slice(0, 180) : 'Registered check',
+              result: exitCode === 0 && (signal === null || signal === undefined)
+                ? 'passed' as const
+                : exitCode === null || exitCode === undefined ? 'not_run' as const : 'failed' as const
+            };
+          }),
+          changedPaths: Array.isArray(acceptanceEvidence.changedPaths)
+            ? acceptanceEvidence.changedPaths.filter((filePath): filePath is string => typeof filePath === 'string').slice(0, 60)
+            : []
         };
       });
     const reviewInputs = task.kind === 'review' && !reportCorrection
       ? await this.createReviewInputs(snapshot, task)
       : [];
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 5,
+      packageVersion: 6,
+      reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       goal: snapshot.run.plan.goal,
       projectContext: snapshot.run.plan.projectContext ?? '',
       exclusions: snapshot.run.plan.exclusions,

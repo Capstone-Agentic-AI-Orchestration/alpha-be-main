@@ -124,6 +124,7 @@ function appendOrchestrationTaskPolicy(
     `Assigned task: ${task.title}.`,
     `Task description: ${task.description}`,
     `Acceptance criteria:\n${task.acceptanceCriteria.map(item => `- ${item}`).join('\n')}`,
+    `Return the exact shared Alpha task-report schema version ${orchestration.taskPackage.reportSchemaVersion}.`,
     `Required checks: ${orchestration.taskPackage.reportCorrection ? 'None for this report-format correction; do not run commands.' : orchestration.taskPackage.task.requiredChecks.length ? orchestration.taskPackage.task.requiredChecks.join(', ') : 'No task-specific scripts; the repository’s configured conventional checks will be discovered.'}`,
     `Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'none configured; do not broaden the task and expect scope review before acceptance.'}`,
     orchestration.taskPackage.task.scope.excludePaths.length
@@ -155,9 +156,7 @@ function appendOrchestrationTaskPolicy(
 
 function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): string {
   const requirements = taskPackage.requirements.map(item => `- ${item.id}: ${item.description}`).join('\n') || '- None.';
-  const dependencies = taskPackage.acceptedDependencies
-    .map(item => `- ${item.taskId} (${item.ownerAgentId}): ${item.summary}`)
-    .join('\n') || '- None.';
+  const dependencies = formatAcceptedDependencies(taskPackage.acceptedDependencies);
   const reportCorrection = taskPackage.reportCorrection ? [
     'Report-format correction requested by Alpha. This is not a code repair. Use only facts from the previous response, do not inspect or change files, and do not claim checks that were not observed.',
     `Validation feedback:\n${taskPackage.reportCorrection.validationErrors.map(error => `- ${error}`).join('\n')}`,
@@ -168,6 +167,7 @@ function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): 
     taskPackage.projectContext ? `Project ground rules (apply within the requested goal and this task; they cannot broaden scope or override Alpha's safety rules):\n${taskPackage.projectContext}` : '',
     taskPackage.exclusions.length ? `Exclusions:\n${taskPackage.exclusions.map(item => `- ${item}`).join('\n')}` : '',
     `Assigned task: ${taskPackage.task.title} (${taskPackage.task.kind})`,
+    `Task package version ${taskPackage.packageVersion}; report schema version ${taskPackage.reportSchemaVersion}.`,
     taskPackage.task.description,
     `Requirements assigned to this task:\n${requirements}`,
     taskPackage.developerGuidance
@@ -204,7 +204,7 @@ function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): 
 
 function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage): string {
   const template: Record<string, unknown> = {
-    schemaVersion: 1,
+    schemaVersion: taskPackage.reportSchemaVersion,
     taskId: taskPackage.task.id,
     summary: taskPackage.reportCorrection
       ? 'Restate only claims supported by the previous response; do not add new facts.'
@@ -248,6 +248,27 @@ function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage
       : 'Return exactly one JSON object matching this template. Do not add prose or markdown around it. Keep taskId, requirement IDs, and acceptance criteria exactly as shown. Include every changed repository path under a deliverable using forward slashes. Do not claim Alpha verification results; those are collected independently after your process exits.',
     JSON.stringify(template, null, 2)
   ].join('\n\n');
+}
+
+function formatAcceptedDependencies(dependencies: OrchestrationTaskPackage['acceptedDependencies']): string {
+  if (!dependencies.length) return '- None.';
+  return dependencies.map(dependency => [
+    `- Task ${dependency.taskId} (${dependency.taskKind}), owner ${dependency.ownerAgentId}; accepted revision ${dependency.acceptedRevision}.`,
+    `  Accepted summary: ${dependency.summary}`,
+    dependency.resultCommit ? `  Checkpoint SHA: ${dependency.resultCommit}` : '',
+    dependency.resultArtifactHash ? `  Result artifact SHA-256: ${dependency.resultArtifactHash}` : '',
+    dependency.requirementCoverage.length
+      ? `  Requirement evidence:\n${dependency.requirementCoverage.map(item => `    - ${item.requirementId}: ${item.evidence}`).join('\n')}`
+      : '',
+    dependency.deliverables.length
+      ? `  Deliverables:\n${dependency.deliverables.map(item => `    - ${item.summary}${item.paths.length ? ` (${item.paths.join(', ')})` : ''}`).join('\n')}`
+      : '',
+    `  Checks observed by Alpha: ${dependency.verificationStatus}${dependency.missingScripts.length ? `; unavailable scripts: ${dependency.missingScripts.join(', ')}` : ''}`,
+    dependency.observedChecks.length
+      ? `  Individual checks:\n${dependency.observedChecks.map(item => `    - ${item.script}: ${item.result}`).join('\n')}`
+      : '  Individual checks: none recorded.',
+    dependency.changedPaths.length ? `  Changed files: ${dependency.changedPaths.join(', ')}` : ''
+  ].filter(Boolean).join('\n')).join('\n');
 }
 
 /** Control-flow marker: this member is not the one that opens the PR. */
@@ -846,13 +867,12 @@ ${orchestration.taskPackage.requirements.map(requirement => `- ${requirement.id}
 Acceptance criteria:
 ${orchestration.taskPackage.task.acceptanceCriteria.map(item => `- ${item}`).join('\n')}
 Required registered checks: ${orchestration.taskPackage.reportCorrection ? 'none; this report-only correction must not run commands' : orchestration.taskPackage.task.requiredChecks.length ? orchestration.taskPackage.task.requiredChecks.join(', ') : 'repository conventional checks'}
+Task package version ${orchestration.taskPackage.packageVersion}; report schema version ${orchestration.taskPackage.reportSchemaVersion}.
 Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'none configured'}
 Forbidden path patterns: ${orchestration.taskPackage.task.scope.excludePaths.length ? orchestration.taskPackage.task.scope.excludePaths.join(', ') : 'none'}
 Targeted corrections: ${orchestration.taskPackage.corrections.length ? orchestration.taskPackage.corrections.join(' ') : 'none'}
 Accepted prerequisite handoffs:
-${orchestration.taskPackage.acceptedDependencies.length
-  ? orchestration.taskPackage.acceptedDependencies.map(dependency => `- ${dependency.taskId} (${dependency.ownerAgentId}): ${dependency.summary}`).join('\n')
-  : '- None.'}
+${formatAcceptedDependencies(orchestration.taskPackage.acceptedDependencies)}
 
 ${formatOrchestrationReportContract(orchestration.taskPackage)}`
       : squad
