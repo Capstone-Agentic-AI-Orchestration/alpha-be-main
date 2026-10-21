@@ -31,13 +31,19 @@ describe('orchestration recovery classification and report retry', () => {
       snapshot: blockedReviewSnapshot(0), category: 'report', taskId: 'review-calculator',
       canControl: true, episodeAgeMs: 0
     });
-    const exhausted = recoveryAvailableActions({
+    const developerDecision = recoveryAvailableActions({
       snapshot: blockedReviewSnapshot(2), category: 'report', taskId: 'review-calculator',
+      canControl: true, episodeAgeMs: 0
+    });
+    const exhausted = recoveryAvailableActions({
+      snapshot: blockedReviewSnapshot(3), category: 'report', taskId: 'review-calculator',
       canControl: true, episodeAgeMs: 0
     });
 
     expect(available.availableActions).toContain('retry_report_format');
+    expect(developerDecision.availableActions).toContain('retry_report_format');
     expect(exhausted.availableActions).not.toContain('retry_report_format');
-    expect(exhausted.actionReasons.retry_report_format).toContain('two report-only corrections');
+    expect(exhausted.actionReasons.retry_report_format).toContain('two automatic report-only corrections');
+    expect(exhausted.actionReasons.retry_report_format).toContain('one developer-authorized correction');
   });
 });

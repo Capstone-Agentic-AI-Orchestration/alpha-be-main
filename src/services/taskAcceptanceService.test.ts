@@ -255,6 +255,220 @@ describe('task acceptance and targeted correction', () => {
     expect(finalAcceptance.evidence).toHaveProperty('checks.status', 'passed');
   });
 
+  it('retries malformed reports twice with the same read-only specialist before escalating', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-report-correction-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export const ready = true;\n');
+    commit(repository, 'Initial API');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'report correction fixture'));
+    const eligibleAgents = [{ id: 'backend-agent', role: 'Backend Agent' }] as const;
+    vi.spyOn(store, 'getAgents').mockReturnValue(eligibleAgents.map(agent => ({ ...agent })) as any);
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1,
+      goal: 'Implement the API endpoint.',
+      exclusions: [],
+      requirements: [{ id: 'REQ-API', description: 'The API endpoint is available.' }],
+      tasks: [{
+        id: 'api', title: 'Implement API', description: 'Implement the API endpoint.', kind: 'backend',
+        ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-API'],
+        acceptanceCriteria: ['The API endpoint is implemented.'], requiredChecks: ['test'],
+        scope: { includePaths: ['src/**'], excludePaths: [] }
+      }]
+    });
+    let snapshot = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/report-correction', requestKey: 'request-report-correction',
+      requestFingerprint: 'fingerprint-report-correction', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents, plan, baseRef: 'main'
+    });
+    const invalidReportedChecks = [
+      { name: 'npm test', status: 'complete', evidence: 'The command completed.' }
+    ];
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.', commands: []
+      })
+    });
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export const ready = true;\nexport function api() { return true; }\n');
+    const resultCommit = commit(repository, 'Implement API');
+
+    let request = launches[0];
+    let submitted = await orchestration.handleRunnerCompleted(
+      completedRun(request, resultCommit, ['src/api.ts'], { reportedChecks: invalidReportedChecks })
+    );
+    let outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: 'api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('retrying');
+    expect(launches).toHaveLength(2);
+    expect(launches[1].ownerAgentId).toBe('backend-agent');
+    expect(launches[1].taskPackage.reportCorrection?.validationErrors.join('\n')).toContain('reportedChecks.0');
+    expect(launches[1].taskPackage.task.id).toBe('api');
+
+    request = launches[1];
+    submitted = await orchestration.handleRunnerCompleted(
+      completedRun(request, resultCommit, [], { reportedChecks: invalidReportedChecks })
+    );
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: 'api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('retrying');
+    expect(launches).toHaveLength(3);
+    expect(launches[2].ownerAgentId).toBe('backend-agent');
+    expect(launches[2].taskPackage.reportCorrection?.validationErrors.join('\n')).toContain('reportedChecks.0');
+
+    request = launches[2];
+    submitted = await orchestration.handleRunnerCompleted(
+      completedRun(request, resultCommit, [], { reportedChecks: invalidReportedChecks })
+    );
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: 'api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+
+    expect(outcome.decision).toBe('rejected');
+    expect(outcome.reason).toContain('reportedChecks.0');
+    expect(outcome.snapshot.run.status).toBe('blocked');
+    expect(outcome.snapshot.attempts.filter(attempt => attempt.contextManifest.reportOnlyReportRetry).length).toBe(2);
+    expect(launches).toHaveLength(3);
+    expect(git(repository, ['rev-parse', 'HEAD'])).toBe(resultCommit);
+  });
+
+  it('recovers a malformed implementation report, preserves its diff, then completes review and validation', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-report-handoff-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export const ready = true;\n');
+    commit(repository, 'Initial API');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'report handoff fixture'));
+    const eligibleAgents = [
+      { id: 'backend-agent', role: 'Backend Agent' },
+      { id: 'reviewer-agent', role: 'Security / Code Quality Agent' },
+      { id: 'qa-agent', role: 'Validation / Checking Agent' }
+    ] as const;
+    vi.spyOn(store, 'getAgents').mockReturnValue(eligibleAgents.map(agent => ({ ...agent })) as any);
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1,
+      goal: 'Implement and independently review the API endpoint.',
+      exclusions: [],
+      requirements: [{ id: 'REQ-API', description: 'The API endpoint is available.' }],
+      tasks: [
+        {
+          id: 'api', title: 'Implement API', description: 'Implement the API endpoint.', kind: 'backend',
+          ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-API'],
+          acceptanceCriteria: ['The API endpoint is implemented.'], requiredChecks: ['test'],
+          scope: { includePaths: ['src/**'], excludePaths: [] }
+        },
+        {
+          id: 'review-api', title: 'Independently review API', description: 'Review the accepted API changes.', kind: 'review',
+          ownerAgentId: 'reviewer-agent', dependsOn: ['api'], requirementIds: ['REQ-API'],
+          acceptanceCriteria: ['The API change meets the requirement.']
+        },
+        {
+          id: 'validate-api', title: 'Validate API', description: 'Run the API verification checks.', kind: 'validation',
+          ownerAgentId: 'qa-agent', dependsOn: ['review-api'], requirementIds: ['REQ-API'],
+          acceptanceCriteria: ['The registered API check passes.'], requiredChecks: ['test']
+        }
+      ]
+    });
+    let snapshot = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/report-handoff', requestKey: 'request-report-handoff',
+      requestFingerprint: 'fingerprint-report-handoff', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents, plan, baseRef: 'main'
+    });
+    const malformedCheck = [{ name: 'npm test', status: 'complete', evidence: 'The command completed.' }];
+    const correctedCheck = [{ name: 'npm test', status: 'passed', evidence: 'The original task observed npm test pass.' }];
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
+      })
+    });
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export const ready = true;\nexport function api() { return true; }\n');
+    const resultCommit = commit(repository, 'Implement API');
+    let request = launches[0];
+    let submitted = await orchestration.handleRunnerCompleted(
+      completedRun(request, resultCommit, ['src/api.ts'], { reportedChecks: malformedCheck })
+    );
+    let outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: 'api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('retrying');
+
+    request = launches[1];
+    submitted = await orchestration.handleRunnerCompleted(
+      completedRun(request, resultCommit, ['src/api.ts'], { reportedChecks: correctedCheck })
+    );
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: 'api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+
+    expect(outcome.decision).toBe('accepted');
+    expect(outcome.snapshot.run.status).toBe('executing');
+    expect(outcome.snapshot.run.currentTaskId).toBe('review-api');
+    expect(launches).toHaveLength(3);
+    expect(launches[2].ownerAgentId).toBe('reviewer-agent');
+    expect(launches[2].taskPackage.reviewInputs[0].changedPaths).toEqual(['src/api.ts']);
+    expect(launches[2].taskPackage.reviewInputs[0].diff).toContain('function api()');
+
+    request = launches[2];
+    submitted = await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, []));
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('accepted');
+    expect(outcome.snapshot.run.currentTaskId).toBe('validate-api');
+    expect(launches[3].ownerAgentId).toBe('qa-agent');
+
+    request = launches[3];
+    submitted = await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, []));
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('awaiting_approval');
+    expect(outcome.snapshot.run.status).toBe('awaiting_approval');
+    expect(launches.map(launch => launch.ownerAgentId)).toEqual([
+      'backend-agent', 'backend-agent', 'reviewer-agent', 'qa-agent'
+    ]);
+  });
+
   it('routes an independent review finding to its owner, then repeats review and validation before approval', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });
