@@ -12,7 +12,11 @@ import { buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from 
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
-import { safeRecoveryGuidance } from './orchestrationRecoveryPolicy.js';
+import {
+  MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
+  reportFormatCorrectionCount,
+  safeRecoveryGuidance
+} from './orchestrationRecoveryPolicy.js';
 export { pathMatchesScope } from '../utils/pathScope.js';
 
 export interface TaskAcceptanceOutcome {
@@ -56,6 +60,25 @@ function dependsTransitivelyOn(
     return false;
   };
   return visit(task.id);
+}
+
+function reportChangeBaseline(
+  snapshot: OrchestrationSnapshot,
+  taskId: string,
+  attempt: OrchestrationAttemptRecord
+): string | undefined {
+  if (attempt.contextManifest.reportOnlyReportRetry !== true) return attempt.startingCommit;
+  const storedBaseline = attempt.contextManifest.reportOnlyBaselineCommit;
+  if (typeof storedBaseline === 'string' && /^[a-f0-9]{40,64}$/i.test(storedBaseline)) return storedBaseline;
+  const attemptIndex = snapshot.attempts.findIndex(item => item.id === attempt.id);
+  for (let index = attemptIndex - 1; index >= 0; index -= 1) {
+    const previous = snapshot.attempts[index];
+    if (previous.taskId === taskId && previous.contextManifest.reportOnlyReportRetry !== true &&
+        ['failed', 'rejected', 'recovery_required'].includes(previous.status) && previous.startingCommit) {
+      return previous.startingCommit;
+    }
+  }
+  return attempt.startingCommit;
 }
 
 function reviewRootTask(task: OrchestrationTaskRecord, tasks: readonly OrchestrationTaskRecord[]): OrchestrationTaskRecord | undefined {
@@ -131,9 +154,8 @@ export class TaskAcceptanceService {
         const reportCanBeRepaired = reportCheck === 'agent_report' || reportCheck === 'report_identity' ||
           reportCheck === 'review_findings_missing' || reportCheck === 'requirement_coverage' ||
           reportCheck === 'acceptance_criteria';
-        const reportRetryAlreadyUsed = rejected.attempts.some(item => item.taskId === task.id &&
-          item.contextManifest.reportOnlyReportRetry === true);
-        if (reportCanBeRepaired && !reportRetryAlreadyUsed && input.dispatchNext !== false) {
+        const automaticReportCorrectionsUsed = reportFormatCorrectionCount(rejected, task.id);
+        if (reportCanBeRepaired && automaticReportCorrectionsUsed < MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS && input.dispatchNext !== false) {
           const correctionTask = rejected.tasks.find(item => item.id === task.id);
           if (correctionTask) {
             try {
@@ -149,14 +171,15 @@ export class TaskAcceptanceService {
                     const detail = finding.evidence.detail;
                     return typeof detail === 'string' ? detail : rejection.reason;
                   }),
-                  previousResponse: previousAgentReportResponse(attempt.result)
+                  previousResponse: previousAgentReportResponse(attempt.result),
+                  startingCommit: reportChangeBaseline(rejected, task.id, attempt)
                 }
               });
               if (correction.run.status === 'executing' && correction.run.currentTaskId === task.id) {
                 return {
                   decision: 'retrying',
                   snapshot: correction,
-                  reason: 'The report format was invalid. The same specialist received the exact error for one read-only format correction; no code changes or new checks were requested.'
+                  reason: `The report format was invalid. The same specialist received the exact error for read-only format correction ${automaticReportCorrectionsUsed + 1} of ${MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS}; no code changes or new checks were requested.`
                 };
               }
               return {
@@ -391,10 +414,11 @@ export class TaskAcceptanceService {
         submittedCommit: attempt.resultCommit, currentCommit, workingTreeClean: isClean
       });
     }
-    if (!attempt.startingCommit) {
+    const diffStartingCommit = reportChangeBaseline(snapshot, task.id, attempt);
+    if (!diffStartingCommit) {
       return fail('The attempt has no recorded starting commit, so its changed-file scope cannot be verified.', { check: 'starting_commit' });
     }
-    const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, attempt.startingCommit, attempt.resultCommit);
+    const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, diffStartingCommit, attempt.resultCommit);
     const declaredDeliverablePaths = new Set(report.data.deliverables.flatMap(deliverable => deliverable.paths));
     const undeclaredChangedPath = changedPaths.find(filePath => !declaredDeliverablePaths.has(filePath));
     if (undeclaredChangedPath) {
@@ -516,11 +540,13 @@ export class TaskAcceptanceService {
     if (!authorizedWorkspace) throw new Error(`Task ${task.id} has no authorized repository workspace.`);
     const worktree = authorizedWorkspace.worktreePath;
     const changedPaths = attempt.startingCommit && attempt.resultCommit
-      ? await this.dependencies.getGitChangedPaths(worktree, attempt.startingCommit, attempt.resultCommit)
+      ? await this.dependencies.getGitChangedPaths(worktree,
+        reportChangeBaseline(snapshot, task.id, attempt) ?? attempt.startingCommit, attempt.resultCommit)
       : [];
     return {
       acceptanceVersion: 1,
       attemptId: attempt.id,
+      diffStartingCommit: reportChangeBaseline(snapshot, task.id, attempt) ?? attempt.startingCommit,
       artifactId: snapshot.artifacts.find(item => item.attemptId === attempt.id && item.type === 'task_result')?.id,
       resultCommit: attempt.resultCommit,
       currentHead: attempt.resultCommit,

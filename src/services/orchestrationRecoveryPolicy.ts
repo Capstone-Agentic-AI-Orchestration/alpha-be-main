@@ -6,8 +6,10 @@ import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 /** Total execution attempts including the first specialist run; this permits two automatic repairs. */
 export const AUTO_REPAIR_ATTEMPT_LIMIT = 3;
 export const MAX_REPAIR_ATTEMPTS_PER_EPISODE = 4;
-/** One automatic formatting retry plus one explicit, user-authorized retry. */
-export const MAX_REPORT_FORMAT_CORRECTIONS = 2;
+/** Alpha may ask the same specialist twice to correct a report without touching code. */
+export const MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS = 2;
+/** Keep one additional correction available only after the developer reviews the escalation. */
+export const MAX_REPORT_FORMAT_CORRECTIONS = MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS + 1;
 export const MAX_RECOVERY_GUIDANCE_CHARS = 2_000;
 export const MAX_RECOVERY_EPISODE_MS = ALPHA_ORCHESTRATION_RECOVERY_WINDOW_MS;
 
@@ -114,7 +116,7 @@ export function recoveryAvailableActions(input: {
       if (reportFormatCorrectionCount(snapshot, task.id) < MAX_REPORT_FORMAT_CORRECTIONS) {
         availableActions.push('retry_report_format');
       } else {
-        actionReasons.retry_report_format = 'Alpha has used the two report-only corrections for this task. Review the exact field error and saved responses before starting a new build.';
+        actionReasons.retry_report_format = 'Alpha has used two automatic report-only corrections and one developer-authorized correction for this task. Review the exact field error and saved responses before starting a new build.';
       }
     } else if (category === 'workspace') {
       actionReasons.resume_checkpoint = 'The saved branch or process needs inspection before Alpha can continue safely.';

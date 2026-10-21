@@ -15,6 +15,7 @@ import { agentReadiness } from './agentReadiness.js';
 import { buildFinalValidationAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
+  MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
   MAX_REPORT_FORMAT_CORRECTIONS,
   MAX_RECOVERY_EPISODE_MS,
   MAX_RECOVERY_GUIDANCE_CHARS,
@@ -83,7 +84,11 @@ function lastAttempt(snapshot: OrchestrationSnapshot, taskId?: string): Orchestr
     (!taskId || attempt.taskId === taskId) && ['failed', 'rejected', 'recovery_required'].includes(attempt.status));
 }
 
-function reportCorrectionInput(snapshot: OrchestrationSnapshot, taskId: string): { validationErrors: string[]; previousResponse: string } {
+function reportCorrectionInput(snapshot: OrchestrationSnapshot, taskId: string): {
+  validationErrors: string[];
+  previousResponse: string;
+  startingCommit?: string;
+} {
   const attempt = lastAttempt(snapshot, taskId);
   const result = attempt?.result ?? {};
   const detail = typeof result.agentReportError === 'string' ? result.agentReportError
@@ -96,7 +101,10 @@ function reportCorrectionInput(snapshot: OrchestrationSnapshot, taskId: string):
   const previousResponse = result.agentReportResponseTruncated === true
     ? `${response.slice(0, Math.max(0, 12_000 - marker.length))}${marker}`
     : response.slice(0, 12_000);
-  return { validationErrors: [safeRecoverySummary(detail)], previousResponse };
+  const startingCommit = typeof attempt?.contextManifest.reportOnlyBaselineCommit === 'string'
+    ? attempt.contextManifest.reportOnlyBaselineCommit
+    : attempt?.startingCommit;
+  return { validationErrors: [safeRecoverySummary(detail)], previousResponse, startingCommit };
 }
 
 function getObservedChecks(attempt?: OrchestrationAttemptRecord): Array<{ name: string; status: string }> {
@@ -154,11 +162,37 @@ function publicProjection(
   };
 }
 
-function milestoneFor(phase: OrchestrationRecoveryEpisode['phase'], summary: string, taskTitle?: string): { key: string; content: string } | undefined {
+function milestoneFor(
+  phase: OrchestrationRecoveryEpisode['phase'],
+  summary: string,
+  taskTitle?: string,
+  reportCorrectionsUsed?: number,
+  reportCorrectionAvailable = false
+): { key: string; content: string } | undefined {
   const subject = taskTitle ? `“${taskTitle}”` : 'the final build checks';
-  if (phase === 'repairing') return { key: 'repair_started', content: `Alpha started a bounded recovery step for ${subject}. It will check the new result before handing work to another specialist.` };
+  if (phase === 'repairing') {
+    const reportCorrection = reportCorrectionsUsed !== undefined
+      ? reportCorrectionsUsed <= MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS
+        ? ` Alpha sent the same specialist read-only report correction ${reportCorrectionsUsed} of ${MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS}.`
+        : ` Alpha sent the same specialist your authorized read-only report correction ${reportCorrectionsUsed} of ${MAX_REPORT_FORMAT_CORRECTIONS}.`
+      : '';
+    return {
+      key: reportCorrectionsUsed !== undefined ? `report_correction_${reportCorrectionsUsed}` : 'repair_started',
+      content: `Alpha started a bounded recovery step for ${subject}.${reportCorrection} The issue detected was: ${summary} It will check the new result before handing work to another specialist.`
+    };
+  }
   if (phase === 'ready_to_continue') return { key: 'failure_captured', content: `The build stopped at ${subject}. Alpha saved the work and failure details. ${summary}` };
-  if (phase === 'waiting_for_user') return { key: 'developer_action_needed', content: `The build is waiting for your direction at ${subject}. Alpha preserved the current work and will not start another repair without an explicit action.` };
+  if (phase === 'waiting_for_user') {
+    const nextStep = reportCorrectionsUsed === undefined
+      ? 'Alpha preserved the current work and will not start another repair without your direction.'
+      : reportCorrectionAvailable
+        ? 'Alpha preserved the code work. Review this exact report error and choose whether to send one more bounded, read-only correction from this chat or the Live Build Room.'
+        : 'Alpha preserved the code work. The bounded report-correction limit is exhausted; review the saved response and decide whether to keep the build paused or start a fresh request.';
+    return {
+      key: 'developer_action_needed',
+      content: `The build is waiting for your decision at ${subject}. The issue is: ${summary} ${nextStep}`
+    };
+  }
   if (phase === 'resolved') return { key: 'recovery_resolved', content: `The recovery at ${subject} passed its acceptance checks. The build has continued from the saved checkpoint.` };
   if (phase === 'cancelled') return { key: 'build_cancelled', content: 'The build was stopped at your request. Alpha kept the saved work and recovery history.' };
   return undefined;
@@ -204,7 +238,11 @@ export class OrchestrationRecoveryService {
 
     const failingTasks = snapshot.tasks.filter(task => ['failed', 'blocked'].includes(task.status));
     const failedTask = [...failingTasks].reverse().find(task => lastAttempt(snapshot, task.id)) ?? failingTasks.at(-1);
-    const targetTaskId = failedTask?.id ?? currentEpisode?.taskId;
+    const activeTaskWithFailureHistory = snapshot.run.status === 'executing' && snapshot.run.currentTaskId &&
+      lastAttempt(snapshot, snapshot.run.currentTaskId)
+      ? snapshot.run.currentTaskId
+      : undefined;
+    const targetTaskId = failedTask?.id ?? currentEpisode?.taskId ?? activeTaskWithFailureHistory;
     const previousFailedAttempt = lastAttempt(snapshot, targetTaskId);
     const activeAttempt = targetTaskId
       ? [...snapshot.attempts].reverse().find(attempt => attempt.taskId === targetTaskId && ['starting', 'running', 'submitted'].includes(attempt.status))
@@ -216,11 +254,15 @@ export class OrchestrationRecoveryService {
     const terminalCancel = snapshot.run.status === 'cancelled';
     if (terminalCancel && currentEpisode) {
       const timestamp = new Date().toISOString();
+      const reportCorrectionsUsed = currentEpisode.category === 'report' && currentEpisode.taskId
+        ? reportFormatCorrectionCount(snapshot, currentEpisode.taskId)
+        : undefined;
       const saved = this.store.saveOrchestrationRecoveryEpisode({
         episode: { ...currentEpisode, phase: 'cancelled', updatedAt: timestamp, resolvedAt: timestamp },
         expectedRevision: currentEpisode.revision,
         milestone: milestoneFor('cancelled', currentEpisode.summary,
-          currentEpisode.taskId ? snapshot.tasks.find(task => task.id === currentEpisode.taskId)?.title : undefined),
+          currentEpisode.taskId ? snapshot.tasks.find(task => task.id === currentEpisode.taskId)?.title : undefined,
+          reportCorrectionsUsed),
         actorId
       });
       return saved.episode;
@@ -233,8 +275,14 @@ export class OrchestrationRecoveryService {
         snapshot.run.currentTaskId !== currentEpisode.taskId);
       const nextPhase = terminalCancel ? 'cancelled' : shouldResolve ? 'resolved'
         : isRepairing ? 'repairing' : snapshot.run.status === 'paused' ? 'waiting_for_user' : currentEpisode.phase;
-      if (nextPhase !== currentEpisode.phase) {
-        const taskTitle = currentEpisode.taskId ? snapshot.tasks.find(task => task.id === currentEpisode.taskId)?.title : undefined;
+      const taskTitle = currentEpisode.taskId ? snapshot.tasks.find(task => task.id === currentEpisode.taskId)?.title : undefined;
+      const reportCorrectionsUsed = currentEpisode.category === 'report' && currentEpisode.taskId
+        ? reportFormatCorrectionCount(snapshot, currentEpisode.taskId)
+        : undefined;
+      const repeatedReportCorrection = isRepairing && nextPhase === 'repairing' && reportCorrectionsUsed !== undefined
+        ? milestoneFor(nextPhase, currentEpisode.summary, taskTitle, reportCorrectionsUsed)
+        : undefined;
+      if (nextPhase !== currentEpisode.phase || repeatedReportCorrection) {
         const saved = this.store.saveOrchestrationRecoveryEpisode({
           episode: {
             ...currentEpisode,
@@ -243,7 +291,11 @@ export class OrchestrationRecoveryService {
             updatedAt: new Date().toISOString(),
             resolvedAt: ['resolved', 'cancelled'].includes(nextPhase) ? new Date().toISOString() : undefined
           },
-          milestone: milestoneFor(nextPhase, currentEpisode.summary, taskTitle),
+          milestone: repeatedReportCorrection ?? (nextPhase !== currentEpisode.phase
+            ? milestoneFor(nextPhase, currentEpisode.summary, taskTitle, reportCorrectionsUsed,
+              currentEpisode.category === 'report' && currentEpisode.taskId !== undefined &&
+                reportFormatCorrectionCount(snapshot, currentEpisode.taskId) < MAX_REPORT_FORMAT_CORRECTIONS)
+            : undefined),
           actorId
         });
         return saved.episode;
@@ -254,22 +306,23 @@ export class OrchestrationRecoveryService {
     if (!currentFailure && !isRepairing) return currentEpisode;
 
     const evidenceAttempt = previousFailedAttempt;
+    const episodeTask = failedTask ?? (targetTaskId ? snapshot.tasks.find(task => task.id === targetTaskId) : undefined);
     const result = evidenceAttempt?.result ?? {};
     const rejectionReason = typeof result.rejectionReason === 'string' ? result.rejectionReason : undefined;
     const reportError = typeof result.agentReportError === 'string' ? result.agentReportError : undefined;
     const reportFindingChecks = new Set([
       'agent_report', 'report_identity', 'review_findings_missing', 'requirement_coverage', 'acceptance_criteria'
     ]);
-    const hasReportFinding = Boolean(failedTask && snapshot.findings.some(finding =>
-      finding.taskId === failedTask.id && finding.status === 'open' &&
+    const hasReportFinding = Boolean(episodeTask && snapshot.findings.some(finding =>
+      finding.taskId === episodeTask.id && finding.status === 'open' &&
       typeof finding.evidence.check === 'string' && reportFindingChecks.has(finding.evidence.check)
     ));
     const reason = safeRecoverySummary(evidenceAttempt?.failureReason ?? rejectionReason ?? reportError ??
       snapshot.run.stoppedReason ?? 'The build stopped before the next specialist could safely start.');
     const category = classifyRecoveryCategory({
       reason,
-      taskKind: failedTask?.kind,
-      hasTask: Boolean(failedTask),
+      taskKind: episodeTask?.kind,
+      hasTask: Boolean(episodeTask),
       hasReportError: Boolean(reportError || hasReportFinding),
       finalValidation
     });
@@ -278,19 +331,23 @@ export class OrchestrationRecoveryService {
         : evidenceAttempt?.status === 'recovery_required' ? 'restart'
           : evidenceAttempt ? 'runner' : 'preparation';
     const code = recoveryErrorCode(category, source);
-    const attemptsUsed = failedTask ? workAttemptCount(snapshot, failedTask.id) : currentEpisode?.attemptsUsed ?? 0;
-    const repeatedFailure = failedTask ? hasRepeatedRecoveryFailure(snapshot, failedTask.id, category, reason) : false;
+    const attemptsUsed = episodeTask ? workAttemptCount(snapshot, episodeTask.id) : currentEpisode?.attemptsUsed ?? 0;
+    const repeatedFailure = episodeTask ? hasRepeatedRecoveryFailure(snapshot, episodeTask.id, category, reason) : false;
     const phase: OrchestrationRecoveryEpisode['phase'] = isRepairing ? 'repairing'
       : currentEpisode?.phase === 'waiting_for_user' ? 'waiting_for_user'
       : ['provider', 'configuration', 'workspace', 'review_input', 'report', 'alpha', 'final_validation'].includes(category) ||
         attemptsUsed >= AUTO_REPAIR_ATTEMPT_LIMIT || repeatedFailure || snapshot.run.status === 'recovery_required'
         ? 'waiting_for_user' : 'ready_to_continue';
     const summary = reason || 'The build stopped. Review the saved details before continuing.';
+    const reportTaskId = category === 'report' ? episodeTask?.id ?? targetTaskId : undefined;
+    const reportCorrectionsUsed = reportTaskId
+      ? reportFormatCorrectionCount(snapshot, reportTaskId)
+      : undefined;
     const fingerprint = recoveryFailureFingerprint(category, summary);
     const timestamp = new Date().toISOString();
     const episode: OrchestrationRecoveryEpisode = currentEpisode ? {
       ...currentEpisode,
-      taskId: failedTask?.id ?? currentEpisode.taskId,
+      taskId: episodeTask?.id ?? currentEpisode.taskId,
       attemptId: evidenceAttempt?.id ?? currentEpisode.attemptId,
       source,
       category,
@@ -317,7 +374,7 @@ export class OrchestrationRecoveryService {
       projectId: snapshot.run.projectId,
       runId: snapshot.run.id,
       issueId: snapshot.run.issueId,
-      taskId: failedTask?.id,
+      taskId: episodeTask?.id,
       attemptId: evidenceAttempt?.id,
       source,
       category,
@@ -343,12 +400,16 @@ export class OrchestrationRecoveryService {
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    const taskTitle = failedTask?.title ?? (finalValidation ? 'Final validation' : undefined);
-    const milestoneKey = currentEpisode?.phase === phase ? undefined : phase;
+    const taskTitle = episodeTask?.title ?? (finalValidation ? 'Final validation' : undefined);
+    const reportCorrectionAvailable = reportCorrectionsUsed !== undefined && reportCorrectionsUsed < MAX_REPORT_FORMAT_CORRECTIONS;
+    const milestone = phase === 'repairing' && reportCorrectionsUsed !== undefined
+      ? milestoneFor(phase, summary, taskTitle, reportCorrectionsUsed)
+      : currentEpisode?.phase === phase ? undefined
+        : milestoneFor(phase, summary, taskTitle, reportCorrectionsUsed, reportCorrectionAvailable);
     const saved = this.store.saveOrchestrationRecoveryEpisode({
       episode,
       expectedRevision: currentEpisode?.revision,
-      milestone: milestoneKey ? milestoneFor(phase, summary, taskTitle) : undefined,
+      milestone,
       actorId
     });
     return saved.episode;

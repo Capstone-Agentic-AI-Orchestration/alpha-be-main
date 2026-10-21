@@ -103,10 +103,12 @@ export interface OrchestrationTaskPackage {
   findingIds: string[];
   /** Explicit project-owner clarification for one bounded recovery retry. */
   developerGuidance?: string;
-  /** One bounded, read-only retry used only to repair an invalid task report. */
+  /** Bounded, read-only retries used only to repair an invalid task report. */
   reportCorrection?: {
     validationErrors: string[];
     previousResponse: string;
+    /** Original code-attempt base, retained so acceptance/review still inspect that patch. */
+    startingCommit?: string;
   };
 }
 
@@ -206,10 +208,9 @@ function extractJsonObjects(text: string): string[] {
 function normalizeReportFieldAliases(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const report = value as Record<string, unknown>;
-  if (!Array.isArray(report.requirementCoverage)) return value;
-  return {
-    ...report,
-    requirementCoverage: report.requirementCoverage.map(item => {
+  const normalized: Record<string, unknown> = { ...report };
+  if (Array.isArray(report.requirementCoverage)) {
+    normalized.requirementCoverage = report.requirementCoverage.map(item => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
       const coverage = { ...(item as Record<string, unknown>) };
       if (typeof coverage.requirementId !== 'string' && typeof coverage.requirement === 'string') {
@@ -219,8 +220,41 @@ function normalizeReportFieldAliases(value: unknown): unknown {
         delete coverage.requirement;
       }
       return coverage;
-    })
-  };
+    });
+  }
+  if (Array.isArray(report.reportedChecks)) {
+    normalized.reportedChecks = report.reportedChecks.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+      const check = { ...(item as Record<string, unknown>) };
+      if (check.script === undefined && typeof check.name === 'string') {
+        check.script = check.name;
+        delete check.name;
+      } else if (check.script === check.name) {
+        delete check.name;
+      }
+
+      const rawResult = check.result !== undefined ? check.result : check.status;
+      const normalizedResult = normalizeReportedCheckResult(rawResult);
+      if (normalizedResult !== undefined) {
+        check.result = normalizedResult;
+        if (check.status !== undefined && normalizeReportedCheckResult(check.status) === normalizedResult) {
+          delete check.status;
+        }
+      }
+      return check;
+    });
+  }
+  return normalized;
+}
+
+/** Convert common report wording only when it has one clear contract meaning. */
+function normalizeReportedCheckResult(value: unknown): 'passed' | 'failed' | 'not_run' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (['passed', 'pass', 'success', 'successful', 'succeeded', 'ok'].includes(normalized)) return 'passed';
+  if (['failed', 'fail', 'failure', 'error', 'errored'].includes(normalized)) return 'failed';
+  if (['not_run', 'skipped', 'skip', 'not_executed', 'unrun'].includes(normalized)) return 'not_run';
+  return undefined;
 }
 
 export function parseAgentReport(text: string): { report?: Record<string, unknown>; error?: string } {
@@ -505,7 +539,7 @@ export class OrchestrationService {
     expectedRunRevision?: number;
     actorId: string;
     startingCommit?: string;
-    reportCorrection?: { validationErrors: string[]; previousResponse: string };
+    reportCorrection?: { validationErrors: string[]; previousResponse: string; startingCommit?: string };
     developerGuidance?: string;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
@@ -535,7 +569,7 @@ export class OrchestrationService {
       }
       if (input.reportCorrection) {
         if (reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) {
-          throw new Error('The two report-only corrections have already been used. Review the saved response and exact field error before starting a new build.');
+          throw new Error('Two automatic report-only corrections and one developer-authorized correction have already been used. Review the saved response and exact field error before starting a new build.');
         }
       } else if (executionAttempts >= MAX_REPAIR_ATTEMPTS_PER_EPISODE ||
           (executionAttempts >= AUTO_REPAIR_ATTEMPT_LIMIT && !developerGuidance)) {
@@ -1039,7 +1073,7 @@ export class OrchestrationService {
     actorId: string,
     startingCommit?: string,
     now?: string,
-    reportCorrection?: { validationErrors: string[]; previousResponse: string },
+    reportCorrection?: { validationErrors: string[]; previousResponse: string; startingCommit?: string },
     developerGuidance?: string
   ): Promise<OrchestrationSnapshot> {
     if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId) return snapshot;
@@ -1073,7 +1107,10 @@ export class OrchestrationService {
     const attemptId = `attempt-${randomUUID()}`;
     const contextManifest = {
       ...this.createFixtureManifest(snapshot, next.id),
-      ...(reportCorrection ? { reportOnlyReportRetry: true } : {})
+      ...(reportCorrection ? {
+        reportOnlyReportRetry: true,
+        ...(reportCorrection.startingCommit ? { reportOnlyBaselineCommit: reportCorrection.startingCommit } : {})
+      } : {})
     };
     let baseRequest: OrchestrationLaunchRequest;
     let prepared: PreparedOrchestrationTask = {};
@@ -1319,7 +1356,7 @@ export class OrchestrationService {
   private async createTaskPackage(
     snapshot: OrchestrationSnapshot,
     taskId: string,
-    reportCorrection?: { validationErrors: string[]; previousResponse: string },
+    reportCorrection?: { validationErrors: string[]; previousResponse: string; startingCommit?: string },
     developerGuidance?: string
   ): Promise<OrchestrationTaskPackage> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
@@ -1432,12 +1469,18 @@ export class OrchestrationService {
       if (!repositoryWorkspace) throw new Error(`The accepted code task ${codeTask.id} has no authorized repository workspace. Preserve the build and use human review.`);
       const worktree = repositoryWorkspace.worktreePath;
       const attempt = [...snapshot.attempts].reverse().find(item => item.taskId === codeTask.id && item.status === 'accepted');
-      if (!attempt?.startingCommit || !attempt.resultCommit) {
+      const acceptanceEvidence = attempt?.result?.acceptanceEvidence && typeof attempt.result.acceptanceEvidence === 'object'
+        ? attempt.result.acceptanceEvidence as Record<string, unknown>
+        : undefined;
+      const diffStartingCommit = typeof acceptanceEvidence?.diffStartingCommit === 'string'
+        ? acceptanceEvidence.diffStartingCommit
+        : attempt?.startingCommit;
+      if (!diffStartingCommit || !attempt?.resultCommit) {
         throw new Error(`Accepted task ${codeTask.id} is missing its immutable diff commits. Preserve the build and use human review.`);
       }
       const [diff, changedPaths] = await Promise.all([
-        getGitDiffPatch(worktree, attempt.startingCommit, attempt.resultCommit),
-        getGitChangedPaths(worktree, attempt.startingCommit, attempt.resultCommit)
+        getGitDiffPatch(worktree, diffStartingCommit, attempt.resultCommit),
+        getGitChangedPaths(worktree, diffStartingCommit, attempt.resultCommit)
       ]);
       totalBytes += Buffer.byteLength(diff, 'utf8');
       if (totalBytes > MAX_REVIEW_CONTEXT_BYTES) {
@@ -1459,7 +1502,7 @@ export class OrchestrationService {
         title: codeTask.title,
         repository: repositoryWorkspace.repository,
         ownerAgentId: codeTask.ownerAgentId,
-        startingCommit: attempt.startingCommit,
+        startingCommit: diffStartingCommit,
         resultCommit: attempt.resultCommit,
         changedPaths,
         diff,
