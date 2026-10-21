@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { classifyRecoveryCategory, recoveryAvailableActions } from './orchestrationRecoveryPolicy.js';
+import { classifyRecoveryCategory, recoveryAvailableActions, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
 
 function blockedReviewSnapshot(reportOnlyRetries: number): OrchestrationSnapshot {
   return {
@@ -26,6 +26,38 @@ describe('orchestration recovery classification and report retry', () => {
     })).toBe('review_input');
   });
 
+  it('classifies local permission and missing-runtime preparation errors before offering code repair', () => {
+    expect(classifyRecoveryCategory({
+      reason: 'spawn git ENOENT', taskKind: 'backend', hasTask: true, hasReportError: false, finalValidation: false
+    })).toBe('configuration');
+    expect(classifyRecoveryCategory({
+      reason: 'EACCES: permission denied opening the saved worktree', taskKind: 'backend', hasTask: true,
+      hasReportError: false, finalValidation: false
+    })).toBe('workspace');
+  });
+
+  it('redacts credentials and local paths from chat-safe recovery details', () => {
+    const safe = safeRecoverySummary('Request failed for https://builder:supersecret@example.test/api with Authorization: Bearer ghp_12345678901234567890 at C:\\Users\\Francis\\repo');
+    expect(safe).not.toContain('supersecret');
+    expect(safe).not.toContain('ghp_12345678901234567890');
+    expect(safe).not.toContain('C:\\Users\\Francis');
+    expect(safe).toContain('[redacted]');
+    expect(safe).toContain('[local path]');
+  });
+
+  it('offers bounded rechecks after a saved workspace-preparation failure', () => {
+    const snapshot = {
+      run: { status: 'blocked' },
+      tasks: [{ id: 'implement', status: 'blocked' }],
+      attempts: [{ id: 'attempt-1', taskId: 'implement', status: 'failed', contextManifest: { orchestrationPreparationFailed: true } }],
+      findings: []
+    } as unknown as OrchestrationSnapshot;
+    const available = recoveryAvailableActions({
+      snapshot, category: 'workspace', taskId: 'implement', canControl: true, episodeAgeMs: 0
+    });
+    expect(available.availableActions).toContain('recheck_prerequisite');
+  });
+
   it('offers a bounded report-only correction and removes it after the limit', () => {
     const available = recoveryAvailableActions({
       snapshot: blockedReviewSnapshot(0), category: 'report', taskId: 'review-calculator',
@@ -45,5 +77,15 @@ describe('orchestration recovery classification and report retry', () => {
     expect(exhausted.availableActions).not.toContain('retry_report_format');
     expect(exhausted.actionReasons.retry_report_format).toContain('two automatic report-only corrections');
     expect(exhausted.actionReasons.retry_report_format).toContain('one developer-authorized correction');
+  });
+
+  it('keeps a verified saved checkpoint recoverable after the old one-hour window', () => {
+    const stale = recoveryAvailableActions({
+      snapshot: blockedReviewSnapshot(0), category: 'project_code', taskId: 'review-calculator',
+      canControl: true, episodeAgeMs: 10 * 24 * 60 * 60_000
+    });
+
+    expect(stale.availableActions).toContain('repair_and_continue');
+    expect(stale.actionReasons.provide_guidance).toBeUndefined();
   });
 });

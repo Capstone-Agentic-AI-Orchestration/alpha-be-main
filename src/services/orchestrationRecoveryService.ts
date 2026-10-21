@@ -7,7 +7,6 @@ import type {
   OrchestrationRecoveryProjection
 } from '../models/index.js';
 import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
-import { saveChatMessageAndShare } from './chatWriteThrough.js';
 import { sqliteService, type SQLiteService } from './sqliteService.js';
 import type { OrchestrationSnapshot, OrchestrationAttemptRecord } from './orchestrationStateMachine.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -17,7 +16,6 @@ import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
   MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
   MAX_REPORT_FORMAT_CORRECTIONS,
-  MAX_RECOVERY_EPISODE_MS,
   MAX_RECOVERY_GUIDANCE_CHARS,
   MAX_REPAIR_ATTEMPTS_PER_EPISODE,
   classifyRecoveryCategory,
@@ -139,7 +137,9 @@ function publicProjection(
     canControl,
     episodeAgeMs: Math.max(0, Date.now() - Date.parse(episode.createdAt)),
     repeatedFailure: episode.evidence.repeatedFailure === true,
-    finalValidationCorrectionReady: episode.evidence.finalValidationCorrectionReady === true
+    finalValidationCorrectionReady: episode.evidence.finalValidationCorrectionReady === true,
+    finalValidationCorrectionReason: typeof episode.evidence.finalValidationCorrectionError === 'string'
+      ? episode.evidence.finalValidationCorrectionError : undefined
   });
   return {
     id: episode.id,
@@ -153,6 +153,10 @@ function publicProjection(
     taskRevision: task?.revision,
     attemptsUsed: episode.attemptsUsed,
     repairBudget: episode.repairBudget,
+    ...(task && episode.category === 'report' ? {
+      reportCorrectionsUsed: reportFormatCorrectionCount(snapshot, task.id),
+      reportCorrectionLimit: MAX_REPORT_FORMAT_CORRECTIONS
+    } : {}),
     episodeNumber: episode.episodeNumber,
     revision: episode.revision,
     createdAt: episode.createdAt,
@@ -167,7 +171,11 @@ function milestoneFor(
   summary: string,
   taskTitle?: string,
   reportCorrectionsUsed?: number,
-  reportCorrectionAvailable = false
+  reportCorrectionAvailable = false,
+  finalValidationCorrectionError?: string,
+  recoveryCategory?: OrchestrationRecoveryCategory,
+  workAttemptsUsed?: number,
+  repeatedFailure = false
 ): { key: string; content: string } | undefined {
   const subject = taskTitle ? `“${taskTitle}”` : 'the final build checks';
   if (phase === 'repairing') {
@@ -183,14 +191,21 @@ function milestoneFor(
   }
   if (phase === 'ready_to_continue') return { key: 'failure_captured', content: `The build stopped at ${subject}. Alpha saved the work and failure details. ${summary}` };
   if (phase === 'waiting_for_user') {
-    const nextStep = reportCorrectionsUsed === undefined
+    const nextStep = recoveryCategory === 'project_code' && repeatedFailure
+      ? 'The same failure returned after a focused repair, so Alpha stopped early. Review the saved changes and direct the next step in this chat.'
+      : recoveryCategory === 'project_code' && (workAttemptsUsed ?? 0) >= AUTO_REPAIR_ATTEMPT_LIMIT
+        ? 'Alpha used the original attempt and both automatic repairs. It preserved the latest work and will wait for your direction before another attempt.'
+      : reportCorrectionsUsed === undefined
       ? 'Alpha preserved the current work and will not start another repair without your direction.'
       : reportCorrectionAvailable
         ? 'Alpha preserved the code work. Review this exact report error and choose whether to send one more bounded, read-only correction from this chat or the Live Build Room.'
         : 'Alpha preserved the code work. The bounded report-correction limit is exhausted; review the saved response and decide whether to keep the build paused or start a fresh request.';
+    const planningNote = finalValidationCorrectionError
+      ? ` Alpha could not safely assign an automatic correction: ${safeRecoverySummary(finalValidationCorrectionError)}.`
+      : '';
     return {
       key: 'developer_action_needed',
-      content: `The build is waiting for your decision at ${subject}. The issue is: ${summary} ${nextStep}`
+      content: `The build is waiting for your decision at ${subject}. The issue is: ${summary} ${nextStep}${planningNote}`
     };
   }
   if (phase === 'resolved') return { key: 'recovery_resolved', content: `The recovery at ${subject} passed its acceptance checks. The build has continued from the saved checkpoint.` };
@@ -233,8 +248,28 @@ export class OrchestrationRecoveryService {
       ? latestBlockedEvent.payload.evidence as Record<string, unknown>
       : undefined;
     const workspaceValidation = ['workspace_checkpoint', 'final_scope', 'workspace_missing'].includes(String(validationEvidence?.check ?? ''));
-    const finalValidation = snapshot.run.status === 'blocked' && validationEvidence?.validationVersion === 1 && !workspaceValidation;
-    const finalValidationCorrectionReady = finalValidation && hasRepairableFinalValidationEvidence(validationEvidence);
+    const finalValidationCorrectionRunning = snapshot.run.status === 'executing' && Boolean(snapshot.run.currentTaskId) &&
+      snapshot.findings.some(finding => finding.status === 'open' && finding.evidence.origin === 'final_validation');
+    const finalValidation = (snapshot.run.status === 'blocked' || finalValidationCorrectionRunning) &&
+      validationEvidence?.validationVersion === 1 && !workspaceValidation;
+    let finalValidationCorrectionReady = false;
+    let finalValidationCorrectionError: string | undefined;
+    if (finalValidation && snapshot.run.status === 'blocked' && hasRepairableFinalValidationEvidence(validationEvidence)) {
+      try {
+        buildFinalValidationAmendment(
+          snapshot,
+          validationEvidence!,
+          this.store.getAgents().filter(agent => !agent.isArchived).map(agent => ({ id: agent.id, role: agent.role }))
+        );
+        finalValidationCorrectionReady = true;
+      } catch (error) {
+        finalValidationCorrectionError = error instanceof OrchestrationReviewPlanError
+          ? error.message
+          : error instanceof Error ? error.message : 'Alpha could not safely assign a correction to the affected code owners.';
+      }
+    } else if (finalValidation && !hasRepairableFinalValidationEvidence(validationEvidence)) {
+      finalValidationCorrectionError = 'The saved checks do not identify a failed command that can be safely assigned to an implementation owner.';
+    }
 
     const failingTasks = snapshot.tasks.filter(task => ['failed', 'blocked'].includes(task.status));
     const failedTask = [...failingTasks].reverse().find(task => lastAttempt(snapshot, task.id)) ?? failingTasks.at(-1);
@@ -242,13 +277,14 @@ export class OrchestrationRecoveryService {
       lastAttempt(snapshot, snapshot.run.currentTaskId)
       ? snapshot.run.currentTaskId
       : undefined;
-    const targetTaskId = failedTask?.id ?? currentEpisode?.taskId ?? activeTaskWithFailureHistory;
+    const targetTaskId = failedTask?.id ?? currentEpisode?.taskId ?? activeTaskWithFailureHistory ??
+      (finalValidationCorrectionRunning ? snapshot.run.currentTaskId ?? undefined : undefined);
     const previousFailedAttempt = lastAttempt(snapshot, targetTaskId);
     const activeAttempt = targetTaskId
       ? [...snapshot.attempts].reverse().find(attempt => attempt.taskId === targetTaskId && ['starting', 'running', 'submitted'].includes(attempt.status))
       : undefined;
-    const isRepairing = snapshot.run.status === 'executing' && snapshot.run.currentTaskId === targetTaskId &&
-      Boolean(activeAttempt) && Boolean(previousFailedAttempt);
+    const isRepairing = (snapshot.run.status === 'executing' && snapshot.run.currentTaskId === targetTaskId &&
+      Boolean(activeAttempt) && Boolean(previousFailedAttempt)) || finalValidationCorrectionRunning;
     const taskAccepted = targetTaskId ? snapshot.tasks.find(task => task.id === targetTaskId)?.status === 'accepted' : false;
     const terminalSuccess = ['awaiting_approval', 'publishing', 'completed'].includes(snapshot.run.status);
     const terminalCancel = snapshot.run.status === 'cancelled';
@@ -294,7 +330,11 @@ export class OrchestrationRecoveryService {
           milestone: repeatedReportCorrection ?? (nextPhase !== currentEpisode.phase
             ? milestoneFor(nextPhase, currentEpisode.summary, taskTitle, reportCorrectionsUsed,
               currentEpisode.category === 'report' && currentEpisode.taskId !== undefined &&
-                reportFormatCorrectionCount(snapshot, currentEpisode.taskId) < MAX_REPORT_FORMAT_CORRECTIONS)
+                reportFormatCorrectionCount(snapshot, currentEpisode.taskId) < MAX_REPORT_FORMAT_CORRECTIONS,
+              undefined,
+              currentEpisode.category,
+              currentEpisode.taskId ? workAttemptCount(snapshot, currentEpisode.taskId) : currentEpisode.attemptsUsed,
+              currentEpisode.evidence.repeatedFailure === true)
             : undefined),
           actorId
         });
@@ -317,7 +357,12 @@ export class OrchestrationRecoveryService {
       finding.taskId === episodeTask.id && finding.status === 'open' &&
       typeof finding.evidence.check === 'string' && reportFindingChecks.has(finding.evidence.check)
     ));
-    const reason = safeRecoverySummary(evidenceAttempt?.failureReason ?? rejectionReason ?? reportError ??
+    const validationReason = typeof latestBlockedEvent?.payload.reason === 'string' ? latestBlockedEvent.payload.reason
+      : typeof (validationEvidence?.checks as Record<string, unknown> | undefined)?.summary === 'string'
+        ? (validationEvidence!.checks as Record<string, unknown>).summary as string
+        : undefined;
+    const reason = safeRecoverySummary(finalValidation ? validationReason ?? snapshot.run.stoppedReason ??
+      'Final validation stopped the build.' : evidenceAttempt?.failureReason ?? rejectionReason ?? reportError ??
       snapshot.run.stoppedReason ?? 'The build stopped before the next specialist could safely start.');
     const category = classifyRecoveryCategory({
       reason,
@@ -327,6 +372,7 @@ export class OrchestrationRecoveryService {
       finalValidation
     });
     const source = finalValidation ? 'final_validation'
+      : evidenceAttempt?.contextManifest.orchestrationPreparationFailed === true ? 'preparation'
       : evidenceAttempt?.status === 'rejected' ? 'acceptance'
         : evidenceAttempt?.status === 'recovery_required' ? 'restart'
           : evidenceAttempt ? 'runner' : 'preparation';
@@ -362,7 +408,7 @@ export class OrchestrationRecoveryService {
         observedChecks: getObservedChecks(evidenceAttempt),
         repository: snapshot.run.repository,
         repeatedFailure,
-        ...(finalValidation ? { finalValidationCorrectionReady } : {})
+        ...(finalValidation ? { finalValidationCorrectionReady, ...(finalValidationCorrectionError ? { finalValidationCorrectionError } : {}) } : {})
       },
       threadId: binding?.threadId ?? currentEpisode.threadId,
       buildMessageId: binding?.buildMessageId ?? currentEpisode.buildMessageId,
@@ -391,7 +437,7 @@ export class OrchestrationRecoveryService {
         observedChecks: getObservedChecks(evidenceAttempt),
         repository: snapshot.run.repository,
         repeatedFailure,
-        ...(finalValidation ? { finalValidationCorrectionReady } : {})
+        ...(finalValidation ? { finalValidationCorrectionReady, ...(finalValidationCorrectionError ? { finalValidationCorrectionError } : {}) } : {})
       },
       threadId: binding?.threadId,
       buildMessageId: binding?.buildMessageId,
@@ -404,12 +450,18 @@ export class OrchestrationRecoveryService {
     const reportCorrectionAvailable = reportCorrectionsUsed !== undefined && reportCorrectionsUsed < MAX_REPORT_FORMAT_CORRECTIONS;
     const milestone = phase === 'repairing' && reportCorrectionsUsed !== undefined
       ? milestoneFor(phase, summary, taskTitle, reportCorrectionsUsed)
-      : currentEpisode?.phase === phase ? undefined
-        : milestoneFor(phase, summary, taskTitle, reportCorrectionsUsed, reportCorrectionAvailable);
+      : currentEpisode?.phase === phase && currentEpisode.fingerprint === fingerprint &&
+          currentEpisode.attemptId === evidenceAttempt?.id && currentEpisode.attemptsUsed === attemptsUsed
+        ? undefined
+        : milestoneFor(phase, summary, taskTitle, reportCorrectionsUsed, reportCorrectionAvailable,
+          finalValidationCorrectionError, category, attemptsUsed, repeatedFailure);
+    const distinctMilestone = milestone && currentEpisode
+      ? { ...milestone, key: `${milestone.key}_run_${snapshot.run.revision}` }
+      : milestone;
     const saved = this.store.saveOrchestrationRecoveryEpisode({
       episode,
       expectedRevision: currentEpisode?.revision,
-      milestone,
+      milestone: distinctMilestone,
       actorId
     });
     return saved.episode;
@@ -677,7 +729,14 @@ export class OrchestrationRecoveryService {
           errorCode: 'recovery_action_failed'
         });
         const current = this.store.getOrchestrationSnapshot(input.runId);
-        if (current) this.syncSnapshot(current, input.actorId);
+        if (current) {
+          this.syncSnapshot(current, input.actorId);
+          try {
+            await this.flushPendingMilestones();
+          } catch {
+            // The durable chat outbox retries this milestone on the next read or startup pass.
+          }
+        }
         throw error;
       }
     });
@@ -685,7 +744,10 @@ export class OrchestrationRecoveryService {
 
   async flushPendingMilestones(): Promise<number> {
     let delivered = 0;
-    for (const milestone of this.store.listPendingOrchestrationRecoveryMilestones(100)) {
+    const milestones = this.store.listPendingOrchestrationRecoveryMilestones(100);
+    if (!milestones.length) return 0;
+    const { saveChatMessageAndShare } = await import('./chatWriteThrough.js');
+    for (const milestone of milestones) {
       await runWithWorkspace(milestone.workspaceId, async () => {
         const binding = this.store.getOrchestrationChatBinding(milestone.runId);
         const thread = this.store.getChatThreads().find(item => item.id === milestone.threadId);

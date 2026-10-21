@@ -24,13 +24,15 @@ import {
   ALPHA_ORCHESTRATION_MAX_COST_USD,
   ALPHA_ORCHESTRATION_MAX_TOKENS
 } from '../config/env.js';
-import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_EPISODE_MS, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, workAttemptCount } from './orchestrationRecoveryPolicy.js';
+import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount } from './orchestrationRecoveryPolicy.js';
 
 const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
 const MAX_REVIEW_SOURCE_FILES = 12;
 const MAX_REVIEW_SOURCE_FILE_BYTES = 16 * 1024;
 const REVIEW_SOURCE_EXTENSIONS = /\.(?:[cm]?[jt]sx?|vue|svelte|html?|css|scss|less|json|md|ya?ml)$/i;
 const SENSITIVE_REVIEW_PATH = /(?:^|\/)(?:\.env(?:\.|$)|secrets?(?:\/|\.|$)|credentials?(?:\/|\.|$)|private[-_]?key|id_rsa|id_ed25519)/i;
+const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', 'frontend', 'mobile']);
+const NON_REPAIRABLE_AGENT_FAILURE = /\b(?:provider|429|rate.?limit|quota|network|connection|timed? ?out|credential|authentication|permission|access denied|eacces|eperm|enoent|eio|worktree|working tree|branch|checkpoint|workspace|runtime|not ready|executable|spawn|disk full|enospc|read.only file system|no such file or directory)\b/i;
 
 export interface OrchestrationLaunchRequest {
   runId: string;
@@ -549,11 +551,6 @@ export class OrchestrationService {
       if (input.expectedRunRevision !== undefined && snapshot.run.revision !== input.expectedRunRevision) {
         throw new Error('The build changed since this recovery was opened. Refresh before retrying.');
       }
-      const recovery = this.store.getOpenOrchestrationRecoveryEpisode(input.runId);
-      const recoveryStartedAt = recovery ? Date.parse(recovery.createdAt) : NaN;
-      if (Number.isFinite(recoveryStartedAt) && Date.now() - recoveryStartedAt > MAX_RECOVERY_EPISODE_MS) {
-        throw new Error('This recovery is over one hour old. Review the saved changes and start a fresh, explicitly scoped request if needed.');
-      }
       if (!['executing', 'blocked'].includes(snapshot.run.status)) {
         throw new Error(snapshot.run.status === 'recovery_required'
           ? 'Review the preserved attempt and use Resume before retrying an interrupted task.'
@@ -938,13 +935,16 @@ export class OrchestrationService {
       const failedStage = run.stages.find(stage => stage.status === 'failed');
       const isVerificationFailure = failedStage?.id === 'tests'
         && (run.verificationEvidence?.status === 'failed' || /verification failed|could not prepare .*dependencies/i.test(run.testSummary ?? ''));
+      const isRepairableImplementationFailure = failedStage?.id === 'implementation' && CODE_TASK_KINDS.has(task.kind) &&
+        !NON_REPAIRABLE_AGENT_FAILURE.test(failedStage.logs.slice(-30).join('\n'));
       const verificationOutput = failedStage?.logs.slice(-30).join('\n').slice(-4_000);
       const reason = isVerificationFailure
         ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
-        : failedStage?.logs.slice(-3).join('\n').slice(0, 2_000)
+        : failedStage?.logs.slice(-30).join('\n').slice(-4_000)
           || run.testSummary
           || 'The specialist runner failed before submitting a result.';
-      return this.failActiveAttempt(snapshot, task.id, attempt.id, reason, isVerificationFailure);
+      return this.failActiveAttempt(snapshot, task.id, attempt.id, reason,
+        (isVerificationFailure || isRepairableImplementationFailure) && CODE_TASK_KINDS.has(task.kind));
     }));
   }
 
@@ -981,12 +981,12 @@ export class OrchestrationService {
     taskId: string,
     attemptId: string,
     reason: string,
-    autoRepairVerification = false
+    autoRepairableFailure = false
   ): Promise<OrchestrationSnapshot> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
     const reportOnlyAttempt = snapshot.attempts.some(attempt => attempt.id === attemptId &&
       attempt.contextManifest.reportOnlyReportRetry === true);
-    const shouldAutoRepairVerification = autoRepairVerification && !reportOnlyAttempt;
+    const shouldAutoRepairFailure = autoRepairableFailure && !reportOnlyAttempt;
     const pauseWasRequested = Boolean(snapshot.run.pauseRequestedAt);
     const failed = this.store.failOrchestrationAttempt({
       runId: snapshot.run.id,
@@ -999,21 +999,18 @@ export class OrchestrationService {
     if (failed.run.status !== 'executing') return failed;
     const issue = reason.split(/\r?\n/, 1)[0].slice(0, 400);
     const attemptsUsed = taskExecutionAttemptCount(failed, taskId);
-    const withinRecoveryWindow = this.isRecoveryWindowOpen(failed, taskId);
-    const repeatedFailure = shouldAutoRepairVerification && hasRepeatedRecoveryFailure(failed, taskId, 'project_code', reason);
-    const canAutomaticallyRepair = shouldAutoRepairVerification && !pauseWasRequested &&
-      attemptsUsed < AUTO_REPAIR_ATTEMPT_LIMIT && withinRecoveryWindow && !repeatedFailure;
+    const repeatedFailure = shouldAutoRepairFailure && hasRepeatedRecoveryFailure(failed, taskId, 'project_code', reason);
+    const canAutomaticallyRepair = shouldAutoRepairFailure && !pauseWasRequested &&
+      attemptsUsed < AUTO_REPAIR_ATTEMPT_LIMIT && !repeatedFailure;
     const repairAction = pauseWasRequested
       ? `The current specialist failed while a pause was pending. The work is preserved for review; inspect the failed checks before retrying.`
       : repeatedFailure
-        ? `The same verification failure remained after a focused repair. Alpha stopped automatic retries early and saved the latest changes. Provide direction before another bounded attempt.`
-      : shouldAutoRepairVerification
+        ? `The same failure remained after a focused repair. Alpha stopped automatic retries early and saved the latest result. Provide direction before another bounded attempt.`
+      : shouldAutoRepairFailure
       ? attemptsUsed >= AUTO_REPAIR_ATTEMPT_LIMIT
-        ? `The Orchestrator reviewed the checks, but they still fail after ${attemptsUsed} execution attempts. The two automatic repair attempts are used. Review the latest failure details, then provide a new direction or start a fresh build.`
-        : !withinRecoveryWindow
-          ? 'The automatic recovery window expired. Alpha preserved the failed checks and saved work for review before any new attempt.'
-        : `The Orchestrator reviewed the failed checks (${issue}) and assigned ${task.ownerAgentId} to make a focused repair. It will run the checks again after the repair.`
-      : 'Specialist execution failed; review the preserved result before retrying.';
+        ? `The Orchestrator reviewed the failure, but it remains after ${attemptsUsed} execution attempts. The two automatic repair attempts are used. Review the latest failure details, then provide a new direction or start a fresh build.`
+        : `The Orchestrator reviewed the reported failure (${issue}) and assigned ${task.ownerAgentId} to make a focused repair. It will check the new result before handing work to another specialist.`
+      : 'Specialist execution failed; Alpha preserved the work and error details for the developer to review in project chat.';
     const blocked = this.store.transitionOrchestrationRun({
       runId: failed.run.id,
       expectedRevision: failed.run.revision,
@@ -1030,22 +1027,13 @@ export class OrchestrationService {
     return this.retryFailedTaskUnlocked(blocked, failedTask, reason);
   }
 
-  private isRecoveryWindowOpen(snapshot: OrchestrationSnapshot, taskId: string): boolean {
-    const firstAttempt = snapshot.attempts
-      .filter(attempt => attempt.taskId === taskId && attempt.contextManifest.reportOnlyReportRetry !== true)
-      .map(attempt => Date.parse(attempt.createdAt))
-      .filter(Number.isFinite)
-      .sort((left, right) => left - right)[0];
-    return firstAttempt === undefined || Date.now() - firstAttempt <= MAX_RECOVERY_EPISODE_MS;
-  }
-
   private async retryFailedTaskUnlocked(
     snapshot: OrchestrationSnapshot,
     task: OrchestrationSnapshot['tasks'][number],
     failureReason: string
   ): Promise<OrchestrationSnapshot> {
     if (!['executing', 'blocked'].includes(snapshot.run.status) || !['failed', 'blocked'].includes(task.status) ||
-        taskExecutionAttemptCount(snapshot, task.id) >= AUTO_REPAIR_ATTEMPT_LIMIT || !this.isRecoveryWindowOpen(snapshot, task.id)) {
+        taskExecutionAttemptCount(snapshot, task.id) >= AUTO_REPAIR_ATTEMPT_LIMIT) {
       return snapshot;
     }
     let next = this.store.transitionOrchestrationTask({
@@ -1140,7 +1128,41 @@ export class OrchestrationService {
         taskPackage,
         contextManifest
       };
-      prepared = await this.executor.prepare?.(baseRequest) ?? {};
+      try {
+        prepared = await this.executor.prepare?.(baseRequest) ?? {};
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'The task workspace or persona could not be prepared.';
+        const started = this.store.startOrchestrationAttempt({
+          runId: snapshot.run.id,
+          taskId: next.id,
+          expectedTaskRevision: next.revision,
+          attemptId,
+          startingCommit: baseRequest.baseCommit,
+          contextManifest: { ...contextManifest, orchestrationPreparationFailed: true },
+          actorId,
+          now
+        });
+        const failedTask = started.tasks.find(item => item.id === next.id);
+        if (!failedTask) throw new Error('The failed preparation attempt could not be read after it was persisted.');
+        const failed = this.store.failOrchestrationAttempt({
+          runId: started.run.id,
+          taskId: next.id,
+          attemptId,
+          expectedTaskRevision: failedTask.revision,
+          reason,
+          actorId: 'orchestrator'
+        });
+        return failed.run.status === 'executing'
+          ? this.store.transitionOrchestrationRun({
+              runId: failed.run.id,
+              expectedRevision: failed.run.revision,
+              nextStatus: 'blocked',
+              actorId,
+              reason: `The task could not be prepared for its specialist: ${reason}`,
+              now
+            })
+          : failed;
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'The task workspace or persona could not be prepared.';
       let blocked = this.store.transitionOrchestrationTask({
@@ -1224,12 +1246,13 @@ export class OrchestrationService {
         const active = current?.attempts.find(item => item.id === attemptId);
         if (!current) throw new Error('Orchestration run disappeared while its task launch was being reconciled.');
         if (!currentTask || !active || !['starting', 'running'].includes(active.status)) return current;
+        const launchError = error instanceof Error ? error.message : 'The executor failed to start the task.';
         const failed = this.store.failOrchestrationAttempt({
           runId: started.run.id,
           taskId: next.id,
           attemptId,
           expectedTaskRevision: currentTask.revision,
-          reason: error instanceof Error ? error.message : 'The executor failed to start the task.',
+          reason: launchError,
           actorId
         });
         if (failed.run.status === 'executing') {
@@ -1238,7 +1261,7 @@ export class OrchestrationService {
             expectedRevision: failed.run.revision,
             nextStatus: 'blocked',
             actorId,
-            reason: 'Specialist launch failed; retry or adjust the plan.',
+            reason: `Specialist launch failed before the task could run: ${launchError}`,
           });
         }
         return failed;
@@ -1405,7 +1428,13 @@ export class OrchestrationService {
             : typeof evidence.message === 'string' ? evidence.message
               : typeof evidence.reason === 'string' ? evidence.reason
                 : 'Resolve the recorded acceptance finding and provide evidence.';
-          return `[finding:${finding.id}] ${instruction.slice(0, 2_000)}`;
+          const title = typeof evidence.title === 'string' ? evidence.title.slice(0, 240) : undefined;
+          const detail = typeof evidence.evidence === 'string' ? evidence.evidence
+            : typeof evidence.detail === 'string' ? evidence.detail
+              : typeof evidence.reason === 'string' ? evidence.reason : undefined;
+          const location = finding.path ? `Path: ${finding.path}. ` : '';
+          const failure = detail ? `Evidence: ${detail.slice(0, 1_000)} ` : '';
+          return `[finding:${finding.id}] ${title ? `${title}. ` : ''}${location}${failure}Requested: ${instruction.slice(0, 2_000)}`;
         }),
       findingIds: reportCorrection ? [] : snapshot.findings
         .filter(finding => finding.correctionTaskId === taskId && finding.status === 'open')
@@ -1425,7 +1454,7 @@ export class OrchestrationService {
     );
     if (!reportCorrection && priorFailure?.failureReason) {
       taskPackage.corrections.push(
-        `[orchestrator-repair] Review the previous verification failure and correct its cause before resubmitting. Evidence: ${priorFailure.failureReason.slice(0, 4_000)}`
+        `[orchestrator-repair] Review the previous specialist failure and correct its cause before resubmitting. Evidence: ${safeRecoveryGuidance(priorFailure.failureReason).slice(0, 4_000)}`
       );
     }
     if (task.kind === 'review' && Buffer.byteLength(JSON.stringify(taskPackage), 'utf8') > MAX_REVIEW_CONTEXT_BYTES) {

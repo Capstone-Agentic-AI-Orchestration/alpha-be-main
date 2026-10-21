@@ -747,6 +747,8 @@ export interface OrchestrationRecoveryProjection {
   taskRevision?: number;
   attemptsUsed: number;
   repairBudget: number;
+  reportCorrectionsUsed?: number;
+  reportCorrectionLimit?: number;
   episodeNumber: number;
   revision: number;
   createdAt: string;

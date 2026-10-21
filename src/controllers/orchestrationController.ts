@@ -9,11 +9,21 @@ import { orchestrationSessionId } from '../services/orchestrationSession.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { orchestrationRecoveryService } from '../services/orchestrationRecoveryService.js';
+import type { OrchestrationSnapshot } from '../services/orchestrationStateMachine.js';
 import { route } from './asyncRoute.js';
 import { desktopOnly } from './desktopOnly.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
 export const orchestrationRouter = Router();
+
+async function reconcileRecovery(snapshot: OrchestrationSnapshot): Promise<void> {
+  try {
+    orchestrationRecoveryService.reconcileSnapshot(snapshot);
+    await orchestrationRecoveryService.flushPendingMilestones();
+  } catch {
+    // Recovery messages are durable in the outbox; a later read or startup pass retries delivery.
+  }
+}
 
 function errorResponse(res: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : 'The task workflow action failed.';
@@ -186,6 +196,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/start', des
       expectedRevision,
       actorId: req.workspace!.userId
     });
+    await reconcileRecovery(started);
     res.json({ runId: started.run.id, status: started.run.status, currentTaskId: started.run.currentTaskId });
   } catch (error) {
     errorResponse(res, error);
@@ -304,6 +315,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/tasks/:task
       expectedTaskRevision,
       actorId: req.workspace!.userId
     });
+    await reconcileRecovery(next);
     res.json({ runId: next.run.id, status: next.run.status, currentTaskId: next.run.currentTaskId });
   } catch (error) {
     errorResponse(res, error);
@@ -331,6 +343,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
       runId: snapshot.run.id,
       actorId: req.workspace!.userId
     });
+    await reconcileRecovery(next);
     res.json({ runId: next.run.id, status: next.run.status, currentTaskId: next.run.currentTaskId });
   } catch (error) {
     errorResponse(res, error);
@@ -373,6 +386,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/cancel', de
       runId: snapshot.run.id,
       actorId: req.workspace!.userId
     });
+    await reconcileRecovery(cancelled);
     res.json({ runId: cancelled.run.id, status: cancelled.run.status });
   } catch (error) {
     errorResponse(res, error);

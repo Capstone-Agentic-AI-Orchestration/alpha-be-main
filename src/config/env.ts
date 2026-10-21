@@ -66,11 +66,8 @@ function boundedNumberSetting(name: string, fallback: number, minimum: number, m
   return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
 }
 export const ALPHA_ORCHESTRATION_MAX_COST_USD = boundedNumberSetting('ALPHA_ORCHESTRATION_MAX_COST_USD', 0, 0, 100_000);
-/** Maximum total build age; 0 disables it. */
-export const ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS = boundedIntegerSetting('ALPHA_ORCHESTRATION_MAX_BUILD_AGE_HOURS', 24, 0, 24 * 7) * 60 * 60_000;
-/** Maximum age of an automatic recovery episode, in minutes. */
-export const ALPHA_ORCHESTRATION_RECOVERY_WINDOW_MS = boundedIntegerSetting('ALPHA_ORCHESTRATION_RECOVERY_WINDOW_MINUTES', 60, 5, 24 * 60) * 60_000;
-
+/** Maximum total build age; 0 disables it. Saved builds remain resumable by default. */
+export const ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS = boundedIntegerSetting('ALPHA_ORCHESTRATION_MAX_BUILD_AGE_HOURS', 0, 0, 24 * 7) * 60 * 60_000;
 // Phase 3: cloud-only email rollout. Unset/off leaves existing behavior intact.
 export const ALPHA_TICKETING_ACK_EMAIL_ENABLED = process.env.ALPHA_TICKETING_ACK_EMAIL_ENABLED === '1';
 export const TICKET_ACK_EMAIL_PROVIDER = (process.env.TICKET_ACK_EMAIL_PROVIDER ?? 'resend').trim().toLowerCase();
