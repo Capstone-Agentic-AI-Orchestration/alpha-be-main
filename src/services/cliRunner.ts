@@ -7,6 +7,7 @@ import { chatToolsFor } from './toolPolicy.js';
 import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
+import { codexModelConfigArgs } from './codexModelConfig.js';
 import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
@@ -61,6 +62,10 @@ export interface CliTurnOptions {
   /** Agent `modelProvider` value — selects the CLI family. */
   provider: string;
   modelName?: string;
+  /** Verified local endpoint from the selected runtime catalog, when available. */
+  codexBaseUrl?: string;
+  /** Runtime-owned Codex gateway/catalog overrides; never read user MCP config. */
+  codexConfigArgs?: string[];
   /** Optional effort override; omitted means the model/runtime default. */
   reasoningEffort?: ReasoningEffort;
   systemPrompt?: string;
@@ -391,6 +396,9 @@ export function buildTurnInvocation(
          * with this flag set.
          */
         '--ignore-user-config',
+        // Re-apply only Alpha's local gateway and its model metadata catalog.
+        // The rest of the operator's Codex config (especially MCPs) remains isolated.
+        ...(options.codexConfigArgs ?? []),
         // Before the `--`, necessarily: after it, `--model` would be read as
         // part of the prompt text rather than as a flag.
         ...(modelName ? ['--model', modelName] : []),
@@ -688,8 +696,13 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   }
 
   try {
+    const codexArgs = provider === 'OpenAI' ? codexModelConfigArgs(modelName, options.codexBaseUrl) : [];
     const invocation = buildTurnInvocation(
-      { ...options, personaFile: writeTurnPersona(runId, options.systemPrompt ?? '') ?? undefined },
+      {
+        ...options,
+        codexConfigArgs: codexArgs,
+        personaFile: writeTurnPersona(runId, options.systemPrompt ?? '') ?? undefined
+      },
       mcp
     );
     family = invocation.family;

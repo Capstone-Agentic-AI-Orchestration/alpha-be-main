@@ -24,6 +24,14 @@ describe('pickDefaultRuntime', () => {
     expect(chosen?.reason).toMatch(/default runtime/i);
   });
 
+  it('keeps the selected runtime endpoint available to the Codex runner', () => {
+    const chosen = pickDefaultRuntime([
+      { ...rt('OpenAI', 'online', ['gpt-6-astra'], true), endpoint: 'http://127.0.0.1:10100/v1' }
+    ]);
+
+    expect(chosen?.endpoint).toBe('http://127.0.0.1:10100/v1');
+  });
+
   it('falls back to another signed-in runtime rather than refusing', () => {
     const chosen = pickDefaultRuntime([
       rt('Anthropic', 'degraded', ['claude-sonnet-5'], true),

@@ -705,6 +705,7 @@ export class ChatService extends EventEmitter {
       cwd,
       provider: runtime.provider,
       modelName: runtime.modelName,
+      codexBaseUrl: runtime.endpoint,
       // The tool policy still applies: a chat inspects, it does not mutate.
       systemPrompt: [DEFAULT_ASSISTANT_PROMPT, describeWorkspaceForAlpha(workspaceId), describeChatToolPolicy()]
         .filter(Boolean)
@@ -828,7 +829,8 @@ export class ChatService extends EventEmitter {
      * to the Runtimes page, where everything looks green. Answering from here
      * costs nothing (no process, no tokens) and names the actual fix.
      */
-    const readiness = agentReadiness(agent, sqliteService.getRuntimes());
+    const runtimes = sqliteService.getRuntimes();
+    const readiness = agentReadiness(agent, runtimes);
     if (readiness.status === 'stale_model') {
       logInfo(`Refusing turn for ${agent.id}: ${readiness.detail}`);
       return {
@@ -849,6 +851,9 @@ export class ChatService extends EventEmitter {
       cwd,
       provider: persona.modelProvider,
       modelName: persona.modelName,
+      codexBaseUrl: runtimes.find(runtime =>
+        runtime.provider === persona.modelProvider && runtime.models.includes(persona.modelName)
+      )?.endpoint,
       reasoningEffort: persona.reasoningEffort,
       systemPrompt: persona.systemPrompt,
       personaName: persona.name,

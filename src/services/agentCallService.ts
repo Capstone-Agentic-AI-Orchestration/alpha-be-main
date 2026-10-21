@@ -514,7 +514,8 @@ export class AgentCallService extends EventEmitter {
         includeToolPolicy: false
       });
       const effectiveAgent = { ...agent, ...persona };
-      const readiness = agentReadiness(effectiveAgent, sqliteService.getRuntimes());
+      const runtimes = sqliteService.getRuntimes();
+      const readiness = agentReadiness(effectiveAgent, runtimes);
       if (readiness.status !== 'ready') {
         throw new Error(readiness.detail);
       }
@@ -526,6 +527,9 @@ export class AgentCallService extends EventEmitter {
         cwd: workspace.dir,
         provider: persona.modelProvider,
         modelName: persona.modelName,
+        codexBaseUrl: runtimes.find(runtime =>
+          runtime.provider === persona.modelProvider && runtime.models.includes(persona.modelName)
+        )?.endpoint,
         reasoningEffort: persona.reasoningEffort,
         personaName: persona.name,
         systemPrompt: [persona.systemPrompt, READ_ONLY_CALL_POLICY].filter(Boolean).join('\n\n---\n\n'),
