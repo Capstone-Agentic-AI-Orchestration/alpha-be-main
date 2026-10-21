@@ -385,6 +385,29 @@ async function discoverAnthropicCatalog(): Promise<CatalogDiscovery> {
   }
 }
 
+/**
+ * Claude Code's Claude.ai subscription login does not provide an Anthropic API
+ * key, so `/v1/models` cannot enumerate its account-backed model access. Keep
+ * the CLI's supported model IDs available for that auth mode, as earlier
+ * runtime scans did. API-key logins continue to use the live API catalog.
+ */
+const CLAUDE_CODE_SUBSCRIPTION_MODELS = [
+  'claude-sonnet-5',
+  'claude-opus-5',
+  'claude-haiku-4-5'
+];
+
+export function claudeCatalogForAuth(
+  catalog: CatalogDiscovery,
+  authMethod: unknown
+): CatalogDiscovery {
+  if (catalog.models.length || authMethod !== 'claude.ai') return catalog;
+  return {
+    models: [...CLAUDE_CODE_SUBSCRIPTION_MODELS],
+    source: 'cli'
+  };
+}
+
 async function discoverGeminiCatalog(): Promise<CatalogDiscovery> {
   const apiKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)?.trim();
   if (!apiKey) {
@@ -567,6 +590,7 @@ export class RuntimeService {
     const authProbe = await runClosedStdin(bin, ['auth', 'status'], 15_000);
     try {
       const auth = JSON.parse(authProbe.stdout);
+      const accountCatalog = claudeCatalogForAuth(catalog, auth.authMethod);
       return {
         id: 'claude',
         name: 'Claude Code CLI',
@@ -574,8 +598,8 @@ export class RuntimeService {
         status: auth.loggedIn ? 'online' : 'degraded',
         version,
         isDefault: true,
-        models: catalog.models,
-        ...catalogMetadata(catalog, now),
+        models: accountCatalog.models,
+        ...catalogMetadata(accountCatalog, now),
         account: {
           email: auth.email,
           org: auth.orgName,

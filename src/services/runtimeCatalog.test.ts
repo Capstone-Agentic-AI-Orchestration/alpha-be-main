@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import type { RuntimeCatalogSource } from '../models/index.js';
 
 vi.mock('./sqliteService.js', () => ({
   sqliteService: {
@@ -11,12 +12,26 @@ let parseOpenCodeModelIds: (output: string) => string[];
 let parseAntigravityModelIds: (output: string) => string[];
 let parseLMStudioModelIds: (payload: unknown) => string[];
 let codexCacheModelIds: (payload: unknown) => string[];
+let claudeCatalogForAuth: (catalog: { models: string[]; source: RuntimeCatalogSource; error?: string }, authMethod: unknown) => { models: string[]; source: RuntimeCatalogSource; error?: string };
 
 beforeAll(async () => {
-  ({ parseOpenCodeModelIds, parseAntigravityModelIds, parseLMStudioModelIds, codexCacheModelIds } = await import('./runtimeService.js'));
+  ({ parseOpenCodeModelIds, parseAntigravityModelIds, parseLMStudioModelIds, codexCacheModelIds, claudeCatalogForAuth } = await import('./runtimeService.js'));
 });
 
 describe('runtime model catalog parsers', () => {
+  it('keeps Claude Code subscription models when no API catalog is available', () => {
+    expect(claudeCatalogForAuth({ models: [], source: 'none', error: 'ANTHROPIC_API_KEY is not configured' }, 'claude.ai')).toEqual({
+      models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+      source: 'cli'
+    });
+  });
+
+  it('prefers a live Anthropic API catalog and does not invent models for other auth modes', () => {
+    const liveCatalog = { models: ['claude-sonnet-5'], source: 'remote_api' as const };
+    expect(claudeCatalogForAuth(liveCatalog, 'claude.ai')).toBe(liveCatalog);
+    expect(claudeCatalogForAuth({ models: [], source: 'none' }, 'console')).toEqual({ models: [], source: 'none' });
+  });
+
   it('keeps provider/model ids from OpenCode and ignores labels', () => {
     expect(parseOpenCodeModelIds([
       'Models available:',

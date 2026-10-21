@@ -1,7 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentStore, chatStore, projectStore } from '../store/stores.js';
-import { chatService } from '../services/chatService.js';
+import { chatService, ChatRouteError } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -13,7 +13,7 @@ import {
   shareThread
 } from '../services/chatWriteThrough.js';
 import { desktopOnly } from './desktopOnly.js';
-import { isProjectBuildRequest } from '../services/projectBuildIntent.js';
+import { parseChatOverride } from '../services/chatRouter.js';
 import { IS_CLOUD } from '../config/env.js';
 import { supabaseService } from '../services/supabaseService.js';
 import { retryChatSync } from '../services/chatSyncService.js';
@@ -281,6 +281,62 @@ chatRouter.post('/chat/threads/:threadId/messages/:messageId/steer', desktopOnly
 }));
 
 /**
+ * The user's answer to how Alpha handled a message.
+ *
+ * `messageId` is the user's own message. `build` plans it with the
+ * Orchestrator (Plan this build / Build this instead); `answer` withdraws an
+ * unstarted plan and has Alpha answer it instead (Just answer / This was just
+ * a question). Every server-side build check still applies.
+ */
+chatRouter.post('/chat/threads/:threadId/messages/:messageId/route', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const { action, repositories, projectId } = req.body ?? {};
+  if (action !== 'build' && action !== 'answer') {
+    return res.status(400).json({ error: 'action must be build or answer' });
+  }
+  if (repositories !== undefined && (!Array.isArray(repositories) || repositories.length > 30 || repositories.some((item: unknown) => typeof item !== 'string' || !item.trim()))) {
+    return res.status(400).json({ error: 'repositories must be a list of up to 30 repository names' });
+  }
+  if (projectId !== undefined && projectId !== null && typeof projectId !== 'string') {
+    return res.status(400).json({ error: 'projectId must be a string or omitted' });
+  }
+  if (req.workspace!.role === 'client') {
+    return res.status(403).json({ error: 'Project builds are available to the internal project team.' });
+  }
+  const thread = sqliteService.getChatThreads().find(item => item.id === req.params.threadId);
+  if (!thread || thread.ownerId !== req.workspace!.userId) {
+    return res.status(404).json({ error: 'Conversation not found.' });
+  }
+  if (projectId && thread.projectId && thread.projectId !== projectId) {
+    return res.status(409).json({ error: 'This conversation is already attached to another project.' });
+  }
+  const scopedProjectId = thread.projectId ?? projectId ?? undefined;
+  if (scopedProjectId && !requireProjectWorkspace(req, res, scopedProjectId)) return;
+  if (!thread.projectId && scopedProjectId) {
+    const scopedThread = sqliteService.setChatThreadProject(thread.id, scopedProjectId);
+    if (!scopedThread) return res.status(404).json({ error: 'Conversation not found.' });
+    shareThread(scopedThread);
+  }
+  try {
+    const result = await chatService.routeMessage({
+      threadId: thread.id,
+      messageId: req.params.messageId,
+      action,
+      userId: req.workspace!.userId,
+      routing: {
+        context: req.workspace!,
+        repositories: Array.isArray(repositories) ? [...new Set(repositories.map((item: string) => item.trim()))] : undefined,
+        canBuild: workspaceRegistry.can(req.workspace!.role, 'agent.run')
+      }
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    const status = error instanceof ChatRouteError ? error.status : 500;
+    res.status(status).json({ error: error instanceof Error ? error.message : 'Alpha could not update how this message is handled.' });
+  }
+}));
+
+/**
  * Delete a conversation, or empty one.
  *
  * Neither existed. The UI has had a Delete and a Clear button since the chat
@@ -365,14 +421,29 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       shareThread(scopedThread);
     }
 
-    // A direct @mention is an explicit request for an agent to answer in chat.
-    // Keep project-build detection for ordinary product requests, while the
-    // Build control still routes to the Orchestrator even if the text contains
-    // a mention.
-    const directlyAddressesAgent = /(?:^|[\s(\[{])@[a-zA-Z0-9_-]+/.test(content);
-    const buildRequested = intent === 'build' || (intent !== 'ask' && !directlyAddressesAgent && isProjectBuildRequest(content));
-    const buildRequest = req.workspace!.role !== 'client' && buildRequested
+    /**
+     * Alpha is the Orchestrator. An unaddressed message goes to Alpha, which
+     * answers it or decides it is a build; `chatService` enforces every check
+     * before a build starts. A direct @mention still goes to that agent.
+     *
+     * `/build` and `/ask` replace the old mode buttons as explicit overrides.
+     * The `intent` field is still read for one release so an older desktop
+     * renderer keeps working: `build` acts as `/build`, `ask` as `/ask`.
+     */
+    const isInternal = req.workspace!.role !== 'client';
+    const override = parseChatOverride(content).override;
+    const forcedBuild = intent === 'build' || override === 'build';
+    const answerOnly = intent === 'ask' || override === 'ask';
+    const buildRequest = isInternal && forcedBuild
       ? { context: req.workspace!, repositories: requestedRepositories, issueId: issueId || undefined }
+      : undefined;
+    const routing = isInternal && !buildRequest
+      ? {
+          context: req.workspace!,
+          repositories: requestedRepositories,
+          canBuild: workspaceRegistry.can(req.workspace!.role, 'agent.run'),
+          answerOnly
+        }
       : undefined;
     const result = await chatService.sendMessage({
       threadId,
@@ -384,7 +455,8 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       attachmentIds,
       workspaceId: req.workspace!.workspaceId,
       userId: req.workspace!.userId,
-      buildRequest
+      buildRequest,
+      routing
     });
     res.status(201).json(result);
   } catch (err: any) {

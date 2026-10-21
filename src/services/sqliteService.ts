@@ -711,6 +711,7 @@ export class SQLiteService {
         operation_mode TEXT,
         agent_call_status TEXT,
         revision_target TEXT,
+        route_proposal TEXT,
         timestamp TEXT NOT NULL,
         attachments_json TEXT NOT NULL DEFAULT '[]'
       );
@@ -1401,6 +1402,7 @@ export class SQLiteService {
       ,['chat_messages', 'operation_mode TEXT']
       ,['chat_messages', 'agent_call_status TEXT']
       ,['chat_messages', 'revision_target TEXT']
+      ,['chat_messages', 'route_proposal TEXT']
       ,['agent_calls', "activities TEXT NOT NULL DEFAULT '[]'"]
       ,['agent_calls', 'working_branch TEXT']
       ,['agent_calls', 'working_commit TEXT']
@@ -5357,6 +5359,7 @@ export class SQLiteService {
       operationMode: r.operation_mode ?? undefined,
       agentCallStatus: r.agent_call_status ?? undefined,
       revisionTarget: parseJson<AgentCallTarget | undefined>(r.revision_target, undefined),
+      routeProposal: parseJson<ChatMessage['routeProposal']>(r.route_proposal, undefined),
       attachments: parseJson<ChatMessage['attachments']>(r.attachments_json, []),
       timestamp: r.timestamp
     }));
@@ -5462,12 +5465,12 @@ export class SQLiteService {
       INSERT INTO chat_messages (
         id, thread_id, sender_type, sender_name, agent_id, content,
         thinking_process, tools_executed, message_type, agent_call_id,
-        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, timestamp, attachments_json
+        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, route_proposal, timestamp, attachments_json
       )
       VALUES (
         @id, @threadId, @senderType, @senderName, @agentId, @content,
         @thinkingProcess, @toolsExecuted, @messageType, @agentCallId,
-        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @timestamp, @attachments
+        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @routeProposal, @timestamp, @attachments
       )
     `);
     stmt.run({
@@ -5482,6 +5485,7 @@ export class SQLiteService {
       operationMode: msg.operationMode || null,
       agentCallStatus: msg.agentCallStatus || null,
       revisionTarget: msg.revisionTarget ? JSON.stringify(msg.revisionTarget) : null,
+      routeProposal: msg.routeProposal ? JSON.stringify(msg.routeProposal) : null,
       attachments: JSON.stringify(msg.attachments ?? [])
     });
 
@@ -5496,6 +5500,12 @@ export class SQLiteService {
 
   deleteChatMessage(messageId: string): boolean {
     return this.db.prepare('DELETE FROM chat_messages WHERE id = ?').run(messageId).changes > 0;
+  }
+
+  /** Record the user's answer to a build Alpha proposed in chat. */
+  updateChatMessageRouteProposal(threadId: string, messageId: string, proposal: NonNullable<ChatMessage['routeProposal']>): boolean {
+    return this.db.prepare('UPDATE chat_messages SET route_proposal = ? WHERE id = ? AND thread_id = ?')
+      .run(JSON.stringify(proposal), messageId, threadId).changes > 0;
   }
 
   saveChatAttachment(record: ChatAttachmentRecord): ChatAttachmentRecord {
