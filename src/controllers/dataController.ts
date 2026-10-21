@@ -46,7 +46,6 @@ import {
   requireDiscoverableProject,
   requireEntityWorkspace,
   requireProjectWorkspace,
-  requireSquadManagement,
   requireSquadWorkspace,
   requireWorkspaceCapability
 } from './workspaceContext.js';
@@ -224,14 +223,11 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
       // Who is pulling, so a project the team dropped leaves this machine too.
       const pulled = await pullSharedBoard(req.workspace!.workspaceId, source, req.workspace!.userId);
       /**
-       * Then this machine's own agents and squads, which the team does not
-       * have. An issue assigned to one of them names a row the cloud has to
-       * hold, or the assignment is refused when the card is shared.
+       * Then this machine's own agents, which the team does not have. An issue
+       * that names one refers to a row the cloud has to hold, or the card is
+       * refused when it is shared. Squads were removed and are not published.
        */
       for (const agent of pulled.unpublished.agents) await supabaseService.shareAgent(agent);
-      for (const squad of pulled.unpublished.squads) {
-        await supabaseService.shareSquad(squad, workspaceRegistry.squadOwnerId(req.workspace!, squad.id));
-      }
       res.json(asSyncReport(pulled));
     } catch (err: any) {
       /**
@@ -304,24 +300,21 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
   const { createdBy: _claimed, ...input } = req.body ?? {};
   const workspaceId = req.workspace!.workspaceId;
   if (!String(input.name ?? '').trim()) return res.status(400).json({ error: 'Project name is required.' });
-  if ((input.leadAgentId != null && typeof input.leadAgentId !== 'string') || (input.leadSquadId != null && typeof input.leadSquadId !== 'string')) {
+  if (typeof input.leadSquadId === 'string' && input.leadSquadId.trim()) {
+    return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
+  }
+  if (input.leadAgentId != null && typeof input.leadAgentId !== 'string') {
     return res.status(400).json({ error: 'Choose a valid project owner.' });
   }
   const leadAgentId = typeof input.leadAgentId === 'string' ? input.leadAgentId.trim() : '';
-  const leadSquadId = typeof input.leadSquadId === 'string' ? input.leadSquadId.trim() : '';
-  if (leadAgentId && leadSquadId) return res.status(400).json({ error: 'Choose one project owner.' });
-  const ownerId = leadAgentId || leadSquadId;
-  if (ownerId && typeof ownerId !== 'string') return res.status(400).json({ error: 'Choose a valid project owner.' });
-  const owner = ownerId
-    ? leadAgentId ? await agentStore().get(workspaceId, ownerId) : await squadStore().get(workspaceId, ownerId)
-    : undefined;
-  if (ownerId && (!owner || ('isArchived' in owner && owner.isArchived))) return res.status(400).json({ error: 'The project owner is no longer available in this workspace.' });
+  const owner = leadAgentId ? await agentStore().get(workspaceId, leadAgentId) : undefined;
+  if (leadAgentId && (!owner || owner.isArchived)) return res.status(400).json({ error: 'The project owner is no longer available in this workspace.' });
+  const { leadSquadId: _retiredSquad, ...projectInput } = input;
   const project = await projectStore().create(workspaceId, {
-    ...input,
+    ...projectInput,
     leadType: 'agent',
     leadName: owner?.name ?? 'Orchestrator',
     leadAgentId: leadAgentId || undefined,
-    leadSquadId: leadSquadId || undefined,
     status: 'planned',
     createdBy: req.workspace!.userId
   });
@@ -466,20 +459,18 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
 
   // Who created it is not something an edit can change.
   const { createdBy: _owner, leadName: _leadName, leadType: _leadType, ...changes } = req.body ?? {};
-  if (Object.prototype.hasOwnProperty.call(changes, 'leadAgentId') || Object.prototype.hasOwnProperty.call(changes, 'leadSquadId')) {
-    if ((changes.leadAgentId != null && typeof changes.leadAgentId !== 'string') || (changes.leadSquadId != null && typeof changes.leadSquadId !== 'string')) {
+  if (typeof changes.leadSquadId === 'string' && changes.leadSquadId.trim()) {
+    return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
+  }
+  delete changes.leadSquadId;
+  if (Object.prototype.hasOwnProperty.call(changes, 'leadAgentId')) {
+    if (changes.leadAgentId != null && typeof changes.leadAgentId !== 'string') {
       return res.status(400).json({ error: 'Choose a valid project owner.' });
     }
     const leadAgentId = typeof changes.leadAgentId === 'string' ? changes.leadAgentId.trim() : '';
-    const leadSquadId = typeof changes.leadSquadId === 'string' ? changes.leadSquadId.trim() : '';
-    if (leadAgentId && leadSquadId) return res.status(400).json({ error: 'Choose one project owner.' });
-    const ownerId = leadAgentId || leadSquadId;
-    const owner = ownerId
-      ? leadAgentId ? await agentStore().get(req.workspace!.workspaceId, ownerId) : await squadStore().get(req.workspace!.workspaceId, ownerId)
-      : undefined;
-    if (ownerId && (!owner || ('isArchived' in owner && owner.isArchived))) return res.status(400).json({ error: 'The project owner is no longer available in this workspace.' });
+    const owner = leadAgentId ? await agentStore().get(req.workspace!.workspaceId, leadAgentId) : undefined;
+    if (leadAgentId && (!owner || owner.isArchived)) return res.status(400).json({ error: 'The project owner is no longer available in this workspace.' });
     changes.leadAgentId = leadAgentId;
-    changes.leadSquadId = leadSquadId;
     changes.leadName = owner?.name ?? 'Orchestrator';
     changes.leadType = 'agent';
   }
@@ -954,9 +945,10 @@ dataRouter.post('/issues', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   const { identifier: _ignored, comments: _alsoIgnored, ...rest } = req.body ?? {};
 
-  if (rest.assignedAgentId && rest.assignedSquadId) {
-    return res.status(400).json({ error: 'Choose either an agent or a squad as the issue owner, not both.' });
+  if (rest.assignedSquadId) {
+    return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
   }
+  delete rest.assignedSquadId;
 
   const identity = await currentIdentity();
   if (!rest.projectId || typeof rest.projectId !== 'string') {
@@ -1020,12 +1012,10 @@ dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
   // Empty strings are explicit clears from the owner selector; normalize before either store writes foreign keys.
-  for (const field of ['assignedAgentId', 'assignedSquadId']) {
-    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, field) && !req.body[field]) req.body[field] = undefined;
-  }
-  if (req.body?.assignedAgentId && req.body?.assignedSquadId) return res.status(400).json({ error: 'Choose one agent or squad as the issue owner.' });
+  if (req.body?.assignedSquadId) return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
+  if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'assignedSquadId')) req.body.assignedSquadId = undefined;
+  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'assignedAgentId') && !req.body.assignedAgentId) req.body.assignedAgentId = undefined;
   if (req.body?.assignedAgentId && !(await agentStore().get(req.workspace!.workspaceId, req.body.assignedAgentId))) return res.status(400).json({ error: 'The selected agent is unavailable in this workspace.' });
-  if (req.body?.assignedSquadId && !(await squadStore().get(req.workspace!.workspaceId, req.body.assignedSquadId))) return res.status(400).json({ error: 'The selected squad is unavailable in this workspace.' });
   const transitionError = await statusTransitionError(req.workspace!.workspaceId, before, req.body?.status);
   if (transitionError) {
     const status = isIssueStatus(req.body?.status) ? 409 : 400;
@@ -1153,54 +1143,18 @@ dataRouter.get('/squads', route(async (req: Request, res: Response) => {
   })));
 }));
 
-dataRouter.post('/squads', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
-  const squad = await squadStore().create(req.workspace!.workspaceId, req.body);
-  workspaceRegistry.bind('squads', squad.id, req.workspace!.workspaceId);
-  await workspaceRegistry.bindSquadOwner(req.workspace!.workspaceId, squad.id, req.workspace!.userId);
-  void supabaseService.shareSquad(squad, req.workspace!.userId);
-  res.status(201).json({ ...squad, ownerId: req.workspace!.userId });
-}));
-
 /**
- * Edit and delete, which squads did not have.
- *
- * An agent is created, edited, archived and deleted; a squad could only be
- * created and run. Same kind of object to the person using it, so a typo in a
- * squad name or a wrong member list was permanent.
- *
- * A PUT carries only the fields being changed, like the agent and project
- * routes above — absent ones are left as they are rather than cleared.
+ * Squads were removed. Existing rows stay readable for history; nothing can
+ * create, edit, delete, or assign one.
  */
-dataRouter.put('/squads/:id', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
-  if (!requireSquadWorkspace(req, res, req.params.id)) return;
-  if (!requireSquadManagement(req, res, req.params.id)) return;
-  if (req.body?.name !== undefined && !String(req.body.name).trim()) {
-    return res.status(400).json({ error: 'name cannot be empty' });
-  }
-
-  const updated = await squadStore().update(req.workspace!.workspaceId, req.params.id, req.body);
-  if (!updated) return res.status(404).json({ error: 'Squad not found' });
-  void supabaseService.shareSquad(updated);
-  res.json({
-    ...updated,
-    ownerId: workspaceRegistry.squadOwnerId(req.workspace!, updated.id)
-  });
-}));
-
-dataRouter.delete('/squads/:id', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'squad.manage')) return;
-  if (!requireSquadWorkspace(req, res, req.params.id)) return;
-  if (!requireSquadManagement(req, res, req.params.id)) return;
-  const deleted = await squadStore().remove(req.workspace!.workspaceId, req.params.id);
-  if (deleted) {
-    await workspaceRegistry.unbind('squads', req.params.id);
-    void supabaseService.unshareSquad(req.params.id);
-  }
-  if (!deleted) return res.status(404).json({ error: 'Squad not found' });
-  res.json({ success: true });
-}));
+const squadsRemoved = (_req: Request, res: Response) => {
+  res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
+};
+dataRouter.post('/squads', squadsRemoved);
+dataRouter.put('/squads/:id', squadsRemoved);
+dataRouter.delete('/squads/:id', squadsRemoved);
+dataRouter.put('/squads/:id/projects/:projectId', squadsRemoved);
+dataRouter.delete('/squads/:id/projects/:projectId', squadsRemoved);
 
 dataRouter.get('/squads/:id/projects', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
@@ -1209,34 +1163,6 @@ dataRouter.get('/squads/:id/projects', route(async (req: Request, res: Response)
     .filter(assignment => assignment.squadId === req.params.id && assignment.status === 'active')
     .filter(assignment => workspaceRegistry.canAccessProject(req.workspace!, assignment.projectId));
   res.json(assignments);
-}));
-
-dataRouter.put('/squads/:id/projects/:projectId', route(async (req: Request, res: Response) => {
-  // Project access controls reuse of a shared squad; it does not transfer
-  // ownership of the squad's roster or mission.
-  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
-  if (!requireSquadWorkspace(req, res, req.params.id)) return;
-  if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
-  const relationship = req.body?.relationship === 'owned' ? 'owned' : 'assigned';
-  res.status(201).json(await workspaceRegistry.assignSquadProject(
-    req.workspace!.workspaceId,
-    req.params.id,
-    req.params.projectId,
-    relationship
-  ));
-}));
-
-dataRouter.delete('/squads/:id/projects/:projectId', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.update')) return;
-  if (!requireSquadWorkspace(req, res, req.params.id)) return;
-  if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
-  const removed = await workspaceRegistry.removeSquadProject(
-    req.workspace!.workspaceId,
-    req.params.id,
-    req.params.projectId
-  );
-  if (!removed) return res.status(404).json({ error: 'Squad project assignment not found.' });
-  res.json({ success: true });
 }));
 
 // --- Skills ---

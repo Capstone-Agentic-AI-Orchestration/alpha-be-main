@@ -159,18 +159,11 @@ export class PostgresProjectStore implements ProjectStore {
   async saveBuildSteps(workspaceId: string, projectId: string, input: unknown): Promise<ProjectBuildStep[] | null> {
     if (!(await this.get(workspaceId, projectId))) return null;
 
-    const { rows: owned } = await this.sql.query<{ agents: string[] | null; squads: string[] | null }>(
-      `select
-         (select array_agg(id) from agents where workspace_id = $1) as agents,
-         (select array_agg(id) from squads where workspace_id = $1) as squads`,
+    const { rows: owned } = await this.sql.query<{ agents: string[] | null }>(
+      `select (select array_agg(id) from agents where workspace_id = $1) as agents`,
       [workspaceId]
     );
-    const steps = normalizeBuildSteps(
-      projectId,
-      input,
-      new Set(owned[0]?.agents ?? []),
-      new Set(owned[0]?.squads ?? [])
-    );
+    const steps = normalizeBuildSteps(projectId, input, new Set(owned[0]?.agents ?? []));
 
     /**
      * Ids come from the client, and the key is global. One already used by

@@ -6,7 +6,7 @@ import { ALPHA_ORG } from '../config/env.js';
 import { githubApi } from '../services/githubApi.js';
 import { roleForTeamSlug } from '../services/identityService.js';
 import { refreshMemberships, usesCloudDirectory } from '../services/cloudWorkspaces.js';
-import { agentStore, squadStore } from '../store/stores.js';
+import { agentStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -37,15 +37,15 @@ import { requireProjectWorkspace, requireWorkspaceCapability } from './workspace
 export const workspaceRouter = Router();
 
 /**
- * The agents and squad a new workspace starts with.
+ * The agents a new workspace starts with.
  *
  * Through the stores, so a cloud workspace gets its roster in Postgres and a
  * desktop one in SQLite. Projects and issues stay empty on purpose: those are
  * the owner's work, not product seed data.
  */
 export async function seedRoster(workspaceId: string, name: string): Promise<void> {
+  void name;
   await agentStore().ensureOfficial(workspaceId);
-  await squadStore().create(workspaceId, await coreSquad(workspaceId, `squad-${workspaceId}`, name));
 }
 
 /**
@@ -54,10 +54,9 @@ export async function seedRoster(workspaceId: string, name: string): Promise<voi
  * Nothing else creates it: a workspace made through the API is seeded as it
  * is made, but the default one is the directory's, and the directory makes it
  * as a bare row. Idempotent throughout -- the official agents are keyed on
- * their template, and the core squad is created only if it is not there --
- * so a boot that has run before adds nothing.
+ * their template -- so a boot that has run before adds nothing.
  *
- * The row comes first. Every agent and squad has a foreign key to its
+ * The row comes first. Every agent has a foreign key to its
  * workspace, and this used to run before anything had created the default
  * one, so it failed that key and left the workspace everyone lands in with no
  * agents at all.
@@ -66,27 +65,6 @@ export async function seedDefaultWorkspace(): Promise<void> {
   const workspaceId = workspaceRegistry.getDefaultWorkspaceId();
   await workspaceRegistry.ensureDefaultWorkspace();
   await agentStore().ensureOfficial(workspaceId);
-  // `squad-core` is the id the desktop's own default squad has always had.
-  if (!(await squadStore().get(workspaceId, 'squad-core'))) {
-    await squadStore().create(workspaceId, await coreSquad(workspaceId, 'squad-core', 'Alpha'));
-  }
-}
-
-async function coreSquad(workspaceId: string, id: string, name: string) {
-  const agents = await agentStore().list(workspaceId);
-  return {
-    id,
-    name: `${name} Core Squad`,
-    description: 'Official Alpha roles working in sequence.',
-    avatar: '◈',
-    color: '#6366f1',
-    topology: 'Sequential' as const,
-    leaderAgentId: agents.find(agent => agent.role === 'Manager Agent')?.id ?? agents[0]?.id,
-    memberAgentIds: agents.map(agent => agent.id),
-    mission: 'Research, plan, build, review, and validate approved project work.',
-    activeRunsCount: 0,
-    completedRunsCount: 0
-  };
 }
 
 const ROLES: readonly WorkspaceRole[] = ['client', 'dev', 'pm', 'admin'];

@@ -22,14 +22,14 @@ const PHASES = new Set<BuildStepPhase>([
  * cloud accepts. Positions come from the order sent; an id repeated in one list
  * is replaced rather than letting the second step overwrite the first.
  *
- * `agentIds` and `squadIds` are this workspace's: a step may name only an agent
- * or squad the workspace has.
+ * `agentIds` are this workspace's: a step may name only an agent the workspace
+ * has. Steps no longer target squads; a stale squad id from an older client is
+ * dropped.
  */
 export function normalizeBuildSteps(
   projectId: string,
   input: unknown,
   agentIds: ReadonlySet<string>,
-  squadIds: ReadonlySet<string>,
   now = new Date().toISOString()
 ): ProjectBuildStep[] {
   if (!Array.isArray(input)) throw new BuildStepError('steps must be an array');
@@ -43,10 +43,7 @@ export function normalizeBuildSteps(
     if (!PHASES.has(phase)) throw new BuildStepError(`Unsupported build step phase: ${phase}`);
 
     const agentId = typeof raw.agentId === 'string' && raw.agentId ? raw.agentId : undefined;
-    const squadId = typeof raw.squadId === 'string' && raw.squadId ? raw.squadId : undefined;
-    if (agentId && squadId) throw new BuildStepError(`Build step ${index + 1} cannot target both an agent and a squad`);
     if (agentId && !agentIds.has(agentId)) throw new BuildStepError(`Agent not found for build step ${index + 1}`);
-    if (squadId && !squadIds.has(squadId)) throw new BuildStepError(`Squad not found for build step ${index + 1}`);
 
     let id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `build-step-${randomUUID()}`;
     if (seenIds.has(id)) id = `build-step-${randomUUID()}`;
@@ -62,7 +59,6 @@ export function normalizeBuildSteps(
       label,
       phase,
       agentId,
-      squadId,
       position: index,
       enabled: raw.enabled !== false,
       required: raw.required !== false,

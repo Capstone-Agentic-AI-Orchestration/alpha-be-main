@@ -68,7 +68,7 @@ describe('seeding runs once', () => {
   /**
    * Templates, not someone else's work.
    *
-   * Agents, skills and a squad are scaffolding anyone would want. A project and
+   * Agents and skills are scaffolding anyone would want. A project and
    * its issues are the work itself — the seed used to ship Alpha's own backlog,
    * so a new collaborator opened the board and found three issues about
    * implementing a stream parser they had never heard of.
@@ -77,26 +77,8 @@ describe('seeding runs once', () => {
     const svc = await startDaemon();
     expect(svc.getProjects()).toHaveLength(0);
     expect(svc.getIssues()).toHaveLength(0);
-    expect(svc.getSquads()).toEqual([
-      expect.objectContaining({
-        id: 'squad-core',
-        completedRunsCount: 0
-      })
-    ]);
-  });
-
-  it('repairs the retired starter run counter on a database with no run history', async () => {
-    const first = await startDaemon();
-    first.close();
-
-    const db = new Database(dbPath());
-    db.prepare("UPDATE squads SET completed_runs_count = 12 WHERE id = 'squad-core'").run();
-    db.close();
-
-    const restarted = await startDaemon();
-    expect(restarted.getSquads().find(squad => squad.id === 'squad-core')).toMatchObject({
-      completedRunsCount: 0
-    });
+    // Squads were removed; nothing seeds one.
+    expect(svc.getSquads()).toEqual([]);
   });
 
   it('records that it seeded, rather than leaving it to be inferred', async () => {
@@ -126,7 +108,7 @@ describe('seeding runs once', () => {
     const svc = await startDaemon();
     expect(svc.getSkills()).toHaveLength(5);
     expect(svc.getAgents()).toHaveLength(OFFICIAL_AGENT_TEMPLATES.length);
-    expect(svc.getSquads()).toHaveLength(1);
+    expect(svc.getSquads()).toHaveLength(0);
   });
 
   /**

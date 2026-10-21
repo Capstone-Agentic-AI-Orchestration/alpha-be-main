@@ -2,10 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Agent, Project, ProjectBuildStep, RuntimeEngine, Squad, SquadMemberAssignment } from '../models/index.js';
+import type { Agent, Project, ProjectBuildStep, RuntimeEngine } from '../models/index.js';
 import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
-import { issueStore, projectStore, squadStore } from '../store/stores.js';
+import { issueStore, projectStore } from '../store/stores.js';
 import { addBranchWorktree, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { agentReadiness } from './agentReadiness.js';
 import { reposForProject } from './githubIssueMapping.js';
@@ -14,7 +14,6 @@ import { projectRunWorkspacePath, resolveProjectWorkspace, allowAttachedWorkspac
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
-import { isSupportedTopology, orderedMembers, squadRunner } from './squadRunner.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
 import { supabaseService } from './supabaseService.js';
 import { resolveAgent } from './personaService.js';
@@ -35,9 +34,6 @@ export interface ProjectBuildStartResult {
   repositories?: string[];
   issueId?: string;
   issueIdentifier?: string;
-  squadId?: string;
-  squadName?: string;
-  squadRunId?: string;
   orchestrationRunId?: string;
   orchestrationTaskCount?: number;
   orchestrationCurrentTask?: { id: string; title: string; ownerAgentId: string };
@@ -53,6 +49,8 @@ interface StartProjectBuildInput {
   content: string;
   requestedRepository?: string;
   requestedRepositories?: string[];
+  /** Existing board issue to build. Omitted for chat requests, which get their own issue. */
+  issueId?: string;
 }
 
 interface SelectedProjectRepository { repository: string; checkoutDir: string }
@@ -99,74 +97,6 @@ function issueTitle(content: string): string {
 
 function repositoryOptions(project: Project): string[] {
   return reposForProject(project);
-}
-
-function buildStepInstructions(phase: ProjectBuildStep['phase'], label: string): string {
-  const scope = `Complete only the “${label}” step.`;
-  switch (phase) {
-    case 'requirements':
-      return `${scope} Turn the user's request and existing repository behavior into clear, testable requirements. Record assumptions and unresolved questions for the next agent. Do not begin implementation.`;
-    case 'architecture':
-      return `${scope} Define the relevant components, interfaces, and decisions for the requested change. Leave a concise design handoff; do not implement later stages.`;
-    case 'database':
-      return `${scope} Make only the required data-layer changes and focused migration or schema checks. Preserve compatibility and leave the next agent a handoff.`;
-    case 'validation':
-      return `${scope} Verify the implemented behavior against the request and run relevant checks. Report evidence and concrete failures; do not redo the implementation.`;
-    case 'review':
-      return `${scope} Review the changes already on the branch for defects, security issues, and convention problems. Report findings with evidence; do not take over implementation.`;
-    case 'delivery':
-      return `${scope} Check repository and CI readiness and report blockers. Do not merge, publish a release, or deploy without an explicit user request.`;
-    case 'implementation':
-    default:
-      return `${scope} Implement only the feature slice named by this step, building on prior commits. Leave other agents' stages to them.`;
-  }
-}
-
-function assignmentsForBuildSteps(
-  steps: ProjectBuildStep[],
-  executionOrder: string[]
-): SquadMemberAssignment[] {
-  if (!steps.length || !executionOrder.length) return [];
-  const assignments = new Map<string, SquadMemberAssignment>();
-
-  steps.forEach((step, index) => {
-    const agentId = step.agentId && executionOrder.includes(step.agentId)
-      ? step.agentId
-      : executionOrder[index % executionOrder.length];
-    const instruction = `(${step.phase}) ${buildStepInstructions(step.phase, step.label)}`;
-    const existing = assignments.get(agentId);
-    assignments.set(agentId, existing
-      ? {
-          agentId,
-          stageLabel: `${existing.stageLabel} · ${step.label}`,
-          phase: existing.phase === step.phase ? step.phase : undefined,
-          instructions: `${existing.instructions}\n- ${instruction}`
-        }
-      : {
-          agentId,
-          stageLabel: step.label,
-          phase: step.phase,
-          instructions: instruction
-        });
-  });
-
-  return [...assignments.values()];
-}
-
-function selectSquad(
-  context: WorkspaceContext,
-  project: Project,
-  squads: Squad[],
-  assignments: Array<{ squadId: string; status: string }>,
-  steps: ProjectBuildStep[]
-): Squad | null {
-  const activeIds = new Set(assignments.filter(item => item.status === 'active').map(item => item.squadId));
-  const accessible = squads.filter(squad => activeIds.has(squad.id) && workspaceRegistry.canAccessSquad(context, squad.id));
-  const enabledSteps = [...(steps ?? [])].filter(step => step.enabled).sort((a, b) => a.position - b.position);
-  const fromBuildSteps = enabledSteps.find(step => step.squadId && activeIds.has(step.squadId))?.squadId;
-  const preferredId = fromBuildSteps || project.leadSquadId;
-  if (preferredId) return accessible.find(squad => squad.id === preferredId) ?? null;
-  return accessible.length === 1 ? accessible[0] : null;
 }
 
 const PLANNING_KINDS = new Set(['requirements', 'architecture']);
@@ -269,7 +199,7 @@ function repositoryPlanningContext(repositoryDir: string): { context: string; sc
   return { context: context.slice(0, 16_000), scripts: availableScripts };
 }
 
-function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Project, repository: string, squad?: Squad): ProjectBuildStartResult {
+function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Project, repository: string): ProjectBuildStartResult {
   const active = snapshot.run.currentTaskId ? snapshot.tasks.find(task => task.id === snapshot.run.currentTaskId) : undefined;
   const status: ProjectBuildStartResult['status'] = snapshot.run.status === 'completed' ? 'completed'
     : snapshot.run.status === 'awaiting_plan_approval' ? 'plan_ready'
@@ -286,7 +216,6 @@ function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Proj
     repositories: snapshot.run.repositoryWorkspaces?.map(item => item.repository) ?? [repository],
     issueId: snapshot.run.issueId,
     issueIdentifier: sqliteService.getIssues().find(issue => issue.id === snapshot.run.issueId)?.identifier,
-    squadId: squad?.id,
     orchestrationRunId: snapshot.run.id,
     orchestrationTaskCount: snapshot.tasks.length,
     orchestrationCurrentTask: active ? { id: active.id, title: active.title, ownerAgentId: active.ownerAgentId } : undefined,
@@ -299,17 +228,16 @@ async function startOrchestratedProjectBuild(input: {
   context: WorkspaceContext;
   project: Project;
   repositories: SelectedProjectRepository[];
-  squad?: Squad;
   members: Agent[];
   buildSteps: ProjectBuildStep[];
   threadId: string;
   messageId: string;
   content: string;
+  issueId?: string;
 }): Promise<ProjectBuildStartResult> {
-  const { context, project, squad, members, buildSteps } = input;
+  const { context, project, members, buildSteps } = input;
   const repositories = input.repositories;
   const repository = repositories[0]?.repository ?? '';
-  const checkoutDir = repositories[0]?.checkoutDir ?? '';
   if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
   if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('The Orchestrator is unavailable in this desktop version. Update the app before starting a build.', project, repository);
 
@@ -320,7 +248,8 @@ async function startOrchestratedProjectBuild(input: {
   if ((project.description?.length ?? 0) > MAX_PROJECT_CONTEXT_CHARS) {
     return blocked(`Project context is over ${MAX_PROJECT_CONTEXT_CHARS.toLocaleString()} characters. Shorten the saved ground rules in Project settings before starting a build.`, project, repository);
   }
-  const expectedIssueId = `chat-build-${requestKey}`;
+  const linkedIssueId = input.issueId?.trim() || undefined;
+  const expectedIssueId = linkedIssueId ?? `chat-build-${requestKey}`;
   const requestFingerprint = orchestrationRequestFingerprint({
     workspaceId, projectId: project.id, issueId: expectedIssueId, repository,
     repositories: repositories.map(item => item.repository),
@@ -331,7 +260,7 @@ async function startOrchestratedProjectBuild(input: {
     if (priorSnapshot.run.requestFingerprint !== requestFingerprint) {
       return blocked('This chat request key is already associated with a different task workflow. Start a new chat message to create a separate build.', project, repository);
     }
-    return orchestrationStartResult(priorSnapshot, project, repository, squad);
+    return orchestrationStartResult(priorSnapshot, project, repository);
   }
   for (const selected of repositories) {
     let activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, selected.repository));
@@ -355,10 +284,15 @@ async function startOrchestratedProjectBuild(input: {
     }
   }
 
-  const issueId = `chat-build-${requestKey}`;
+  const issueId = expectedIssueId;
   const idempotencyLabel = `alpha:chat-build-${requestKey}`;
-  const currentIssues = await issueStore().list(workspaceId);
-  let issue = currentIssues.find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));
+  let issue = linkedIssueId
+    ? await issueStore().get(workspaceId, linkedIssueId)
+    : (await issueStore().list(workspaceId)).find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));
+  if (linkedIssueId) {
+    if (!issue || issue.projectId !== project.id) return blocked('That issue is not part of this project. Open it from the project board and try again.', project, repository);
+    if (issue.status === 'done') return blocked(`${issue.identifier} is already done. Reopen it before starting another build.`, project, repository);
+  }
   const previousLegacyRun = issue && sqliteService.getSquadRuns().find(run => run.issueId === issue!.id);
   if (previousLegacyRun && issue) {
     const runs = sqliteService.getRunsForSquadRun(previousLegacyRun.id);
@@ -366,8 +300,8 @@ async function startOrchestratedProjectBuild(input: {
     return {
       status: previousLegacyRun.status === 'awaiting_approval' ? 'awaiting_review' : previousLegacyRun.status === 'failed' || previousLegacyRun.status === 'cancelled' ? 'failed' : 'in_progress',
       projectId: project.id, projectName: project.name, repository, issueId: issue.id,
-      issueIdentifier: issue.identifier, squadId: squad?.id, squadName: squad?.name,
-      squadRunId: previousLegacyRun.id, branchName: firstRun?.branchName ?? previousLegacyRun.branchName,
+      issueIdentifier: issue.identifier,
+      branchName: firstRun?.branchName ?? previousLegacyRun.branchName,
       reason: previousLegacyRun.stoppedReason
     };
   }
@@ -531,7 +465,7 @@ async function startOrchestratedProjectBuild(input: {
         '- A human remains responsible for final review and approval.',
         '', `Source conversation: ${input.threadId}`
       ].join('\n'),
-        status: 'todo', priority: 'medium', assignedSquadId: undefined,
+        status: 'todo', priority: 'medium',
         labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
       });
       workspaceRegistry.bind('issues', issue.id, workspaceId);
@@ -540,6 +474,13 @@ async function startOrchestratedProjectBuild(input: {
         id: `comm-${issue.id}-chat-build`, issueId: issue.id,
         authorType: 'system', authorName: 'Alpha Orchestrator',
         content: `Task workflow planned by ${plannerCandidate.persona.name}.`, createdAt: issue.createdAt
+      });
+    } else if (linkedIssueId) {
+      addCommentAndShare({
+        id: `comm-${issue.id}-build-${requestKey}`, issueId: issue.id,
+        authorType: 'system', authorName: 'Alpha Orchestrator',
+        content: `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it in project chat or the Live Build Room.`,
+        createdAt: new Date().toISOString()
       });
     }
   } catch (error) {
@@ -587,7 +528,7 @@ async function startOrchestratedProjectBuild(input: {
         extraReservation.requestKey, requestFingerprint, orchestrationOwnerSessionId
       ));
     }
-    return orchestrationStartResult(snapshot, project, repository, squad);
+    return orchestrationStartResult(snapshot, project, repository);
   } catch (error) {
     const persisted = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
     let recoveryNote = '';
@@ -696,207 +637,19 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       selectedCheckouts.push({ repository: repo, checkoutDir: checkout.dir });
     }
     const repository = selectedRepositories[0];
-    const checkout = resolveProjectWorkspace(project, repository)!;
+    if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
 
     const buildSteps = await projectStore().getBuildSteps(workspaceId, project.id);
-    const useOrchestrator = !IS_CLOUD && Boolean(project.id);
-    if (useOrchestrator) {
-      const availableAgents = sqliteService.getAgents().filter(agent => !agent.isArchived);
-      const projectAgents = (await Promise.all(availableAgents.map(async agent =>
-        await workspaceRegistry.canAccessProjectAgentRun(context, project.id, agent.id) ? agent : null
-      ))).filter((agent): agent is Agent => Boolean(agent));
-      if (!projectAgents.length) {
-        return blocked('No project-visible specialists are available. Add suitable specialists to the workspace or adjust their project access, then try again.', project, repository);
-      }
-      return startOrchestratedProjectBuild({
-        context, project, repositories: selectedCheckouts, members: projectAgents,
-        buildSteps: buildSteps ?? [], threadId, messageId, content
-      });
+    const availableAgents = sqliteService.getAgents().filter(agent => !agent.isArchived);
+    const projectAgents = (await Promise.all(availableAgents.map(async agent =>
+      await workspaceRegistry.canAccessProjectAgentRun(context, project.id, agent.id) ? agent : null
+    ))).filter((agent): agent is Agent => Boolean(agent));
+    if (!projectAgents.length) {
+      return blocked('No project-visible specialists are available. Add suitable specialists to the workspace or adjust their project access, then try again.', project, repository);
     }
-
-    const assignments = await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id);
-    const squads = await squadStore().list(workspaceId);
-    const squad = selectSquad(context, project, squads, assignments, buildSteps ?? []);
-    const activeAssigned = assignments.filter(item => item.status === 'active');
-    if (!squad) {
-      if (!activeAssigned.length) return blocked('Assign a sequential agent squad to this project in Project settings before starting a build.', project, repository);
-      if (activeAssigned.length > 1 && !project.leadSquadId) {
-        return blocked('More than one squad is assigned to this project. Set the project’s lead squad or choose one in Project settings.', project, repository);
-      }
-      return blocked('The project’s configured build squad is unavailable. Reassign an active squad or update the project’s lead squad.', project, repository);
-    }
-    if (!isSupportedTopology(squad.topology)) {
-      return blocked(`The project’s assigned squad uses “${squad.topology}” orchestration, which is not supported for builds yet. Set it to Sequential in Squad settings.`, project, repository);
-    }
-
-    const requestKey = crypto.createHash('sha256').update(`${workspaceId}:${threadId}:${messageId}`).digest('hex').slice(0, 16);
-    const orderedSteps = [...(buildSteps ?? [])].filter(step => step.enabled).sort((a, b) => a.position - b.position);
-    const otherSquadStep = orderedSteps.find(step => step.squadId && step.squadId !== squad.id);
-    if (otherSquadStep) {
-      return blocked(`The project build sequence includes “${otherSquadStep.label}” on another squad. Configure one sequential squad for this build, or split the work into separate builds.`, project, repository);
-    }
-
-    const squadMembers = new Set(squad.memberAgentIds);
-    const outsideMember = orderedSteps.find(step => step.agentId && !squadMembers.has(step.agentId));
-    if (outsideMember) {
-      return blocked(`The “${outsideMember.label}” step uses an agent outside ${squad.name}. Add that agent to the project squad or update the build sequence.`, project, repository);
-    }
-
-    const members = [...new Set(squad.memberAgentIds)];
-    if (!members.length) return blocked(`${squad.name} has no agents assigned. Add agents before starting this build.`, project, repository);
-    const agents = sqliteService.getAgents().filter(agent => members.includes(agent.id) && !agent.isArchived);
-    const missing = members.filter(id => !agents.some(agent => agent.id === id));
-    if (missing.length) return blocked(`${squad.name} includes unavailable agents. Update the squad membership before starting a build.`, project, repository);
-
-    const activeWorkflow = !IS_CLOUD
-      ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, repository))
-      : undefined;
-    if (activeWorkflow) {
-      if (!repository) return blocked('A task-based build is already active for this project. Choose its repository in the project workspace to follow or resolve it.', project);
-      const activeSnapshot = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(activeWorkflow.runId));
-      const cleanGoal = content.trim().replace(/^\/build\s*/i, '').trim();
-      const fingerprint = activeSnapshot && orchestrationRequestFingerprint({
-        workspaceId, projectId: project.id, issueId: activeSnapshot.run.issueId,
-        repository, createdBy: context.userId, originalRequest: cleanGoal
-      });
-      if (activeSnapshot?.run.requestKey === requestKey && activeSnapshot.run.requestFingerprint === fingerprint) {
-        return orchestrationStartResult(activeSnapshot, project, repository, squad);
-      }
-      return blocked(`A task-based build is ${activeWorkflow.status.replace('_', ' ')} for this repository. Follow or resolve that build before starting another.`, project, repository);
-    }
-
-    const runtimes = sqliteService.getRuntimes();
-    const notReady = agents.map(agent => ({ agent, readiness: agentReadiness(agent, runtimes) }))
-      .filter(item => item.readiness.status !== 'ready');
-    if (notReady.length) {
-      const first = notReady[0];
-      return blocked(`${first.agent.name} is not ready: ${first.readiness.detail}`, project, repository);
-    }
-
-    const stepAgentIds = orderedSteps.map(step => step.agentId).filter((id): id is string => Boolean(id));
-    const idempotencyLabel = `alpha:chat-build-${requestKey}`;
-    const currentIssues = await issueStore().list(workspaceId);
-    let issue = currentIssues.find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));
-    if (!issue) {
-      const description = [
-        'Build requested from project chat.',
-        '',
-        'Original request:',
-        content.trim().replace(/^\/build\s*/i, ''),
-        '',
-        'Build expectations:',
-        '- Complete your assigned build stage in the project repository; do not answer with a standalone code snippet in chat.',
-        '- Follow the repository’s existing conventions and preserve unrelated user changes.',
-        '- Run the applicable repository checks and report their real results.',
-        '- Summarize changed files, verification, and anything that still needs attention.',
-        '',
-        `Source conversation: ${threadId}`
-      ].join('\n');
-      issue = await issueStore().create(workspaceId, {
-        id: `chat-build-${requestKey}`,
-        projectId: project.id,
-        githubRepo: repository,
-        title: issueTitle(content),
-        description,
-        status: 'todo',
-        priority: 'medium',
-        assignedSquadId: squad.id,
-        labels: ['alpha:chat-build', idempotencyLabel],
-        createdBy: context.userId
-      });
-      workspaceRegistry.bind('issues', issue.id, workspaceId);
-      await supabaseService.shareIssue(issue);
-      addCommentAndShare({
-        id: `comm-${issue.id}-chat-build`,
-        issueId: issue.id,
-        authorType: 'system',
-        authorName: 'Alpha Orchestrator',
-        content: `Build request received from project chat and assigned to ${squad.name}.`,
-        createdAt: issue.createdAt
-      });
-    }
-
-    const existingRun = sqliteService.getSquadRuns().find(run => run.issueId === issue!.id);
-    if (existingRun) {
-      const runs = sqliteService.getRunsForSquadRun(existingRun.id);
-      const firstRun = runs.sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))[0];
-      const status: ProjectBuildStartResult['status'] = existingRun.status === 'failed' || existingRun.status === 'cancelled'
-        ? 'failed'
-        : existingRun.status === 'awaiting_approval'
-          ? 'awaiting_review'
-          : firstRun?.status === 'queued' ? 'queued' : 'in_progress';
-      return {
-        status,
-        projectId: project.id,
-        projectName: project.name,
-        repository,
-        issueId: issue.id,
-        issueIdentifier: issue.identifier,
-        squadId: squad.id,
-        squadName: squad.name,
-        squadRunId: existingRun.id,
-        branchName: existingRun.branchName,
-        reason: existingRun.stoppedReason
-      };
-    }
-
-    const executionOrder = [...new Set([
-      ...stepAgentIds,
-      ...orderedMembers(squad)
-    ])];
-    const memberAssignments = assignmentsForBuildSteps(orderedSteps, executionOrder);
-    const plan = [
-      `Shared project goal: ${content.trim().replace(/^\/build\s*/i, '')}`,
-      `Target issue: ${issue.identifier} — ${issue.title}`,
-      'This is a repository build in an isolated worktree. Preserve unrelated user changes and follow the repository’s existing stack and conventions.',
-      'Each agent receives its own stage assignment. Follow your assigned stage and persona; do not repeat or take over other agents’ work.',
-      'Before your stage ends, leave a concise, factual handoff describing what you completed, important decisions, checks actually run, and what the next agent should do.'
-    ];
-
-    try {
-      const squadRun = await squadRunner.startSquadRun({
-        squadId: squad.id,
-        issueId: issue.id,
-        plan,
-        mission: content.trim().replace(/^\/build\s*/i, ''),
-        workspaceId,
-        baseWorkspaceDir: checkout.dir,
-        memberAgentIds: stepAgentIds,
-        memberAssignments
-      });
-      workspaceRegistry.bind('squad_runs', squadRun.id, workspaceId);
-      const runs = sqliteService.getRunsForSquadRun(squadRun.id);
-      for (const run of runs) workspaceRegistry.bind('prototype_runs', run.id, workspaceId);
-      const firstRun = runs.sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))[0];
-      return {
-        status: firstRun?.status === 'queued' ? 'queued' : 'started',
-        projectId: project.id,
-        projectName: project.name,
-        repository,
-        issueId: issue.id,
-        issueIdentifier: issue.identifier,
-        squadId: squad.id,
-        squadName: squad.name,
-        squadRunId: squadRun.id,
-        branchName: squadRun.branchName
-      };
-    } catch (error) {
-      const failedRun = sqliteService.getSquadRuns()
-        .filter(run => run.issueId === issue!.id)
-        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
-      return {
-        status: 'failed',
-        projectId: project.id,
-        projectName: project.name,
-        repository,
-        issueId: issue.id,
-        issueIdentifier: issue.identifier,
-        squadId: squad.id,
-        squadName: squad.name,
-        squadRunId: failedRun?.id,
-        branchName: failedRun?.branchName,
-        reason: error instanceof Error ? error.message : 'The agent run could not start.'
-      };
-    }
+    return startOrchestratedProjectBuild({
+      context, project, repositories: selectedCheckouts, members: projectAgents,
+      buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId
+    });
   });
 }

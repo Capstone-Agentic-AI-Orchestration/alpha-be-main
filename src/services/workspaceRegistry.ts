@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 
 import { DB_PATH, IS_CLOUD } from '../config/env.js';
 import { database } from '../store/database.js';
-import { agentStore, squadStore } from '../store/stores.js';
+import { agentStore } from '../store/stores.js';
 import { PostgresWorkspaceDirectory } from '../store/postgresWorkspaceDirectory.js';
 import { SqliteWorkspaceDirectory } from '../store/sqliteWorkspaceDirectory.js';
 import type {
@@ -484,37 +484,12 @@ class WorkspaceRegistry {
   }
 
   /**
-   * Authorize one concrete agent call without trusting a client-supplied
-   * roster. The agent must be a member of an active squad assignment for the
-   * project, the caller must be allowed to use that squad, and the agent's own
-   * visibility setting must allow the caller.
-   */
-  async canAccessProjectAgent(
-    context: WorkspaceContext,
-    projectId: string,
-    squadId: string,
-    agentId: string
-  ): Promise<boolean> {
-    if (!this.canAccessProject(context, projectId)) return false;
-    if (!this.squadAssignedToProject(context, squadId, projectId)) return false;
-    if (!this.canAccessSquad(context, squadId)) return false;
-
-    /*
-     * Read through the stores, not this file's SQLite handle. The roster is
-     * Postgres in the cloud, and asking the local file there answered "no such
-     * agent" for every agent that exists -- so a project manager saw an empty
-     * roster while the agents sat in the shared database.
-     */
-    const squad = await squadStore().get(context.workspaceId, squadId);
-    if (!squad?.memberAgentIds?.includes(agentId)) return false;
-
-    return this.canAccessProjectAgentRun(context, projectId, agentId);
-  }
-
-  /**
-   * Authorize operational run metadata for one explicitly assigned project agent.
-   * A run does not always belong to a squad run, but private agent visibility
-   * still applies when a project member is inspecting that run.
+   * Whether this caller may use, or inspect the work of, one agent in a project.
+   *
+   * Every non-archived agent is available to every project the caller can see;
+   * the agent's own visibility setting (private, admins, team) is the only
+   * further limit. The Orchestrator picks from this same set when it assigns
+   * build tasks.
    */
   async canAccessProjectAgentRun(
     context: WorkspaceContext,

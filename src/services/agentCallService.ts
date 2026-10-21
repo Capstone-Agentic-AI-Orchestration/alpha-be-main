@@ -28,6 +28,11 @@ import { getHeadCommit } from '../utils/gitUtils.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH_BYTES = 2_000_000;
+/**
+ * Stored in the legacy, non-null agent_calls.squad_id column for direct calls.
+ * Squads were removed; nothing reads this value to authorize a call.
+ */
+export const DIRECT_AGENT_CALL_SQUAD_ID = 'alpha-direct';
 
 export interface CreateAgentCallInput {
   id?: string;
@@ -35,7 +40,6 @@ export interface CreateAgentCallInput {
   project: Project;
   threadId: string;
   messageId?: string;
-  squadId: string;
   agent: Agent;
   requestedBy: string;
   operationMode: AgentCallMode;
@@ -48,7 +52,6 @@ export interface StartChatTurnActivityInput {
   project: Project;
   threadId: string;
   messageId: string;
-  squadId?: string;
   agent: Agent;
   requestedBy: string;
   instruction: string;
@@ -174,9 +177,9 @@ export class AgentCallService extends EventEmitter {
       projectId: input.project.id,
       threadId: input.threadId,
       messageId: input.messageId,
-      // Chat participation is independent of squad membership. This reserved
-      // value keeps standalone Alpha replies in the same activity timeline.
-      squadId: input.squadId ?? 'alpha-chat',
+      // Reserved value for the legacy column; it keeps chat replies in the
+      // same activity timeline.
+      squadId: 'alpha-chat',
       agentId: input.agent.id,
       requestedBy: input.requestedBy,
       operationMode: 'ask',
@@ -262,7 +265,7 @@ export class AgentCallService extends EventEmitter {
       projectId: input.project.id,
       threadId: input.threadId,
       messageId: input.messageId,
-      squadId: input.squadId,
+      squadId: DIRECT_AGENT_CALL_SQUAD_ID,
       agentId: input.agent.id,
       requestedBy: input.requestedBy,
       operationMode: input.operationMode,
@@ -364,7 +367,6 @@ export class AgentCallService extends EventEmitter {
       project,
       threadId: previous.threadId,
       messageId,
-      squadId: previous.squadId,
       agent,
       requestedBy: previous.requestedBy,
       operationMode: previous.operationMode,
@@ -759,7 +761,7 @@ export class AgentCallService extends EventEmitter {
     return [
       `You are ${agent.name}, the explicitly selected project agent for Alpha.`,
       `Role: ${agent.role}`,
-      'This is an independent call to you alone. Complete only work within your persona responsibilities; do not act as the whole squad.',
+      'This is an independent call to you alone. Complete only work within your persona responsibilities; do not act as the whole team.',
       'When the request exceeds your role, explain the boundary and identify the specialist needed. Do not silently take over their work.',
       `Project: ${project.name} (${project.key})`,
       `Project goal and ground rules: ${project.description || 'Not specified'}`,

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
-import { ChatMessage, ChatThread, Squad } from '../models/index.js';
+import { ChatMessage, ChatThread } from '../models/index.js';
 import { providerResumesSessions, runCliTurn } from './cliRunner.js';
 import {
   ensureWorkspacesRoot,
@@ -67,7 +67,6 @@ export interface SendMessageParams {
   senderName?: string;
   /** Explicit target from the chat picker. Null clears a persisted target. */
   targetAgentId?: string | null;
-  targetSquadId?: string | null;
   /** Project attached to a thread being created by its first message. */
   projectId?: string;
   /** Stable client id, reused when a transport retry repeats the same send. */
@@ -85,34 +84,24 @@ export interface SendMessageParams {
   /** Caller's role in that workspace, for role-gated chat behaviour. */
   workspaceRole?: WorkspaceRole;
   /** A clear project implementation request, routed through the real runner. */
-  buildRequest?: { context: WorkspaceContext; repository?: string; repositories?: string[] };
+  buildRequest?: { context: WorkspaceContext; repository?: string; repositories?: string[]; issueId?: string };
   /** Let Alpha decide, as the Orchestrator, whether this message is a build. */
   routing?: ChatRoutingContext;
 }
 
 /**
- * Match every `@mention` in a message to an agent, or to a whole squad.
+ * Match every `@mention` in a message to an agent.
  *
  * An agent matches on first name (`@Ada`), full name with no space
  * (`@AdaLovelace`), id (`@agent-ada`) or role (`@Reviewer`) — all things a
  * person plausibly types.
  *
- * A squad matches on its full name with no space or its id, and expands to
- * its members in execution order. Deliberately NOT on its first word: the
- * seeded squad is "Alpha Core Execution Squad", and `@Alpha` is both its
- * first word and the name of the default assistant. Agents are matched
- * first, so an agent name always wins a tie.
- *
- * Returns agents in mention order, de-duplicated, so naming a squad and then
- * one of its members does not make that member answer twice.
+ * Returns agents in mention order, de-duplicated, so naming the same agent
+ * twice does not make it answer twice.
  */
-export function resolveMentions(content: string, agents: any[], squads: Squad[] = []): any[] {
+export function resolveMentions(content: string, agents: any[]): any[] {
   const tokens = [...content.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(m => m[1].toLowerCase());
   const picked: any[] = [];
-  const add = (agent: any) => {
-    if (agent && !picked.some(p => p.id === agent.id)) picked.push(agent);
-  };
-
   for (const token of tokens) {
     const agent = agents.find(a => {
       const name = String(a.name ?? '').toLowerCase();
@@ -123,51 +112,20 @@ export function resolveMentions(content: string, agents: any[], squads: Squad[] 
         String(a.role ?? '').toLowerCase().replace(/\s+/g, '') === token
       );
     });
-    if (agent) {
-      add(agent);
-      continue;
-    }
-
-    const squad = squads.find(sq => {
-      const name = String(sq.name ?? '').toLowerCase();
-      return sq.id?.toLowerCase() === token || name.replace(/\s+/g, '') === token;
-    });
-    if (squad) {
-      for (const id of orderedSquadMembers(squad)) {
-        add(agents.find(a => a.id === id));
-      }
-    }
+    if (agent && !picked.some(p => p.id === agent.id)) picked.push(agent);
   }
-
   return picked;
 }
 
 /**
- * Resolve the target chosen in the Chats tab when the message has no explicit
- * @mention. Keeping this separate from mention resolution makes the precedence
- * clear: a typed mention wins, otherwise the per-thread picker wins, otherwise
- * Alpha answers as the automatic responder.
+ * Resolve the agent chosen in the Chats tab when the message has no explicit
+ * @mention. A typed mention wins, otherwise the per-thread picker wins,
+ * otherwise Alpha answers as the automatic responder.
  */
-export function resolveChatTarget(
-  targetAgentId: string | undefined,
-  targetSquadId: string | undefined,
-  agents: any[],
-  squads: Squad[] = []
-): any[] {
-  if (targetAgentId) {
-    const agent = agents.find(a => a.id === targetAgentId);
-    return agent ? [agent] : [];
-  }
-
-  if (targetSquadId) {
-    const squad = squads.find(sq => sq.id === targetSquadId);
-    if (!squad) return [];
-    return orderedSquadMembers(squad)
-      .map(id => agents.find(a => a.id === id))
-      .filter(Boolean);
-  }
-
-  return [];
+export function resolveChatTarget(targetAgentId: string | undefined, agents: any[]): any[] {
+  if (!targetAgentId) return [];
+  const agent = agents.find(a => a.id === targetAgentId);
+  return agent ? [agent] : [];
 }
 
 export interface SendMessageResult {
@@ -179,7 +137,7 @@ export interface SendMessageResult {
    */
   agentMessage: ChatMessage;
   /**
-   * Every reply, in the order they were produced. Longer than one when a squad
+   * Every reply, in the order they were produced. Longer than one when several agents
    * was mentioned: each member answers in turn, having seen what the members
    * before it said.
    */
@@ -252,31 +210,18 @@ function chatWorkspace(threadId: string): string {
 }
 
 /**
- * The agents and squads Alpha can speak about.
+ * The agents Alpha can speak about.
  *
  * An agent reply already gets a roster — see `resolveAgentLogged` — and Alpha,
- * the one you would naturally ask "which squads do I have", got nothing. Asked
+ * the one you would naturally ask "which agents do I have", got nothing. Asked
  * about them it reached for its CLI's own tooling, ran `ListAgents`, and
  * reported on Claude Code sessions instead.
- *
- * Squads are included here and not in the agent roster because Alpha is the
- * only participant that talks about the workspace as a whole; an agent is a
- * member of it.
  */
 function describeWorkspaceForAlpha(workspaceId?: string): string {
   const agents = (workspaceId ? workspaceRegistry.scope('agents', sqliteService.getAgents(), workspaceId) : sqliteService.getAgents())
     .filter(a => !a.isArchived)
     .map(a => ({ id: a.id, name: a.name, role: a.role }));
-
-  const byId = new Map(agents.map(a => [a.id, a.name]));
-
-  const squads = (workspaceId ? workspaceRegistry.scope('squads', sqliteService.getSquads(), workspaceId) : sqliteService.getSquads()).map(sq => ({
-    name: sq.name,
-    topology: sq.topology,
-    memberNames: (sq.memberAgentIds ?? []).map(id => byId.get(id) ?? id)
-  }));
-
-  return describeAlphaWorkspace(agents, squads);
+  return describeAlphaWorkspace(agents);
 }
 
 /**
@@ -359,14 +304,13 @@ export class ChatService extends EventEmitter {
     agent: any;
     instruction: string;
     turn: ActiveChatTurn;
-    squadId?: string;
   }): Promise<string | undefined> {
     const { params, project, threadId, messageId, agent, instruction, turn } = input;
     if (!project || !params.workspaceId || !params.userId) return undefined;
     try {
       const call = await agentCallService.startChatTurn({
         workspaceId: params.workspaceId, project, threadId, messageId,
-        squadId: input.squadId, agent, requestedBy: params.userId, instruction
+        agent, requestedBy: params.userId, instruction
       });
       turn.currentCallId = call.id;
       turn.currentRunId = call.id;
@@ -398,7 +342,6 @@ export class ChatService extends EventEmitter {
         // silently had a participant nobody chose.
         agentIds: [],
         targetAgentId: params.targetAgentId ?? undefined,
-        targetSquadId: params.targetSquadId ?? undefined,
         projectId: params.projectId,
         createdAt: now
       });
@@ -439,7 +382,8 @@ export class ChatService extends EventEmitter {
         context: params.buildRequest.context,
         request: parseChatOverride(content).content || content,
         repositories: params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []),
-        attachmentIds
+        attachmentIds,
+        issueId: params.buildRequest.issueId
       });
     }
 
@@ -469,19 +413,13 @@ export class ChatService extends EventEmitter {
      * Agents speak when spoken to. Anything else Alpha answers itself.
      */
     const agents = sqliteService.getAgents().filter(a => !a.isArchived);
-    const squads = sqliteService.getSquads();
-    const mentioned = resolveMentions(content, agents, squads);
-    const hasExplicitTarget =
-      params.targetAgentId !== undefined || params.targetSquadId !== undefined;
-    const targetAgentId = hasExplicitTarget
+    const mentioned = resolveMentions(content, agents);
+    const targetAgentId = params.targetAgentId !== undefined
       ? params.targetAgentId ?? undefined
       : thread.targetAgentId;
-    const targetSquadId = hasExplicitTarget
-      ? params.targetSquadId ?? undefined
-      : thread.targetSquadId;
     const addressed = mentioned.length
       ? mentioned
-      : resolveChatTarget(targetAgentId, targetSquadId, agents, squads);
+      : resolveChatTarget(targetAgentId, agents);
 
     if (!addressed.length) {
       const projectForChat = thread.projectId
@@ -539,14 +477,12 @@ export class ChatService extends EventEmitter {
     /**
      * 3. Everyone addressed answers, in the order they were named.
      *
-     * One `@agent` is one reply, which is the ordinary case. Naming a squad
-     * expands to its members, and each of them speaks after seeing what the
-     * members before it said — the conversational counterpart of the written
-     * handoff a squad run passes between members.
+     * One `@agent` is one reply, which is the ordinary case. When several
+     * agents are named, each speaks after seeing what the ones before it said.
      *
      * Sequential rather than parallel on purpose: PROVIDER_CONCURRENCY caps
-     * Anthropic at 2 concurrent, and a four-member squad answering at once
-     * would spend the whole allowance on a single chat message.
+     * Anthropic at 2 concurrent, and four agents answering at once would
+     * spend the whole allowance on a single chat message.
      */
     if (addressed.length > 1) {
       logInfo(`Chat: ${addressed.length} agents addressed — answering in sequence`);
@@ -556,25 +492,12 @@ export class ChatService extends EventEmitter {
     const project = thread.projectId
       ? sqliteService.getProjects().find(item => item.id === thread!.projectId)
       : undefined;
-    let activeSquadAssignments: Array<{ squadId: string; status: string }> = [];
-      if (project && workspaceId) {
-      try {
-        activeSquadAssignments = (await workspaceRegistry.listSquadProjectAssignments(workspaceId, project.id))
-          .filter(assignment => assignment.status === 'active');
-      } catch {
-        // Chat still works if the room directory is temporarily unavailable.
-      }
-    }
-
     for (const [index, agent] of addressed.entries()) {
       const priorTurn = agentMessages.length ? describePriorReplies(agentMessages) : undefined;
-      const squadId = activeSquadAssignments.find(assignment =>
-        sqliteService.getSquads().some(squad => squad.id === assignment.squadId && squad.memberAgentIds.includes(agent.id))
-      )?.squadId;
       let activityCallId: string | undefined;
       if (project && workspaceId && params.userId) {
         activityCallId = await this.startProjectChatActivity({
-          params, project, threadId, messageId: userMessage.id, squadId, agent,
+          params, project, threadId, messageId: userMessage.id, agent,
           instruction: requestContent, turn
         });
         if (index > 0 && agentMessages[index - 1]) {
@@ -663,6 +586,8 @@ export class ChatService extends EventEmitter {
     attachmentIds?: string[];
     /** One extra line for the user, such as how the request was routed. */
     note?: string;
+    /** Board issue to build in place instead of filing a new chat-build issue. */
+    issueId?: string;
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
@@ -690,7 +615,8 @@ export class ChatService extends EventEmitter {
       threadId,
       messageId,
       content: `${brief}${buildAttachmentContext.text}`,
-      repositories
+      repositories,
+      issueId: input.issueId
     });
     const build = builds[0];
     const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
@@ -717,7 +643,6 @@ export class ChatService extends EventEmitter {
           ...builds.map(result => [
             `**${result.repository ?? 'Repository'} · ${statusText(result)}**`,
             result.reason,
-            result.squadName ? `Agent sequence: ${result.squadName}` : undefined,
             result.branchName ? `Working branch: ${result.branchName}` : undefined
           ].filter(Boolean).join(' · ')),
           'Open the Live Build Room and choose a build to follow its agents, handoffs, changed files, and verification.'
@@ -741,7 +666,6 @@ export class ChatService extends EventEmitter {
             build.reason,
             build.projectName ? `**Project:** ${build.projectName}` : undefined,
             build.repository ? `**Repository:** ${build.repository}` : undefined,
-            build.squadName ? `**Agent sequence:** ${build.squadName}` : undefined,
             build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
             'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
           ].filter(Boolean).join('\n\n');
@@ -1144,7 +1068,7 @@ export class ChatService extends EventEmitter {
       reasoningEffort: persona.reasoningEffort,
       systemPrompt: persona.systemPrompt,
       personaName: persona.name,
-      // What squadmates said this turn rides with the message, not the system
+      // What other agents said this turn rides with the message, not the system
       // prompt: it is true of this turn only, and putting it in the persona
       // would break the stable cacheable prefix a resumed session depends on.
       prompt: priorTurn ? `${prompt}
@@ -1200,22 +1124,13 @@ ${priorTurn}` : prompt,
 
 export const chatService = new ChatService();
 
-/** Leader first when there is one, then the rest in their configured order. */
-function orderedSquadMembers(squad: Squad): string[] {
-  const members = [...new Set(squad.memberAgentIds ?? [])];
-  const leader = squad.leaderAgentId;
-  if (!leader || !members.includes(leader)) return members;
-  return [leader, ...members.filter(id => id !== leader)];
-}
-
 /**
- * What the squadmates who have already answered said.
+ * What the agents who have already answered said.
  *
  * Truncated per reply because this grows with every member: four agents at
  * full length would put three long answers into the fourth one's prompt. The
- * cap keeps a squad chat turn near the CLI's own baseline rather than doubling
- * it, which is the same reason a squad RUN passes a written handoff instead of
- * a replayed transcript.
+ * cap keeps a multi-agent chat turn near the CLI's own baseline rather than
+ * doubling it.
  */
 const PRIOR_REPLY_CHARS = 800;
 
@@ -1229,7 +1144,7 @@ ${body}`;
   });
 
   return [
-    'Your squadmates have already answered this message:',
+    'Other agents have already answered this message:',
     '',
     ...lines,
     '',
