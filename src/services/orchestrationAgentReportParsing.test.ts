@@ -58,6 +58,48 @@ describe('structured specialist report parsing', () => {
     ]);
   });
 
+  it('records a blocked check as not_run and retains its explanation', () => {
+    const raw = JSON.stringify({
+      ...validReviewReport([]),
+      reportedChecks: [{
+        script: 'npm test', result: 'blocked', evidence: 'The test runner was unavailable, so this check did not execute.'
+      }]
+    });
+
+    const parsed = parseAgentReport(raw);
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.report?.reportedChecks).toEqual([{
+      script: 'npm test', result: 'not_run', evidence: 'The test runner was unavailable, so this check did not execute.'
+    }]);
+  });
+
+  it('normalizes common review-finding aliases and severity labels', () => {
+    const raw = JSON.stringify({
+      ...validReviewReport([]),
+      reviewFindings: [{
+        taskId: 'backend-api', severity: 'high', title: 'Missing input validation', requirement: 'REQ-API',
+        file: 'src/api.ts', evidence: 'An unchecked request reaches the handler.',
+        recommendation: 'Validate the request before processing it.'
+      }, {
+        targetTaskId: 'backend-api', severity: 'medium', title: 'Missing edge-case coverage',
+        evidence: 'The boundary case is not covered.', instruction: 'Add a focused boundary test.'
+      }]
+    });
+
+    const parsed = parseAgentReport(raw);
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.report?.reviewFindings).toEqual([{
+      targetTaskId: 'backend-api', severity: 'blocking', title: 'Missing input validation', requirementId: 'REQ-API',
+      path: 'src/api.ts', evidence: 'An unchecked request reaches the handler.',
+      instruction: 'Validate the request before processing it.'
+    }, {
+      targetTaskId: 'backend-api', severity: 'blocking', title: 'Missing edge-case coverage',
+      evidence: 'The boundary case is not covered.', instruction: 'Add a focused boundary test.'
+    }]);
+  });
+
   it('rejects conflicting or unknown reported-check aliases instead of guessing', () => {
     const conflicting = parseAgentReport(JSON.stringify({
       ...validReviewReport([]),

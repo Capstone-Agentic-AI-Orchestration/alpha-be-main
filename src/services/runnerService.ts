@@ -144,6 +144,7 @@ function appendOrchestrationTaskPolicy(
     orchestration.taskPackage.findingIds.length
       ? `For every targeted finding ID below, include one findingCoverage entry with concrete evidence that it is fixed. A correction is not complete merely because its checks pass.\n${orchestration.taskPackage.findingIds.map(id => `- ${id}`).join('\n')}`
       : '',
+    'For reportedChecks, use only passed, failed, or not_run. Use not_run when a check did not execute, including when it was blocked, and explain why in evidence. Put unresolved task-level blockers in blockers so Alpha can escalate them clearly.',
     'Follow your persona and role boundaries. Do not implement another planned task, broaden the scope, or rework an accepted dependency. If the assigned work conflicts with your role or cannot be completed safely, explain the conflict and stop.',
     orchestration.taskPackage.reportCorrection
       ? 'Do not make or claim repository changes. Do not push, open a pull request, merge, deploy, run commands, or change ticket status.'
@@ -239,6 +240,9 @@ function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage
   }
   return [
     'Required final response format:',
+    taskPackage.task.kind === 'review'
+      ? 'For each reviewFindings item, use exactly these fields: targetTaskId, severity, title, requirementId (optional), path (optional), evidence, instruction. severity must be exactly warning, blocking, or critical. Use a repository-relative path with forward slashes. Use an empty array only when no findings were found.'
+      : '',
     taskPackage.reportCorrection
       ? 'Return exactly one JSON object matching this template, with taskId, requirement IDs, and acceptance criteria unchanged. This correction is format-only: use no new facts, files, or checks. Do not claim that review passed if the previous response does not contain evidence for that conclusion; report missing review evidence as a blocker.'
       : 'Return exactly one JSON object matching this template. Do not add prose or markdown around it. Keep taskId, requirement IDs, and acceptance criteria exactly as shown. Include every changed repository path under a deliverable using forward slashes. Do not claim Alpha verification results; those are collected independently after your process exits.',

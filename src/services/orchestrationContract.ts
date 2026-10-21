@@ -28,6 +28,12 @@ export const orchestrationTaskKindSchema = z.enum([
 
 export type OrchestrationTaskKind = z.infer<typeof orchestrationTaskKindSchema>;
 
+export const orchestrationRequiredCheckSchema = z.enum([
+  'verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint'
+]);
+
+export type OrchestrationRequiredCheck = z.infer<typeof orchestrationRequiredCheckSchema>;
+
 const shortText = z.string().trim().min(1).max(240);
 const detailText = z.string().trim().min(1).max(4_000);
 const identifier = z.string().trim().min(1).max(80).regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/);
@@ -62,7 +68,7 @@ export const orchestrationPlanSchema = z.object({
     dependsOn: z.array(identifier).max(MAX_TASK_DEPENDENCIES).default([]),
     requirementIds: z.array(identifier).min(1).max(MAX_TASK_REQUIREMENTS),
     acceptanceCriteria: z.array(detailText).min(1).max(MAX_TASK_ACCEPTANCE_CRITERIA),
-    requiredChecks: z.array(z.enum(['verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint'])).max(7).default([]),
+    requiredChecks: z.array(orchestrationRequiredCheckSchema).max(7).default([]),
     scope: z.object({
       includePaths: z.array(scopePattern).max(60).default([]),
       excludePaths: z.array(scopePattern).max(60).default([])

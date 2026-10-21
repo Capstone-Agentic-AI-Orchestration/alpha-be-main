@@ -56,6 +56,8 @@ describe('read-only orchestration planner', () => {
     });
     expect(request?.systemPrompt).toContain('read-only planning orchestrator');
     expect(request?.prompt).toContain('"projectContext": "Keep the workflow keyboard accessible."');
+    expect(request?.prompt).toContain('task.kind = requirements, architecture, database, backend, frontend, mobile, review, validation, delivery');
+    expect(request?.prompt).toContain('task.requiredChecks = verify, check, validate, ci, test, typecheck, lint');
   });
 
   it('explains which planner setup is missing when no model is selected', async () => {

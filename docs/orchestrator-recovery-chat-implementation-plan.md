@@ -1,6 +1,6 @@
 # Orchestrator recovery, project chat, and Live Build Room
 
-Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Frontend and backend typechecks/builds passed, along with 414 frontend tests. Windows v2.0.46 is published with setup, portable, blockmap, and updater metadata; its release notes identify the source branches and include installer checksums. The package is unsigned. Browser visual acceptance and installed-app update verification remain outstanding.
+Status: the recovery, chat, review-handoff, final-validation repair, and Live Build Room changes are published in Windows v2.0.49. The follow-up report/planning contract audit is implemented on `feat/orchestrator-recovery-chat-20261021` and is awaiting its desktop release. The package is unsigned; browser visual acceptance and installed-app update verification remain outstanding.
 Source review: 2026-10-21, Asia/Manila. This describes the checked-out source, not a verification of the installed desktop app.
 
 ## Implementation status
@@ -18,6 +18,8 @@ Implemented in source:
 - Task retry eligibility is projected by the backend from the run state, task state, desktop capability, and work-attempt count. Chat and Live Build Room use that value for the button, while the retry endpoint checks the state and limit again before dispatch.
 - Natural-language requests such as “rerun the build” stay attached to the exact saved build and use its authorized recovery action; ambiguous or missing build context is surfaced instead of being sent to a regular chat agent that cannot run the build.
 - Unambiguous report aliases, including `requirement`/`requirementId` and `reportedChecks[].name/status`, are normalized. Up to two automatic format-only corrections go to the same specialist; if the report remains invalid, the exact field error appears in project chat and the developer can authorize one final read-only correction.
+- Reported check result `blocked` is normalized to `not_run` while preserving its evidence; a task-level blocker still escalates through the report's `blockers` field. Review report prompts now specify the exact finding keys and allowed severities, and common `taskId`/`targetTaskId`, `file`/`path`, `recommendation`/`instruction`, and severity aliases normalize before validation.
+- Planning prompts and semantic corrections state the complete task-kind and required-check enums directly from the validation schemas. This closes a second strict-enum mismatch that could stop planning before specialist dispatch.
 
 Implemented in source during this completion:
 
