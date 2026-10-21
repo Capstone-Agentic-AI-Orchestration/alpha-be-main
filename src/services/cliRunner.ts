@@ -67,6 +67,8 @@ export interface CliTurnOptions {
   codexBaseUrl?: string;
   /** Runtime-owned Codex gateway/catalog overrides; never read user MCP config. */
   codexConfigArgs?: string[];
+  /** The installed Codex accepts `--approve-for-me`; see RuntimeService.codexSupportsApproveForMe. */
+  codexApproveForMe?: boolean;
   /** Optional effort override; omitted means the model/runtime default. */
   reasoningEffort?: ReasoningEffort;
   systemPrompt?: string;
@@ -392,9 +394,22 @@ export function buildTurnInvocation(
         // and the CLI rejects it when `--sandbox` is present. Keep the explicit
         // sandbox for chats, where Alpha must preserve the agent's capability
         // boundary, and use the compatible approval mode for launched runs.
+        // Older Codex releases do not have the switch and exit with code 2 when
+        // given it, so a run on those gets the same workspace-write sandbox with
+        // approvals off: in-sandbox commands run, anything beyond it is refused.
         ...(isRun
-          ? ['--approve-for-me']
+          ? options.codexApproveForMe
+            ? ['--approve-for-me']
+            : ['--sandbox', 'workspace-write', '--config', 'approval_policy="never"']
           : ['--sandbox', canWrite ? 'workspace-write' : 'read-only']),
+        // On Windows, Codex writes inside the workspace only once a Windows
+        // sandbox is chosen, which normally comes from ~/.codex/config.toml and
+        // is ignored below. Without it workspace-write quietly behaves as
+        // read-only: the agent reports "the workspace is read-only" and changes
+        // nothing. `unelevated` needs no administrator setup.
+        ...(process.platform === 'win32' && (isRun ? !options.codexApproveForMe : canWrite)
+          ? ['--config', 'windows.sandbox="unelevated"']
+          : []),
         '--skip-git-repo-check',
         /**
          * Isolate codex from ~/.codex/config.toml — the operator's own file.

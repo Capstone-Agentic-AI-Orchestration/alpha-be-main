@@ -557,10 +557,31 @@ describe('run mode — Alpha doing the work, not discussing it', () => {
     expect(valueOf(run().args, '--append-system-prompt')).toBe('You are Ada.');
   });
 
-  it('uses Codex automatic review for a writable run', () => {
-    const { args } = run({ provider: 'OpenAI' });
+  it('uses Codex automatic review for a writable run when the CLI supports it', () => {
+    const { args } = run({ provider: 'OpenAI', codexApproveForMe: true });
     expect(args).toContain('--approve-for-me');
     expect(args).not.toContain('--sandbox');
+  });
+
+  it('gives an older Codex the workspace-write sandbox with approvals off instead of a flag it rejects', () => {
+    const { args } = run({ provider: 'OpenAI' });
+    expect(args).not.toContain('--approve-for-me');
+    expect(valueOf(args, '--sandbox')).toBe('workspace-write');
+    expect(valueOf(args, '--config')).toBe('approval_policy="never"');
+  });
+
+  it('chooses a Windows sandbox when Codex is given workspace-write, or it stays read-only', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const configs = (args: string[]) => args.filter((_, index) => args[index - 1] === '--config');
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      expect(configs(run({ provider: 'OpenAI' }).args)).toContain('windows.sandbox="unelevated"');
+      expect(configs(run({ provider: 'OpenAI', codexApproveForMe: true }).args)).not.toContain('windows.sandbox="unelevated"');
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      expect(configs(run({ provider: 'OpenAI' }).args)).not.toContain('windows.sandbox="unelevated"');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
 
   it('still ignores the operator\'s codex config on a run', () => {
