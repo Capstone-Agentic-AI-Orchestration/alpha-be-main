@@ -191,11 +191,10 @@ describe('ticket execution reservation and queue-front admission', () => {
     const value = f.linked(); value.snapshot.issue.revisionId = 'revision-b'; value.snapshot.issue.initialRevisionId = 'revision-b';
     await expect(f.service.reserve(target, subject, { ...input, expectedRevisionId: 'revision-b', operationId: 'new-revision' })).rejects.toMatchObject({ code: 'ticket_execution_conflict' });
   });
-  it('reserves one logical squad claim, refusing competing agent execution', async () => {
+  it('refuses a new squad claim now that squads were removed', async () => {
     const f = fixture(); f.linked().executor = { kind: 'squad', id: 'squad-a', active: true, allowed: true };
-    await f.service.reserve(target, subject, { ...input, executor: { kind: 'squad', id: 'squad-a' } });
-    await expect(f.service.reserve(target, subject, { ...input, operationId: 'agent-competes' })).rejects.toMatchObject({ code: 'ticket_execution_conflict' });
-    await expect(f.service.admit(target, worker)).resolves.toMatchObject({ newlyAdmitted: true }); expect(f.data().claims).toHaveLength(1);
+    await expect(f.service.reserve(target, subject, { ...input, executor: { kind: 'squad', id: 'squad-a' } as any })).rejects.toMatchObject({ status: 400 });
+    expect(f.data().claims).toHaveLength(0);
   });
   it.each(['workspace', 'issue', 'identity', 'client', 'revoked'])('refuses %s authority before reading operations', async condition => {
     const f = fixture(); let owner = target; let identity: TicketSubject = subject;

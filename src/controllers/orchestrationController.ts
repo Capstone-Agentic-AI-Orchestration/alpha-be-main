@@ -52,6 +52,18 @@ function scopedSnapshot(req: Request, res: Response) {
   return snapshot;
 }
 
+/**
+ * The latest Orchestrator build status for each issue the caller can see, so
+ * board cards can show build progress without loading every Live Build Room.
+ */
+orchestrationRouter.get('/issues/build-status', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
+  const projectIds = (await projectStore().list(req.workspace!.workspaceId))
+    .map(project => project.id)
+    .filter(projectId => workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, projectId));
+  res.json(runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.listLatestIssueBuilds(projectIds)));
+}));
+
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;

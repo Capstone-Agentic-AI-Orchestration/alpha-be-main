@@ -766,13 +766,11 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
 
   const authorizedChatCalls = (await Promise.all(
     projectAgentCalls
-      .filter(call => call.origin === 'chat_turn'
-        ? call.requestedBy === req.workspace!.userId
-        : accessibleSquadIds.has(call.squadId))
+      .filter(call => call.origin !== 'chat_turn' || call.requestedBy === req.workspace!.userId)
       .map(async call => {
         const allowed = call.origin === 'chat_turn' && call.requestedBy === req.workspace!.userId
           ? true
-          : await workspaceRegistry.canAccessProjectAgent(req.workspace!, call.projectId, call.squadId, call.agentId);
+          : await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, call.projectId, call.agentId);
         if (!allowed) return null;
         const agent = membersById.get(call.agentId);
         const ownedThread = ownerThreads.get(call.threadId);

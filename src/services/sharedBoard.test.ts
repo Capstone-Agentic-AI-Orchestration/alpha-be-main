@@ -332,15 +332,15 @@ describe('the team’s roster', () => {
     expect(agent.description).toBe('Reviews changes twice');
   });
 
-  it('adds a squad and keeps this machine’s own to publish', async () => {
+  it('still reads legacy squads from the team board', async () => {
     const { svc, board, inWorkspace } = await load();
     inWorkspace(() => svc.createSquad({ ...cloudSquad({ id: 'squad-mine', name: 'Mine' }) }));
 
     const report = await board.pullSharedBoard('ws-default', source({ squads: [cloudSquad()] }));
 
     expect(report.squadsAdded).toBe(1);
-    // This machine's own, the seeded core squad included, until they are published.
-    expect(report.unpublished.squads.map((s: Squad) => s.id)).toEqual(expect.arrayContaining(['squad-mine', 'squad-core']));
+    // A squad made before the upgrade stays local; nothing seeds one any more.
+    expect(report.unpublished.squads.map((s: Squad) => s.id)).toEqual(['squad-mine']);
     // The seeded roster is this machine's until it is published.
     expect(report.unpublished.agents.length).toBeGreaterThan(0);
   });

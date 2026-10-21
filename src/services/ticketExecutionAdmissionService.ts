@@ -11,7 +11,9 @@ import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 
 const opaque = z.string().min(1).max(200).refine(value => value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value));
-const executorSchema = z.object({ kind: z.enum(['agent', 'squad']), id: opaque }).strict();
+// New claims are single-agent only. Squad claims made before squads were removed
+// still resolve through ticketLifecycleRuntime.
+const executorSchema = z.object({ kind: z.literal('agent'), id: opaque }).strict();
 const inputSchema = z.object({ schemaVersion: z.literal(1), operationId: opaque,
   expectedRevisionId: opaque, executor: executorSchema }).strict();
 const missing = () => new TicketWorkflowError(404, 'ticket_work_not_found', 'Issue work not found.');

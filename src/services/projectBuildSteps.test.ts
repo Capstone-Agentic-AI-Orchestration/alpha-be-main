@@ -95,11 +95,14 @@ describe('project build room configuration', () => {
       agentId: 'agent-from-another-workspace'
     }])).toThrow('Agent not found');
 
-    expect(() => svc.saveProjectBuildSteps(project.id, [{
-      label: 'Both owners',
+    // An older client may still send a squad; it is dropped and the agent kept.
+    const saved = svc.saveProjectBuildSteps(project.id, [{
+      label: 'Old client',
       phase: 'implementation',
       agentId: agent.id,
-      squadId: svc.getSquads()[0].id
-    }])).toThrow('both an agent and a squad');
+      squadId: 'squad-core'
+    } as any]);
+    expect(saved[0]).toMatchObject({ agentId: agent.id });
+    expect(saved[0].squadId).toBeUndefined();
   });
 });

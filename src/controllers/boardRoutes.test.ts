@@ -440,7 +440,6 @@ describe('the cloud roster routes', () => {
 
     const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
     const agents = new PostgresAgentStore(freshSqlFor(db));
-    const squads = new PostgresSquadStore(freshSqlFor(db));
     await agents.create('ws-default', {
       id: 'agent-private',
       name: 'Private',
@@ -459,28 +458,15 @@ describe('the cloud roster routes', () => {
       allowedUsers: 'private',
       createdAt: new Date().toISOString()
     } as any);
-    await squads.create('ws-default', {
-      id: 'squad-1',
-      name: 'Squad',
-      description: '',
-      avatar: '◈',
-      color: '#111',
-      topology: 'Sequential',
-      memberAgentIds: ['agent-private'],
-      mission: '',
-      activeRunsCount: 0,
-      completedRunsCount: 0
-    } as any);
-    await workspaceRegistry.assignSquadProject('ws-default', 'squad-1', project.id, 'assigned');
     workspaceRegistry.bind('projects', project.id, 'ws-default');
-    workspaceRegistry.bind('squads', 'squad-1', 'ws-default');
     workspaceRegistry.bind('agents', 'agent-private', 'ws-default');
 
+    // No squad is involved: the agent's own visibility is the only limit.
     const asAdmin = (await workspaceRegistry.resolve('Admin1', 'ws-default', 'admin'))!;
-    expect(await workspaceRegistry.canAccessProjectAgent(asAdmin, project.id, 'squad-1', 'agent-private')).toBe(false);
+    expect(await workspaceRegistry.canAccessProjectAgentRun(asAdmin, project.id, 'agent-private')).toBe(false);
 
     const asOwner = (await workspaceRegistry.resolve('Someone-else', 'ws-default', 'admin'))!;
-    expect(await workspaceRegistry.canAccessProjectAgent(asOwner, project.id, 'squad-1', 'agent-private')).toBe(true);
+    expect(await workspaceRegistry.canAccessProjectAgentRun(asOwner, project.id, 'agent-private')).toBe(true);
   });
 });
 
@@ -495,7 +481,7 @@ describe('the cloud roster routes', () => {
  * nothing, as a real boot does.
  */
 describe('the cloud boot', () => {
-  it('seeds the default workspace, its roster and its core squad into an empty database', async () => {
+  it('seeds the default workspace and its roster into an empty database', async () => {
     await startCloudApi();
     const { seedDefaultWorkspace } = await import('./workspaceController.js');
 
@@ -505,7 +491,8 @@ describe('the cloud boot', () => {
       Number((await db.query<{ n: number }>(`select count(*)::int as n from ${table}`)).rows[0].n);
     expect(await count('workspaces')).toBe(1);
     expect(await count('agents')).toBeGreaterThan(0);
-    expect(await count('squads')).toBe(1);
+    // Squads were removed; the Orchestrator assigns agents per task.
+    expect(await count('squads')).toBe(0);
   });
 
   it('adds nothing on a second boot', async () => {
@@ -517,7 +504,7 @@ describe('the cloud boot', () => {
     await seedDefaultWorkspace();
 
     expect((await db.query('select id from agents')).rows).toHaveLength(agents);
-    expect((await db.query('select id from squads')).rows).toHaveLength(1);
+    expect((await db.query('select id from squads')).rows).toHaveLength(0);
   });
 
   /** Why the order matters, stated as the failure it prevents. */

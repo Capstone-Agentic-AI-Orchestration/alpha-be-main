@@ -447,53 +447,7 @@ runRouter.post('/squad-runs/:id/cancel', desktopOnly, async (req: Request, res: 
   }
 });
 
-runRouter.post('/squads/:id/run', desktopOnly, async (req: Request, res: Response) => {
-  let ticketExecution: Awaited<ReturnType<typeof reserveTicketExecution>> = null;
-  try {
-    if (!requireWorkspaceCapability(req, res, 'squad.run')) return;
-    if (!requireSquadWorkspace(req, res, req.params.id)) return;
-    const { issueId, plan, mission } = req.body;
-    if (!issueId) return res.status(400).json({ error: 'issueId is required' });
-    if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
-    const issue = await issueStore().get(req.workspace!.workspaceId, issueId);
-    if (!issue) return res.status(404).json({ error: 'Issue not found' });
-    if (!requireProjectWorkspace(req, res, issue.projectId)) return;
-    if (!workspaceRegistry.squadAssignedToProject(req.workspace!, req.params.id, issue.projectId)) {
-      return res.status(409).json({ error: 'Assign this squad to the project before starting a squad run.' });
-    }
-
-    const workspaceId = req.workspace!.workspaceId;
-    const reservedSquadRunId = `squadrun-${randomUUID()}`;
-    ticketExecution = await reserveTicketExecution({
-      workspaceId, issueId, runId: reservedSquadRunId,
-      executor: { kind: 'squad', id: req.params.id },
-    });
-    let squadRun;
-    try {
-      squadRun = await squadRunner.startSquadRun({
-        squadId: req.params.id,
-        issueId,
-        plan: plan || [],
-        mission,
-        ...(ticketExecution ? { id: ticketExecution.runId, ticketExecution } : {}),
-      });
-    } catch (error) {
-      if (ticketExecution) await stopTicketExecution(ticketExecution).catch(stopError =>
-        logError('Could not release unused ticket squad reservation:', stopError?.message ?? stopError));
-      throw error;
-    }
-    workspaceRegistry.bind('squad_runs', squadRun.id, req.workspace!.workspaceId);
-    for (const run of await runStore().runsForSquadRun(req.workspace!.workspaceId, squadRun.id)) {
-      workspaceRegistry.bind('prototype_runs', run.id, req.workspace!.workspaceId);
-    }
-    res.status(201).json(squadRun);
-  } catch (err: any) {
-    // A squad that cannot run — unimplemented topology, no members, a missing
-    // issue — is the caller's problem to fix and says so, rather than being
-    // reported as an internal failure.
-    const status = err instanceof SquadRunError ? 400
-      : err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500 ? err.status
-        : err instanceof TicketExecutionRelayError ? 503 : 500;
-    res.status(status).json({ error: err.message || 'Failed to start squad run' });
-  }
+/** Squads were removed; past squad runs stay readable above. */
+runRouter.post('/squads/:id/run', desktopOnly, (_req: Request, res: Response) => {
+  res.status(410).json({ error: 'Squads were removed. Start a build with the Orchestrator from the issue or project chat.' })
 });

@@ -231,9 +231,9 @@ describe('the roster on a team’s desktop', () => {
 
     await call(app, 'POST', '/api/board/sync');
 
-    // The machine's seeded roster and core squad, not the one it just pulled.
+    // The machine's seeded roster, not the one it just pulled. Squads are never published.
     expect(shared).toContain('agent agent-architect');
-    expect(shared.some(s => s.startsWith('squad squad-core'))).toBe(true);
+    expect(shared.some(s => s.startsWith('squad '))).toBe(false);
     expect(shared).not.toContain('agent agent-teammate');
   });
 
@@ -285,14 +285,15 @@ describe('the roster on a team’s desktop', () => {
     expect(agent.owner).toBe('Dev1');
   });
 
-  it('shares a squad with its owner', async () => {
+  it('refuses to create a squad and shares nothing', async () => {
     role = 'admin';
     const { app } = await startApi();
     shared = [];
 
-    await call(app, 'POST', '/api/squads', { id: 'squad-mine', name: 'Mine', topology: 'Sequential', memberAgentIds: [] });
+    const res = await call(app, 'POST', '/api/squads', { id: 'squad-mine', name: 'Mine', topology: 'Sequential', memberAgentIds: [] });
 
-    expect(shared).toContain('squad squad-mine owned by Dev1');
+    expect(res.status).toBe(410);
+    expect(shared).toEqual([]);
   });
 });
 

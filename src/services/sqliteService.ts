@@ -1468,24 +1468,6 @@ export class SQLiteService {
         .run(DEFAULT_WORKSPACE_ID);
     }
 
-    /**
-     * A retired desktop seed claimed this untouched starter squad had completed
-     * twelve runs. Correct only that signature, and only when no squad-run
-     * history exists, so an actual historical counter is never overwritten.
-     */
-    this.db.prepare(`
-      UPDATE squads
-      SET completed_runs_count = 0
-      WHERE id = 'squad-core'
-        AND name = 'Alpha Core Execution Squad'
-        AND completed_runs_count = 12
-        AND NOT EXISTS (
-          SELECT 1
-          FROM squad_runs
-          WHERE squad_runs.squad_id = squads.id
-            AND squad_runs.workspace_id = squads.workspace_id
-        )
-    `).run();
   }
 
   private ensureDefaultWorkspace(): void {
@@ -1567,12 +1549,12 @@ export class SQLiteService {
   }
 
   /**
-   * Give a workspace the agents and squad it starts life with.
+   * Give a workspace the agents it starts life with.
    *
    * Separate from `createWorkspace` because the workspace row itself is no
    * longer written here: membership decides who may open one, so the row is
    * the directory's (Postgres in the cloud, SQLite on a desktop) while the
-   * agents and squads it seeds are still this store's.
+   * agents it seeds are still this store's.
    *
    * Projects and issues stay intentionally empty: those are the owner's work,
    * not product seed data.
@@ -1580,20 +1562,7 @@ export class SQLiteService {
   seedWorkspace(workspaceId: string, name: string): void {
     runWithWorkspace(workspaceId, () => {
       this.ensureOfficialAgents(workspaceId);
-      const agents = this.getAgents();
-      this.createSquad({
-        id: `squad-${workspaceId}`,
-        name: `${name} Core Squad`,
-        description: 'Official Alpha roles working in sequence.',
-        avatar: '◈',
-        color: '#6366f1',
-        topology: 'Sequential',
-        leaderAgentId: agents.find(agent => agent.role === 'Manager Agent')?.id || agents[0]?.id,
-        memberAgentIds: agents.map(agent => agent.id),
-        mission: 'Research, plan, build, review, and validate approved project work.',
-        activeRunsCount: 0,
-        completedRunsCount: 0
-      });
+      void name;
     });
   }
 
@@ -1902,25 +1871,12 @@ export class SQLiteService {
      * board, in a project describing a product they may not be building.
      *
      * The distinction this draws is between a template and someone else's data.
-     * Agents, skills and the squad stay because they are scaffolding anyone
+     * Agents and skills stay because they are scaffolding anyone
      * would want — Architect, Developer, Reviewer, Tester and Operator are
      * roles, not opinions about what you are working on. A project and its
      * issues are the work itself, and only its owner can say what that is.
      */
 
-    // Default Squad
-    const defaultSquad: Squad = {
-      id: 'squad-core',
-      name: 'Alpha Core Execution Squad',
-      topology: 'Sequential',
-      leaderAgentId: 'agent-manager',
-      memberAgentIds: ['agent-research', 'agent-architect', 'agent-manager', 'agent-backend', 'agent-frontend', 'agent-reviewer', 'agent-tester'],
-      mission: 'Research, plan, build, review, and validate approved project work.',
-      activeRunsCount: 0,
-      completedRunsCount: 0
-    };
-
-    this.createSquad(defaultSquad);
 
     // Last, so a seed that throws part-way is retried rather than recorded as
     // done. Everything above is idempotent, so the retry is safe.
@@ -2337,12 +2293,7 @@ export class SQLiteService {
       (this.db.prepare('SELECT id FROM agents WHERE workspace_id = ?').all(workspaceId) as Array<{ id: string }>)
         .map(row => row.id)
     );
-    const squadIds = new Set(
-      (this.db.prepare('SELECT id FROM squads WHERE workspace_id = ?').all(workspaceId) as Array<{ id: string }>)
-        .map(row => row.id)
-    );
-
-    const normalized = normalizeBuildSteps(projectId, input, agentIds, squadIds);
+    const normalized = normalizeBuildSteps(projectId, input, agentIds);
 
     const replace = this.db.transaction(() => {
       this.db.prepare(
@@ -3547,6 +3498,22 @@ export class SQLiteService {
     const row = this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 1')
       .get(this.workspaceId(), projectId) as { id: string } | undefined;
     return row ? this.getOrchestrationSnapshot(row.id) : undefined;
+  }
+
+  /** The newest Orchestrator build for each issue in the given projects, for the board's status chips. */
+  listLatestIssueBuilds(projectIds: string[]): Array<{ issueId: string; projectId: string; runId: string; status: string; updatedAt: string }> {
+    if (!projectIds.length) return [];
+    const placeholders = projectIds.map(() => '?').join(', ');
+    const rows = this.db.prepare(`SELECT issue_id, project_id, id, status, updated_at FROM orchestration_runs
+      WHERE workspace_id = ? AND project_id IN (${placeholders}) ORDER BY created_at DESC`)
+      .all(this.workspaceId(), ...projectIds) as Array<{ issue_id: string; project_id: string; id: string; status: string; updated_at: string }>;
+    const latest = new Map<string, { issueId: string; projectId: string; runId: string; status: string; updatedAt: string }>();
+    for (const row of rows) {
+      if (!latest.has(row.issue_id)) {
+        latest.set(row.issue_id, { issueId: row.issue_id, projectId: row.project_id, runId: row.id, status: row.status, updatedAt: row.updated_at });
+      }
+    }
+    return [...latest.values()];
   }
 
   reserveOrchestrationPlanning(input: {

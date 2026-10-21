@@ -153,6 +153,7 @@ async function load(
     }),
     issueStore: () => ({
       list: vi.fn(async () => issueRows),
+      get: vi.fn(async (_workspaceId: string, id: string) => issueRows.find(issue => issue.id === id)),
       create: createdIssue
     }),
     squadStore: () => ({ list: vi.fn(async () => []) })
@@ -352,6 +353,47 @@ describe('project builds triggered from chat', () => {
     }));
     expect(startOrchestration).toHaveBeenCalledTimes(1);
     expect(startSquadRun).not.toHaveBeenCalled();
+  });
+
+  it('builds an existing board issue instead of creating a second one', async () => {
+    const service = await load();
+    issueRows.push({ id: 'issue-7', identifier: 'CALC-7', projectId: project.id, title: 'Keyboard input', status: 'todo', labels: [] });
+    const result = await service.startProjectBuildBatch({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-issue',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: '/build Keyboard input',
+      repositories: [selectedRepo],
+      issueId: 'issue-7'
+    });
+
+    expect(result[0]).toMatchObject({ status: 'plan_ready', issueId: 'issue-7', issueIdentifier: 'CALC-7' });
+    expect(startOrchestration).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-7' }));
+    expect(createdIssue).not.toHaveBeenCalled();
+    expect(issueRows).toHaveLength(1);
+  });
+
+  it.each([
+    ['belongs to another project', { projectId: 'project-other', status: 'todo' }, /not part of this project/],
+    ['is already done', { projectId: project.id, status: 'done' }, /already done/]
+  ])('refuses to build an issue that %s before planning', async (_label, issue, reason) => {
+    const service = await load();
+    issueRows.push({ id: 'issue-8', identifier: 'CALC-8', title: 'Other', labels: [], ...issue });
+    const [result] = await service.startProjectBuildBatch({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id,
+      threadId: 'thread-issue',
+      messageId: `message-${crypto.randomUUID()}`,
+      content: '/build Other',
+      repositories: [selectedRepo],
+      issueId: 'issue-8'
+    });
+
+    expect(result).toMatchObject({ status: 'blocked', reason: expect.stringMatching(reason) });
+    expect(reservePlanning).not.toHaveBeenCalled();
+    expect(plannerCreatePlan).not.toHaveBeenCalled();
+    expect(startOrchestration).not.toHaveBeenCalled();
   });
 
   it('uses a live runtime model when the planning agent intentionally has no pinned model', async () => {

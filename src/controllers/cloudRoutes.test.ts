@@ -494,9 +494,11 @@ describe('Orchestrator project build defaults', () => {
     const { projectStore } = await import('../store/stores.js');
     expect(await projectStore().get('ws-default', created.body.id)).toMatchObject({ leadName: 'Orchestrator' });
   });
-  it('rejects ambiguous owners without creating the project', async () => {
+  it('refuses a squad owner without creating the project', async () => {
     const app = await startCloudApi();
-    expect((await call(app, 'POST', '/api/projects', { name: 'Two owners', key: 'TWO', leadAgentId: 'a', leadSquadId: 's' })).status).toBe(400);
+    const res = await call(app, 'POST', '/api/projects', { name: 'Squad owner', key: 'SQO', leadSquadId: 's' });
+    expect(res.status).toBe(410);
+    expect(res.body.error).toMatch(/Squads were removed/);
     expect((await db.query('select id from projects')).rows).toEqual([]);
   });
   it('refuses an owner from another workspace', async () => {
@@ -504,33 +506,23 @@ describe('Orchestrator project build defaults', () => {
     expect((await call(app, 'POST', '/api/projects', { name: 'Foreign owner', key: 'FOR', leadAgentId: 'missing' })).status).toBe(400);
     expect((await db.query('select id from projects')).rows).toEqual([]);
   });
-  it('creates and reloads a squad-owned project with its active relationship', async () => {
+  it('switches a project between an agent owner and the Orchestrator, and refuses a squad', async () => {
     const app = await startCloudApi();
     await call(app, 'GET', '/api/agents');
-    await db.query(`insert into squads (id, workspace_id, name, topology, mission) values ('squad-execution', 'ws-default', 'Delivery squad', 'sequential', 'Deliver')`);
-    const created = await call(app, 'POST', '/api/projects', { name: 'Squad work', key: 'SQW', leadSquadId: 'squad-execution' });
-    expect(created.status).toBe(201);
-    expect(created.body).toMatchObject({ status: 'planned', leadSquadId: 'squad-execution', leadName: 'Delivery squad' });
-    const { projectStore } = await import('../store/stores.js');
-    expect(await projectStore().get('ws-default', created.body.id)).toMatchObject({ leadSquadId: 'squad-execution' });
-    expect((await db.query(`select relationship, status from workspace_squad_projects where project_id = $1`, [created.body.id])).rows).toEqual([{ relationship: 'owned', status: 'active' }]);
-    const { agentStore } = await import('../store/stores.js');
+    const { agentStore, projectStore } = await import('../store/stores.js');
     await agentStore().ensureOfficial('ws-default');
-    const switched = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadAgentId: 'agent-research', leadSquadId: '' });
-    expect(switched.status).toBe(200);
-    expect(switched.body.leadAgentId).toBe('agent-research');
-    expect(switched.body.leadSquadId).toBeUndefined();
-    expect((await db.query<{ relationship: string }>(`select relationship from workspace_squad_projects where project_id = $1`, [created.body.id])).rows[0].relationship).toBe('assigned');
-    await db.query(`insert into squads (id, workspace_id, name, topology, mission) values ('squad-next', 'ws-default', 'Next squad', 'sequential', 'Deliver')`);
-    const next = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadAgentId: '', leadSquadId: 'squad-next' });
-    expect(next.status).toBe(200);
-    expect(next.body.leadSquadId).toBe('squad-next');
-    expect((await projectStore().get('ws-default', created.body.id))?.leadSquadId).toBe('squad-next');
+    const created = await call(app, 'POST', '/api/projects', { name: 'Owned work', key: 'OWN', leadAgentId: 'agent-research' });
+    expect(created.status).toBe(201);
+    expect(created.body.leadAgentId).toBe('agent-research');
+
+    const squad = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadSquadId: 'squad-next' });
+    expect(squad.status).toBe(410);
+    expect((await projectStore().get('ws-default', created.body.id))?.leadAgentId).toBe('agent-research');
+
     const unassigned = await call(app, 'PUT', `/api/projects/${created.body.id}`, { leadAgentId: '', leadSquadId: '' });
     expect(unassigned.status).toBe(200);
     expect(unassigned.body).toMatchObject({ leadName: 'Orchestrator' });
     expect(unassigned.body.leadAgentId).toBeUndefined();
     expect(unassigned.body.leadSquadId).toBeUndefined();
-
   });
 });

@@ -12,7 +12,7 @@ import { agentReadiness } from '../services/agentReadiness.js';
 import { isGitRepo } from '../utils/gitUtils.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { reposForProject } from '../services/githubIssueMapping.js';
-import { agentStore, projectStore, squadStore } from '../store/stores.js';
+import { agentStore, projectStore } from '../store/stores.js';
 import { route } from './asyncRoute.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
@@ -101,7 +101,7 @@ async function requireCurrentProjectAgent(
 ): Promise<boolean> {
   const allowed =
     req.workspace &&
-    (await workspaceRegistry.canAccessProjectAgent(req.workspace, call.projectId, call.squadId, call.agentId));
+    (await workspaceRegistry.canAccessProjectAgentRun(req.workspace, call.projectId, call.agentId));
   if (!allowed) {
     res.status(404).json({ error: 'The selected agent is no longer available for this project.' });
     return false;
@@ -139,51 +139,33 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
   const project = await getProject(req, res, req.params.projectId);
   if (!project) return;
 
-  const assignedIds = workspaceRegistry.projectSquadIdsFor(req.workspace!, project.id);
   const workspaceId = req.workspace!.workspaceId;
-  const squads = (await squadStore().list(workspaceId)).filter(squad => assignedIds.includes(squad.id));
-  const agents = await agentStore().list(workspaceId);
   const runtimes = sqliteService.getRuntimes();
   const modes = roleModes(req);
 
   /**
-   * Visibility is a database question now, so every (squad, agent) pair is
-   * decided up front and the filters below stay synchronous.
-   *
-   * `.filter(async …)` would keep every agent, because a promise is truthy --
-   * which for a visibility check means showing private agents to everyone.
+   * Every visible, ready agent in the workspace can be called from any project
+   * the caller can see. Visibility is decided up front because
+   * `.filter(async …)` would keep every agent -- a promise is truthy.
    */
+  const candidates = (await agentStore().list(workspaceId)).filter(agent => !agent.isArchived);
   const visible = new Set<string>();
-  await Promise.all(
-    squads.flatMap(squad =>
-      (squad.memberAgentIds ?? []).map(async agentId => {
-        if (await workspaceRegistry.canAccessProjectAgent(req.workspace!, project.id, squad.id, agentId)) {
-          visible.add(`${squad.id}::${agentId}`);
-        }
-      })
-    )
-  );
-
-  const visibleSquads = squads.map(squad => {
-    const members = (squad.memberAgentIds ?? [])
-      .map(agentId => agents.find(agent => agent.id === agentId))
-      .filter((agent): agent is NonNullable<typeof agent> => Boolean(agent))
-      .filter(agent => visible.has(`${squad.id}::${agent.id}`))
-      .filter(agent => agentReadiness({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, runtimes).status === 'ready')
-      .map(agent => ({
-        id: agent.id,
-        name: agent.name,
-        role: agent.role,
-        description: agent.description,
-        avatar: agent.avatar,
-        color: agent.color,
-        squadId: squad.id,
-        squadName: squad.name,
-        availability: 'ready' as const,
-        supportedModes: modes
-      }));
-    return { id: squad.id, name: squad.name, agents: members };
-  }).filter(squad => squad.agents.length > 0);
+  await Promise.all(candidates.map(async agent => {
+    if (await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agent.id)) visible.add(agent.id);
+  }));
+  const callableAgents = candidates
+    .filter(agent => visible.has(agent.id))
+    .filter(agent => agentReadiness({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, runtimes).status === 'ready')
+    .map(agent => ({
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      description: agent.description,
+      avatar: agent.avatar,
+      color: agent.color,
+      availability: 'ready' as const,
+      supportedModes: modes
+    }));
 
   const workspace = resolveProjectWorkspace(project);
   const hasWorkingCopy = Boolean(workspace && fs.existsSync(workspace.dir));
@@ -204,11 +186,9 @@ agentCallRouter.get('/projects/:projectId/chat/available-agents', desktopOnly, a
       workingCopy: hasWorkingCopy
         ? { status: 'connected', managed: workspace?.managed ?? false, repositories: repos.length, onMachine }
         : { status: 'not_connected', managed: false, repositories: repos.length, onMachine },
-      repositories,
-      assignedSquadNames: visibleSquads.map(squad => squad.name)
+      repositories
     },
-    squads: visibleSquads,
-    agents: visibleSquads.flatMap(squad => squad.agents)
+    agents: callableAgents
   });
 });
 
@@ -247,17 +227,16 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
       return res.status(400).json({ error: 'A target is required for review, revise, and implement calls.' });
     }
 
-    const { squadId, agentId } = req.body ?? {};
-    if (typeof squadId !== 'string' || typeof agentId !== 'string') {
-      return res.status(400).json({ error: 'squadId and agentId are required.' });
+    const { agentId } = req.body ?? {};
+    if (typeof agentId !== 'string' || !agentId.trim()) {
+      return res.status(400).json({ error: 'agentId is required.' });
     }
-    if (!(await workspaceRegistry.canAccessProjectAgent(req.workspace!, project.id, squadId, agentId))) {
+    if (!(await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId))) {
       return res.status(404).json({ error: 'That agent is not available for this project.' });
     }
 
     const agent = sqliteService.getAgents().find(item => item.id === agentId);
-    const squad = sqliteService.getSquads().find(item => item.id === squadId);
-    if (!agent || !squad || agent.isArchived) {
+    if (!agent || agent.isArchived) {
       return res.status(404).json({ error: 'That agent is not available for this project.' });
     }
     const readiness = agentReadiness({ ...agent, ...resolveAgent(agent, { includeMemory: false }) }, sqliteService.getRuntimes());
@@ -274,7 +253,6 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
       content: instruction,
       messageType: 'user',
       agentId,
-      squadId,
       operationMode: mode,
       agentCallStatus: mode === 'implement' ? 'awaiting_confirmation' : 'queued',
       revisionTarget: target,
@@ -288,7 +266,6 @@ agentCallRouter.post('/projects/:projectId/chat/threads/:threadId/agent-calls', 
       project,
       threadId: thread.id,
       messageId: userMessage.id,
-      squadId,
       agent,
       requestedBy: req.workspace!.userId,
       operationMode: mode,

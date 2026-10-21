@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { agentStore, chatStore, projectStore, squadStore } from '../store/stores.js';
+import { agentStore, chatStore, projectStore } from '../store/stores.js';
 import { chatService } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
@@ -191,7 +191,7 @@ chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res:
 /**
  * Choose who answers an unmentioned message in a conversation.
  *
- * A thread can point at one configured agent, one squad, or neither (Alpha's
+ * A thread can point at one configured agent or none (Alpha's
  * automatic responder). The target is deliberately separate from `agentIds`:
  * that field is the participant history and must not make an old participant
  * answer every future message.
@@ -199,15 +199,11 @@ chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res:
 chatRouter.put('/chat/threads/:id/target', desktopOnly, route(async (req: Request, res: Response) => {
   const { targetAgentId = null, targetSquadId = null } = req.body ?? {};
 
-  if (
-    (targetAgentId !== null && typeof targetAgentId !== 'string') ||
-    (targetSquadId !== null && typeof targetSquadId !== 'string')
-  ) {
-    return res.status(400).json({ error: 'Target ids must be strings or null' });
+  if (targetAgentId !== null && typeof targetAgentId !== 'string') {
+    return res.status(400).json({ error: 'targetAgentId must be a string or null' });
   }
-
-  if (targetAgentId && targetSquadId) {
-    return res.status(400).json({ error: 'Choose an agent or a squad, not both' });
+  if (targetSquadId) {
+    return res.status(410).json({ error: 'Squads were removed. Choose an agent, or leave the target empty so Alpha answers.' });
   }
 
   if (targetAgentId) {
@@ -215,11 +211,8 @@ chatRouter.put('/chat/threads/:id/target', desktopOnly, route(async (req: Reques
     if (!agent || agent.isArchived) return res.status(404).json({ error: 'Agent not found or archived' });
   }
 
-  if (targetSquadId && !(await squadStore().get(req.workspace!.workspaceId, targetSquadId))) {
-    return res.status(404).json({ error: 'Squad not found' });
-  }
-
-  const updated = sqliteService.setChatThreadTarget(req.params.id, targetAgentId, targetSquadId);
+  // Clears any squad target an older version saved on this thread.
+  const updated = sqliteService.setChatThreadTarget(req.params.id, targetAgentId, null);
   if (!updated) return res.status(404).json({ error: 'Thread not found' });
   shareThread(updated);
   return res.json(updated);
@@ -315,7 +308,7 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -331,14 +324,17 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (attachmentIds !== undefined && (!Array.isArray(attachmentIds) || attachmentIds.length > 8 || attachmentIds.some((id: unknown) => typeof id !== 'string'))) {
       return res.status(400).json({ error: 'attachmentIds must be a list of up to 8 attachment ids' });
     }
-    if (
-      (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') ||
-      (targetSquadId !== undefined && targetSquadId !== null && typeof targetSquadId !== 'string')
-    ) {
-      return res.status(400).json({ error: 'Target ids must be strings or null' });
+    if (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') {
+      return res.status(400).json({ error: 'targetAgentId must be a string or null' });
     }
-    if (targetAgentId && targetSquadId) {
-      return res.status(400).json({ error: 'Choose an agent or a squad, not both' });
+    if (targetSquadId) {
+      return res.status(410).json({ error: 'Squads were removed. Mention an agent, or ask Alpha to build and the Orchestrator assigns agents per task.' });
+    }
+    if (issueId !== undefined && (typeof issueId !== 'string' || !issueId.trim() || issueId.length > 200)) {
+      return res.status(400).json({ error: 'issueId must be a non-empty string of at most 200 characters' });
+    }
+    if (issueId && intent !== 'build') {
+      return res.status(400).json({ error: 'An issue can only be attached to a build request' });
     }
     if (repository !== undefined && repository !== null && typeof repository !== 'string') {
       return res.status(400).json({ error: 'repository must be a repository name or omitted' });
@@ -359,6 +355,10 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     }
     const scopedProjectId = existingThread?.projectId ?? projectId ?? undefined;
     if (scopedProjectId && !requireProjectWorkspace(req, res, scopedProjectId)) return;
+    if (issueId) {
+      if (!scopedProjectId) return res.status(400).json({ error: "Choose the issue's project before starting its build" });
+      if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
+    }
     if (existingThread && !existingThread.projectId && scopedProjectId) {
       const scopedThread = sqliteService.setChatThreadProject(threadId, scopedProjectId);
       if (!scopedThread) return res.status(404).json({ error: 'Conversation not found.' });
@@ -372,14 +372,13 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     const directlyAddressesAgent = /(?:^|[\s(\[{])@[a-zA-Z0-9_-]+/.test(content);
     const buildRequested = intent === 'build' || (intent !== 'ask' && !directlyAddressesAgent && isProjectBuildRequest(content));
     const buildRequest = req.workspace!.role !== 'client' && buildRequested
-      ? { context: req.workspace!, repositories: requestedRepositories }
+      ? { context: req.workspace!, repositories: requestedRepositories, issueId: issueId || undefined }
       : undefined;
     const result = await chatService.sendMessage({
       threadId,
       content,
       senderName,
       targetAgentId,
-      targetSquadId,
       projectId: scopedProjectId,
       clientMessageId,
       attachmentIds,
