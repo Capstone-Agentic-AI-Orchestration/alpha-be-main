@@ -1,6 +1,6 @@
 # Orchestrator recovery, project chat, and Live Build Room
 
-Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. A local Windows v2.0.45 package and update metadata were produced after cloud verification passed; the package is unsigned. Installed-app acceptance and publishing remain outstanding while GitHub CLI authentication is renewed.
+Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. Windows v2.0.45 is published and confirmed as the latest release with setup, portable, blockmap, and updater metadata; its release notes include installer checksums. The package is unsigned. Installed-app acceptance remains outstanding.
 Source review: 2026-10-21, Asia/Manila. This describes the checked-out source, not a verification of the installed desktop app.
 
 ## Implementation status
@@ -25,10 +25,9 @@ Implemented in source during this completion:
 - Live Build Room now has persistent Build plan and Live work tabs, one roster card per assigned agent with the latest run, exact task-to-attempt and inspector-to-task navigation, producer-aware artifact targeting, bounded long content, and keyboard-operable tab controls.
 - A separate source test-file expectation was updated for the current task-package version. Automated test suites and installed-app visual scenarios were not run in this task.
 
-Release and acceptance gates still outstanding:
+Remaining acceptance gate:
 
-- Exercise the documented end-to-end recovery scenarios and responsive/keyboard behavior in the packaged Windows app; these acceptance checks were not run.
-- Publish v2.0.45 after GitHub CLI authentication is renewed. The local setup, portable executable, blockmap, and `latest.yml` were produced, and the Supabase/cloud preflight accepted the key. The package has no code-signing certificate, so Windows will identify it as unsigned.
+- Exercise the documented end-to-end recovery scenarios and responsive/keyboard behavior in the packaged Windows app; these acceptance checks were not run. The published package has no code-signing certificate, so Windows will identify it as unsigned.
 
 ## Product outcome
 
