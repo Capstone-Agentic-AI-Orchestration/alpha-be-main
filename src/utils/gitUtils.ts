@@ -76,6 +76,17 @@ export async function getGitChangedPaths(cwd: string, baseCommit: string, result
   return [...new Set(stdout.split('\0').filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
+/** List tracked paths for safe, scoped review-context packaging without invoking a reviewer shell. */
+export async function getGitTrackedPaths(cwd: string): Promise<string[]> {
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd,
+    timeout: 30_000,
+    maxBuffer: 16 * 1024 * 1024,
+    windowsHide: true
+  });
+  return [...new Set(stdout.split('\0').filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
 /** Read an exact, color-free patch between two immutable task commits. */
 export async function getGitDiffPatch(cwd: string, baseCommit: string, resultCommit: string): Promise<string> {
   if (!/^[a-f0-9]{40,64}$/i.test(baseCommit) || !/^[a-f0-9]{40,64}$/i.test(resultCommit)) {

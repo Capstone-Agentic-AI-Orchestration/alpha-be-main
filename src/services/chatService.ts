@@ -28,6 +28,7 @@ import type { WorkspaceContext } from './workspaceRegistry.js';
 import { startProjectBuildBatch, type ProjectBuildStartResult } from './projectBuildOrchestrator.js';
 import { processManager } from './processManager.js';
 import { chatAttachmentService } from './chatAttachmentService.js';
+import { runWithWorkspace } from './workspaceContext.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -385,7 +386,17 @@ export class ChatService extends EventEmitter {
       const existingBuildReply = existingUserMessage
         ? sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`)
         : undefined;
-      if (existingBuildReply) return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
+      if (existingBuildReply) {
+        if (existingBuildReply.orchestrationRunId && workspaceId && params.userId) {
+          runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({
+            runId: existingBuildReply.orchestrationRunId!,
+            threadId,
+            buildMessageId: existingBuildReply.id,
+            actorId: params.userId!
+          }));
+        }
+        return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
+      }
 
       const repositories = [...new Set((params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []))
         .map(repository => repository.trim()).filter(Boolean))];
@@ -462,6 +473,14 @@ export class ChatService extends EventEmitter {
         timestamp: new Date().toISOString()
       };
       saveChatMessageAndShare(reply);
+      if (build.orchestrationRunId && workspaceId && params.userId) {
+        runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({
+          runId: build.orchestrationRunId!,
+          threadId,
+          buildMessageId: reply.id,
+          actorId: params.userId!
+        }));
+      }
       this.emit('chat_message', reply);
       return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
     }

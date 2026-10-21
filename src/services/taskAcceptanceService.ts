@@ -11,9 +11,12 @@ import { OrchestrationService } from './orchestrationService.js';
 import { buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { pathMatchesScope } from '../utils/pathScope.js';
+import { safeRecoveryGuidance } from './orchestrationRecoveryPolicy.js';
+export { pathMatchesScope } from '../utils/pathScope.js';
 
 export interface TaskAcceptanceOutcome {
-  decision: 'accepted' | 'rejected' | 'blocked' | 'awaiting_approval';
+  decision: 'accepted' | 'rejected' | 'blocked' | 'retrying' | 'awaiting_approval';
   snapshot: OrchestrationSnapshot;
   reason?: string;
   evidence?: Record<string, unknown>;
@@ -59,30 +62,19 @@ function reviewRootTask(task: OrchestrationTaskRecord, tasks: readonly Orchestra
   return tasks.find(candidate => candidate.id === (task.correctionOfTaskId ?? task.id));
 }
 
-/** Match repository-relative Git paths against a small, dependency-free glob subset. */
-export function pathMatchesScope(filePath: string, pattern: string): boolean {
-  const normalizedPath = filePath.replace(/\\/g, '/');
-  let expression = '^';
-  for (let index = 0; index < pattern.length; index++) {
-    const char = pattern[index];
-    if (char === '*' && pattern[index + 1] === '*') {
-      index++;
-      if (pattern[index + 1] === '/') {
-        index++;
-        expression += '(?:.*/)?';
-      } else {
-        expression += '.*';
-      }
-    } else if (char === '*') {
-      expression += '[^/]*';
-    } else if (char === '?') {
-      expression += '[^/]';
-    } else {
-      expression += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+function previousAgentReportResponse(result: Record<string, unknown> | undefined): string {
+  if (typeof result?.agentReportResponse === 'string') {
+    const response = result.agentReportResponse;
+    if (result.agentReportResponseTruncated === true) {
+      const marker = '\n[Alpha saved only the first part of the original response.]';
+      return `${response.slice(0, Math.max(0, 12_000 - marker.length))}${marker}`;
     }
+    return response.slice(0, 12_000);
   }
-  expression += '$';
-  return new RegExp(expression).test(normalizedPath);
+  if (result?.agentReport && typeof result.agentReport === 'object') {
+    return JSON.stringify(result.agentReport).slice(0, 12_000);
+  }
+  return typeof result?.summary === 'string' ? result.summary.slice(0, 12_000) : '';
 }
 
 export class TaskAcceptanceService {
@@ -135,6 +127,51 @@ export class TaskAcceptanceService {
           findings: rejection.findings,
           now: input.now
         });
+        const reportCheck = rejection.findings[0]?.evidence.check;
+        const reportCanBeRepaired = reportCheck === 'agent_report' || reportCheck === 'report_identity' ||
+          reportCheck === 'review_findings_missing';
+        const reportRetryAlreadyUsed = rejected.attempts.some(item => item.taskId === task.id &&
+          item.contextManifest.reportOnlyReportRetry === true);
+        if (reportCanBeRepaired && !reportRetryAlreadyUsed && input.dispatchNext !== false) {
+          const correctionTask = rejected.tasks.find(item => item.id === task.id);
+          if (correctionTask) {
+            try {
+              const correction = await this.orchestration.retryTask({
+                workspaceId: input.workspaceId,
+                runId: input.runId,
+                taskId: task.id,
+                expectedTaskRevision: correctionTask.revision,
+                actorId: input.acceptedBy,
+                now: input.now,
+                reportCorrection: {
+                  validationErrors: rejection.findings.map(finding => {
+                    const detail = finding.evidence.detail;
+                    return typeof detail === 'string' ? detail : rejection.reason;
+                  }),
+                  previousResponse: previousAgentReportResponse(attempt.result)
+                }
+              });
+              if (correction.run.status === 'executing' && correction.run.currentTaskId === task.id) {
+                return {
+                  decision: 'retrying',
+                  snapshot: correction,
+                  reason: 'The report format was invalid. The same specialist received the exact error for one read-only format correction; no code changes or new checks were requested.'
+                };
+              }
+              return {
+                decision: 'blocked',
+                snapshot: correction,
+                reason: correction.run.stoppedReason ?? 'The report was rejected, and Alpha could not prepare its read-only format correction.'
+              };
+            } catch (error) {
+              return {
+                decision: 'blocked',
+                snapshot: rejected,
+                reason: error instanceof Error ? error.message : rejection.reason
+              };
+            }
+          }
+        }
         return { decision: 'rejected', snapshot: rejected, reason: rejection.reason };
       }
 
@@ -233,19 +270,22 @@ export class TaskAcceptanceService {
     }
     const report = orchestrationAgentReportSchema.safeParse(result.agentReport);
     if (!report.success) {
-      return fail('The specialist did not return the required structured task report.', {
-        check: 'agent_report', detail: result.agentReportError ?? report.error.issues[0]?.message ?? 'invalid report'
+      const detail = result.agentReportError ?? report.error.issues[0]?.message ?? 'invalid report';
+      return fail(`The specialist report is invalid: ${detail}`, {
+        check: 'agent_report', detail,
+        instruction: `The report could not be read: ${detail}`
       });
     }
     if (report.data.taskId !== task.id) {
-      return fail('The specialist report names a different task.', {
-        check: 'report_identity', expectedTaskId: task.id, reportedTaskId: report.data.taskId
+      const detail = `Expected taskId "${task.id}" but received "${report.data.taskId}".`;
+      return fail(`The specialist report names a different task. ${detail}`, {
+        check: 'report_identity', detail, expectedTaskId: task.id, reportedTaskId: report.data.taskId
       });
     }
     if (task.kind === 'review') {
       if (!report.data.reviewFindings) {
         return fail('The independent reviewer must return a reviewFindings array, including an explicit empty array when no defect is found.', {
-          check: 'review_findings_missing'
+          check: 'review_findings_missing', detail: 'The report must include "reviewFindings": [].'
         });
       }
       const seenFindings = new Set<string>();
@@ -517,8 +557,13 @@ export class TaskAcceptanceService {
       const latestTaskCommit = taskCommits[taskCommits.length - 1];
       if (branchName !== workspace.branchName || !clean || (latestTaskCommit && currentCommit !== latestTaskCommit)) {
         const reason = `The ${workspace.repository} branch changed after its last accepted task; final checks need a fresh review.`;
-        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now });
-        return { decision: 'blocked', snapshot: blocked, reason };
+        const evidence = {
+          validationVersion: 1, check: 'workspace_checkpoint', repository: workspace.repository,
+          expectedBranch: workspace.branchName, branchName, expectedCommit: latestTaskCommit ?? workspace.baseCommit,
+          resultCommit: currentCommit, workingTreeClean: clean
+        };
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
+        return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
       const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktree, workspace.baseCommit, currentCommit);
       const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
@@ -526,8 +571,9 @@ export class TaskAcceptanceService {
       const unownedPath = cumulativeChangedPaths.find(filePath => !acceptedCodeTasks.some(task => taskAllowsPath(task, filePath)));
       if (unownedPath) {
         const reason = `Final checks found ${unownedPath} in ${workspace.repository}, outside the accepted task assignments.`;
-        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence: { check: 'final_scope', repository: workspace.repository, changedPath: unownedPath, cumulativeChangedPaths }, now });
-        return { decision: 'blocked', snapshot: blocked, reason };
+        const evidence = { validationVersion: 1, check: 'final_scope', repository: workspace.repository, changedPath: unownedPath, cumulativeChangedPaths };
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
+        return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
       const requiredScripts = [...new Set(current.tasks.filter(task => task.required &&
         (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase()).flatMap(task => task.requiredChecks))];
@@ -543,16 +589,21 @@ export class TaskAcceptanceService {
     };
     if (!primary) {
       const reason = 'No selected repository has a private build workspace to validate.';
-      const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now });
-      return { decision: 'blocked', snapshot: blocked, reason };
+      const evidence = { validationVersion: 1, check: 'workspace_missing' };
+      const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
+      return { decision: 'blocked', snapshot: blocked, reason, evidence };
     }
     const finalRepositoryEvidence = repositoryResults.map(item => ({
       repository: item.repository, baseCommit: item.baseCommit, resultCommit: item.resultCommit,
       branchName: item.branchName, cumulativeChangedPaths: item.cumulativeChangedPaths,
-      checks: { status: item.verification.status, missingScripts: item.verification.missingScripts, observed: item.verification.commands.map(command => ({ script: command.command.script, display: command.command.display, exitCode: command.exitCode, signal: command.signal })) }
+      checks: { status: item.verification.status, missingScripts: item.verification.missingScripts, observed: item.verification.commands.map(command => ({
+        script: command.command.script, display: command.command.display, exitCode: command.exitCode, signal: command.signal,
+        outputSummary: safeRecoveryGuidance(command.output).slice(0, 1_500)
+      })) }
     }));
     const evidence = {
       validationVersion: 1,
+      repository: primary.repository,
       resultCommit: primary.resultCommit,
       branchName: primary.branchName,
       repositories: finalRepositoryEvidence,
@@ -565,7 +616,8 @@ export class TaskAcceptanceService {
           script: command.command.script,
           display: command.command.display,
           exitCode: command.exitCode,
-          signal: command.signal
+          signal: command.signal,
+          outputSummary: safeRecoveryGuidance(command.output).slice(0, 1_500)
         })),
         summary: verification.summary
       },

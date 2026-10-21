@@ -154,6 +154,9 @@ export interface OrchestrationRunRecord {
   workspaceId: string;
   projectId: string;
   issueId: string;
+  /** Owning project-chat conversation for recovery actions; never used as authorization by itself. */
+  originChatThreadId?: string;
+  originBuildMessageId?: string;
   repository: string;
   requestKey: string;
   requestFingerprint: string;
