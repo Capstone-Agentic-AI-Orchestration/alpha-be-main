@@ -8,14 +8,19 @@ import { projectRunWorkspacePath } from './workspaceService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { SQLiteService } from './sqliteService.js';
 import { OrchestrationService } from './orchestrationService.js';
-import { buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
+import { buildFinalValidationAmendment, buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
 import {
+  AUTO_REPAIR_ATTEMPT_LIMIT,
   MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
+  hasRepeatedRecoveryFailure,
+  hasRepairableFinalValidationEvidence,
   reportFormatCorrectionCount,
-  safeRecoveryGuidance
+  safeRecoverySummary,
+  safeRecoveryGuidance,
+  workAttemptCount
 } from './orchestrationRecoveryPolicy.js';
 export { pathMatchesScope } from '../utils/pathScope.js';
 
@@ -36,6 +41,14 @@ interface AcceptanceDependencies {
 }
 
 const CODE_TASK_KINDS = new Set(['database', 'backend', 'frontend', 'mobile']);
+const REPORT_ONLY_CORRECTION_CHECKS = new Set([
+  'agent_report', 'report_identity', 'review_findings_missing', 'duplicate_review_finding',
+  'review_target', 'review_requirement', 'review_path_scope', 'review_finding_coverage',
+  'requirement_coverage', 'acceptance_criteria', 'deliverable_traceability'
+]);
+const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
+  'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed'
+]);
 
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
   return CODE_TASK_KINDS.has(task.kind) &&
@@ -128,7 +141,37 @@ export class TaskAcceptanceService {
     dispatchNext?: boolean;
     now?: string;
   }): Promise<TaskAcceptanceOutcome> {
-    return runWithWorkspace(input.workspaceId, async () => {
+    try {
+      return await this.evaluateAndAcceptSubmitted(input);
+    } catch (error) {
+      return runWithWorkspace(input.workspaceId, (): TaskAcceptanceOutcome => {
+        const latest = this.store.getOrchestrationSnapshot(input.runId);
+        const task = latest?.tasks.find(item => item.id === input.taskId);
+        const attempt = latest?.attempts.find(item => item.id === input.attemptId);
+        if (!latest || !task || !attempt) throw error;
+        if (attempt.status === 'accepted') return { decision: 'accepted', snapshot: latest };
+        if (latest.run.status !== 'executing' || latest.run.currentTaskId !== task.id ||
+            attempt.taskId !== task.id || attempt.status !== 'submitted') {
+          return {
+            decision: 'blocked', snapshot: latest,
+            reason: 'Alpha could not finish recording this handoff. The current build state was preserved for review.'
+          };
+        }
+        return this.blockAcceptanceFailure(latest, task, attempt, input.acceptedBy, error, input.now);
+      });
+    }
+  }
+
+  private evaluateAndAcceptSubmitted(input: {
+    workspaceId: string;
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    acceptedBy: string;
+    dispatchNext?: boolean;
+    now?: string;
+  }): Promise<TaskAcceptanceOutcome> {
+    return runWithWorkspace(input.workspaceId, async (): Promise<TaskAcceptanceOutcome> => {
       const snapshot = this.store.getOrchestrationSnapshot(input.runId);
       const task = snapshot?.tasks.find(item => item.id === input.taskId);
       const attempt = snapshot?.attempts.find(item => item.id === input.attemptId);
@@ -138,7 +181,12 @@ export class TaskAcceptanceService {
         return { decision: 'blocked', snapshot, reason: 'This submission is stale or no longer owns the active task.' };
       }
 
-      const rejection = await this.inspectSubmission(snapshot, task, attempt);
+      let rejection: Awaited<ReturnType<TaskAcceptanceService['inspectSubmission']>>;
+      try {
+        rejection = await this.inspectSubmission(snapshot, task, attempt);
+      } catch (error) {
+        return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy, error, input.now);
+      }
       if (rejection) {
         const rejected = this.store.rejectOrchestrationAttempt({
           runId: snapshot.run.id,
@@ -150,10 +198,8 @@ export class TaskAcceptanceService {
           findings: rejection.findings,
           now: input.now
         });
-        const reportCheck = rejection.findings[0]?.evidence.check;
-        const reportCanBeRepaired = reportCheck === 'agent_report' || reportCheck === 'report_identity' ||
-          reportCheck === 'review_findings_missing' || reportCheck === 'requirement_coverage' ||
-          reportCheck === 'acceptance_criteria';
+        const reportCanBeRepaired = rejection.findings.every(finding =>
+          typeof finding.evidence.check === 'string' && REPORT_ONLY_CORRECTION_CHECKS.has(finding.evidence.check));
         const automaticReportCorrectionsUsed = reportFormatCorrectionCount(rejected, task.id);
         if (reportCanBeRepaired && automaticReportCorrectionsUsed < MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS && input.dispatchNext !== false) {
           const correctionTask = rejected.tasks.find(item => item.id === task.id);
@@ -196,10 +242,51 @@ export class TaskAcceptanceService {
             }
           }
         }
+        const repairableCodeFailure = CODE_TASK_KINDS.has(task.kind) && rejection.findings.length > 0 &&
+          rejection.findings.every(finding => typeof finding.evidence.check === 'string' &&
+            AUTOMATIC_CODE_REPAIR_CHECKS.has(finding.evidence.check) &&
+            (finding.evidence.check !== 'required_check' ||
+              !Array.isArray(finding.evidence.missingScripts) || finding.evidence.missingScripts.length === 0));
+        if (repairableCodeFailure && input.dispatchNext !== false &&
+            workAttemptCount(rejected, task.id) < AUTO_REPAIR_ATTEMPT_LIMIT &&
+            !hasRepeatedRecoveryFailure(rejected, task.id, 'project_code', rejection.reason)) {
+          const correctionTask = rejected.tasks.find(item => item.id === task.id);
+          if (correctionTask) {
+            try {
+              const correction = await this.orchestration.retryTask({
+                workspaceId: input.workspaceId,
+                runId: input.runId,
+                taskId: task.id,
+                expectedTaskRevision: correctionTask.revision,
+                actorId: input.acceptedBy,
+                now: input.now
+              });
+              if (correction.run.status === 'executing' && correction.run.currentTaskId === task.id) {
+                return {
+                  decision: 'retrying',
+                  snapshot: correction,
+                  reason: `Alpha sent the failed acceptance checks and saved finding to ${correctionTask.ownerAgentId} for automatic repair (${workAttemptCount(rejected, task.id)} of ${AUTO_REPAIR_ATTEMPT_LIMIT} work attempts). It will recheck the result before continuing.`
+                };
+              }
+              return {
+                decision: 'blocked',
+                snapshot: correction,
+                reason: correction.run.stoppedReason ?? 'Alpha could not safely restart the failed task from its saved checkpoint.'
+              };
+            } catch (error) {
+              return { decision: 'blocked', snapshot: rejected, reason: error instanceof Error ? error.message : rejection.reason };
+            }
+          }
+        }
         return { decision: 'rejected', snapshot: rejected, reason: rejection.reason };
       }
 
-      const evidence = await this.acceptanceEvidence(snapshot, task, attempt);
+      let evidence: Record<string, unknown>;
+      try {
+        evidence = await this.acceptanceEvidence(snapshot, task, attempt);
+      } catch (error) {
+        return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy, error, input.now);
+      }
       if (task.kind === 'review') {
         const report = orchestrationAgentReportSchema.parse(attempt.result?.agentReport);
         let amendment;
@@ -255,7 +342,7 @@ export class TaskAcceptanceService {
         now: input.now
       });
       if (accepted.run.status === 'validating') {
-        const finalized = await this.finalValidation(accepted, input.acceptedBy, input.now);
+        const finalized = await this.finalizeSafely(accepted, input.acceptedBy, input.now);
         accepted = finalized.snapshot;
         return finalized;
       }
@@ -275,8 +362,64 @@ export class TaskAcceptanceService {
       if (snapshot.run.status !== 'validating') {
         return { decision: 'blocked', snapshot, reason: 'The build is not waiting for final validation.' };
       }
-      return this.finalValidation(snapshot, input.actorId, input.now);
+      return this.finalizeSafely(snapshot, input.actorId, input.now);
     });
+  }
+
+  private async finalizeSafely(
+    snapshot: OrchestrationSnapshot,
+    actorId: string,
+    now?: string
+  ): Promise<TaskAcceptanceOutcome> {
+    try {
+      return await this.finalValidation(snapshot, actorId, now);
+    } catch (error) {
+      const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+      const reason = `Alpha could not complete final validation: ${detail || 'The verification service failed unexpectedly.'}`;
+      const evidence = {
+        validationVersion: 1,
+        check: 'validation_system',
+        repository: snapshot.run.repository,
+        checks: { status: 'failed', missingScripts: [], observed: [], summary: reason }
+      };
+      const current = this.store.getOrchestrationSnapshot(snapshot.run.id) ?? snapshot;
+      const blocked = current.run.status === 'validating'
+        ? this.store.transitionOrchestrationRun({
+            runId: current.run.id,
+            expectedRevision: current.run.revision,
+            nextStatus: 'blocked',
+            actorId,
+            reason,
+            evidence,
+            now
+          })
+        : current;
+      return { decision: 'blocked', snapshot: blocked, reason, evidence };
+    }
+  }
+
+  private blockAcceptanceFailure(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    attempt: OrchestrationAttemptRecord,
+    rejectedBy: string,
+    error: unknown,
+    now?: string
+  ): TaskAcceptanceOutcome {
+    const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+    const reason = `Alpha could not complete its acceptance checks: ${detail || 'The verification service failed unexpectedly.'}`;
+    const evidence = { check: 'acceptance_system', origin: 'alpha_acceptance', detail };
+    const blocked = this.store.rejectOrchestrationAttempt({
+      runId: snapshot.run.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      expectedTaskRevision: task.revision,
+      rejectedBy,
+      reason,
+      findings: [{ severity: 'blocking', evidence: { instruction: reason, ...evidence } }],
+      now
+    });
+    return { decision: 'blocked', snapshot: blocked, reason, evidence };
   }
 
   private async inspectSubmission(
@@ -403,11 +546,17 @@ export class TaskAcceptanceService {
     if (!authorizedWorkspace.branchName || !this.store.isPathAllowed(worktreePath)) {
       return fail('The orchestration branch or approved local worktree is missing.', { check: 'workspace_authority' });
     }
-    const [branchName, currentCommit, isClean] = await Promise.all([
+    const [branchResult, commitResult, cleanResult] = await Promise.allSettled([
       this.dependencies.getCurrentBranch(worktreePath),
       this.dependencies.getHeadCommit(worktreePath),
       this.dependencies.isGitWorkingTreeClean(worktreePath)
-    ]);
+    ] as const);
+    if (branchResult.status === 'rejected') throw branchResult.reason;
+    if (commitResult.status === 'rejected') throw commitResult.reason;
+    if (cleanResult.status === 'rejected') throw cleanResult.reason;
+    const branchName = branchResult.value;
+    const currentCommit = commitResult.value;
+    const isClean = cleanResult.value;
     if (branchName !== authorizedWorkspace.branchName || currentCommit !== attempt.resultCommit || !isClean) {
       return fail('The repository changed after submission or has uncheckpointed edits. Reconcile it before acceptance.', {
         check: 'freshness', expectedBranch: authorizedWorkspace.branchName, currentBranch: branchName,
@@ -604,7 +753,22 @@ export class TaskAcceptanceService {
       }
       const requiredScripts = [...new Set(current.tasks.filter(task => task.required &&
         (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase()).flatMap(task => task.requiredChecks))];
-      const verification = await this.dependencies.runVerification({ runId: `orchestration-final-${current.run.id}-${Buffer.from(workspace.repository).toString('hex').slice(0, 16)}`, cwd: worktree, requiredScripts: requiredScripts.length ? requiredScripts : undefined });
+      let verification: VerificationResult;
+      try {
+        verification = await this.dependencies.runVerification({
+          runId: `orchestration-final-${current.run.id}-${Buffer.from(workspace.repository).toString('hex').slice(0, 16)}`,
+          cwd: worktree,
+          requiredScripts: requiredScripts.length ? requiredScripts : undefined
+        });
+      } catch (error) {
+        const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+        verification = {
+          status: 'failed',
+          missingScripts: [],
+          commands: [],
+          summary: `Alpha could not start final validation: ${detail || 'The verification service failed unexpectedly.'}`
+        };
+      }
       repositoryResults.push({ repository: workspace.repository, worktree, branchName, resultCommit: currentCommit, baseCommit: workspace.baseCommit, cumulativeChangedPaths, verification });
     }
     const primary = repositoryResults[0];
@@ -651,7 +815,9 @@ export class TaskAcceptanceService {
       noOpenBlockingFindings: !current.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity))
     };
     if (verification.status !== 'passed' || verification.missingScripts.length || !verification.commands.length || !evidence.noOpenBlockingFindings) {
-      const reason = verification.missingScripts.length
+      const reason = verification.summary.startsWith('Alpha could not start final validation:')
+        ? verification.summary
+        : verification.missingScripts.length
         ? `Final validation could not run required checks: ${verification.missingScripts.join(', ')}.`
         : verification.commands.length
           ? 'Final validation failed or unresolved blocking findings remain.'
@@ -660,6 +826,41 @@ export class TaskAcceptanceService {
         runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason,
         evidence, now
       });
+      if (hasRepairableFinalValidationEvidence(evidence) && !current.run.pauseRequestedAt) {
+        try {
+          const amendment = buildFinalValidationAmendment(
+            blocked,
+            evidence,
+            this.store.getAgents().filter(agent => !agent.isArchived).map(agent => ({ id: agent.id, role: agent.role }))
+          );
+          const repairing = await this.orchestration.amendFinalValidation({
+            workspaceId: current.run.workspaceId,
+            runId: current.run.id,
+            expectedRunRevision: blocked.run.revision,
+            actorId,
+            amendment,
+            evidence,
+            now
+          });
+          if (repairing.run.status === 'executing' && repairing.run.currentTaskId) {
+            return {
+              decision: 'retrying', snapshot: repairing,
+              reason: 'Final checks failed. Alpha routed a bounded correction to the affected code owner, followed by an independent review and fresh validation.'
+            };
+          }
+          return {
+            decision: 'blocked', snapshot: repairing,
+            reason: repairing.run.stoppedReason ?? 'Alpha saved the correction plan but could not start its next specialist. Review the recovery details in project chat.'
+          };
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Alpha could not safely plan an owner correction.';
+          return {
+            decision: 'blocked', snapshot: blocked,
+            reason: `${reason} Alpha could not safely assign an automatic correction: ${detail}`,
+            evidence: { ...evidence, automaticRepairError: detail }
+          };
+        }
+      }
       return { decision: 'blocked', snapshot: blocked, reason, evidence };
     }
     const awaitingApproval = this.store.transitionOrchestrationRun({

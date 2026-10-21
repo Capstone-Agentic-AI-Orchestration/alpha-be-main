@@ -389,7 +389,7 @@ describe('deterministic orchestration orchestrator', () => {
       .rejects.toThrow(/different build request/);
   });
 
-  it('blocks failed execution, retries only the owned task, and ignores the old attempt completing late', async () => {
+  it('self-repairs an agent execution failure, retries only its owner, and ignores a late old result', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-late-event-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
@@ -416,19 +416,13 @@ describe('deterministic orchestration orchestrator', () => {
       status: 'failed',
       stages: [{ id: 'implementation', status: 'failed', logs: ['fixture failure'] }]
     } as any);
-    expect(failed?.run.status).toBe('blocked');
+    expect(failed?.run.status).toBe('executing');
     expect(failed?.attempts[0].status).toBe('failed');
-
-    snapshot = await orchestrator.retryTask({
-      workspaceId: input.workspaceId,
-      runId: snapshot.run.id,
-      taskId: firstRequest.taskId,
-      expectedTaskRevision: failed!.tasks.find(task => task.id === firstRequest.taskId)!.revision,
-      actorId: 'user-test'
-    });
+    snapshot = failed!;
     expect(launches).toHaveLength(2);
     expect(launches[1].taskId).toBe(firstRequest.taskId);
     expect(launches[1].ownerAgentId).toBe('backend-agent');
+    expect(launches[1].taskPackage.corrections.join('\n')).toContain('fixture failure');
 
     const eventCount = runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id).length);
     const late = await orchestrator.handleRunnerCompleted({
@@ -445,6 +439,69 @@ describe('deterministic orchestration orchestrator', () => {
     expect(late?.attempts.find(attempt => attempt.id === firstRequest.attemptId)?.status).toBe('failed');
     expect(late?.attempts.find(attempt => attempt.id === launches[1].attemptId)?.status).toBe('running');
     expect(runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id))).toHaveLength(eventCount);
+  });
+
+  it('escalates provider failures without asking a project agent to repair the runtime', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-provider-failure-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const input = {
+      workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+      requestKey: 'request-provider-failure', requestFingerprint: 'fingerprint-provider-failure', createdBy: 'user-test',
+      executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    };
+
+    const snapshot = await startAndApprove(orchestrator, input);
+    const firstRequest = launches[0];
+    const failed = await orchestrator.handleRunnerFailed({
+      id: `prototype-${firstRequest.attemptId}`,
+      workspaceId: input.workspaceId,
+      orchestrationRunId: snapshot.run.id,
+      orchestrationTaskId: firstRequest.taskId,
+      orchestrationAttemptId: firstRequest.attemptId,
+      status: 'failed',
+      stages: [{ id: 'implementation', status: 'failed', logs: ['Provider connection timed out.'] }]
+    } as any);
+
+    expect(failed?.run.status).toBe('blocked');
+    expect(failed?.run.stoppedReason).toContain('developer to review in project chat');
+    expect(launches).toHaveLength(1);
+  });
+
+  it('persists a bounded recovery attempt when specialist preparation fails before launch', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-prepare-failure-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      async prepare() { throw new Error('EACCES: permission denied while preparing the saved worktree.'); },
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const input = {
+      workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+      requestKey: 'request-prepare-failure', requestFingerprint: 'fingerprint-prepare-failure', createdBy: 'user-test',
+      executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    };
+
+    const snapshot = await startAndApprove(orchestrator, input);
+
+    expect(snapshot.run.status).toBe('blocked');
+    expect(snapshot.tasks.find(task => task.id === 'create-endpoint')?.status).toBe('failed');
+    expect(snapshot.attempts).toHaveLength(1);
+    expect(snapshot.attempts[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'EACCES: permission denied while preparing the saved worktree.'
+    });
+    expect(snapshot.attempts[0].contextManifest.orchestrationPreparationFailed).toBe(true);
+    expect(launches).toHaveLength(0);
   });
 
   it('assigns bounded verification repairs, gives each the failure evidence, then stops for human review', async () => {

@@ -233,4 +233,15 @@ describe('orchestration runner adapter', () => {
 
     expect((await adapter.prepare({ ...request, attemptNumber: 2 })).startingCommit).toBe(retryCommit);
   });
+
+  it('stops a retry when the branch no longer matches the failed attempt checkpoint', async () => {
+    await adapter.prepare(request);
+    baseCommit = git(source, 'rev-parse', 'HEAD');
+    const savedCommit = commitChange('preserved failed attempt');
+    attempts.push({ ...acceptedAttempt('create-endpoint', savedCommit), status: 'failed' });
+    commitChange('unexpected later commit');
+
+    await expect(adapter.prepare({ ...request, attemptNumber: 2 }))
+      .rejects.toThrow('retry worktree no longer matches its latest saved checkpoint');
+  });
 });

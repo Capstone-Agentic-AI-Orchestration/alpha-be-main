@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import type { OrchestrationRecoveryActionName, OrchestrationRecoveryCategory } from '../models/index.js';
-import { ALPHA_ORCHESTRATION_RECOVERY_WINDOW_MS } from '../config/env.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 
 /** Total execution attempts including the first specialist run; this permits two automatic repairs. */
@@ -11,7 +10,6 @@ export const MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS = 2;
 /** Keep one additional correction available only after the developer reviews the escalation. */
 export const MAX_REPORT_FORMAT_CORRECTIONS = MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS + 1;
 export const MAX_RECOVERY_GUIDANCE_CHARS = 2_000;
-export const MAX_RECOVERY_EPISODE_MS = ALPHA_ORCHESTRATION_RECOVERY_WINDOW_MS;
 
 export function reportFormatCorrectionCount(snapshot: OrchestrationSnapshot, taskId: string): number {
   return snapshot.attempts.filter(attempt => attempt.taskId === taskId &&
@@ -68,11 +66,14 @@ export function classifyRecoveryCategory(input: {
     return 'review_input';
   }
   if (/review (?:package|input|source)|review input|read-only.*(?:unavailable|failed)|no usable source/i.test(text)) return 'review_input';
+  if (/\beacces\b|\beperm\b|permission denied|access denied|disk full|\benospc\b|read.only file system/i.test(text)) return 'workspace';
+  if (/\benoent\b|missing executable|command not found|runtime.*(?:missing|not found)|persona.*(?:missing|unavailable)/i.test(text)) return 'configuration';
   if (/worktree|work tree|branch changed|unexpected head|dirty working|checkpoint|process.*(?:uncertain|stopped)|reconcil/i.test(text)) return 'workspace';
   if (/429|rate.?limit|quota|provider|network|connection|timed? ?out|authentication|credential|runtime.*(?:unavailable|not ready)|not signed in/i.test(text)) return 'provider';
   if (/setting|configuration|missing required|not configured|reconnect|install .*runtime/i.test(text)) return 'configuration';
   if (/orchestrator.*(?:disabled|unavailable)|alpha daemon|update the (?:desktop )?app/i.test(text)) return 'alpha';
-  if (input.hasTask && ['implement', 'validate', 'review'].includes(input.taskKind ?? '')) return 'project_code';
+  if (/alpha could not (?:complete|finish|safely verify).*acceptance checks|acceptance system failure/i.test(text)) return 'alpha';
+  if (input.hasTask && ['database', 'backend', 'frontend', 'mobile', 'implement'].includes(input.taskKind ?? '')) return 'project_code';
   return 'unknown';
 }
 
@@ -89,18 +90,27 @@ export function recoveryAvailableActions(input: {
   episodeAgeMs: number;
   repeatedFailure?: boolean;
   finalValidationCorrectionReady?: boolean;
+  finalValidationCorrectionReason?: string;
 }): { availableActions: OrchestrationRecoveryActionName[]; actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>> } {
   const { snapshot, category, taskId, canControl, episodeAgeMs, repeatedFailure = false,
-    finalValidationCorrectionReady = false } = input;
+    finalValidationCorrectionReady = false, finalValidationCorrectionReason } = input;
   const availableActions: OrchestrationRecoveryActionName[] = ['explain_failure', 'review_saved_changes'];
   const actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>> = {};
   const task = taskId ? snapshot.tasks.find(item => item.id === taskId) : undefined;
   const attempts = task ? workAttemptCount(snapshot, task.id) : MAX_REPAIR_ATTEMPTS_PER_EPISODE;
+  const latestFailedAttempt = task ? [...snapshot.attempts].reverse().find(attempt =>
+    attempt.taskId === task.id && ['failed', 'rejected', 'recovery_required'].includes(attempt.status)) : undefined;
+  const failedDuringPreparation = latestFailedAttempt?.contextManifest.orchestrationPreparationFailed === true;
+  const failedDuringAcceptanceInfrastructure = task && snapshot.findings.some(finding =>
+    finding.taskId === task.id && finding.status === 'open' && finding.evidence.check === 'acceptance_system');
+  const preparationFailureReason = latestFailedAttempt?.failureReason ?? '';
+  const preparationCheckpointIsUncertain = /checkpoint|unexpected head|branch changed|dirty working|process.*(?:uncertain|active|stopped)|outside the run.scoped|not authorized/i.test(preparationFailureReason);
   const canAct = canControl && !['completed', 'failed', 'cancelled'].includes(snapshot.run.status);
   if (!canControl) actionReasons.provide_guidance = 'Your project role can inspect this build but cannot change it.';
-  if (episodeAgeMs > MAX_RECOVERY_EPISODE_MS) actionReasons.provide_guidance = 'This recovery is over one hour old. Review the saved build and start a fresh, explicitly scoped request if needed.';
-
-  if (canAct && task && ['failed', 'blocked'].includes(task.status) && episodeAgeMs <= MAX_RECOVERY_EPISODE_MS) {
+  // Recovery episodes are durable. Their age alone does not invalidate a saved
+  // checkpoint; retryTask and the runner adapter revalidate workspace identity.
+  void episodeAgeMs;
+  if (canAct && task && ['failed', 'blocked'].includes(task.status)) {
     if (category === 'project_code') {
       if (repeatedFailure && attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
       else if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
@@ -119,7 +129,12 @@ export function recoveryAvailableActions(input: {
         actionReasons.retry_report_format = 'Alpha has used two automatic report-only corrections and one developer-authorized correction for this task. Review the exact field error and saved responses before starting a new build.';
       }
     } else if (category === 'workspace') {
-      actionReasons.resume_checkpoint = 'The saved branch or process needs inspection before Alpha can continue safely.';
+      if ((failedDuringPreparation || failedDuringAcceptanceInfrastructure) && !preparationCheckpointIsUncertain &&
+          attempts < AUTO_REPAIR_ATTEMPT_LIMIT) {
+        availableActions.push('recheck_prerequisite');
+      } else {
+        actionReasons.resume_checkpoint = 'The saved branch or process needs inspection before Alpha can continue safely.';
+      }
     } else if (category === 'final_validation') {
       actionReasons.recheck_prerequisite = 'Final checks need to be reviewed in the build plan before they can be repeated.';
     } else if (category === 'budget') {
@@ -137,10 +152,10 @@ export function recoveryAvailableActions(input: {
       snapshot.tasks.filter(item => item.required).every(item => item.status === 'accepted')) {
     availableActions.push('recheck_prerequisite');
     if (finalValidationCorrectionReady) availableActions.push('plan_final_validation_corrections');
-    else actionReasons.plan_final_validation_corrections = 'The saved evidence does not map a failed check to a bounded, independent owner-and-review chain.';
+    else actionReasons.plan_final_validation_corrections = finalValidationCorrectionReason ??
+      'The saved evidence does not map a failed check to a bounded, independent owner-and-review chain.';
   }
-  if (canAct && snapshot.run.status === 'blocked' && category === 'budget' && !snapshot.run.currentTaskId &&
-      episodeAgeMs <= MAX_RECOVERY_EPISODE_MS) {
+  if (canAct && snapshot.run.status === 'blocked' && category === 'budget' && !snapshot.run.currentTaskId) {
     availableActions.push('recheck_prerequisite');
   }
   if (canAct && snapshot.run.status === 'blocked' && category === 'alpha' && !snapshot.run.currentTaskId &&
@@ -161,6 +176,11 @@ export function recoveryAvailableActions(input: {
 export function safeRecoverySummary(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ')
     .replace(/(?:[a-z]:\\|\\\\[^\s]+|\/(?:Users|home|private|tmp|var|mnt)\/)[^\s,;)]*/gi, '[local path]')
+    .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
+    .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|secret|authorization)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g, '[redacted token]')
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi, '[redacted private key]')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 500);

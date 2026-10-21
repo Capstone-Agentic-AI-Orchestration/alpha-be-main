@@ -188,16 +188,13 @@ describe('task acceptance and targeted correction', () => {
     const rejected = await acceptance.evaluateAndAccept({
       workspaceId, runId: snapshot.run.id, taskId: 'create-api', attemptId: firstRequest.attemptId, acceptedBy: 'orchestrator'
     });
-    expect(rejected.decision).toBe('rejected');
-    expect(rejected.snapshot.run.status).toBe('blocked');
+    expect(rejected.decision).toBe('retrying');
+    expect(rejected.snapshot.run.status).toBe('executing');
     expect(rejected.snapshot.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ status: 'open', path: 'docs/readme.md', correctionTaskId: 'create-api' })
     ]));
 
-    snapshot = await orchestration.retryTask({
-      workspaceId, runId: rejected.snapshot.run.id, taskId: 'create-api',
-      expectedTaskRevision: rejected.snapshot.tasks[0].revision, actorId: 'orchestrator'
-    });
+    snapshot = rejected.snapshot;
     const correctionRequest = launches[1];
     expect(correctionRequest.ownerAgentId).toBe('backend-agent');
     expect(correctionRequest.taskPackage.corrections.join('\n')).toContain('outside its approved path scope');
@@ -224,8 +221,7 @@ describe('task acceptance and targeted correction', () => {
     const invalidated = await acceptance.evaluateAndAccept({
       workspaceId, runId: snapshot.run.id, taskId: 'preserve-api', attemptId: preserveRequest.attemptId, acceptedBy: 'orchestrator'
     });
-    expect(invalidated.decision).toBe('rejected');
-    expect(invalidated.reason).toContain('already accepted task create-api');
+    expect(invalidated.decision).toBe('retrying');
     expect(invalidated.snapshot.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({
         status: 'open', path: 'src/api.ts',
@@ -233,11 +229,7 @@ describe('task acceptance and targeted correction', () => {
       })
     ]));
 
-    snapshot = await orchestration.retryTask({
-      workspaceId, runId: invalidated.snapshot.run.id, taskId: 'preserve-api',
-      expectedTaskRevision: invalidated.snapshot.tasks.find(task => task.id === 'preserve-api')!.revision,
-      actorId: 'orchestrator'
-    });
+    snapshot = invalidated.snapshot;
     const restoreRequest = launches[3];
     expect(restoreRequest.taskPackage.corrections.join('\n')).toContain('already accepted task create-api');
     const acceptedApi = git(repository, ['show', `${acceptedApiCommit}:src/api.ts`]);
@@ -253,6 +245,125 @@ describe('task acceptance and targeted correction', () => {
     expect(finalAcceptance.snapshot.findings.every(finding => finding.status === 'resolved')).toBe(true);
     expect(finalAcceptance.evidence).toMatchObject({ cumulativeChangedPaths: ['src/api.ts'] });
     expect(finalAcceptance.evidence).toHaveProperty('checks.status', 'passed');
+  });
+
+  it('blocks with an Alpha finding when repository acceptance checks throw', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-acceptance-system-failure-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'index.ts'), 'export const ready = false;\n');
+    commit(repository, 'Initial code');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'acceptance failure fixture'));
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1, goal: 'Implement the API.', requirements: [{ id: 'REQ-API', description: 'Provide the API.' }],
+      tasks: [{
+        id: 'implement-api', title: 'Implement API', description: 'Add the API behavior.', kind: 'backend',
+        ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-API'],
+        acceptanceCriteria: ['The API returns the expected result.'], requiredChecks: ['test'],
+        scope: { includePaths: ['src/**'], excludePaths: [] }
+      }]
+    });
+    const started = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/acceptance-failure', requestKey: 'acceptance-system-failure',
+      requestFingerprint: 'acceptance-system-failure', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }], plan
+    });
+    const request = launches[0];
+    fs.writeFileSync(path.join(repository, 'src', 'index.ts'), 'export const ready = true;\n');
+    const resultCommit = commit(repository, 'Implement API');
+    await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, ['src/index.ts']));
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      getCurrentBranch: async () => { throw new Error('EACCES: permission denied reading branch.'); }
+    });
+
+    const outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: started.run.id, taskId: 'implement-api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+
+    expect(outcome.decision).toBe('blocked');
+    expect(outcome.snapshot.run.status).toBe('blocked');
+    expect(outcome.reason).toContain('EACCES');
+    expect(outcome.snapshot.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ evidence: expect.objectContaining({ check: 'acceptance_system', origin: 'alpha_acceptance' }) })
+    ]));
+  });
+
+  it('turns an unexpected handoff-recording exception into a recoverable Alpha finding', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-handoff-system-failure-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'index.ts'), 'export const ready = false;\n');
+    commit(repository, 'Initial code');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'handoff failure fixture'));
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1, goal: 'Implement the API.', requirements: [{ id: 'REQ-API', description: 'Provide the API.' }],
+      tasks: [{
+        id: 'implement-api', title: 'Implement API', description: 'Add the API behavior.', kind: 'backend',
+        ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-API'],
+        acceptanceCriteria: ['The API returns the expected result.'], requiredChecks: ['test'],
+        scope: { includePaths: ['src/**'], excludePaths: [] }
+      }]
+    });
+    const started = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/handoff-failure', requestKey: 'handoff-system-failure',
+      requestFingerprint: 'handoff-system-failure', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }], plan
+    });
+    const request = launches[0];
+    fs.writeFileSync(path.join(repository, 'src', 'index.ts'), 'export const ready = true;\n');
+    const resultCommit = commit(repository, 'Implement API');
+    const submitted = await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, ['src/index.ts']));
+    vi.spyOn(orchestration, 'acceptAttempt').mockRejectedValue(new Error('SQLite handoff write failed.'));
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
+      })
+    });
+
+    const outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: 'implement-api', attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+
+    expect(outcome.decision).toBe('blocked');
+    expect(outcome.snapshot.run.status).toBe('blocked');
+    expect(outcome.reason).toContain('SQLite handoff write failed');
+    expect(outcome.snapshot.attempts.find(attempt => attempt.id === request.attemptId)?.status).toBe('rejected');
+    expect(outcome.snapshot.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ evidence: expect.objectContaining({ check: 'acceptance_system', origin: 'alpha_acceptance' }) })
+    ]));
   });
 
   it('retries malformed reports twice with the same read-only specialist before escalating', async () => {
@@ -352,7 +463,7 @@ describe('task acceptance and targeted correction', () => {
     expect(git(repository, ['rev-parse', 'HEAD'])).toBe(resultCommit);
   });
 
-  it('recovers a malformed implementation report, preserves its diff, then completes review and validation', async () => {
+  it('recovers a malformed report and failed final check before completing review and validation', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });
     directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-report-handoff-'));
@@ -414,12 +525,22 @@ describe('task acceptance and targeted correction', () => {
     });
     const malformedCheck = [{ name: 'npm test', status: 'complete', evidence: 'The command completed.' }];
     const correctedCheck = [{ name: 'npm test', status: 'passed', evidence: 'The original task observed npm test pass.' }];
+    let finalCheckRuns = 0;
     const acceptance = new TaskAcceptanceService(store, orchestration, {
       worktreePathFor: () => repository,
-      runVerification: async () => ({
-        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
-        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
-      })
+      runVerification: async () => {
+        finalCheckRuns += 1;
+        const failed = finalCheckRuns === 1;
+        return {
+          status: failed ? 'failed' as const : 'passed' as const,
+          missingScripts: [],
+          summary: failed ? 'npm test failed in src/api.ts.' : 'Verification passed: npm test.',
+          commands: [{
+            command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' },
+            exitCode: failed ? 1 : 0, signal: null, output: failed ? 'Regression in src/api.ts' : ''
+          }]
+        };
+      }
     });
     fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export const ready = true;\nexport function api() { return true; }\n');
     const resultCommit = commit(repository, 'Implement API');
@@ -462,10 +583,44 @@ describe('task acceptance and targeted correction', () => {
     outcome = await acceptance.evaluateAndAccept({
       workspaceId, runId: submitted!.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator'
     });
+    expect(outcome.decision).toBe('retrying');
+    expect(outcome.snapshot.run.status).toBe('executing');
+    expect(outcome.reason).toContain('Final checks failed');
+    expect(launches).toHaveLength(5);
+    expect(launches[4].ownerAgentId).toBe('backend-agent');
+    expect(launches[4].taskPackage.corrections.join('\n')).toContain('Final validation failed');
+
+    request = launches[4];
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'),
+      'export const ready = true;\nexport function api() { return true; }\n// final-check correction\n');
+    const correctedCommit = commit(repository, 'Correct final validation failure');
+    submitted = await orchestration.handleRunnerCompleted(completedRun(request, correctedCommit, ['src/api.ts']));
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('accepted');
+    expect(outcome.snapshot.run.currentTaskId).toMatch(/^review-/);
+    expect(launches[5].ownerAgentId).toBe('reviewer-agent');
+
+    request = launches[5];
+    submitted = await orchestration.handleRunnerCompleted(completedRun(request, correctedCommit, []));
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(outcome.decision).toBe('accepted');
+    expect(launches[6].ownerAgentId).toBe('qa-agent');
+
+    request = launches[6];
+    submitted = await orchestration.handleRunnerCompleted(completedRun(request, correctedCommit, []));
+    outcome = await acceptance.evaluateAndAccept({
+      workspaceId, runId: submitted!.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator'
+    });
     expect(outcome.decision).toBe('awaiting_approval');
     expect(outcome.snapshot.run.status).toBe('awaiting_approval');
+    expect(finalCheckRuns).toBe(2);
     expect(launches.map(launch => launch.ownerAgentId)).toEqual([
-      'backend-agent', 'backend-agent', 'reviewer-agent', 'qa-agent'
+      'backend-agent', 'backend-agent', 'reviewer-agent', 'qa-agent',
+      'backend-agent', 'reviewer-agent', 'qa-agent'
     ]);
   });
 
