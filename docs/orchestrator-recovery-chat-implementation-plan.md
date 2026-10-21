@@ -1,6 +1,6 @@
 # Orchestrator recovery, project chat, and Live Build Room
 
-Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. The Windows installer was not produced because Electron Builder could not reach GitHub to download Electron; installed-app acceptance and publishing remain outstanding.
+Status: the planned recovery, chat, review-handoff, final-validation repair, and Live Build Room source changes are implemented. Backend/frontend typechecks and production builds passed. Windows v2.0.45 is published and confirmed as the latest release with setup, portable, blockmap, and updater metadata; its release notes include installer checksums. The package is unsigned. Installed-app acceptance remains outstanding.
 Source review: 2026-10-21, Asia/Manila. This describes the checked-out source, not a verification of the installed desktop app.
 
 ## Implementation status
@@ -12,10 +12,12 @@ Implemented in source:
 - Project-code recovery uses bounded retries, detects repeated matching failures, and escalates for developer guidance. Recovery messages are attached to the build's project chat.
 - Reviewers receive the accepted change set and, for an empty change set, a small set of readable source/test files limited to approved task paths. If Alpha cannot supply safe review material, it blocks before launching a reviewer.
 - Reviewer instructions point to the available read-only inspection tools and do not rely on shell commands. The review process stays unable to edit files, change Git state, publish, or deploy.
-- Alpha records field-level report errors and the bounded original response. One invalid report can be returned to the same specialist for a read-only, format-only retry; it does not use a code-work attempt or create an implementation-owner task.
+- Alpha records field-level report errors and the bounded original response. A malformed or incomplete report can be returned to the same specialist for a bounded read-only correction; it does not use a code-work attempt or create an implementation-owner task.
 - The Live Build Room separates **Build plan** from **Live work**, keeps the recovery notice and detailed report evidence readable, and directs artifact actions to the producing agent when known. Plan tasks can open their exact attempt; the inspector can return to the linked task.
 - Live work shows one compact card per assigned specialist, including planned specialists who have not started. A card shows the current or next assignment and the specialist's latest run; retry history stays in the build plan. Opening an older plan task can show its exact run in the inspector without creating a duplicate card.
 - Task retry eligibility is projected by the backend from the run state, task state, desktop capability, and work-attempt count. Chat and Live Build Room use that value for the button, while the retry endpoint checks the state and limit again before dispatch.
+- Natural-language requests such as “rerun the build” stay attached to the exact saved build and use its authorized recovery action; ambiguous or missing build context is surfaced instead of being sent to a regular chat agent that cannot run the build.
+- A report with the common `requirement`/`requirementId` key mismatch is safely normalized when unambiguous. If a report still fails after Alpha’s automatic format correction, the result details show the exact error and offer one additional user-authorized, read-only correction from the same specialist.
 
 Implemented in source during this completion:
 
@@ -25,10 +27,9 @@ Implemented in source during this completion:
 - Live Build Room now has persistent Build plan and Live work tabs, one roster card per assigned agent with the latest run, exact task-to-attempt and inspector-to-task navigation, producer-aware artifact targeting, bounded long content, and keyboard-operable tab controls.
 - A separate source test-file expectation was updated for the current task-package version. Automated test suites and installed-app visual scenarios were not run in this task.
 
-Release and acceptance gates still outstanding:
+Remaining acceptance gate:
 
-- Run the documented end-to-end recovery scenarios and interactive responsive/keyboard checks on the packaged Windows app.
-- Produce the installer and publish it only after the package's Supabase/cloud preflight succeeds. Packaging currently stops because the environment cannot resolve GitHub while fetching Electron; the GitHub CLI token is also invalid, so pushing or publishing requires re-authentication.
+- Exercise the documented end-to-end recovery scenarios and responsive/keyboard behavior in the packaged Windows app; these acceptance checks were not run. The published package has no code-signing certificate, so Windows will identify it as unsigned.
 
 ## Product outcome
 
@@ -45,7 +46,7 @@ Resume means continuing from saved work and evidence, not restoring a model's ex
 | A recognized runner verification failure | Saves structured recovery evidence and can dispatch a bounded repair to the same task owner. Repeated matching failures stop automatic repair and ask for guidance. | Detection still relies partly on verification-stage evidence and text; every provider-specific failure still needs scenario coverage. |
 | The repair fails again | Keeps attempts in the same build, stops automatic repair on repeated evidence or configured budget exhaustion, and offers bounded developer guidance when eligible. | Usage/cost caps are optional and require measured provider usage; Alpha does not estimate missing usage. |
 | Other execution failures | Persists a categorized recovery episode and offers actions based on the error type, build state, and user role. Process-start retries are separate from code repair; restart reconciliation preserves but blocks mismatched/uncertain workspaces. | Dirty, unexpected, or missing workspace state requires human inspection rather than automated repair. |
-| A submission fails acceptance | Preserves the report and field-level errors; one invalid report can go to the same specialist for a format-only retry. Review findings remain routed through owner correction and independent review. | Some unexpected acceptance categories still need additional scenario coverage. |
+| A submission fails acceptance | Preserves the report and field-level errors; a common unambiguous report-key alias is normalized, and a malformed report receives one automatic plus one explicit read-only correction at most. Review findings remain routed through owner correction and independent review. | Other unexpected acceptance categories still need additional scenario coverage. |
 | Independent review finds a code defect | Can append owner correction tasks, a fresh independent review, and new validation gates. | This existing mechanism should be reused rather than rebuilt. |
 | Final validation fails | Blocks the run, retains check evidence, and can append a versioned owner-correction, independent-review, and fresh-validation chain when the failed evidence maps safely to accepted code owners. | Evidence that does not identify safe owners remains blocked for human inspection. |
 | App restart or paused build | Saves state and provides explicit recovery/resume in supported states. Restart resume confirms the old writer stopped and checks the exact branch and accepted checkpoint before dispatch. | A process that cannot be confirmed stopped or a workspace mismatch must be reconciled by a person. |
@@ -277,7 +278,7 @@ The calculator review failure shown in the run has two independent causes: the r
 ### 3. Make the report contract easy to follow and recover from
 
 - Keep the report template generated from the same schema Alpha validates. For version 1, require `schemaVersion`, the exact `taskId`, `summary`, `requirementCoverage` entries using `requirementId` and `evidence`, `criteriaEvidence`, at least one `deliverables` item, and `reportedChecks`. A review report must also include `reviewFindings`, even when it is `[]`. Preserve exact field names and task/requirement IDs in the prompt.
-- Validate the report as soon as the agent responds. If it is malformed, preserve the original response and return the specific field-level error to that same specialist for one bounded, format-only retry. Do not ask it to redo code, consume a code-repair budget, or make a second identical correction task. If the retry still fails, stop with the exact missing/invalid field and a clear retry or provider-configuration action.
+- Validate the report as soon as the agent responds. If it is malformed, preserve the original response and return the specific field-level error to that same specialist for one automatic, format-only retry. Do not ask it to redo code, consume a code-repair budget, or make a second identical correction task. If that retry still fails, show the exact missing/invalid field and offer at most one explicit, user-authorized report-only retry; never silently loop.
 - Keep Alpha's observed test results separate from the specialist's `reportedChecks`. Never turn an unrun check into a pass. Do not accept requirement coverage that has no evidence or a review report that says it inspected code when read access failed.
 
 ### 4. Gate each handoff on a clear, accepted result
@@ -324,10 +325,10 @@ Implement recovery execution behind a capability flag. The Live Build Room tab/l
 14. Final approval/publication remain tied to the currently validated commits. Recovery does not auto-merge, deploy, or modify Alpha's installed engine.
 15. Both Live Build Room sub-tabs preserve the same build identity; task-to-agent and artifact-to-producer navigation opens the exact selected execution.
 16. Artifact/file/log stress fixtures pass the responsive and accessibility checks in the UI workstream with no unintended page overflow.
-17. Review preflight confirms the selected worktree and scoped read tools before dispatch; an unavailable reader produces a preparation blocker without spending a specialist attempt.
-18. A reviewer can read and search the assigned source and tests while attempts to write, edit, mutate Git, publish, or deploy remain denied. If shell access is denied but file readers work, review continues through the readers.
+17. Review preflight confirms the selected worktree and that hash-bound patch/source material is present before dispatch; missing material produces a preparation blocker without spending a specialist attempt.
+18. A reviewer can inspect the supplied patch/source material directly, or use scoped read tools when needed, while attempts to write, edit, mutate Git, publish, or deploy remain denied. A shell denial alone does not stop review when its assigned evidence is already included.
 19. An empty accepted patch is reviewed only when the task includes usable source/test context; otherwise the run reports missing review input and does not claim independent verification.
-20. A report using an incorrect field such as `requirement` instead of `requirementId` is rejected with that precise field error, then gets one format-only retry from the same specialist. It creates no implementation-owner correction and no duplicate finding.
+20. A report using an unambiguous alias such as `requirement` instead of `requirementId` is normalized. Other malformed report fields are shown precisely and can receive one automatic plus one explicit, read-only correction from the same specialist, with no implementation-owner correction or duplicate finding.
 21. A valid review report with `reviewFindings: []` passes the review gate and hands off to the next eligible task once. A real blocking finding goes to its code owner and then to a different reviewer.
 22. Alpha checks may pass while reviewer access fails; the build still identifies the review blocker and does not present passing checks as completed review.
 23. Duplicate retry clicks, reconnects, and late completions do not start two specialists, duplicate corrections, or advance the run from a stale result.
@@ -335,4 +336,4 @@ Implement recovery execution behind a capability flag. The Live Build Room tab/l
 
 ## First implementation slice: verification priority
 
-The source now includes the vertical review-recovery slice: an accepted code task is packaged with scoped context; a reviewer uses read-only inspection, returns a structured report, and Alpha handles missing access or a malformed report through separate recovery paths. Verification should now exercise the two failure drills—deny a required read tool before launch, then submit a malformed report and verify one format-only retry to the same reviewer—plus a real finding routed to its implementation owner and a different reviewer. Continue acceptance work across project verification, preparation, provider, acceptance, restart, and final-validation failures, then confirm repeated-failure escalation and a developer "fix and continue" follow-up.
+The source now includes the vertical review-recovery slice: an accepted code task is packaged with scoped context; a reviewer uses read-only inspection, returns a structured report, and Alpha handles missing access or a malformed report through separate recovery paths. Verification should exercise the failure drills—deny a required read tool before launch; submit a malformed report and verify normalization or the bounded same-reviewer correction path; and check that natural-language rerun requests act on the selected build rather than regular chat—plus a real finding routed to its implementation owner and a different reviewer. Continue acceptance work across project verification, preparation, provider, acceptance, restart, and final-validation failures, then confirm repeated-failure escalation and a developer "fix and continue" follow-up.

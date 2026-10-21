@@ -6,8 +6,15 @@ import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 /** Total execution attempts including the first specialist run; this permits two automatic repairs. */
 export const AUTO_REPAIR_ATTEMPT_LIMIT = 3;
 export const MAX_REPAIR_ATTEMPTS_PER_EPISODE = 4;
+/** One automatic formatting retry plus one explicit, user-authorized retry. */
+export const MAX_REPORT_FORMAT_CORRECTIONS = 2;
 export const MAX_RECOVERY_GUIDANCE_CHARS = 2_000;
 export const MAX_RECOVERY_EPISODE_MS = ALPHA_ORCHESTRATION_RECOVERY_WINDOW_MS;
+
+export function reportFormatCorrectionCount(snapshot: OrchestrationSnapshot, taskId: string): number {
+  return snapshot.attempts.filter(attempt => attempt.taskId === taskId &&
+    attempt.contextManifest.reportOnlyReportRetry === true).length;
+}
 
 export function hasRepairableFinalValidationEvidence(evidence: Record<string, unknown> | undefined): boolean {
   if (!evidence || evidence.validationVersion !== 1 || evidence.check !== undefined) return false;
@@ -55,6 +62,9 @@ export function classifyRecoveryCategory(input: {
   if (input.hasReportError) return 'report';
   if (/usage budget|token budget|cost budget|build age limit|elapsed.?time budget/i.test(text)) return 'budget';
   if (input.finalValidation) return 'final_validation';
+  if (input.taskKind === 'review' && /(?:could not|cannot|can't|unable to).{0,80}(?:inspect|read|access)|(?:inspection|read access|repository reads?).{0,80}(?:blocked|denied|unavailable|failed)/i.test(text)) {
+    return 'review_input';
+  }
   if (/review (?:package|input|source)|review input|read-only.*(?:unavailable|failed)|no usable source/i.test(text)) return 'review_input';
   if (/worktree|work tree|branch changed|unexpected head|dirty working|checkpoint|process.*(?:uncertain|stopped)|reconcil/i.test(text)) return 'workspace';
   if (/429|rate.?limit|quota|provider|network|connection|timed? ?out|authentication|credential|runtime.*(?:unavailable|not ready)|not signed in/i.test(text)) return 'provider';
@@ -101,7 +111,11 @@ export function recoveryAvailableActions(input: {
       if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('recheck_prerequisite');
       else actionReasons.recheck_prerequisite = 'The reviewer still cannot read the accepted source. Review the provider setup or saved work before trying again.';
     } else if (category === 'report') {
-      actionReasons.repair_and_continue = 'The reviewer response needs a format correction. Open the report details to see the exact missing field.';
+      if (reportFormatCorrectionCount(snapshot, task.id) < MAX_REPORT_FORMAT_CORRECTIONS) {
+        availableActions.push('retry_report_format');
+      } else {
+        actionReasons.retry_report_format = 'Alpha has used the two report-only corrections for this task. Review the exact field error and saved responses before starting a new build.';
+      }
     } else if (category === 'workspace') {
       actionReasons.resume_checkpoint = 'The saved branch or process needs inspection before Alpha can continue safely.';
     } else if (category === 'final_validation') {

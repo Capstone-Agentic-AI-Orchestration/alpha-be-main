@@ -15,6 +15,7 @@ import { agentReadiness } from './agentReadiness.js';
 import { buildFinalValidationAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
+  MAX_REPORT_FORMAT_CORRECTIONS,
   MAX_RECOVERY_EPISODE_MS,
   MAX_RECOVERY_GUIDANCE_CHARS,
   MAX_REPAIR_ATTEMPTS_PER_EPISODE,
@@ -24,6 +25,7 @@ import {
   recoveryFailureFingerprint,
   recoveryAvailableActions,
   recoveryErrorCode,
+  reportFormatCorrectionCount,
   safeRecoveryGuidance,
   safeRecoverySummary,
   workAttemptCount
@@ -65,7 +67,7 @@ export interface OrchestrationRecoveryActionResult {
 
 const CATEGORY_EXPLANATIONS: Record<OrchestrationRecoveryCategory, string> = {
   project_code: 'The specialist saved its work, but the reported result or Alpha’s checks did not meet the task requirements. The build is keeping the saved changes so you can review or direct a bounded repair.',
-  report: 'The specialist’s final report did not include the fields Alpha needs to accept its work. This is a report issue; it does not by itself mean the code is wrong. Open the result details to see the exact missing or invalid field.',
+  report: 'The specialist’s final report did not match the format Alpha needs to accept its work. This does not by itself mean the code is wrong. Open the result details to see the exact field; Alpha can send one more read-only correction if its first correction did not fix the report.',
   review_input: 'The reviewer could not get enough safe source material to complete an independent review. Alpha did not treat passing tests as proof that the review happened.',
   provider: 'The selected agent runtime or service could not complete the request. This points to access or availability, not a code change. Check the runtime connection, then choose Recheck and resume when it is ready.',
   configuration: 'A required project or agent setting is missing or unavailable. Update that setting first; asking a code specialist to edit project files would not fix this kind of problem.',
@@ -79,6 +81,22 @@ const CATEGORY_EXPLANATIONS: Record<OrchestrationRecoveryCategory, string> = {
 function lastAttempt(snapshot: OrchestrationSnapshot, taskId?: string): OrchestrationAttemptRecord | undefined {
   return [...snapshot.attempts].reverse().find(attempt =>
     (!taskId || attempt.taskId === taskId) && ['failed', 'rejected', 'recovery_required'].includes(attempt.status));
+}
+
+function reportCorrectionInput(snapshot: OrchestrationSnapshot, taskId: string): { validationErrors: string[]; previousResponse: string } {
+  const attempt = lastAttempt(snapshot, taskId);
+  const result = attempt?.result ?? {};
+  const detail = typeof result.agentReportError === 'string' ? result.agentReportError
+    : typeof result.rejectionReason === 'string' ? result.rejectionReason
+      : attempt?.failureReason ?? 'Alpha could not validate the specialist report.';
+  const response = typeof result.agentReportResponse === 'string' ? result.agentReportResponse
+    : result.agentReport && typeof result.agentReport === 'object' ? JSON.stringify(result.agentReport)
+      : typeof result.summary === 'string' ? result.summary : '';
+  const marker = '\n[Alpha saved only the first part of the original response.]';
+  const previousResponse = result.agentReportResponseTruncated === true
+    ? `${response.slice(0, Math.max(0, 12_000 - marker.length))}${marker}`
+    : response.slice(0, 12_000);
+  return { validationErrors: [safeRecoverySummary(detail)], previousResponse };
 }
 
 function getObservedChecks(attempt?: OrchestrationAttemptRecord): Array<{ name: string; status: string }> {
@@ -239,13 +257,20 @@ export class OrchestrationRecoveryService {
     const result = evidenceAttempt?.result ?? {};
     const rejectionReason = typeof result.rejectionReason === 'string' ? result.rejectionReason : undefined;
     const reportError = typeof result.agentReportError === 'string' ? result.agentReportError : undefined;
+    const reportFindingChecks = new Set([
+      'agent_report', 'report_identity', 'review_findings_missing', 'requirement_coverage', 'acceptance_criteria'
+    ]);
+    const hasReportFinding = Boolean(failedTask && snapshot.findings.some(finding =>
+      finding.taskId === failedTask.id && finding.status === 'open' &&
+      typeof finding.evidence.check === 'string' && reportFindingChecks.has(finding.evidence.check)
+    ));
     const reason = safeRecoverySummary(evidenceAttempt?.failureReason ?? rejectionReason ?? reportError ??
       snapshot.run.stoppedReason ?? 'The build stopped before the next specialist could safely start.');
     const category = classifyRecoveryCategory({
       reason,
       taskKind: failedTask?.kind,
       hasTask: Boolean(failedTask),
-      hasReportError: Boolean(reportError),
+      hasReportError: Boolean(reportError || hasReportFinding),
       finalValidation
     });
     const source = finalValidation ? 'final_validation'
@@ -517,6 +542,22 @@ export class OrchestrationRecoveryService {
             expectedRunRevision: input.expectedRunRevision,
             actorId: input.actorId
           });
+        } else if (input.action === 'retry_report_format') {
+          if (episode.category !== 'report' || !actionTask) throw new Error('This build has no report-format correction available. Refresh the saved result and try again.');
+          if (reportFormatCorrectionCount(snapshot, actionTask.id) >= MAX_REPORT_FORMAT_CORRECTIONS) {
+            throw new Error('The two report-only corrections have already been used. Review the saved response and exact field error before starting a new build.');
+          }
+          const correction = reportCorrectionInput(snapshot, actionTask.id);
+          if (!correction.previousResponse) throw new Error('Alpha could not recover the specialist response for a safe report-only correction. Review the saved attempt before continuing.');
+          updated = await orchestrationService.retryTask({
+            workspaceId: input.workspaceId,
+            runId: input.runId,
+            taskId: actionTask.id,
+            expectedTaskRevision: actionTask.revision,
+            expectedRunRevision: input.expectedRunRevision,
+            actorId: input.actorId,
+            reportCorrection: correction
+          });
         } else if (input.action === 'recheck_prerequisite' && episode.category === 'review_input') {
           if (!actionTask) throw new Error('This review recovery has no assigned reviewer task.');
           updated = await orchestrationService.retryTask({
@@ -547,7 +588,9 @@ export class OrchestrationRecoveryService {
         const refreshed = this.store.getOrchestrationSnapshot(input.runId) ?? updated;
         const newEpisode = this.syncSnapshot(refreshed, input.actorId) ?? startedEpisode;
         await this.flushPendingMilestones();
-        const message = refreshed.run.currentTaskId
+        const message = input.action === 'retry_report_format' && refreshed.run.currentTaskId
+          ? 'Alpha sent the same specialist a read-only report correction. It will accept the handoff only after the report passes its checks.'
+          : refreshed.run.currentTaskId
           ? 'Alpha restarted the saved task. It will check the new result before handing work to the next specialist.'
           : refreshed.run.status === 'awaiting_approval'
             ? 'The final checks passed. The build is ready for your review.'

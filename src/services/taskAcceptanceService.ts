@@ -129,7 +129,8 @@ export class TaskAcceptanceService {
         });
         const reportCheck = rejection.findings[0]?.evidence.check;
         const reportCanBeRepaired = reportCheck === 'agent_report' || reportCheck === 'report_identity' ||
-          reportCheck === 'review_findings_missing';
+          reportCheck === 'review_findings_missing' || reportCheck === 'requirement_coverage' ||
+          reportCheck === 'acceptance_criteria';
         const reportRetryAlreadyUsed = rejected.attempts.some(item => item.taskId === task.id &&
           item.contextManifest.reportOnlyReportRetry === true);
         if (reportCanBeRepaired && !reportRetryAlreadyUsed && input.dispatchNext !== false) {

@@ -24,7 +24,7 @@ import {
   ALPHA_ORCHESTRATION_MAX_COST_USD,
   ALPHA_ORCHESTRATION_MAX_TOKENS
 } from '../config/env.js';
-import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_EPISODE_MS, MAX_RECOVERY_GUIDANCE_CHARS, hasRepeatedRecoveryFailure, workAttemptCount } from './orchestrationRecoveryPolicy.js';
+import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_EPISODE_MS, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, workAttemptCount } from './orchestrationRecoveryPolicy.js';
 
 const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
 const MAX_REVIEW_SOURCE_FILES = 12;
@@ -114,11 +114,6 @@ function taskExecutionAttemptCount(snapshot: OrchestrationSnapshot, taskId: stri
   return workAttemptCount(snapshot, taskId);
 }
 
-function taskReportCorrectionCount(snapshot: OrchestrationSnapshot, taskId: string): number {
-  return snapshot.attempts.filter(attempt => attempt.taskId === taskId &&
-    attempt.contextManifest.reportOnlyReportRetry === true).length;
-}
-
 export interface PreparedOrchestrationTask {
   startingCommit?: string;
   personaHash?: string;
@@ -177,24 +172,78 @@ export class OrchestrationPlanError extends Error {
   }
 }
 
-function parseAgentReport(text: string): { report?: Record<string, unknown>; error?: string } {
+function extractJsonObjects(text: string): string[] {
+  const objects: string[] = [];
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== '{') continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          objects.push(text.slice(start, index + 1));
+          start = index;
+          break;
+        }
+      }
+    }
+    if (objects.length >= 8) break;
+  }
+  return objects;
+}
+
+function normalizeReportFieldAliases(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const report = value as Record<string, unknown>;
+  if (!Array.isArray(report.requirementCoverage)) return value;
+  return {
+    ...report,
+    requirementCoverage: report.requirementCoverage.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+      const coverage = { ...(item as Record<string, unknown>) };
+      if (typeof coverage.requirementId !== 'string' && typeof coverage.requirement === 'string') {
+        coverage.requirementId = coverage.requirement;
+        delete coverage.requirement;
+      } else if (coverage.requirementId === coverage.requirement) {
+        delete coverage.requirement;
+      }
+      return coverage;
+    })
+  };
+}
+
+export function parseAgentReport(text: string): { report?: Record<string, unknown>; error?: string } {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   const payload = fenced ? fenced[1] : trimmed;
-  let value: unknown;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    return { error: 'The specialist response is not a single valid JSON task report.' };
-  }
-  const parsed = orchestrationAgentReportSchema.safeParse(value);
-  if (!parsed.success) {
+  const candidates = [payload, ...extractJsonObjects(payload).filter(candidate => candidate !== payload)];
+  let lastError = 'The specialist response is not a single valid JSON task report.';
+  for (const candidate of candidates) {
+    let value: unknown;
+    try {
+      value = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    const parsed = orchestrationAgentReportSchema.safeParse(normalizeReportFieldAliases(value));
+    if (parsed.success) return { report: parsed.data as unknown as Record<string, unknown> };
     const issues = parsed.error.issues.slice(0, 8).map(issue =>
       `${issue.path.join('.') || 'report'} ${issue.message}`
     );
-    return { error: `The specialist report does not match version 1: ${issues.join('; ')}.` };
+    lastError = `The specialist report does not match version 1: ${issues.join('; ')}.`;
   }
-  return { report: parsed.data as unknown as Record<string, unknown> };
+  return { error: lastError };
 }
 
 /**
@@ -485,8 +534,8 @@ export class OrchestrationService {
         throw new Error(`Keep developer guidance under ${MAX_RECOVERY_GUIDANCE_CHARS.toLocaleString()} characters.`);
       }
       if (input.reportCorrection) {
-        if (taskReportCorrectionCount(snapshot, task.id) >= 1) {
-          throw new Error('The one report-format retry has already been used. Review the saved response and choose a new direction.');
+        if (reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) {
+          throw new Error('The two report-only corrections have already been used. Review the saved response and exact field error before starting a new build.');
         }
       } else if (executionAttempts >= MAX_REPAIR_ATTEMPTS_PER_EPISODE ||
           (executionAttempts >= AUTO_REPAIR_ATTEMPT_LIMIT && !developerGuidance)) {
