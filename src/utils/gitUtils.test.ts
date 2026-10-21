@@ -1,10 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { addBranchWorktree, addDetachedWorktree, createBranch, createBranchFrom, getGitChangedPaths, getHeadCommit, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
+import { addBranchWorktree, addDetachedWorktree, createBranch, createBranchFrom, getGitChangedPaths, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
 
 /**
  * Where an agent's branch starts, against real git: a bare "remote" and a
@@ -38,7 +37,9 @@ function repoWithRemote(branches: string[]): { remote: string; clone: string } {
 }
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-gitutils-'));
+  const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+  fs.mkdirSync(tempRoot, { recursive: true });
+  root = fs.mkdtempSync(path.join(tempRoot, 'alpha-gitutils-'));
 });
 
 afterEach(() => {
@@ -140,6 +141,24 @@ describe('the branch an agent starts from', () => {
     const resultCommit = git(repo, 'rev-parse', 'HEAD');
 
     expect(await getGitChangedPaths(repo, baseCommit, resultCommit)).toEqual(['delete.txt', 'keep.txt', 'new.txt']);
+  });
+
+  it('reads scoped review source from the accepted commit after the checkout has moved on', async () => {
+    const repo = path.join(root, 'review-source');
+    fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+    git(repo, 'init', '--initial-branch', 'main');
+    fs.writeFileSync(path.join(repo, 'src', 'app.ts'), 'export const state = "accepted";\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'accepted review source');
+    const acceptedCommit = git(repo, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repo, 'src', 'app.ts'), 'export const state = "later";\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'later source');
+
+    expect(await getGitTrackedPathsAtCommit(repo, acceptedCommit)).toEqual(['src/app.ts']);
+    await expect(getGitFileAtCommit(repo, acceptedCommit, 'src/app.ts', 128))
+      .resolves.toBe('export const state = "accepted";\n');
+    await expect(getGitFileAtCommit(repo, acceptedCommit, 'src/app.ts', 8)).resolves.toBeUndefined();
   });
 
   it('refuses an unsafe branch name before running git', async () => {

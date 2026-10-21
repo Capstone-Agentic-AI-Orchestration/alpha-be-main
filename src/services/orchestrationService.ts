@@ -17,7 +17,7 @@ import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import type { OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
-import { getCurrentBranch, getGitChangedPaths, getGitDiffPatch, getGitTrackedPaths, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { getCurrentBranch, getGitChangedPaths, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
@@ -30,6 +30,7 @@ import {
 import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount } from './orchestrationRecoveryPolicy.js';
 
 const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
+const MAX_REVIEW_SOURCE_CONTEXT_BYTES = 16 * 1024;
 const MAX_REVIEW_SOURCE_FILES = 12;
 const MAX_REVIEW_SOURCE_FILE_BYTES = 16 * 1024;
 const REVIEW_SOURCE_EXTENSIONS = /\.(?:[cm]?[jt]sx?|vue|svelte|html?|css|scss|less|json|md|ya?ml)$/i;
@@ -1513,6 +1514,10 @@ export class OrchestrationService {
           instruction: typeof finding.evidence.instruction === 'string' ? finding.evidence.instruction.slice(0, 450) : 'Recheck the recorded issue.'
         }));
       const diffHash = createHash('sha256').update(diff).digest('hex');
+      const sourceBudget = Math.min(MAX_REVIEW_SOURCE_CONTEXT_BYTES, MAX_REVIEW_CONTEXT_BYTES - totalBytes);
+      const sourceFiles = await this.readReviewSourceContext(
+        worktree, codeTask, attempt, changedPaths, sourceBudget, !diff.trim()
+      );
       results.push({
         taskId: codeTask.id,
         title: codeTask.title,
@@ -1523,13 +1528,13 @@ export class OrchestrationService {
         changedPaths,
         diff,
         diffHash,
-        ...(diff.trim() ? {} : { sourceFiles: await this.readReviewSourceContext(worktree, codeTask, attempt) }),
+        ...(sourceFiles.length ? { sourceFiles } : {}),
         relatedFindings
       });
       for (const file of results.at(-1)?.sourceFiles ?? []) {
         totalBytes += Buffer.byteLength(file.content, 'utf8');
         if (totalBytes > MAX_REVIEW_CONTEXT_BYTES) {
-          throw new Error(`The empty-patch review needs more than ${MAX_REVIEW_CONTEXT_BYTES / 1024} KiB of approved source and test context. Narrow the task scope or request human review.`);
+          throw new Error(`The independent review needs more than ${MAX_REVIEW_CONTEXT_BYTES / 1024} KiB of accepted code and source context. Split the work into smaller tasks or request human review.`);
         }
       }
     }
@@ -1539,14 +1544,19 @@ export class OrchestrationService {
   private async readReviewSourceContext(
     worktree: string,
     task: OrchestrationSnapshot['tasks'][number],
-    acceptedAttempt: OrchestrationSnapshot['attempts'][number]
+    acceptedAttempt: OrchestrationSnapshot['attempts'][number],
+    changedPaths: string[],
+    maxContextBytes: number,
+    required: boolean
   ): Promise<NonNullable<OrchestrationTaskPackage['reviewInputs'][number]['sourceFiles']>> {
     if (!task.scope.includePaths.length) {
-      throw new Error(`Review input missing for ${task.id}: the accepted patch is empty and the task has no approved source paths. Add a concrete source/test path or request human review.`);
+      if (required) throw new Error(`Review input missing for ${task.id}: the accepted patch is empty and the task has no approved source paths. Add a concrete source/test path or request human review.`);
+      return [];
     }
+    if (maxContextBytes <= 0) return [];
     const report = acceptedAttempt.result?.agentReport as { deliverables?: Array<{ paths?: string[] }> } | undefined;
     const reportedPaths = (report?.deliverables ?? []).flatMap(deliverable => deliverable.paths ?? []);
-    const tracked = await getGitTrackedPaths(worktree);
+    const tracked = await getGitTrackedPathsAtCommit(worktree, acceptedAttempt.resultCommit!);
     const included = (filePath: string) => task.scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
       !task.scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
     const candidates = tracked.filter(filePath =>
@@ -1564,36 +1574,30 @@ export class OrchestrationService {
     };
     const ordered = [
       ...acceptedReportedPaths,
-      ...candidates.filter(filePath => !acceptedReportedPaths.includes(filePath))
+      ...changedPaths.filter(filePath => candidates.includes(filePath) && !acceptedReportedPaths.includes(filePath)),
+      ...candidates.filter(filePath => !acceptedReportedPaths.includes(filePath) && !changedPaths.includes(filePath))
         .sort((left, right) => keywordScore(right) - keywordScore(left) || left.localeCompare(right))
     ].slice(0, MAX_REVIEW_SOURCE_FILES);
-    const root = path.resolve(worktree);
     const files: NonNullable<OrchestrationTaskPackage['reviewInputs'][number]['sourceFiles']> = [];
     let contextBytes = 0;
     for (const relativePath of ordered) {
       const segments = relativePath.split('/');
       if (path.isAbsolute(relativePath) || segments.some(segment => !segment || segment === '.' || segment === '..')) continue;
-      const absolutePath = path.resolve(root, ...segments);
-      const relation = path.relative(root, absolutePath);
-      if (!relation || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) continue;
       try {
-        const stat = await fs.promises.lstat(absolutePath);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_REVIEW_SOURCE_FILE_BYTES) continue;
-        const realPath = await fs.promises.realpath(absolutePath);
-        const realRelation = path.relative(root, realPath);
-        if (!realRelation || realRelation.startsWith(`..${path.sep}`) || path.isAbsolute(realRelation)) continue;
-        const content = await fs.promises.readFile(absolutePath, 'utf8');
+        const content = await getGitFileAtCommit(
+          worktree, acceptedAttempt.resultCommit!, relativePath, MAX_REVIEW_SOURCE_FILE_BYTES
+        );
+        if (content === undefined) continue;
         const size = Buffer.byteLength(content, 'utf8');
-        if (size > MAX_REVIEW_SOURCE_FILE_BYTES || content.includes('\u0000')) continue;
-        if (contextBytes + size > MAX_REVIEW_CONTEXT_BYTES) break;
+        if (contextBytes + size > maxContextBytes) break;
         contextBytes += size;
         files.push({ path: relativePath, content, contentHash: createHash('sha256').update(content).digest('hex') });
       } catch {
-        // A file can disappear between Git's listing and the safe read. Omit it;
-        // a review still needs at least one readable scoped file below.
+        // Skip an unreadable object while retaining the immutable patch and
+        // any other scoped source files that were successfully packaged.
       }
     }
-    if (!files.length) {
+    if (required && !files.length) {
       throw new Error(`Review input missing for ${task.id}: the accepted patch is empty and no readable source or test file was found within its approved paths. No reviewer attempt was started.`);
     }
     return files;

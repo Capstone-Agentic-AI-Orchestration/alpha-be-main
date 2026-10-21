@@ -59,12 +59,15 @@ export function classifyRecoveryCategory(input: {
   finalValidation: boolean;
 }): OrchestrationRecoveryCategory {
   const text = input.reason.toLowerCase();
-  if (input.hasReportError) return 'report';
   if (/usage budget|token budget|cost budget|build age limit|elapsed.?time budget/i.test(text)) return 'budget';
   if (input.finalValidation) return 'final_validation';
-  if (input.taskKind === 'review' && /(?:could not|cannot|can't|unable to).{0,80}(?:inspect|read|access)|(?:inspection|read access|repository reads?).{0,80}(?:blocked|denied|unavailable|failed)/i.test(text)) {
+  // A review can first produce an invalid report, then a valid report that
+  // identifies a real input blocker. Older open report findings must not hide
+  // that newer blocker or strand the build in the report-correction path.
+  if (input.taskKind === 'review' && /(?:could not|cannot|can't|unable to).{0,80}(?:inspect|read|access)|(?:inspection|read access|repository reads?|repository access).{0,100}(?:blocked|denied|unavailable|failed|required)/i.test(text)) {
     return 'review_input';
   }
+  if (input.hasReportError) return 'report';
   if (/review (?:package|input|source)|review input|read-only.*(?:unavailable|failed)|no usable source/i.test(text)) return 'review_input';
   if (/\beacces\b|\beperm\b|permission denied|access denied|disk full|\benospc\b|read.only file system/i.test(text)) return 'workspace';
   if (/\benoent\b|missing executable|command not found|runtime.*(?:missing|not found)|persona.*(?:missing|unavailable)/i.test(text)) return 'configuration';

@@ -755,6 +755,7 @@ describe('task acceptance and targeted correction', () => {
     fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
     git(directory, ['init', '-b', 'main', repository]);
     fs.writeFileSync(path.join(repository, 'src', 'tasks.ts'), 'export function createTask() { return null; }\n');
+    fs.writeFileSync(path.join(repository, 'src', 'tasks.test.ts'), 'test("task creation rejects invalid identifiers", () => {});\n');
     const baseCommit = commit(repository, 'Initial task service');
 
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
@@ -839,7 +840,15 @@ describe('task acceptance and targeted correction', () => {
         taskId: 'create-api',
         changedPaths: ['src/tasks.ts'],
         diffHash: expect.stringMatching(/^[a-f0-9]{64}$/),
-        diff: expect.stringContaining('+export function createTask(id: string) { return { id }; }')
+        diff: expect.stringContaining('+export function createTask(id: string) { return { id }; }'),
+        sourceFiles: expect.arrayContaining([
+          expect.objectContaining({
+            path: 'src/tasks.ts',
+            content: 'export function createTask(id: string) { return { id }; }\n',
+            contentHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+          }),
+          expect.objectContaining({ path: 'src/tasks.test.ts', content: expect.stringContaining('rejects invalid identifiers') })
+        ])
       })
     ]));
     const reviewFinding = {
