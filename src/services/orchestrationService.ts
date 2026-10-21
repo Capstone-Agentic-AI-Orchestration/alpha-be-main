@@ -1,23 +1,42 @@
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Agent, PrototypeRun } from '../models/index.js';
 import {
-  orchestrationAgentReportSchema,
+  ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
   MAX_INITIAL_PLAN_TASKS,
   ensureTaskAssignmentReasons,
   parseOrchestrationPlan,
   validateOrchestrationPlan,
+  type OrchestrationRequiredCheck,
   type OrchestrationTaskKind
 } from './orchestrationContract.js';
+import { parseAgentReport } from './orchestrationAgentReport.js';
+export { parseAgentReport } from './orchestrationAgentReport.js';
 import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import type { OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
-import { getGitChangedPaths, getGitDiffPatch } from '../utils/gitUtils.js';
+import { getCurrentBranch, getGitChangedPaths, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { pathMatchesScope } from '../utils/pathScope.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import {
+  ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS,
+  ALPHA_ORCHESTRATION_MAX_COST_USD,
+  ALPHA_ORCHESTRATION_MAX_TOKENS
+} from '../config/env.js';
+import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount } from './orchestrationRecoveryPolicy.js';
 
 const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
+const MAX_REVIEW_SOURCE_CONTEXT_BYTES = 16 * 1024;
+const MAX_REVIEW_SOURCE_FILES = 12;
+const MAX_REVIEW_SOURCE_FILE_BYTES = 16 * 1024;
+const REVIEW_SOURCE_EXTENSIONS = /\.(?:[cm]?[jt]sx?|vue|svelte|html?|css|scss|less|json|md|ya?ml)$/i;
+const SENSITIVE_REVIEW_PATH = /(?:^|\/)(?:\.env(?:\.|$)|secrets?(?:\/|\.|$)|credentials?(?:\/|\.|$)|private[-_]?key|id_rsa|id_ed25519)/i;
+const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', 'frontend', 'mobile']);
+const NON_REPAIRABLE_AGENT_FAILURE = /\b(?:provider|429|rate.?limit|quota|network|connection|timed? ?out|credential|authentication|permission|access denied|eacces|eperm|enoent|eio|worktree|working tree|branch|checkpoint|workspace|runtime|not ready|executable|spawn|disk full|enospc|read.only file system|no such file or directory)\b/i;
 
 export interface OrchestrationLaunchRequest {
   runId: string;
@@ -45,7 +64,8 @@ export interface OrchestrationLaunchRequest {
 }
 
 export interface OrchestrationTaskPackage {
-  packageVersion: 3;
+  packageVersion: 6;
+  reportSchemaVersion: number;
   goal: string;
   projectContext: string;
   exclusions: string[];
@@ -56,15 +76,24 @@ export interface OrchestrationTaskPackage {
     repository: string;
     description: string;
     acceptanceCriteria: string[];
-    requiredChecks: Array<'verify' | 'check' | 'validate' | 'ci' | 'test' | 'typecheck' | 'lint'>;
+    requiredChecks: OrchestrationRequiredCheck[];
     scope: { includePaths: string[]; excludePaths: string[] };
   };
   requirements: Array<{ id: string; description: string }>;
   acceptedDependencies: Array<{
     taskId: string;
+    taskKind: OrchestrationTaskKind;
     ownerAgentId: string;
+    acceptedRevision: number;
     summary: string;
     resultCommit?: string;
+    resultArtifactHash?: string;
+    requirementCoverage: Array<{ requirementId: string; evidence: string }>;
+    deliverables: Array<{ summary: string; paths: string[] }>;
+    verificationStatus: 'passed' | 'failed' | 'skipped' | 'cancelled' | 'not_recorded';
+    missingScripts: string[];
+    observedChecks: Array<{ script: string; result: 'passed' | 'failed' | 'not_run' }>;
+    changedPaths: string[];
   }>;
   reviewInputs: Array<{
     taskId: string;
@@ -76,6 +105,7 @@ export interface OrchestrationTaskPackage {
     changedPaths: string[];
     diff: string;
     diffHash: string;
+    sourceFiles?: Array<{ path: string; content: string; contentHash: string }>;
     relatedFindings: Array<{
       findingId: string;
       title: string;
@@ -87,6 +117,19 @@ export interface OrchestrationTaskPackage {
   }>;
   corrections: string[];
   findingIds: string[];
+  /** Explicit project-owner clarification for one bounded recovery retry. */
+  developerGuidance?: string;
+  /** Bounded, read-only retries used only to repair an invalid task report. */
+  reportCorrection?: {
+    validationErrors: string[];
+    previousResponse: string;
+    /** Original code-attempt base, retained so acceptance/review still inspect that patch. */
+    startingCommit?: string;
+  };
+}
+
+function taskExecutionAttemptCount(snapshot: OrchestrationSnapshot, taskId: string): number {
+  return workAttemptCount(snapshot, taskId);
 }
 
 export interface PreparedOrchestrationTask {
@@ -145,24 +188,6 @@ export class OrchestrationPlanError extends Error {
     super(issues.map(issue => issue.detail).join(' '));
     this.name = 'OrchestrationPlanError';
   }
-}
-
-function parseAgentReport(text: string): { report?: Record<string, unknown>; error?: string } {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  const payload = fenced ? fenced[1] : trimmed;
-  let value: unknown;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    return { error: 'The specialist response is not a single valid JSON task report.' };
-  }
-  const parsed = orchestrationAgentReportSchema.safeParse(value);
-  if (!parsed.success) {
-    const firstIssue = parsed.error.issues[0];
-    return { error: `The specialist report does not match version 1: ${firstIssue?.path.join('.') || 'unknown field'} ${firstIssue?.message ?? 'invalid value'}.` };
-  }
-  return { report: parsed.data as unknown as Record<string, unknown> };
 }
 
 /**
@@ -372,6 +397,7 @@ export class OrchestrationService {
     expectedTaskRevision: number;
     acceptedBy: string;
     evidence: Record<string, unknown>;
+    canonicalReport?: Record<string, unknown>;
     dispatchNext?: boolean;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
@@ -392,6 +418,7 @@ export class OrchestrationService {
     expectedPlanVersion: number;
     acceptedBy: string;
     evidence: Record<string, unknown>;
+    canonicalReport?: Record<string, unknown>;
     amendment: OrchestrationReviewAmendment;
     dispatchNext?: boolean;
     now?: string;
@@ -405,6 +432,7 @@ export class OrchestrationService {
         expectedPlanVersion: input.expectedPlanVersion,
         acceptedBy: input.acceptedBy,
         evidence: input.evidence,
+        canonicalReport: input.canonicalReport,
         plan: input.amendment.plan,
         addedTasks: input.amendment.addedTasks,
         findings: input.amendment.findings,
@@ -421,13 +449,19 @@ export class OrchestrationService {
     runId: string;
     taskId: string;
     expectedTaskRevision: number;
+    expectedRunRevision?: number;
     actorId: string;
     startingCommit?: string;
+    reportCorrection?: { validationErrors: string[]; previousResponse: string; startingCommit?: string };
+    developerGuidance?: string;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
       let snapshot = this.store.getOrchestrationSnapshot(input.runId);
       if (!snapshot) throw new Error('Orchestration run not found.');
+      if (input.expectedRunRevision !== undefined && snapshot.run.revision !== input.expectedRunRevision) {
+        throw new Error('The build changed since this recovery was opened. Refresh before retrying.');
+      }
       if (!['executing', 'blocked'].includes(snapshot.run.status)) {
         throw new Error(snapshot.run.status === 'recovery_required'
           ? 'Review the preserved attempt and use Resume before retrying an interrupted task.'
@@ -436,14 +470,30 @@ export class OrchestrationService {
       const task = snapshot.tasks.find(item => item.id === input.taskId);
       if (!task) throw new Error('Orchestration task not found.');
       if (!['failed', 'blocked'].includes(task.status)) throw new Error('Only a failed or blocked task can be retried.');
-      if (task.attemptCount >= 2) throw new Error('This task reached its two-attempt limit and needs a plan amendment or human decision.');
+      const executionAttempts = taskExecutionAttemptCount(snapshot, task.id);
+      const developerGuidance = input.developerGuidance?.trim();
+      if (developerGuidance && developerGuidance.length > MAX_RECOVERY_GUIDANCE_CHARS) {
+        throw new Error(`Keep developer guidance under ${MAX_RECOVERY_GUIDANCE_CHARS.toLocaleString()} characters.`);
+      }
+      if (input.reportCorrection) {
+        if (reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) {
+          throw new Error('Two automatic report-only corrections and one developer-authorized correction have already been used. Review the saved response and exact field error before starting a new build.');
+        }
+      } else if (executionAttempts >= MAX_REPAIR_ATTEMPTS_PER_EPISODE ||
+          (executionAttempts >= AUTO_REPAIR_ATTEMPT_LIMIT && !developerGuidance)) {
+        throw new Error(executionAttempts >= MAX_REPAIR_ATTEMPTS_PER_EPISODE
+          ? 'This recovery reached its four-work-attempt limit. Review the saved changes before starting a fresh build.'
+          : 'This task reached its automatic retry limit. Provide clear direction to authorize one bounded recovery retry.');
+      }
       snapshot = this.store.transitionOrchestrationTask({
         runId: input.runId,
         taskId: input.taskId,
         expectedRevision: input.expectedTaskRevision,
         nextStatus: 'ready',
         actorId: input.actorId,
-        reason: 'Authorized retry requested.',
+        reason: input.reportCorrection
+          ? 'The same specialist is being asked to fix the report format only. No code changes or checks are requested.'
+          : 'Authorized retry requested.',
         now: input.now
       });
       if (snapshot.run.status === 'blocked') {
@@ -456,30 +506,35 @@ export class OrchestrationService {
           now: input.now
         });
       }
-      return this.dispatchNextUnlocked(snapshot, input.actorId, input.startingCommit, input.now);
+      return this.dispatchNextUnlocked(snapshot, input.actorId, input.startingCommit, input.now, input.reportCorrection, developerGuidance);
     }));
   }
 
   async resume(input: {
     workspaceId: string;
     runId: string;
+    expectedRunRevision?: number;
     actorId?: string;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
       const snapshot = this.store.getOrchestrationSnapshot(input.runId);
       if (!snapshot) throw new Error('Orchestration run not found.');
+      if (input.expectedRunRevision !== undefined && snapshot.run.revision !== input.expectedRunRevision) {
+        throw new Error('The build changed since this recovery was opened. Refresh before resuming.');
+      }
       if (snapshot.run.currentTaskId || !['executing', 'paused', 'blocked', 'recovery_required'].includes(snapshot.run.status)) return snapshot;
       let ready = snapshot;
       if (snapshot.run.status === 'recovery_required') {
+        await this.assertRecoverableCheckpoint(snapshot);
         const interruptedTasks = snapshot.tasks.filter(task => task.status === 'blocked' &&
           snapshot.attempts.some(attempt => attempt.taskId === task.id && attempt.status === 'recovery_required'));
         if (interruptedTasks.length > 1) {
           throw new Error('More than one interrupted task needs reconciliation. Review the workflow before resuming.');
         }
         const interruptedTask = interruptedTasks[0];
-        if (interruptedTask && interruptedTask.attemptCount >= 2) {
-          throw new Error('The interrupted task reached its two-attempt limit. Create a reviewed plan amendment before continuing.');
+        if (interruptedTask && taskExecutionAttemptCount(snapshot, interruptedTask.id) >= MAX_REPAIR_ATTEMPTS_PER_EPISODE) {
+          throw new Error(`The interrupted task reached its ${MAX_REPAIR_ATTEMPTS_PER_EPISODE}-attempt limit. Review the saved changes before starting a fresh build.`);
         }
         if (interruptedTask) {
           const interruptedAttempt = [...ready.attempts].reverse().find(attempt =>
@@ -506,6 +561,56 @@ export class OrchestrationService {
       }
       return this.dispatchNextUnlocked(ready, input.actorId ?? 'orchestrator', undefined, input.now);
     }));
+  }
+
+  private async assertRecoverableCheckpoint(snapshot: OrchestrationSnapshot): Promise<void> {
+    const interruptedTask = snapshot.tasks.find(task => task.status === 'blocked' &&
+      snapshot.attempts.some(attempt => attempt.taskId === task.id && attempt.status === 'recovery_required'));
+    const interruptedAttempt = interruptedTask && [...snapshot.attempts].reverse().find(attempt =>
+      attempt.taskId === interruptedTask.id && attempt.status === 'recovery_required');
+    if (interruptedAttempt) {
+      if (!interruptedAttempt.prototypeRunId) {
+        throw new Error('Alpha cannot confirm whether the interrupted specialist started. Review the saved work and process state before resuming.');
+      }
+      const prototypeRun = this.store.getPrototypeRuns().find(run => run.id === interruptedAttempt.prototypeRunId);
+      if (!prototypeRun || ['queued', 'running', 'validating'].includes(prototypeRun.status)) {
+        throw new Error('The previous specialist may still be active. Alpha will not start another writer until that process is confirmed stopped.');
+      }
+      if (prototypeRun.status === 'completed') {
+        throw new Error('The interrupted specialist has a completed run that still needs result reconciliation. Refresh the build before retrying.');
+      }
+    }
+
+    const workspaces = snapshot.run.repositoryWorkspaces?.length
+      ? snapshot.run.repositoryWorkspaces
+      : snapshot.run.worktreePath && snapshot.run.repository && snapshot.run.branchName && snapshot.run.baseRef && snapshot.run.baseCommit
+        ? [{ repository: snapshot.run.repository, worktreePath: snapshot.run.worktreePath, branchName: snapshot.run.branchName, baseRef: snapshot.run.baseRef, baseCommit: snapshot.run.baseCommit }]
+        : [];
+    if (!workspaces.length) throw new Error('The saved build has no recorded private workspace. Review the saved work before resuming.');
+    for (const workspace of workspaces) {
+      const worktree = path.resolve(workspace.worktreePath);
+      if (!fs.existsSync(worktree) || !(await isGitRepo(worktree))) {
+        throw new Error(`The saved ${workspace.repository} worktree is missing or unreadable. Preserve it and reconcile the checkpoint before resuming.`);
+      }
+      const [branch, head, clean] = await Promise.all([
+        getCurrentBranch(worktree), getHeadCommit(worktree), isGitWorkingTreeClean(worktree)
+      ]);
+      if (branch !== workspace.branchName) {
+        throw new Error(`The saved ${workspace.repository} worktree is on branch ${branch}, but this build owns ${workspace.branchName}. Review the branch before resuming.`);
+      }
+      if (!clean) {
+        throw new Error(`The saved ${workspace.repository} worktree contains uncheckpointed changes. Review or preserve them before resuming.`);
+      }
+      const latestAccepted = [...snapshot.attempts].reverse().find(attempt => {
+        const task = snapshot.tasks.find(item => item.id === attempt.taskId);
+        return attempt.status === 'accepted' && attempt.resultCommit && task &&
+          (task.repository ?? snapshot.run.repository).toLowerCase() === workspace.repository.toLowerCase();
+      });
+      const expectedCommit = latestAccepted?.resultCommit ?? workspace.baseCommit;
+      if (!expectedCommit || head !== expectedCommit) {
+        throw new Error(`The saved ${workspace.repository} HEAD no longer matches its last accepted checkpoint. Preserve the current commit and reconcile it before resuming.`);
+      }
+    }
   }
 
   async pauseScheduling(input: {
@@ -546,6 +651,7 @@ export class OrchestrationService {
   async cancelRun(input: {
     workspaceId: string;
     runId: string;
+    expectedRevision?: number;
     actorId: string;
     reason?: string;
     now?: string;
@@ -553,6 +659,9 @@ export class OrchestrationService {
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
       let snapshot = this.store.getOrchestrationSnapshot(input.runId);
       if (!snapshot) throw new Error('Orchestration run not found.');
+      if (input.expectedRevision !== undefined && snapshot.run.revision !== input.expectedRevision) {
+        throw new Error('The build changed since this recovery was opened. Refresh before cancelling.');
+      }
       if (['completed', 'failed', 'cancelled'].includes(snapshot.run.status)) return snapshot;
       if (snapshot.run.status === 'publishing') {
         throw new Error('This build has been approved and is reconciling its pull request. Wait for publication or retry it; cancellation cannot safely undo a remote change.');
@@ -591,6 +700,69 @@ export class OrchestrationService {
     }));
   }
 
+  async retryFinalValidation(input: {
+    workspaceId: string;
+    runId: string;
+    expectedRunRevision: number;
+    actorId: string;
+    now?: string;
+  }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+      if (!snapshot) throw new Error('Orchestration run not found.');
+      if (snapshot.run.revision !== input.expectedRunRevision) {
+        throw new Error('The build changed since this recovery was opened. Refresh before rechecking.');
+      }
+      if (snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId ||
+          !snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted')) {
+        throw new Error('Final checks can only be rechecked after all required tasks are accepted and the build is stopped at final validation.');
+      }
+      const validationEvent = this.store.listOrchestrationEvents(input.runId, 0, 500).slice().reverse()
+        .find(event => ['run_blocked', 'run_recovery_required'].includes(event.type) &&
+          event.payload.evidence && typeof event.payload.evidence === 'object' &&
+          (event.payload.evidence as Record<string, unknown>).validationVersion === 1);
+      if (!validationEvent) throw new Error('Alpha could not confirm that this blocker came from final validation. Review the saved changes before continuing.');
+      const savedEvidence = validationEvent.payload.evidence as Record<string, unknown>;
+      if (['workspace_checkpoint', 'final_scope', 'workspace_missing'].includes(String(savedEvidence.check ?? ''))) {
+        throw new Error('This blocker needs workspace or scope reconciliation before final checks can be repeated. Review the saved branch and changed files first.');
+      }
+      return this.store.transitionOrchestrationRun({
+        runId: input.runId,
+        expectedRevision: snapshot.run.revision,
+        nextStatus: 'validating',
+        actorId: input.actorId,
+        clearStoppedReason: true,
+        reason: 'The developer requested a fresh run of the saved final checks.',
+        now: input.now
+      });
+    }));
+  }
+
+  async amendFinalValidation(input: {
+    workspaceId: string;
+    runId: string;
+    expectedRunRevision: number;
+    actorId: string;
+    amendment: OrchestrationReviewAmendment;
+    evidence: Record<string, unknown>;
+    now?: string;
+  }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const snapshot = this.store.appendOrchestrationFinalValidationAmendment({
+        runId: input.runId,
+        expectedRunRevision: input.expectedRunRevision,
+        expectedPlanVersion: this.store.getOrchestrationSnapshot(input.runId)?.run.planVersion ?? -1,
+        actorId: input.actorId,
+        evidence: input.evidence,
+        plan: input.amendment.plan,
+        addedTasks: input.amendment.addedTasks,
+        findings: input.amendment.findings,
+        now: input.now
+      });
+      return this.dispatchNextUnlocked(snapshot, input.actorId, undefined, input.now);
+    }));
+  }
+
   async handleRunnerCompleted(run: PrototypeRun): Promise<OrchestrationSnapshot | undefined> {
     if (run.status !== 'completed' || !run.workspaceId || !run.orchestrationRunId || !run.orchestrationTaskId || !run.orchestrationAttemptId) return undefined;
     return runWithWorkspace(run.workspaceId, () => this.serialize(run.workspaceId!, run.orchestrationRunId!, async () => {
@@ -618,8 +790,13 @@ export class OrchestrationService {
         .find(activity => activity.kind === 'assistant' && !activity.isStreaming)?.message
         ?? [...(run.activities ?? [])].reverse().find(activity => activity.kind === 'summary')?.message
         ?? 'The runner completed without a structured specialist summary.';
-      const agentReport = parseAgentReport(rawSummary);
-      const agentSummary = typeof agentReport.report?.summary === 'string' ? agentReport.report.summary : rawSummary;
+      const expectedReportSchemaVersion = typeof attempt.contextManifest.reportSchemaVersion === 'number'
+        ? attempt.contextManifest.reportSchemaVersion
+        : undefined;
+      const agentReport = parseAgentReport(rawSummary, expectedReportSchemaVersion);
+      const agentSummary = typeof agentReport.report?.summary === 'string'
+        ? agentReport.report.summary
+        : 'The specialist response did not match Alpha’s required task-report format.';
       const verificationStage = run.stages.find(stage => stage.id === 'tests');
       return this.store.submitOrchestrationAttempt({
         runId: snapshot.run.id,
@@ -635,6 +812,12 @@ export class OrchestrationService {
           branchName: run.branchName,
           agentReport: agentReport.report ?? null,
           agentReportError: agentReport.error,
+          agentReportSchemaVersionExpected: expectedReportSchemaVersion ?? ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
+          agentReportSchemaVersionReceived: agentReport.schemaVersion,
+          // Keep bounded raw output next to the canonical report so every
+          // normalisation and correction remains auditable after restart.
+          agentReportResponse: rawSummary.slice(0, 12_000),
+          agentReportResponseTruncated: rawSummary.length > 12_000,
           changedFiles: run.changedFiles ?? 0,
           insertions: run.insertions ?? 0,
           deletions: run.deletions ?? 0,
@@ -668,13 +851,16 @@ export class OrchestrationService {
       const failedStage = run.stages.find(stage => stage.status === 'failed');
       const isVerificationFailure = failedStage?.id === 'tests'
         && (run.verificationEvidence?.status === 'failed' || /verification failed|could not prepare .*dependencies/i.test(run.testSummary ?? ''));
+      const isRepairableImplementationFailure = failedStage?.id === 'implementation' && CODE_TASK_KINDS.has(task.kind) &&
+        !NON_REPAIRABLE_AGENT_FAILURE.test(failedStage.logs.slice(-30).join('\n'));
       const verificationOutput = failedStage?.logs.slice(-30).join('\n').slice(-4_000);
       const reason = isVerificationFailure
         ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
-        : failedStage?.logs.slice(-3).join('\n').slice(0, 2_000)
+        : failedStage?.logs.slice(-30).join('\n').slice(-4_000)
           || run.testSummary
           || 'The specialist runner failed before submitting a result.';
-      return this.failActiveAttempt(snapshot, task.id, attempt.id, reason, isVerificationFailure);
+      return this.failActiveAttempt(snapshot, task.id, attempt.id, reason,
+        (isVerificationFailure || isRepairableImplementationFailure) && CODE_TASK_KINDS.has(task.kind));
     }));
   }
 
@@ -711,9 +897,12 @@ export class OrchestrationService {
     taskId: string,
     attemptId: string,
     reason: string,
-    autoRepairVerification = false
+    autoRepairableFailure = false
   ): Promise<OrchestrationSnapshot> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
+    const reportOnlyAttempt = snapshot.attempts.some(attempt => attempt.id === attemptId &&
+      attempt.contextManifest.reportOnlyReportRetry === true);
+    const shouldAutoRepairFailure = autoRepairableFailure && !reportOnlyAttempt;
     const pauseWasRequested = Boolean(snapshot.run.pauseRequestedAt);
     const failed = this.store.failOrchestrationAttempt({
       runId: snapshot.run.id,
@@ -725,24 +914,31 @@ export class OrchestrationService {
     });
     if (failed.run.status !== 'executing') return failed;
     const issue = reason.split(/\r?\n/, 1)[0].slice(0, 400);
+    const attemptsUsed = taskExecutionAttemptCount(failed, taskId);
+    const repeatedFailure = shouldAutoRepairFailure && hasRepeatedRecoveryFailure(failed, taskId, 'project_code', reason);
+    const canAutomaticallyRepair = shouldAutoRepairFailure && !pauseWasRequested &&
+      attemptsUsed < AUTO_REPAIR_ATTEMPT_LIMIT && !repeatedFailure;
     const repairAction = pauseWasRequested
       ? `The current specialist failed while a pause was pending. The work is preserved for review; inspect the failed checks before retrying.`
-      : autoRepairVerification
-      ? task.attemptCount >= 2
-        ? `The Orchestrator reviewed the checks, but they still fail after ${task.attemptCount} attempts. ${task.ownerAgentId} made the repair attempt. Review the latest failure details for the reported problem, then retry or provide a new direction.`
-        : `The Orchestrator reviewed the failed checks (${issue}) and assigned ${task.ownerAgentId} to make a focused repair. It will run the checks again after the repair.`
-      : 'Specialist execution failed; review the preserved result before retrying.';
+      : repeatedFailure
+        ? `The same failure remained after a focused repair. Alpha stopped automatic retries early and saved the latest result. Provide direction before another bounded attempt.`
+      : shouldAutoRepairFailure
+      ? attemptsUsed >= AUTO_REPAIR_ATTEMPT_LIMIT
+        ? `The Orchestrator reviewed the failure, but it remains after ${attemptsUsed} execution attempts. The two automatic repair attempts are used. Review the latest failure details, then provide a new direction or start a fresh build.`
+        : `The Orchestrator reviewed the reported failure (${issue}) and assigned ${task.ownerAgentId} to make a focused repair. It will check the new result before handing work to another specialist.`
+      : 'Specialist execution failed; Alpha preserved the work and error details for the developer to review in project chat.';
     const blocked = this.store.transitionOrchestrationRun({
       runId: failed.run.id,
       expectedRevision: failed.run.revision,
       nextStatus: 'blocked',
       actorId: 'orchestrator',
       reason: repairAction,
-      clearPauseRequest: pauseWasRequested
+      clearPauseRequest: pauseWasRequested,
+      evidence: repeatedFailure ? { recoveryVersion: 1, repeatedFailure: true, taskId } : undefined
     });
     if (pauseWasRequested) return blocked;
-    const failedTask = blocked.tasks.find(task => task.id === taskId);
-    if (!autoRepairVerification || !failedTask || failedTask.attemptCount >= 2) return blocked;
+    const failedTask = blocked.tasks.find(candidate => candidate.id === taskId);
+    if (!canAutomaticallyRepair || !failedTask) return blocked;
 
     return this.retryFailedTaskUnlocked(blocked, failedTask, reason);
   }
@@ -752,7 +948,8 @@ export class OrchestrationService {
     task: OrchestrationSnapshot['tasks'][number],
     failureReason: string
   ): Promise<OrchestrationSnapshot> {
-    if (!['executing', 'blocked'].includes(snapshot.run.status) || !['failed', 'blocked'].includes(task.status) || task.attemptCount >= 2) {
+    if (!['executing', 'blocked'].includes(snapshot.run.status) || !['failed', 'blocked'].includes(task.status) ||
+        taskExecutionAttemptCount(snapshot, task.id) >= AUTO_REPAIR_ATTEMPT_LIMIT) {
       return snapshot;
     }
     let next = this.store.transitionOrchestrationTask({
@@ -779,7 +976,9 @@ export class OrchestrationService {
     snapshot: OrchestrationSnapshot,
     actorId: string,
     startingCommit?: string,
-    now?: string
+    now?: string,
+    reportCorrection?: { validationErrors: string[]; previousResponse: string; startingCommit?: string },
+    developerGuidance?: string
   ): Promise<OrchestrationSnapshot> {
     if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId) return snapshot;
     if (snapshot.run.pauseRequestedAt) {
@@ -796,15 +995,34 @@ export class OrchestrationService {
     const next = selectNextReadyTask(snapshot.run.plan, snapshot.tasks);
     if (!next) return this.closeSchedulingWindow(snapshot, actorId, now);
 
+    const budgetStop = this.recoveryBudgetStop(snapshot);
+    if (budgetStop) {
+      return this.store.transitionOrchestrationRun({
+        runId: snapshot.run.id,
+        expectedRevision: snapshot.run.revision,
+        nextStatus: 'blocked',
+        actorId,
+        reason: budgetStop.reason,
+        evidence: { recoveryBudgetVersion: 1, ...budgetStop.evidence },
+        now
+      });
+    }
+
     const attemptId = `attempt-${randomUUID()}`;
-    const contextManifest = this.createFixtureManifest(snapshot, next.id);
+    const contextManifest = {
+      ...this.createFixtureManifest(snapshot, next.id),
+      ...(reportCorrection ? {
+        reportOnlyReportRetry: true,
+        ...(reportCorrection.startingCommit ? { reportOnlyBaselineCommit: reportCorrection.startingCommit } : {})
+      } : {})
+    };
     let baseRequest: OrchestrationLaunchRequest;
     let prepared: PreparedOrchestrationTask = {};
     try {
       const taskRepository = next.repository ?? snapshot.run.repository;
       const taskWorkspace = repositoryWorkspaceForTask(snapshot, next.id) ?? legacySingleRepositoryWorkspace(snapshot.run, taskRepository);
       if (!taskWorkspace) throw new Error(`The repository assigned to task ${next.id} is not part of this build.`);
-      const taskPackage = await this.createTaskPackage(snapshot, next.id);
+      const taskPackage = await this.createTaskPackage(snapshot, next.id, reportCorrection, developerGuidance);
       baseRequest = {
         runId: snapshot.run.id,
         workspaceId: snapshot.run.workspaceId,
@@ -826,7 +1044,41 @@ export class OrchestrationService {
         taskPackage,
         contextManifest
       };
-      prepared = await this.executor.prepare?.(baseRequest) ?? {};
+      try {
+        prepared = await this.executor.prepare?.(baseRequest) ?? {};
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'The task workspace or persona could not be prepared.';
+        const started = this.store.startOrchestrationAttempt({
+          runId: snapshot.run.id,
+          taskId: next.id,
+          expectedTaskRevision: next.revision,
+          attemptId,
+          startingCommit: baseRequest.baseCommit,
+          contextManifest: { ...contextManifest, orchestrationPreparationFailed: true },
+          actorId,
+          now
+        });
+        const failedTask = started.tasks.find(item => item.id === next.id);
+        if (!failedTask) throw new Error('The failed preparation attempt could not be read after it was persisted.');
+        const failed = this.store.failOrchestrationAttempt({
+          runId: started.run.id,
+          taskId: next.id,
+          attemptId,
+          expectedTaskRevision: failedTask.revision,
+          reason,
+          actorId: 'orchestrator'
+        });
+        return failed.run.status === 'executing'
+          ? this.store.transitionOrchestrationRun({
+              runId: failed.run.id,
+              expectedRevision: failed.run.revision,
+              nextStatus: 'blocked',
+              actorId,
+              reason: `The task could not be prepared for its specialist: ${reason}`,
+              now
+            })
+          : failed;
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'The task workspace or persona could not be prepared.';
       let blocked = this.store.transitionOrchestrationTask({
@@ -852,7 +1104,9 @@ export class OrchestrationService {
     }
     const finalContextManifest = {
       ...contextManifest,
-      ...(prepared.contextManifest ?? {})
+      ...(prepared.contextManifest ?? {}),
+      packageVersion: baseRequest.taskPackage.packageVersion,
+      reportSchemaVersion: baseRequest.taskPackage.reportSchemaVersion
     };
     if (prepared.branchName && prepared.workingDir && prepared.baseRef && prepared.startingCommit) {
       this.store.bindOrchestrationWorkspace({
@@ -910,12 +1164,13 @@ export class OrchestrationService {
         const active = current?.attempts.find(item => item.id === attemptId);
         if (!current) throw new Error('Orchestration run disappeared while its task launch was being reconciled.');
         if (!currentTask || !active || !['starting', 'running'].includes(active.status)) return current;
+        const launchError = error instanceof Error ? error.message : 'The executor failed to start the task.';
         const failed = this.store.failOrchestrationAttempt({
           runId: started.run.id,
           taskId: next.id,
           attemptId,
           expectedTaskRevision: currentTask.revision,
-          reason: error instanceof Error ? error.message : 'The executor failed to start the task.',
+          reason: launchError,
           actorId
         });
         if (failed.run.status === 'executing') {
@@ -924,12 +1179,69 @@ export class OrchestrationService {
             expectedRevision: failed.run.revision,
             nextStatus: 'blocked',
             actorId,
-            reason: 'Specialist launch failed; retry or adjust the plan.',
+            reason: `Specialist launch failed before the task could run: ${launchError}`,
           });
         }
         return failed;
       });
     }
+  }
+
+  private recoveryBudgetStop(snapshot: OrchestrationSnapshot): { reason: string; evidence: Record<string, unknown> } | undefined {
+    if (ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS > 0) {
+      const createdAt = Date.parse(snapshot.run.createdAt);
+      if (!Number.isFinite(createdAt)) {
+        return {
+          reason: 'Alpha could not verify the build age limit because its start time is missing. Review the saved build before continuing.',
+          evidence: { budgetType: 'elapsed_time', measuredMs: null, limitMs: ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS }
+        };
+      }
+      const elapsedMs = Math.max(0, Date.now() - createdAt);
+      if (elapsedMs >= ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS) {
+        return {
+          reason: `The build reached its configured elapsed-time budget (${Math.round(elapsedMs / 60_000)} of ${Math.round(ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS / 60_000)} minutes). Saved work is preserved; increase the limit or review the build before continuing.`,
+          evidence: { budgetType: 'elapsed_time', measuredMs: elapsedMs, limitMs: ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS }
+        };
+      }
+    }
+
+    const prototypeRunIds = [...new Set(snapshot.attempts.flatMap(attempt => attempt.prototypeRunId ? [attempt.prototypeRunId] : []))];
+    const prototypeRuns = new Map(this.store.getPrototypeRuns()
+      .filter(run => prototypeRunIds.includes(run.id)).map(run => [run.id, run]));
+    const usageRuns = prototypeRunIds.map(id => prototypeRuns.get(id));
+    if (ALPHA_ORCHESTRATION_MAX_TOKENS > 0) {
+      const missing = usageRuns.filter(run => !run?.usage || typeof run.usage.inputTokens !== 'number' || typeof run.usage.outputTokens !== 'number').length;
+      const measuredTokens = usageRuns.reduce((total, run) => total + (run?.usage?.inputTokens ?? 0) + (run?.usage?.outputTokens ?? 0), 0);
+      if (missing) {
+        return {
+          reason: `Alpha cannot verify the configured token budget because ${missing} agent run${missing === 1 ? ' has' : 's have'} incomplete usage data. Review the saved build or use a provider that reports both input and output tokens before continuing.`,
+          evidence: { budgetType: 'tokens', measuredTokens, limitTokens: ALPHA_ORCHESTRATION_MAX_TOKENS, runsMissingUsage: missing }
+        };
+      }
+      if (measuredTokens >= ALPHA_ORCHESTRATION_MAX_TOKENS) {
+        return {
+          reason: `The build reached its configured token budget (${measuredTokens.toLocaleString()} of ${ALPHA_ORCHESTRATION_MAX_TOKENS.toLocaleString()} tokens). Saved work is preserved; increase the limit or review the build before continuing.`,
+          evidence: { budgetType: 'tokens', measuredTokens, limitTokens: ALPHA_ORCHESTRATION_MAX_TOKENS }
+        };
+      }
+    }
+    if (ALPHA_ORCHESTRATION_MAX_COST_USD > 0) {
+      const missing = usageRuns.filter(run => typeof run?.usage?.costUsd !== 'number').length;
+      const measuredCostUsd = usageRuns.reduce((total, run) => total + (run?.usage?.costUsd ?? 0), 0);
+      if (missing) {
+        return {
+          reason: `Alpha cannot verify the configured cost budget because ${missing} agent run${missing === 1 ? ' has' : 's have'} no reported cost. Review the saved build or use a provider that reports cost before continuing.`,
+          evidence: { budgetType: 'cost', measuredCostUsd, limitCostUsd: ALPHA_ORCHESTRATION_MAX_COST_USD, runsMissingCost: missing }
+        };
+      }
+      if (measuredCostUsd >= ALPHA_ORCHESTRATION_MAX_COST_USD) {
+        return {
+          reason: `The build reached its configured cost budget ($${measuredCostUsd.toFixed(2)} of $${ALPHA_ORCHESTRATION_MAX_COST_USD.toFixed(2)}). Saved work is preserved; increase the limit or review the build before continuing.`,
+          evidence: { budgetType: 'cost', measuredCostUsd, limitCostUsd: ALPHA_ORCHESTRATION_MAX_COST_USD }
+        };
+      }
+    }
+    return undefined;
   }
 
   private closeSchedulingWindow(snapshot: OrchestrationSnapshot, actorId: string, now?: string): OrchestrationSnapshot {
@@ -973,6 +1285,7 @@ export class OrchestrationService {
       .map(item => ({ taskId: item.id, revision: item.acceptedRevision ?? item.revision }));
     return {
       manifestVersion: 1,
+      reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       runId: snapshot.run.id,
       planVersion: snapshot.run.planVersion,
       taskId,
@@ -982,7 +1295,12 @@ export class OrchestrationService {
     };
   }
 
-  private async createTaskPackage(snapshot: OrchestrationSnapshot, taskId: string): Promise<OrchestrationTaskPackage> {
+  private async createTaskPackage(
+    snapshot: OrchestrationSnapshot,
+    taskId: string,
+    reportCorrection?: { validationErrors: string[]; previousResponse: string; startingCommit?: string },
+    developerGuidance?: string
+  ): Promise<OrchestrationTaskPackage> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
     const requirementIds = new Set(task.requirementIds);
     const acceptedDependencies = snapshot.tasks
@@ -993,18 +1311,87 @@ export class OrchestrationService {
           .find(attempt => attempt.taskId === item.id && attempt.status === 'accepted');
         const result = acceptedAttempt?.result ?? {};
         const summary = typeof result.summary === 'string' ? result.summary.slice(0, 2_000) : 'Accepted; no summary was submitted.';
+        const report = result.agentReport && typeof result.agentReport === 'object'
+          ? result.agentReport as Record<string, unknown>
+          : {};
+        const acceptanceEvidence = result.acceptanceEvidence && typeof result.acceptanceEvidence === 'object'
+          ? result.acceptanceEvidence as Record<string, unknown>
+          : {};
+        const verification = result.verification && typeof result.verification === 'object'
+          ? result.verification as Record<string, unknown>
+          : {};
+        const observed = verification.observed && typeof verification.observed === 'object'
+          ? verification.observed as Record<string, unknown>
+          : {};
+        const commands = Array.isArray(observed.commands)
+          ? observed.commands as Array<Record<string, unknown>>
+          : [];
+        const verificationStatus: OrchestrationTaskPackage['acceptedDependencies'][number]['verificationStatus'] =
+          ['passed', 'failed', 'skipped', 'cancelled'].includes(String(observed.status))
+          ? observed.status as 'passed' | 'failed' | 'skipped' | 'cancelled'
+          : 'not_recorded';
+        const missingScripts = Array.isArray(observed.missingScripts)
+          ? observed.missingScripts.filter((script): script is string => typeof script === 'string').slice(0, 20)
+          : [];
+        const coverage = Array.isArray(report.requirementCoverage)
+          ? report.requirementCoverage as Array<Record<string, unknown>>
+          : [];
+        const deliverables = Array.isArray(report.deliverables)
+          ? report.deliverables as Array<Record<string, unknown>>
+          : [];
+        const artifact = acceptedAttempt && snapshot.artifacts.find(candidate =>
+          candidate.attemptId === acceptedAttempt.id && candidate.type === 'task_result'
+        );
         return {
           taskId: item.id,
+          taskKind: item.kind,
           ownerAgentId: item.ownerAgentId,
+          acceptedRevision: item.acceptedRevision ?? item.revision,
           summary,
-          resultCommit: acceptedAttempt?.resultCommit
+          resultCommit: acceptedAttempt?.resultCommit,
+          resultArtifactHash: artifact?.contentHash,
+          requirementCoverage: coverage.slice(0, 12).flatMap(item =>
+            typeof item.requirementId === 'string' && typeof item.evidence === 'string'
+              ? [{ requirementId: item.requirementId.slice(0, 80), evidence: item.evidence.slice(0, 500) }]
+              : []
+          ),
+          deliverables: deliverables.slice(0, 20).flatMap(item =>
+            typeof item.summary === 'string'
+              ? [{
+                  summary: item.summary.slice(0, 500),
+                  paths: Array.isArray(item.paths)
+                    ? item.paths.filter((filePath): filePath is string => typeof filePath === 'string').slice(0, 60)
+                    : []
+                }]
+              : []
+          ),
+          verificationStatus,
+          missingScripts,
+          observedChecks: commands.slice(0, 20).map(command => {
+            const commandInfo = command.command && typeof command.command === 'object'
+              ? command.command as Record<string, unknown>
+              : {};
+            const script = command.script ?? commandInfo.script ?? command.display ?? commandInfo.display;
+            const exitCode = command.exitCode;
+            const signal = command.signal;
+            return {
+              script: typeof script === 'string' ? script.slice(0, 180) : 'Registered check',
+              result: exitCode === 0 && (signal === null || signal === undefined)
+                ? 'passed' as const
+                : exitCode === null || exitCode === undefined ? 'not_run' as const : 'failed' as const
+            };
+          }),
+          changedPaths: Array.isArray(acceptanceEvidence.changedPaths)
+            ? acceptanceEvidence.changedPaths.filter((filePath): filePath is string => typeof filePath === 'string').slice(0, 60)
+            : []
         };
       });
-    const reviewInputs = task.kind === 'review'
+    const reviewInputs = task.kind === 'review' && !reportCorrection
       ? await this.createReviewInputs(snapshot, task)
       : [];
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 3,
+      packageVersion: 6,
+      reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       goal: snapshot.run.plan.goal,
       projectContext: snapshot.run.plan.projectContext ?? '',
       exclusions: snapshot.run.plan.exclusions,
@@ -1019,9 +1406,9 @@ export class OrchestrationService {
         scope: task.scope
       },
       requirements: snapshot.run.plan.requirements.filter(requirement => requirementIds.has(requirement.id)),
-      acceptedDependencies,
+      acceptedDependencies: reportCorrection ? [] : acceptedDependencies,
       reviewInputs,
-      corrections: snapshot.findings
+      corrections: reportCorrection ? [] : snapshot.findings
         .filter(finding => finding.correctionTaskId === taskId && finding.status === 'open')
         .map(finding => {
           const evidence = finding.evidence;
@@ -1029,18 +1416,33 @@ export class OrchestrationService {
             : typeof evidence.message === 'string' ? evidence.message
               : typeof evidence.reason === 'string' ? evidence.reason
                 : 'Resolve the recorded acceptance finding and provide evidence.';
-          return `[finding:${finding.id}] ${instruction.slice(0, 2_000)}`;
+          const title = typeof evidence.title === 'string' ? evidence.title.slice(0, 240) : undefined;
+          const detail = typeof evidence.evidence === 'string' ? evidence.evidence
+            : typeof evidence.detail === 'string' ? evidence.detail
+              : typeof evidence.reason === 'string' ? evidence.reason : undefined;
+          const location = finding.path ? `Path: ${finding.path}. ` : '';
+          const failure = detail ? `Evidence: ${detail.slice(0, 1_000)} ` : '';
+          return `[finding:${finding.id}] ${title ? `${title}. ` : ''}${location}${failure}Requested: ${instruction.slice(0, 2_000)}`;
         }),
-      findingIds: snapshot.findings
+      findingIds: reportCorrection ? [] : snapshot.findings
         .filter(finding => finding.correctionTaskId === taskId && finding.status === 'open')
         .map(finding => finding.id)
     };
+    if (!reportCorrection && developerGuidance?.trim()) {
+      taskPackage.developerGuidance = developerGuidance.trim().slice(0, MAX_RECOVERY_GUIDANCE_CHARS);
+    }
+    if (reportCorrection) {
+      taskPackage.reportCorrection = {
+        validationErrors: reportCorrection.validationErrors.slice(0, 8).map(error => error.slice(0, 500)),
+        previousResponse: reportCorrection.previousResponse.slice(0, 12_000)
+      };
+    }
     const priorFailure = [...snapshot.attempts].reverse().find(attempt =>
       attempt.taskId === taskId && attempt.status === 'failed' && attempt.failureReason
     );
-    if (priorFailure?.failureReason) {
+    if (!reportCorrection && priorFailure?.failureReason) {
       taskPackage.corrections.push(
-        `[orchestrator-repair] Review the previous verification failure and correct its cause before resubmitting. Evidence: ${priorFailure.failureReason.slice(0, 4_000)}`
+        `[orchestrator-repair] Review the previous specialist failure and correct its cause before resubmitting. Evidence: ${safeRecoveryGuidance(priorFailure.failureReason).slice(0, 4_000)}`
       );
     }
     if (task.kind === 'review' && Buffer.byteLength(JSON.stringify(taskPackage), 'utf8') > MAX_REVIEW_CONTEXT_BYTES) {
@@ -1084,12 +1486,18 @@ export class OrchestrationService {
       if (!repositoryWorkspace) throw new Error(`The accepted code task ${codeTask.id} has no authorized repository workspace. Preserve the build and use human review.`);
       const worktree = repositoryWorkspace.worktreePath;
       const attempt = [...snapshot.attempts].reverse().find(item => item.taskId === codeTask.id && item.status === 'accepted');
-      if (!attempt?.startingCommit || !attempt.resultCommit) {
+      const acceptanceEvidence = attempt?.result?.acceptanceEvidence && typeof attempt.result.acceptanceEvidence === 'object'
+        ? attempt.result.acceptanceEvidence as Record<string, unknown>
+        : undefined;
+      const diffStartingCommit = typeof acceptanceEvidence?.diffStartingCommit === 'string'
+        ? acceptanceEvidence.diffStartingCommit
+        : attempt?.startingCommit;
+      if (!diffStartingCommit || !attempt?.resultCommit) {
         throw new Error(`Accepted task ${codeTask.id} is missing its immutable diff commits. Preserve the build and use human review.`);
       }
       const [diff, changedPaths] = await Promise.all([
-        getGitDiffPatch(worktree, attempt.startingCommit, attempt.resultCommit),
-        getGitChangedPaths(worktree, attempt.startingCommit, attempt.resultCommit)
+        getGitDiffPatch(worktree, diffStartingCommit, attempt.resultCommit),
+        getGitChangedPaths(worktree, diffStartingCommit, attempt.resultCommit)
       ]);
       totalBytes += Buffer.byteLength(diff, 'utf8');
       if (totalBytes > MAX_REVIEW_CONTEXT_BYTES) {
@@ -1106,20 +1514,93 @@ export class OrchestrationService {
           instruction: typeof finding.evidence.instruction === 'string' ? finding.evidence.instruction.slice(0, 450) : 'Recheck the recorded issue.'
         }));
       const diffHash = createHash('sha256').update(diff).digest('hex');
+      const sourceBudget = Math.min(MAX_REVIEW_SOURCE_CONTEXT_BYTES, MAX_REVIEW_CONTEXT_BYTES - totalBytes);
+      const sourceFiles = await this.readReviewSourceContext(
+        worktree, codeTask, attempt, changedPaths, sourceBudget, !diff.trim()
+      );
       results.push({
         taskId: codeTask.id,
         title: codeTask.title,
         repository: repositoryWorkspace.repository,
         ownerAgentId: codeTask.ownerAgentId,
-        startingCommit: attempt.startingCommit,
+        startingCommit: diffStartingCommit,
         resultCommit: attempt.resultCommit,
         changedPaths,
         diff,
         diffHash,
+        ...(sourceFiles.length ? { sourceFiles } : {}),
         relatedFindings
       });
+      for (const file of results.at(-1)?.sourceFiles ?? []) {
+        totalBytes += Buffer.byteLength(file.content, 'utf8');
+        if (totalBytes > MAX_REVIEW_CONTEXT_BYTES) {
+          throw new Error(`The independent review needs more than ${MAX_REVIEW_CONTEXT_BYTES / 1024} KiB of accepted code and source context. Split the work into smaller tasks or request human review.`);
+        }
+      }
     }
     return results;
+  }
+
+  private async readReviewSourceContext(
+    worktree: string,
+    task: OrchestrationSnapshot['tasks'][number],
+    acceptedAttempt: OrchestrationSnapshot['attempts'][number],
+    changedPaths: string[],
+    maxContextBytes: number,
+    required: boolean
+  ): Promise<NonNullable<OrchestrationTaskPackage['reviewInputs'][number]['sourceFiles']>> {
+    if (!task.scope.includePaths.length) {
+      if (required) throw new Error(`Review input missing for ${task.id}: the accepted patch is empty and the task has no approved source paths. Add a concrete source/test path or request human review.`);
+      return [];
+    }
+    if (maxContextBytes <= 0) return [];
+    const report = acceptedAttempt.result?.agentReport as { deliverables?: Array<{ paths?: string[] }> } | undefined;
+    const reportedPaths = (report?.deliverables ?? []).flatMap(deliverable => deliverable.paths ?? []);
+    const tracked = await getGitTrackedPathsAtCommit(worktree, acceptedAttempt.resultCommit!);
+    const included = (filePath: string) => task.scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
+      !task.scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
+    const candidates = tracked.filter(filePath =>
+      included(filePath) && REVIEW_SOURCE_EXTENSIONS.test(filePath) && !SENSITIVE_REVIEW_PATH.test(filePath)
+    );
+    const acceptedReportedPaths = [...new Set(reportedPaths)].filter(filePath => candidates.includes(filePath));
+    const words = `${task.title} ${task.description} ${task.acceptanceCriteria.join(' ')}`
+      .toLowerCase().match(/[a-z0-9_]{4,}/g) ?? [];
+    const keywords = [...new Set(words.filter(word => !new Set([
+      'with', 'from', 'that', 'this', 'should', 'must', 'when', 'then', 'including', 'provide', 'support', 'complete', 'changes'
+    ]).has(word)))];
+    const keywordScore = (filePath: string) => {
+      const normalized = filePath.toLowerCase();
+      return keywords.reduce((score, word) => score + (normalized.includes(word) ? 1 : 0), 0);
+    };
+    const ordered = [
+      ...acceptedReportedPaths,
+      ...changedPaths.filter(filePath => candidates.includes(filePath) && !acceptedReportedPaths.includes(filePath)),
+      ...candidates.filter(filePath => !acceptedReportedPaths.includes(filePath) && !changedPaths.includes(filePath))
+        .sort((left, right) => keywordScore(right) - keywordScore(left) || left.localeCompare(right))
+    ].slice(0, MAX_REVIEW_SOURCE_FILES);
+    const files: NonNullable<OrchestrationTaskPackage['reviewInputs'][number]['sourceFiles']> = [];
+    let contextBytes = 0;
+    for (const relativePath of ordered) {
+      const segments = relativePath.split('/');
+      if (path.isAbsolute(relativePath) || segments.some(segment => !segment || segment === '.' || segment === '..')) continue;
+      try {
+        const content = await getGitFileAtCommit(
+          worktree, acceptedAttempt.resultCommit!, relativePath, MAX_REVIEW_SOURCE_FILE_BYTES
+        );
+        if (content === undefined) continue;
+        const size = Buffer.byteLength(content, 'utf8');
+        if (contextBytes + size > maxContextBytes) break;
+        contextBytes += size;
+        files.push({ path: relativePath, content, contentHash: createHash('sha256').update(content).digest('hex') });
+      } catch {
+        // Skip an unreadable object while retaining the immutable patch and
+        // any other scoped source files that were successfully packaged.
+      }
+    }
+    if (required && !files.length) {
+      throw new Error(`Review input missing for ${task.id}: the accepted patch is empty and no readable source or test file was found within its approved paths. No reviewer attempt was started.`);
+    }
+    return files;
   }
 
   private serialize<T>(workspaceId: string, runId: string, action: () => Promise<T>): Promise<T> {

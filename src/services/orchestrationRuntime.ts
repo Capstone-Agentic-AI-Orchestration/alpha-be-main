@@ -7,6 +7,7 @@ import { startOrchestrationEventOutboxWorker, type OrchestrationEventNotificatio
 import { logError, logInfo } from '../utils/logger.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
+import { orchestrationRecoveryService } from './orchestrationRecoveryService.js';
 
 /** One local orchestrator/runner pair for the desktop's authoritative executor. */
 export const orchestrationRunnerAdapter = new OrchestrationRunnerAdapter({ store: sqliteService });
@@ -41,10 +42,29 @@ orchestrationRunnerAdapter.attachResultHandlers({
         reason: 'The task result was saved, but the Orchestrator is unavailable in this desktop version. Update the app before continuing the build.'
       });
     }
-    return runWithWorkspace(submitted.run.workspaceId, () => sqliteService.getOrchestrationSnapshot(submitted.run.id));
+    const latest = runWithWorkspace(submitted.run.workspaceId, () => sqliteService.getOrchestrationSnapshot(submitted.run.id));
+    if (latest) {
+      orchestrationRecoveryService.reconcileSnapshot(latest);
+      await orchestrationRecoveryService.flushPendingMilestones();
+    }
+    return latest;
   },
-  handleRunnerFailed: run => orchestrationService.handleRunnerFailed(run),
-  handleRunnerCancelled: run => orchestrationService.handleRunnerCancelled(run)
+  async handleRunnerFailed(run) {
+    const snapshot = await orchestrationService.handleRunnerFailed(run);
+    if (snapshot) {
+      orchestrationRecoveryService.reconcileSnapshot(snapshot);
+      await orchestrationRecoveryService.flushPendingMilestones();
+    }
+    return snapshot;
+  },
+  async handleRunnerCancelled(run) {
+    const snapshot = await orchestrationService.handleRunnerCancelled(run);
+    if (snapshot) {
+      orchestrationRecoveryService.reconcileSnapshot(snapshot);
+      await orchestrationRecoveryService.flushPendingMilestones();
+    }
+    return snapshot;
+  }
 });
 
 /** Reconcile local task state after legacy run recovery has closed orphaned processes. */
@@ -170,6 +190,18 @@ export async function reconcileInterruptedOrchestrations(): Promise<void> {
   );
   for (const failure of issueReplay.failed) {
     logError(`Could not synchronize the approved task build ${failure.runId}:`, failure.reason);
+  }
+  for (const snapshot of sqliteService.listAllActiveOrchestrationSnapshots()) {
+    try {
+      orchestrationRecoveryService.reconcileSnapshot(snapshot);
+    } catch (error) {
+      logError(`Could not restore recovery details for task build ${snapshot.run.id}:`, error instanceof Error ? error.message : String(error));
+    }
+  }
+  try {
+    await orchestrationRecoveryService.flushPendingMilestones();
+  } catch (error) {
+    logError('Could not deliver saved orchestration recovery messages:', error instanceof Error ? error.message : String(error));
   }
   logInfo('Task orchestration recovery check completed.');
 }

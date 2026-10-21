@@ -76,6 +76,55 @@ export async function getGitChangedPaths(cwd: string, baseCommit: string, result
   return [...new Set(stdout.split('\0').filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
+/** List tracked paths for safe, scoped review-context packaging without invoking a reviewer shell. */
+export async function getGitTrackedPaths(cwd: string): Promise<string[]> {
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd,
+    timeout: 30_000,
+    maxBuffer: 16 * 1024 * 1024,
+    windowsHide: true
+  });
+  return [...new Set(stdout.split('\0').filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+/** List repository paths from an immutable commit, not from the live checkout. */
+export async function getGitTrackedPathsAtCommit(cwd: string, commit: string): Promise<string[]> {
+  if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error('A commit ID is required to list review source files.');
+  const { stdout } = await execFileAsync('git', ['ls-tree', '-r', '--name-only', '-z', commit], {
+    cwd,
+    timeout: 30_000,
+    maxBuffer: 16 * 1024 * 1024,
+    windowsHide: true
+  });
+  return [...new Set(stdout.split('\0').filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+/** Read a small text file from an immutable commit without checking it out. */
+export async function getGitFileAtCommit(
+  cwd: string,
+  commit: string,
+  filePath: string,
+  maxBytes: number
+): Promise<string | undefined> {
+  if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error('A commit ID is required to read review source.');
+  const segments = filePath.split('/');
+  if (!filePath || path.isAbsolute(filePath) || segments.some(segment => !segment || segment === '.' || segment === '..')) {
+    throw new Error('A repository-relative path is required to read review source.');
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('A valid review source size limit is required.');
+  const object = `${commit}:${filePath}`;
+  const { stdout: sizeText } = await execFileAsync('git', ['cat-file', '-s', object], {
+    cwd, timeout: 30_000, windowsHide: true
+  });
+  const size = Number(sizeText.trim());
+  if (!Number.isSafeInteger(size) || size > maxBytes) return undefined;
+  const { stdout } = await execFileAsync('git', ['show', object], {
+    cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: Math.max(1, maxBytes + 1), windowsHide: true
+  });
+  if (Buffer.byteLength(stdout, 'utf8') > maxBytes || stdout.includes('\u0000')) return undefined;
+  return stdout;
+}
+
 /** Read an exact, color-free patch between two immutable task commits. */
 export async function getGitDiffPatch(cwd: string, baseCommit: string, resultCommit: string): Promise<string> {
   if (!/^[a-f0-9]{40,64}$/i.test(baseCommit) || !/^[a-f0-9]{40,64}$/i.test(resultCommit)) {

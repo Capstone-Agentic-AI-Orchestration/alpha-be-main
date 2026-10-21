@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SQLiteService } from './sqliteService.js';
 import { parseOrchestrationPlan } from './orchestrationContract.js';
 import { OrchestrationService, type OrchestrationExecutor, type OrchestrationLaunchRequest } from './orchestrationService.js';
@@ -49,6 +50,7 @@ describe('deterministic orchestration orchestrator', () => {
   let store: SQLiteService | undefined;
 
   afterEach(() => {
+    vi.restoreAllMocks();
     store?.close();
     store = undefined;
     if (directory) fs.rmSync(directory, { recursive: true, force: true });
@@ -132,13 +134,26 @@ describe('deterministic orchestration orchestrator', () => {
       changedFiles: 1,
       insertions: 4,
       deletions: 0,
-      activities: [{ id: 'summary', sequence: 1, kind: 'assistant', message: 'Endpoint submitted.', createdAt: '2026-10-19T00:00:00.000Z' }],
+      activities: [{ id: 'summary', sequence: 1, kind: 'assistant', message: JSON.stringify({
+        schemaVersion: 1,
+        taskId: firstAttempt.taskId,
+        summary: 'Endpoint submitted.',
+        requirementCoverage: [{ requirementId: 'REQ-CREATE', evidence: 'The endpoint creates a task.' }],
+        criteriaEvidence: [{ criterion: 'A created task survives a database reload.', evidence: 'Persistence is implemented.' }],
+        deliverables: [{ summary: 'Task creation endpoint.', paths: ['src/tasks.ts'] }],
+        reportedChecks: [{
+          script: 'npm test', result: 'blocked', evidence: 'The check could not run because the test runner was unavailable.'
+        }],
+        blockers: []
+      }), createdAt: '2026-10-19T00:00:00.000Z' }],
       stages: [{ id: 'tests', status: 'success' }]
     } as any;
     snapshot = (await orchestrator.handleRunnerCompleted(runEvent))!;
     expect(snapshot.tasks[0].status).toBe('submitted');
     expect(snapshot.attempts[0].result).toMatchObject({
-      summary: 'Endpoint submitted.', verification: { stageStatus: 'success' }
+      summary: 'Endpoint submitted.',
+      verification: { stageStatus: 'success' },
+      agentReport: { reportedChecks: [{ script: 'npm test', result: 'not_run' }] }
     });
     // A repeated process event is ignored after the durable submission.
     const submittedEventCount = store.listOrchestrationEvents(snapshot.run.id).length;
@@ -378,7 +393,7 @@ describe('deterministic orchestration orchestrator', () => {
       .rejects.toThrow(/different build request/);
   });
 
-  it('blocks failed execution, retries only the owned task, and ignores the old attempt completing late', async () => {
+  it('self-repairs an agent execution failure, retries only its owner, and ignores a late old result', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-late-event-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
@@ -405,19 +420,13 @@ describe('deterministic orchestration orchestrator', () => {
       status: 'failed',
       stages: [{ id: 'implementation', status: 'failed', logs: ['fixture failure'] }]
     } as any);
-    expect(failed?.run.status).toBe('blocked');
+    expect(failed?.run.status).toBe('executing');
     expect(failed?.attempts[0].status).toBe('failed');
-
-    snapshot = await orchestrator.retryTask({
-      workspaceId: input.workspaceId,
-      runId: snapshot.run.id,
-      taskId: firstRequest.taskId,
-      expectedTaskRevision: failed!.tasks.find(task => task.id === firstRequest.taskId)!.revision,
-      actorId: 'user-test'
-    });
+    snapshot = failed!;
     expect(launches).toHaveLength(2);
     expect(launches[1].taskId).toBe(firstRequest.taskId);
     expect(launches[1].ownerAgentId).toBe('backend-agent');
+    expect(launches[1].taskPackage.corrections.join('\n')).toContain('fixture failure');
 
     const eventCount = runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id).length);
     const late = await orchestrator.handleRunnerCompleted({
@@ -436,7 +445,70 @@ describe('deterministic orchestration orchestrator', () => {
     expect(runWithWorkspace(input.workspaceId, () => store!.listOrchestrationEvents(snapshot.run.id))).toHaveLength(eventCount);
   });
 
-  it('assigns one focused verification repair, gives it the failure evidence, then stops for human review', async () => {
+  it('escalates provider failures without asking a project agent to repair the runtime', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-provider-failure-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const input = {
+      workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+      requestKey: 'request-provider-failure', requestFingerprint: 'fingerprint-provider-failure', createdBy: 'user-test',
+      executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    };
+
+    const snapshot = await startAndApprove(orchestrator, input);
+    const firstRequest = launches[0];
+    const failed = await orchestrator.handleRunnerFailed({
+      id: `prototype-${firstRequest.attemptId}`,
+      workspaceId: input.workspaceId,
+      orchestrationRunId: snapshot.run.id,
+      orchestrationTaskId: firstRequest.taskId,
+      orchestrationAttemptId: firstRequest.attemptId,
+      status: 'failed',
+      stages: [{ id: 'implementation', status: 'failed', logs: ['Provider connection timed out.'] }]
+    } as any);
+
+    expect(failed?.run.status).toBe('blocked');
+    expect(failed?.run.stoppedReason).toContain('developer to review in project chat');
+    expect(launches).toHaveLength(1);
+  });
+
+  it('persists a bounded recovery attempt when specialist preparation fails before launch', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-prepare-failure-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      async prepare() { throw new Error('EACCES: permission denied while preparing the saved worktree.'); },
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const input = {
+      workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+      requestKey: 'request-prepare-failure', requestFingerprint: 'fingerprint-prepare-failure', createdBy: 'user-test',
+      executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    };
+
+    const snapshot = await startAndApprove(orchestrator, input);
+
+    expect(snapshot.run.status).toBe('blocked');
+    expect(snapshot.tasks.find(task => task.id === 'create-endpoint')?.status).toBe('failed');
+    expect(snapshot.attempts).toHaveLength(1);
+    expect(snapshot.attempts[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'EACCES: permission denied while preparing the saved worktree.'
+    });
+    expect(snapshot.attempts[0].contextManifest.orchestrationPreparationFailed).toBe(true);
+    expect(launches).toHaveLength(0);
+  });
+
+  it('assigns bounded verification repairs, gives each the failure evidence, then stops for human review', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-verification-repair-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
@@ -484,11 +556,28 @@ describe('deterministic orchestration orchestrator', () => {
       },
       stages: [{ id: 'tests', status: 'failed', logs: ['The test command still fails.'] }]
     } as any))!;
+    expect(snapshot.run.status).toBe('executing');
+    expect(launches).toHaveLength(3);
+
+    const secondRepair = launches[2];
+    expect(secondRepair).toMatchObject({ taskId: first.taskId, ownerAgentId: first.ownerAgentId });
+    expect(secondRepair.taskPackage.corrections.join('\n')).toContain('npm run test still exits with code 1');
+    snapshot = (await orchestrator.handleRunnerFailed({
+      id: `prototype-${secondRepair.attemptId}`, workspaceId: input.workspaceId,
+      orchestrationRunId: snapshot.run.id, orchestrationTaskId: secondRepair.taskId,
+      orchestrationAttemptId: secondRepair.attemptId, status: 'failed',
+      testSummary: 'The targeted assertion still fails after the second repair.',
+      verificationEvidence: {
+        status: 'failed', missingScripts: [],
+        commands: [{ script: 'test', display: 'npm run test', exitCode: 1, signal: null }]
+      },
+      stages: [{ id: 'tests', status: 'failed', logs: ['The targeted assertion still fails.'] }]
+    } as any))!;
 
     expect(snapshot.run.status).toBe('blocked');
-    expect(snapshot.tasks.find(task => task.id === repair.taskId)?.attemptCount).toBe(2);
-    expect(snapshot.attempts.find(attempt => attempt.id === repair.attemptId)?.failureReason).toContain('npm run test still exits');
-    expect(launches).toHaveLength(2);
+    expect(snapshot.tasks.find(task => task.id === secondRepair.taskId)?.attemptCount).toBe(3);
+    expect(snapshot.attempts.find(attempt => attempt.id === secondRepair.attemptId)?.failureReason).toContain('targeted assertion still fails');
+    expect(launches).toHaveLength(3);
     expect(snapshot.run.stoppedReason).toContain('Review the latest failure details');
   });
 
@@ -607,7 +696,9 @@ describe('deterministic orchestration orchestrator', () => {
   });
 
   it('keeps an interrupted task stopped until explicit resume, then retries only that task', async () => {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-recovery-'));
+    const testTempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(testTempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(testTempRoot, 'alpha-orchestration-recovery-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     const launches: OrchestrationLaunchRequest[] = [];
     const orchestrator = new OrchestrationService(store, {
@@ -622,11 +713,32 @@ describe('deterministic orchestration orchestrator', () => {
       executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
     };
     const started = await startAndApprove(orchestrator, input);
-    runWithWorkspace(input.workspaceId, () => store!.markOrchestrationRecoveryRequired({
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(repository, { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repository, stdio: 'ignore' });
+    fs.writeFileSync(path.join(repository, 'README.md'), '# Recovery fixture\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repository, stdio: 'ignore' });
+    execFileSync('git', [
+      '-c', 'user.name=Alpha Test', '-c', 'user.email=alpha-test@example.com', 'commit', '-m', 'Initial fixture'
+    ], { cwd: repository, stdio: 'ignore' });
+    const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+    store.addAllowedPath(directory, 'orchestration recovery fixture');
+    const withWorkspace = runWithWorkspace(input.workspaceId, () => store!.bindOrchestrationWorkspace({
       runId: started.run.id,
+      branchName: 'main',
+      baseRef: 'refs/heads/main',
+      baseCommit,
+      worktreePath: repository
+    }));
+    runWithWorkspace(input.workspaceId, () => store!.markOrchestrationRecoveryRequired({
+      runId: withWorkspace.run.id,
       actorId: 'orchestrator',
       reason: 'The daemon stopped during this task.'
     }));
+    const interruptedAttempt = started.attempts[0];
+    vi.spyOn(store!, 'getPrototypeRuns').mockReturnValue([{
+      id: interruptedAttempt.prototypeRunId!, status: 'failed'
+    } as any]);
 
     const preserved = runWithWorkspace(input.workspaceId, () => store!.getOrchestrationSnapshot(started.run.id)!);
     expect(preserved.run.status).toBe('recovery_required');

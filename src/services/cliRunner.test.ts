@@ -677,6 +677,12 @@ describe('orchestration review mode is read-only', () => {
     const { args } = buildTurnInvocation(options({ provider: 'OpenAI', mode: 'review' }), noMcp);
     expect(valueOf(args, '--sandbox')).toBe('read-only');
     expect(args).not.toContain('--approve-for-me');
+    expect(valueOf(args, '--config')).toBe('approval_policy="never"');
+  });
+
+  it('does not change Codex approval policy for ordinary chat turns', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', mode: 'chat' }), noMcp);
+    expect(args).not.toContain('--config');
   });
 
   it('does not auto-approve Antigravity tools during review', () => {

@@ -148,6 +148,19 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
               ? 'The handoff worktree no longer matches its latest accepted checkpoint. Preserve it and reconcile the build before retrying.'
               : 'The planning worktree no longer matches its recorded base commit. Preserve it and reconcile the build before retrying.');
           }
+        } else {
+          const latestTaskCheckpoint = [...snapshot!.attempts].reverse().find(attempt =>
+            attempt.taskId === request.taskId && attempt.resultCommit &&
+            ['accepted', 'failed', 'rejected', 'recovery_required'].includes(attempt.status));
+          const latestAccepted = [...snapshot!.attempts].reverse().find(attempt => {
+            const task = snapshot!.tasks.find(item => item.id === attempt.taskId);
+            return attempt.status === 'accepted' && task &&
+              normalizeRepository(task.repository ?? snapshot!.run.repository) === normalizeRepository(request.repository);
+          });
+          const expectedCommit = latestTaskCheckpoint?.resultCommit ?? latestAccepted?.resultCommit ?? repositoryWorkspace.baseCommit;
+          if (expectedCommit && await getHeadCommit(workingDir) !== expectedCommit) {
+            throw new Error('The retry worktree no longer matches its latest saved checkpoint. Preserve the branch and reconcile it before dispatching another specialist attempt.');
+          }
         }
       } else {
         if (repositoryWorkspace.baseCommit) {
@@ -170,6 +183,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         workingDir,
         contextManifest: {
           packageVersion: request.taskPackage.packageVersion,
+          reportSchemaVersion: request.taskPackage.reportSchemaVersion,
           taskPackageHash,
           personaHash: persona.personaHash,
           modelProvider: persona.modelProvider,

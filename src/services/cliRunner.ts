@@ -415,6 +415,11 @@ export function buildTurnInvocation(
         // Re-apply only Alpha's local gateway and its model metadata catalog.
         // The rest of the operator's Codex config (especially MCPs) remains isolated.
         ...(options.codexConfigArgs ?? []),
+        // Orchestration reviews are non-interactive. Keep Codex in its
+        // read-only sandbox, but make it execute safe in-sandbox inspection
+        // commands without waiting for an approval UI that Alpha cannot show.
+        // This does not grant writes or access beyond the selected sandbox.
+        ...(options.mode === 'review' ? ['--config', 'approval_policy="never"'] : []),
         // Before the `--`, necessarily: after it, `--model` would be read as
         // part of the prompt text rather than as a flag.
         ...(modelName ? ['--model', modelName] : []),

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SQLiteService } from './sqliteService.js';
 import { parseOrchestrationPlan } from './orchestrationContract.js';
-import { initialTaskRecords } from './orchestrationStateMachine.js';
+import { initialTaskRecords, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationDiffPreview } from './orchestrationReviewService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 
@@ -99,5 +99,30 @@ describe('orchestration review checkpoint', () => {
 
     await expect(assertOrchestrationApprovalCheckpointCurrent(snapshot, store!))
       .rejects.toThrow(/changed after final checks/);
+  });
+
+  it('previews the exact saved checkpoint while a build is blocked', async () => {
+    const validated = await prepareAwaitingApproval();
+    const validation = runWithWorkspace('workspace-review', () =>
+      store!.listOrchestrationEvents(validated.run.id).find(event => event.type === 'run_awaiting_approval'))!;
+    const evidence = validation.payload.evidence as { resultCommit: string };
+    const blocked = {
+      ...validated,
+      run: { ...validated.run, status: 'blocked' },
+      attempts: [{
+        id: 'attempt-failed-code', runId: validated.run.id, taskId: 'code-change', status: 'rejected',
+        resultCommit: evidence.resultCommit, contextManifest: {}, createdAt: '2026-10-20T00:00:00.000Z'
+      }]
+    } as unknown as OrchestrationSnapshot;
+
+    const preview = await getOrchestrationDiffPreview(blocked, store!);
+
+    expect(preview).toMatchObject({
+      reviewType: 'saved_checkpoint',
+      baseCommit: validated.run.baseCommit,
+      resultCommit: evidence.resultCommit,
+      changedPaths: ['README.md']
+    });
+    expect(preview.diff).toContain('+reviewed change');
   });
 });

@@ -663,7 +663,7 @@ export interface ChatMessage {
   content: string;
   thinkingProcess?: string;
   toolsExecuted?: ToolExecutionRecord[];
-  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build' | 'build_proposal' | 'project_needed';
+  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build' | 'build_milestone' | 'build_proposal' | 'project_needed';
   agentCallId?: string;
   /** The task workflow shown beneath an Orchestrator build message. */
   orchestrationRunId?: string;
@@ -685,6 +685,119 @@ export interface ChatRouteProposal {
   goal: string;
   repositories: string[];
   status: 'open' | 'accepted' | 'dismissed';
+}
+
+export type OrchestrationRecoveryCategory =
+  | 'project_code'
+  | 'report'
+  | 'review_input'
+  | 'provider'
+  | 'configuration'
+  | 'workspace'
+  | 'final_validation'
+  | 'budget'
+  | 'alpha'
+  | 'unknown';
+
+export type OrchestrationRecoveryPhase =
+  | 'repairing'
+  | 'waiting_for_user'
+  | 'ready_to_continue'
+  | 'resolved'
+  | 'cancelled';
+
+export type OrchestrationRecoveryActionName =
+  | 'explain_failure'
+  | 'retry_report_format'
+  | 'repair_and_continue'
+  | 'provide_guidance'
+  | 'recheck_prerequisite'
+  | 'plan_final_validation_corrections'
+  | 'resume_checkpoint'
+  | 'review_saved_changes'
+  | 'keep_paused'
+  | 'cancel_build';
+
+export interface OrchestrationRecoveryEpisode {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  runId: string;
+  issueId: string;
+  taskId?: string;
+  attemptId?: string;
+  source: string;
+  category: OrchestrationRecoveryCategory;
+  code: string;
+  summary: string;
+  fingerprint: string;
+  phase: OrchestrationRecoveryPhase;
+  episodeNumber: number;
+  repairBudget: number;
+  attemptsUsed: number;
+  guidance?: string;
+  evidence: Record<string, unknown>;
+  threadId?: string;
+  buildMessageId?: string;
+  initiatedBy: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+}
+
+export interface OrchestrationRecoveryProjection {
+  id: string;
+  runId: string;
+  phase: OrchestrationRecoveryPhase;
+  category: OrchestrationRecoveryCategory;
+  code: string;
+  summary: string;
+  taskId?: string;
+  taskTitle?: string;
+  taskRevision?: number;
+  attemptsUsed: number;
+  repairBudget: number;
+  reportCorrectionsUsed?: number;
+  reportCorrectionLimit?: number;
+  episodeNumber: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  availableActions: OrchestrationRecoveryActionName[];
+  actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>>;
+}
+
+export interface OrchestrationRecoveryActionRecord {
+  id: string;
+  workspaceId: string;
+  runId: string;
+  recoveryId: string;
+  actorId: string;
+  idempotencyKey: string;
+  expectedRunRevision: number;
+  expectedRecoveryRevision: number;
+  expectedTaskRevision?: number;
+  action: OrchestrationRecoveryActionName;
+  guidance?: string;
+  status: 'pending' | 'completed' | 'failed';
+  result?: Record<string, unknown>;
+  errorCode?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export interface OrchestrationRecoveryMilestone {
+  id: string;
+  workspaceId: string;
+  runId: string;
+  recoveryId: string;
+  milestoneKey: string;
+  threadId: string;
+  messageId: string;
+  content: string;
+  createdAt: string;
+  deliveredAt?: string;
 }
 
 export interface ChatAttachmentReference {

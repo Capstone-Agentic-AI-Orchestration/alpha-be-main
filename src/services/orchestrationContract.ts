@@ -7,6 +7,8 @@ import type { Agent } from '../models/index.js';
  * the selected project squad before persisting or dispatching anything.
  */
 export const ORCHESTRATION_PLAN_SCHEMA_VERSION = 1 as const;
+/** Version expected in every specialist's structured task report. */
+export const ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION = 1 as const;
 export const MAX_INITIAL_PLAN_TASKS = 12;
 export const MAX_PLAN_TASKS = 64;
 export const MAX_TASK_DEPENDENCIES = 8;
@@ -27,6 +29,12 @@ export const orchestrationTaskKindSchema = z.enum([
 ]);
 
 export type OrchestrationTaskKind = z.infer<typeof orchestrationTaskKindSchema>;
+
+export const orchestrationRequiredCheckSchema = z.enum([
+  'verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint'
+]);
+
+export type OrchestrationRequiredCheck = z.infer<typeof orchestrationRequiredCheckSchema>;
 
 const shortText = z.string().trim().min(1).max(240);
 const detailText = z.string().trim().min(1).max(4_000);
@@ -62,7 +70,7 @@ export const orchestrationPlanSchema = z.object({
     dependsOn: z.array(identifier).max(MAX_TASK_DEPENDENCIES).default([]),
     requirementIds: z.array(identifier).min(1).max(MAX_TASK_REQUIREMENTS),
     acceptanceCriteria: z.array(detailText).min(1).max(MAX_TASK_ACCEPTANCE_CRITERIA),
-    requiredChecks: z.array(z.enum(['verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint'])).max(7).default([]),
+    requiredChecks: z.array(orchestrationRequiredCheckSchema).max(7).default([]),
     scope: z.object({
       includePaths: z.array(scopePattern).max(60).default([]),
       excludePaths: z.array(scopePattern).max(60).default([])
@@ -83,7 +91,7 @@ const repositoryPath = z.string().trim().min(1).max(1_000).refine(value =>
 
 /** Provider-independent specialist submission; Alpha adds trusted run evidence separately. */
 export const orchestrationAgentReportSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION),
   taskId: identifier,
   summary: z.string().trim().min(1).max(4_000),
   requirementCoverage: z.array(z.object({

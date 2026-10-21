@@ -1,19 +1,31 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
-import { orchestrationAgentReportSchema } from './orchestrationContract.js';
+import { normalizeAndValidateAgentReport } from './orchestrationAgentReport.js';
 import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { runVerification, type VerificationResult } from './verificationService.js';
 import { projectRunWorkspacePath } from './workspaceService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { SQLiteService } from './sqliteService.js';
 import { OrchestrationService } from './orchestrationService.js';
-import { buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
+import { buildFinalValidationAmendment, buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { pathMatchesScope } from '../utils/pathScope.js';
+import {
+  AUTO_REPAIR_ATTEMPT_LIMIT,
+  MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
+  hasRepeatedRecoveryFailure,
+  hasRepairableFinalValidationEvidence,
+  reportFormatCorrectionCount,
+  safeRecoverySummary,
+  safeRecoveryGuidance,
+  workAttemptCount
+} from './orchestrationRecoveryPolicy.js';
+export { pathMatchesScope } from '../utils/pathScope.js';
 
 export interface TaskAcceptanceOutcome {
-  decision: 'accepted' | 'rejected' | 'blocked' | 'awaiting_approval';
+  decision: 'accepted' | 'rejected' | 'blocked' | 'retrying' | 'awaiting_approval';
   snapshot: OrchestrationSnapshot;
   reason?: string;
   evidence?: Record<string, unknown>;
@@ -29,6 +41,14 @@ interface AcceptanceDependencies {
 }
 
 const CODE_TASK_KINDS = new Set(['database', 'backend', 'frontend', 'mobile']);
+const REPORT_ONLY_CORRECTION_CHECKS = new Set([
+  'agent_report', 'report_identity', 'review_findings_missing', 'duplicate_review_finding',
+  'review_target', 'review_requirement', 'review_path_scope', 'review_finding_coverage',
+  'requirement_coverage', 'acceptance_criteria', 'deliverable_traceability'
+]);
+const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
+  'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed'
+]);
 
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
   return CODE_TASK_KINDS.has(task.kind) &&
@@ -55,34 +75,49 @@ function dependsTransitivelyOn(
   return visit(task.id);
 }
 
+function reportChangeBaseline(
+  snapshot: OrchestrationSnapshot,
+  taskId: string,
+  attempt: OrchestrationAttemptRecord
+): string | undefined {
+  if (attempt.contextManifest.reportOnlyReportRetry !== true) return attempt.startingCommit;
+  const storedBaseline = attempt.contextManifest.reportOnlyBaselineCommit;
+  if (typeof storedBaseline === 'string' && /^[a-f0-9]{40,64}$/i.test(storedBaseline)) return storedBaseline;
+  const attemptIndex = snapshot.attempts.findIndex(item => item.id === attempt.id);
+  for (let index = attemptIndex - 1; index >= 0; index -= 1) {
+    const previous = snapshot.attempts[index];
+    if (previous.taskId === taskId && previous.contextManifest.reportOnlyReportRetry !== true &&
+        ['failed', 'rejected', 'recovery_required'].includes(previous.status) && previous.startingCommit) {
+      return previous.startingCommit;
+    }
+  }
+  return attempt.startingCommit;
+}
+
 function reviewRootTask(task: OrchestrationTaskRecord, tasks: readonly OrchestrationTaskRecord[]): OrchestrationTaskRecord | undefined {
   return tasks.find(candidate => candidate.id === (task.correctionOfTaskId ?? task.id));
 }
 
-/** Match repository-relative Git paths against a small, dependency-free glob subset. */
-export function pathMatchesScope(filePath: string, pattern: string): boolean {
-  const normalizedPath = filePath.replace(/\\/g, '/');
-  let expression = '^';
-  for (let index = 0; index < pattern.length; index++) {
-    const char = pattern[index];
-    if (char === '*' && pattern[index + 1] === '*') {
-      index++;
-      if (pattern[index + 1] === '/') {
-        index++;
-        expression += '(?:.*/)?';
-      } else {
-        expression += '.*';
-      }
-    } else if (char === '*') {
-      expression += '[^/]*';
-    } else if (char === '?') {
-      expression += '[^/]';
-    } else {
-      expression += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+function previousAgentReportResponse(result: Record<string, unknown> | undefined): string {
+  if (typeof result?.agentReportResponse === 'string') {
+    const response = result.agentReportResponse;
+    if (result.agentReportResponseTruncated === true) {
+      const marker = '\n[Alpha saved only the first part of the original response.]';
+      return `${response.slice(0, Math.max(0, 12_000 - marker.length))}${marker}`;
     }
+    return response.slice(0, 12_000);
   }
-  expression += '$';
-  return new RegExp(expression).test(normalizedPath);
+  if (result?.agentReport && typeof result.agentReport === 'object') {
+    return JSON.stringify(result.agentReport).slice(0, 12_000);
+  }
+  return typeof result?.summary === 'string' ? result.summary.slice(0, 12_000) : '';
+}
+
+function validateAttemptReport(attempt: OrchestrationAttemptRecord) {
+  const expectedVersion = typeof attempt.contextManifest.reportSchemaVersion === 'number'
+    ? attempt.contextManifest.reportSchemaVersion
+    : undefined;
+  return normalizeAndValidateAgentReport(attempt.result?.agentReport, expectedVersion);
 }
 
 export class TaskAcceptanceService {
@@ -113,7 +148,37 @@ export class TaskAcceptanceService {
     dispatchNext?: boolean;
     now?: string;
   }): Promise<TaskAcceptanceOutcome> {
-    return runWithWorkspace(input.workspaceId, async () => {
+    try {
+      return await this.evaluateAndAcceptSubmitted(input);
+    } catch (error) {
+      return runWithWorkspace(input.workspaceId, (): TaskAcceptanceOutcome => {
+        const latest = this.store.getOrchestrationSnapshot(input.runId);
+        const task = latest?.tasks.find(item => item.id === input.taskId);
+        const attempt = latest?.attempts.find(item => item.id === input.attemptId);
+        if (!latest || !task || !attempt) throw error;
+        if (attempt.status === 'accepted') return { decision: 'accepted', snapshot: latest };
+        if (latest.run.status !== 'executing' || latest.run.currentTaskId !== task.id ||
+            attempt.taskId !== task.id || attempt.status !== 'submitted') {
+          return {
+            decision: 'blocked', snapshot: latest,
+            reason: 'Alpha could not finish recording this handoff. The current build state was preserved for review.'
+          };
+        }
+        return this.blockAcceptanceFailure(latest, task, attempt, input.acceptedBy, error, input.now);
+      });
+    }
+  }
+
+  private evaluateAndAcceptSubmitted(input: {
+    workspaceId: string;
+    runId: string;
+    taskId: string;
+    attemptId: string;
+    acceptedBy: string;
+    dispatchNext?: boolean;
+    now?: string;
+  }): Promise<TaskAcceptanceOutcome> {
+    return runWithWorkspace(input.workspaceId, async (): Promise<TaskAcceptanceOutcome> => {
       const snapshot = this.store.getOrchestrationSnapshot(input.runId);
       const task = snapshot?.tasks.find(item => item.id === input.taskId);
       const attempt = snapshot?.attempts.find(item => item.id === input.attemptId);
@@ -123,7 +188,12 @@ export class TaskAcceptanceService {
         return { decision: 'blocked', snapshot, reason: 'This submission is stale or no longer owns the active task.' };
       }
 
-      const rejection = await this.inspectSubmission(snapshot, task, attempt);
+      let rejection: Awaited<ReturnType<TaskAcceptanceService['inspectSubmission']>>;
+      try {
+        rejection = await this.inspectSubmission(snapshot, task, attempt);
+      } catch (error) {
+        return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy, error, input.now);
+      }
       if (rejection) {
         const rejected = this.store.rejectOrchestrationAttempt({
           runId: snapshot.run.id,
@@ -135,12 +205,104 @@ export class TaskAcceptanceService {
           findings: rejection.findings,
           now: input.now
         });
+        const reportCanBeRepaired = rejection.findings.every(finding =>
+          typeof finding.evidence.check === 'string' && REPORT_ONLY_CORRECTION_CHECKS.has(finding.evidence.check));
+        const automaticReportCorrectionsUsed = reportFormatCorrectionCount(rejected, task.id);
+        if (reportCanBeRepaired && automaticReportCorrectionsUsed < MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS && input.dispatchNext !== false) {
+          const correctionTask = rejected.tasks.find(item => item.id === task.id);
+          if (correctionTask) {
+            try {
+              const correction = await this.orchestration.retryTask({
+                workspaceId: input.workspaceId,
+                runId: input.runId,
+                taskId: task.id,
+                expectedTaskRevision: correctionTask.revision,
+                actorId: input.acceptedBy,
+                now: input.now,
+                reportCorrection: {
+                  validationErrors: rejection.findings.map(finding => {
+                    const detail = finding.evidence.detail;
+                    return typeof detail === 'string' ? detail : rejection.reason;
+                  }),
+                  previousResponse: previousAgentReportResponse(attempt.result),
+                  startingCommit: reportChangeBaseline(rejected, task.id, attempt)
+                }
+              });
+              if (correction.run.status === 'executing' && correction.run.currentTaskId === task.id) {
+                return {
+                  decision: 'retrying',
+                  snapshot: correction,
+                  reason: `The report format was invalid. The same specialist received the exact error for read-only format correction ${automaticReportCorrectionsUsed + 1} of ${MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS}; no code changes or new checks were requested.`
+                };
+              }
+              return {
+                decision: 'blocked',
+                snapshot: correction,
+                reason: correction.run.stoppedReason ?? 'The report was rejected, and Alpha could not prepare its read-only format correction.'
+              };
+            } catch (error) {
+              return {
+                decision: 'blocked',
+                snapshot: rejected,
+                reason: error instanceof Error ? error.message : rejection.reason
+              };
+            }
+          }
+        }
+        const repairableCodeFailure = CODE_TASK_KINDS.has(task.kind) && rejection.findings.length > 0 &&
+          rejection.findings.every(finding => typeof finding.evidence.check === 'string' &&
+            AUTOMATIC_CODE_REPAIR_CHECKS.has(finding.evidence.check) &&
+            (finding.evidence.check !== 'required_check' ||
+              !Array.isArray(finding.evidence.missingScripts) || finding.evidence.missingScripts.length === 0));
+        if (repairableCodeFailure && input.dispatchNext !== false &&
+            workAttemptCount(rejected, task.id) < AUTO_REPAIR_ATTEMPT_LIMIT &&
+            !hasRepeatedRecoveryFailure(rejected, task.id, 'project_code', rejection.reason)) {
+          const correctionTask = rejected.tasks.find(item => item.id === task.id);
+          if (correctionTask) {
+            try {
+              const correction = await this.orchestration.retryTask({
+                workspaceId: input.workspaceId,
+                runId: input.runId,
+                taskId: task.id,
+                expectedTaskRevision: correctionTask.revision,
+                actorId: input.acceptedBy,
+                now: input.now
+              });
+              if (correction.run.status === 'executing' && correction.run.currentTaskId === task.id) {
+                return {
+                  decision: 'retrying',
+                  snapshot: correction,
+                  reason: `Alpha sent the failed acceptance checks and saved finding to ${correctionTask.ownerAgentId} for automatic repair (${workAttemptCount(rejected, task.id)} of ${AUTO_REPAIR_ATTEMPT_LIMIT} work attempts). It will recheck the result before continuing.`
+                };
+              }
+              return {
+                decision: 'blocked',
+                snapshot: correction,
+                reason: correction.run.stoppedReason ?? 'Alpha could not safely restart the failed task from its saved checkpoint.'
+              };
+            } catch (error) {
+              return { decision: 'blocked', snapshot: rejected, reason: error instanceof Error ? error.message : rejection.reason };
+            }
+          }
+        }
         return { decision: 'rejected', snapshot: rejected, reason: rejection.reason };
       }
 
-      const evidence = await this.acceptanceEvidence(snapshot, task, attempt);
+      const reportValidation = validateAttemptReport(attempt);
+      if (!reportValidation.success) {
+        return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy,
+          new Error(reportValidation.error), input.now);
+      }
+      const canonicalReport = reportValidation.report as unknown as Record<string, unknown>;
+
+      let evidence: Record<string, unknown>;
+      try {
+        evidence = await this.acceptanceEvidence(snapshot, task, attempt);
+      } catch (error) {
+        return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy, error, input.now);
+      }
       if (task.kind === 'review') {
-        const report = orchestrationAgentReportSchema.parse(attempt.result?.agentReport);
+        const report = reportValidation.report;
         let amendment;
         try {
           amendment = buildOrchestrationReviewAmendment(
@@ -171,6 +333,7 @@ export class TaskAcceptanceService {
           expectedPlanVersion: snapshot.run.planVersion,
           acceptedBy: input.acceptedBy,
           evidence,
+          canonicalReport,
           amendment,
           dispatchNext: input.dispatchNext,
           now: input.now
@@ -190,11 +353,12 @@ export class TaskAcceptanceService {
         expectedTaskRevision: task.revision,
         acceptedBy: input.acceptedBy,
         evidence,
+        canonicalReport,
         dispatchNext: input.dispatchNext,
         now: input.now
       });
       if (accepted.run.status === 'validating') {
-        const finalized = await this.finalValidation(accepted, input.acceptedBy, input.now);
+        const finalized = await this.finalizeSafely(accepted, input.acceptedBy, input.now);
         accepted = finalized.snapshot;
         return finalized;
       }
@@ -214,8 +378,64 @@ export class TaskAcceptanceService {
       if (snapshot.run.status !== 'validating') {
         return { decision: 'blocked', snapshot, reason: 'The build is not waiting for final validation.' };
       }
-      return this.finalValidation(snapshot, input.actorId, input.now);
+      return this.finalizeSafely(snapshot, input.actorId, input.now);
     });
+  }
+
+  private async finalizeSafely(
+    snapshot: OrchestrationSnapshot,
+    actorId: string,
+    now?: string
+  ): Promise<TaskAcceptanceOutcome> {
+    try {
+      return await this.finalValidation(snapshot, actorId, now);
+    } catch (error) {
+      const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+      const reason = `Alpha could not complete final validation: ${detail || 'The verification service failed unexpectedly.'}`;
+      const evidence = {
+        validationVersion: 1,
+        check: 'validation_system',
+        repository: snapshot.run.repository,
+        checks: { status: 'failed', missingScripts: [], observed: [], summary: reason }
+      };
+      const current = this.store.getOrchestrationSnapshot(snapshot.run.id) ?? snapshot;
+      const blocked = current.run.status === 'validating'
+        ? this.store.transitionOrchestrationRun({
+            runId: current.run.id,
+            expectedRevision: current.run.revision,
+            nextStatus: 'blocked',
+            actorId,
+            reason,
+            evidence,
+            now
+          })
+        : current;
+      return { decision: 'blocked', snapshot: blocked, reason, evidence };
+    }
+  }
+
+  private blockAcceptanceFailure(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    attempt: OrchestrationAttemptRecord,
+    rejectedBy: string,
+    error: unknown,
+    now?: string
+  ): TaskAcceptanceOutcome {
+    const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+    const reason = `Alpha could not complete its acceptance checks: ${detail || 'The verification service failed unexpectedly.'}`;
+    const evidence = { check: 'acceptance_system', origin: 'alpha_acceptance', detail };
+    const blocked = this.store.rejectOrchestrationAttempt({
+      runId: snapshot.run.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      expectedTaskRevision: task.revision,
+      rejectedBy,
+      reason,
+      findings: [{ severity: 'blocking', evidence: { instruction: reason, ...evidence } }],
+      now
+    });
+    return { decision: 'blocked', snapshot: blocked, reason, evidence };
   }
 
   private async inspectSubmission(
@@ -231,25 +451,29 @@ export class TaskAcceptanceService {
     if (!result || result.resultSchemaVersion !== 1 || typeof result.summary !== 'string' || !result.summary.trim()) {
       return fail('The task result is missing the required versioned summary.', { check: 'result_schema' });
     }
-    const report = orchestrationAgentReportSchema.safeParse(result.agentReport);
-    if (!report.success) {
-      return fail('The specialist did not return the required structured task report.', {
-        check: 'agent_report', detail: result.agentReportError ?? report.error.issues[0]?.message ?? 'invalid report'
+    const reportValidation = validateAttemptReport(attempt);
+    if (!reportValidation.success) {
+      const detail = typeof result.agentReportError === 'string' ? result.agentReportError : reportValidation.error;
+      return fail(`The specialist report is invalid: ${detail}`, {
+        check: 'agent_report', detail,
+        instruction: `The report could not be read: ${detail}`
       });
     }
-    if (report.data.taskId !== task.id) {
-      return fail('The specialist report names a different task.', {
-        check: 'report_identity', expectedTaskId: task.id, reportedTaskId: report.data.taskId
+    const report = reportValidation.report;
+    if (report.taskId !== task.id) {
+      const detail = `Expected taskId "${task.id}" but received "${report.taskId}".`;
+      return fail(`The specialist report names a different task. ${detail}`, {
+        check: 'report_identity', detail, expectedTaskId: task.id, reportedTaskId: report.taskId
       });
     }
     if (task.kind === 'review') {
-      if (!report.data.reviewFindings) {
+      if (!report.reviewFindings) {
         return fail('The independent reviewer must return a reviewFindings array, including an explicit empty array when no defect is found.', {
-          check: 'review_findings_missing'
+          check: 'review_findings_missing', detail: 'The report must include "reviewFindings": [].'
         });
       }
       const seenFindings = new Set<string>();
-      for (const finding of report.data.reviewFindings) {
+      for (const finding of report.reviewFindings) {
         const key = `${finding.targetTaskId}\0${finding.path ?? ''}\0${finding.title.toLowerCase()}`;
         if (seenFindings.has(key)) return fail('The independent review contains a duplicate finding.', { check: 'duplicate_review_finding', title: finding.title });
         seenFindings.add(key);
@@ -277,25 +501,25 @@ export class TaskAcceptanceService {
       const expectedFindingIds = snapshot.findings
         .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id)
         .map(finding => finding.id).sort();
-      const reportedFindingCoverage = report.data.findingCoverage?.map(item => item.findingId).sort() ?? [];
+      const reportedFindingCoverage = report.findingCoverage?.map(item => item.findingId).sort() ?? [];
       if (!expectedFindingIds.length || expectedFindingIds.length !== reportedFindingCoverage.length ||
           expectedFindingIds.some((id, index) => id !== reportedFindingCoverage[index]) ||
-          report.data.findingCoverage?.some(item => !item.evidence.trim())) {
+          report.findingCoverage?.some(item => !item.evidence.trim())) {
         return fail('The correction report must address every linked reviewer finding exactly once with concrete evidence.', {
           check: 'review_finding_coverage', expectedFindingIds, reportedFindingIds: reportedFindingCoverage
         });
       }
     }
-    const coveredRequirementIds = report.data.requirementCoverage.map(item => item.requirementId);
+    const coveredRequirementIds = report.requirementCoverage.map(item => item.requirementId);
     if (new Set(coveredRequirementIds).size !== coveredRequirementIds.length ||
         task.requirementIds.length !== coveredRequirementIds.length ||
         task.requirementIds.some(id => !coveredRequirementIds.includes(id)) ||
-        report.data.requirementCoverage.some(item => !item.evidence.trim())) {
+        report.requirementCoverage.some(item => !item.evidence.trim())) {
       return fail('The specialist report does not provide evidence for every assigned requirement exactly once.', {
         check: 'requirement_coverage', expected: task.requirementIds, reported: coveredRequirementIds
       });
     }
-    const reportedCriteria = report.data.criteriaEvidence.map(item => item.criterion);
+    const reportedCriteria = report.criteriaEvidence.map(item => item.criterion);
     if (new Set(reportedCriteria).size !== reportedCriteria.length ||
         task.acceptanceCriteria.length !== reportedCriteria.length ||
         task.acceptanceCriteria.some(criterion => !reportedCriteria.includes(criterion))) {
@@ -303,10 +527,10 @@ export class TaskAcceptanceService {
         check: 'acceptance_criteria', expected: task.acceptanceCriteria, reported: reportedCriteria
       });
     }
-    const unresolvedBlocker = report.data.blockers[0];
+    const unresolvedBlocker = report.blockers[0];
     if (unresolvedBlocker) {
       return fail(`The specialist reported a blocker: ${unresolvedBlocker}`, {
-        check: 'agent_blocker', blockers: report.data.blockers
+        check: 'agent_blocker', blockers: report.blockers
       });
     }
     const authorizedWorkspace = repositoryWorkspaceForTask(snapshot, task.id);
@@ -339,22 +563,29 @@ export class TaskAcceptanceService {
     if (!authorizedWorkspace.branchName || !this.store.isPathAllowed(worktreePath)) {
       return fail('The orchestration branch or approved local worktree is missing.', { check: 'workspace_authority' });
     }
-    const [branchName, currentCommit, isClean] = await Promise.all([
+    const [branchResult, commitResult, cleanResult] = await Promise.allSettled([
       this.dependencies.getCurrentBranch(worktreePath),
       this.dependencies.getHeadCommit(worktreePath),
       this.dependencies.isGitWorkingTreeClean(worktreePath)
-    ]);
+    ] as const);
+    if (branchResult.status === 'rejected') throw branchResult.reason;
+    if (commitResult.status === 'rejected') throw commitResult.reason;
+    if (cleanResult.status === 'rejected') throw cleanResult.reason;
+    const branchName = branchResult.value;
+    const currentCommit = commitResult.value;
+    const isClean = cleanResult.value;
     if (branchName !== authorizedWorkspace.branchName || currentCommit !== attempt.resultCommit || !isClean) {
       return fail('The repository changed after submission or has uncheckpointed edits. Reconcile it before acceptance.', {
         check: 'freshness', expectedBranch: authorizedWorkspace.branchName, currentBranch: branchName,
         submittedCommit: attempt.resultCommit, currentCommit, workingTreeClean: isClean
       });
     }
-    if (!attempt.startingCommit) {
+    const diffStartingCommit = reportChangeBaseline(snapshot, task.id, attempt);
+    if (!diffStartingCommit) {
       return fail('The attempt has no recorded starting commit, so its changed-file scope cannot be verified.', { check: 'starting_commit' });
     }
-    const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, attempt.startingCommit, attempt.resultCommit);
-    const declaredDeliverablePaths = new Set(report.data.deliverables.flatMap(deliverable => deliverable.paths));
+    const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, diffStartingCommit, attempt.resultCommit);
+    const declaredDeliverablePaths = new Set(report.deliverables.flatMap(deliverable => deliverable.paths));
     const undeclaredChangedPath = changedPaths.find(filePath => !declaredDeliverablePaths.has(filePath));
     if (undeclaredChangedPath) {
       return fail(`The specialist report does not identify changed file ${undeclaredChangedPath} as a deliverable.`, {
@@ -475,11 +706,13 @@ export class TaskAcceptanceService {
     if (!authorizedWorkspace) throw new Error(`Task ${task.id} has no authorized repository workspace.`);
     const worktree = authorizedWorkspace.worktreePath;
     const changedPaths = attempt.startingCommit && attempt.resultCommit
-      ? await this.dependencies.getGitChangedPaths(worktree, attempt.startingCommit, attempt.resultCommit)
+      ? await this.dependencies.getGitChangedPaths(worktree,
+        reportChangeBaseline(snapshot, task.id, attempt) ?? attempt.startingCommit, attempt.resultCommit)
       : [];
     return {
       acceptanceVersion: 1,
       attemptId: attempt.id,
+      diffStartingCommit: reportChangeBaseline(snapshot, task.id, attempt) ?? attempt.startingCommit,
       artifactId: snapshot.artifacts.find(item => item.attemptId === attempt.id && item.type === 'task_result')?.id,
       resultCommit: attempt.resultCommit,
       currentHead: attempt.resultCommit,
@@ -517,8 +750,13 @@ export class TaskAcceptanceService {
       const latestTaskCommit = taskCommits[taskCommits.length - 1];
       if (branchName !== workspace.branchName || !clean || (latestTaskCommit && currentCommit !== latestTaskCommit)) {
         const reason = `The ${workspace.repository} branch changed after its last accepted task; final checks need a fresh review.`;
-        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now });
-        return { decision: 'blocked', snapshot: blocked, reason };
+        const evidence = {
+          validationVersion: 1, check: 'workspace_checkpoint', repository: workspace.repository,
+          expectedBranch: workspace.branchName, branchName, expectedCommit: latestTaskCommit ?? workspace.baseCommit,
+          resultCommit: currentCommit, workingTreeClean: clean
+        };
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
+        return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
       const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktree, workspace.baseCommit, currentCommit);
       const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
@@ -526,12 +764,28 @@ export class TaskAcceptanceService {
       const unownedPath = cumulativeChangedPaths.find(filePath => !acceptedCodeTasks.some(task => taskAllowsPath(task, filePath)));
       if (unownedPath) {
         const reason = `Final checks found ${unownedPath} in ${workspace.repository}, outside the accepted task assignments.`;
-        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence: { check: 'final_scope', repository: workspace.repository, changedPath: unownedPath, cumulativeChangedPaths }, now });
-        return { decision: 'blocked', snapshot: blocked, reason };
+        const evidence = { validationVersion: 1, check: 'final_scope', repository: workspace.repository, changedPath: unownedPath, cumulativeChangedPaths };
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
+        return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
       const requiredScripts = [...new Set(current.tasks.filter(task => task.required &&
         (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase()).flatMap(task => task.requiredChecks))];
-      const verification = await this.dependencies.runVerification({ runId: `orchestration-final-${current.run.id}-${Buffer.from(workspace.repository).toString('hex').slice(0, 16)}`, cwd: worktree, requiredScripts: requiredScripts.length ? requiredScripts : undefined });
+      let verification: VerificationResult;
+      try {
+        verification = await this.dependencies.runVerification({
+          runId: `orchestration-final-${current.run.id}-${Buffer.from(workspace.repository).toString('hex').slice(0, 16)}`,
+          cwd: worktree,
+          requiredScripts: requiredScripts.length ? requiredScripts : undefined
+        });
+      } catch (error) {
+        const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+        verification = {
+          status: 'failed',
+          missingScripts: [],
+          commands: [],
+          summary: `Alpha could not start final validation: ${detail || 'The verification service failed unexpectedly.'}`
+        };
+      }
       repositoryResults.push({ repository: workspace.repository, worktree, branchName, resultCommit: currentCommit, baseCommit: workspace.baseCommit, cumulativeChangedPaths, verification });
     }
     const primary = repositoryResults[0];
@@ -543,16 +797,21 @@ export class TaskAcceptanceService {
     };
     if (!primary) {
       const reason = 'No selected repository has a private build workspace to validate.';
-      const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, now });
-      return { decision: 'blocked', snapshot: blocked, reason };
+      const evidence = { validationVersion: 1, check: 'workspace_missing' };
+      const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
+      return { decision: 'blocked', snapshot: blocked, reason, evidence };
     }
     const finalRepositoryEvidence = repositoryResults.map(item => ({
       repository: item.repository, baseCommit: item.baseCommit, resultCommit: item.resultCommit,
       branchName: item.branchName, cumulativeChangedPaths: item.cumulativeChangedPaths,
-      checks: { status: item.verification.status, missingScripts: item.verification.missingScripts, observed: item.verification.commands.map(command => ({ script: command.command.script, display: command.command.display, exitCode: command.exitCode, signal: command.signal })) }
+      checks: { status: item.verification.status, missingScripts: item.verification.missingScripts, observed: item.verification.commands.map(command => ({
+        script: command.command.script, display: command.command.display, exitCode: command.exitCode, signal: command.signal,
+        outputSummary: safeRecoveryGuidance(command.output).slice(0, 1_500)
+      })) }
     }));
     const evidence = {
       validationVersion: 1,
+      repository: primary.repository,
       resultCommit: primary.resultCommit,
       branchName: primary.branchName,
       repositories: finalRepositoryEvidence,
@@ -565,14 +824,17 @@ export class TaskAcceptanceService {
           script: command.command.script,
           display: command.command.display,
           exitCode: command.exitCode,
-          signal: command.signal
+          signal: command.signal,
+          outputSummary: safeRecoveryGuidance(command.output).slice(0, 1_500)
         })),
         summary: verification.summary
       },
       noOpenBlockingFindings: !current.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity))
     };
     if (verification.status !== 'passed' || verification.missingScripts.length || !verification.commands.length || !evidence.noOpenBlockingFindings) {
-      const reason = verification.missingScripts.length
+      const reason = verification.summary.startsWith('Alpha could not start final validation:')
+        ? verification.summary
+        : verification.missingScripts.length
         ? `Final validation could not run required checks: ${verification.missingScripts.join(', ')}.`
         : verification.commands.length
           ? 'Final validation failed or unresolved blocking findings remain.'
@@ -581,6 +843,41 @@ export class TaskAcceptanceService {
         runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason,
         evidence, now
       });
+      if (hasRepairableFinalValidationEvidence(evidence) && !current.run.pauseRequestedAt) {
+        try {
+          const amendment = buildFinalValidationAmendment(
+            blocked,
+            evidence,
+            this.store.getAgents().filter(agent => !agent.isArchived).map(agent => ({ id: agent.id, role: agent.role }))
+          );
+          const repairing = await this.orchestration.amendFinalValidation({
+            workspaceId: current.run.workspaceId,
+            runId: current.run.id,
+            expectedRunRevision: blocked.run.revision,
+            actorId,
+            amendment,
+            evidence,
+            now
+          });
+          if (repairing.run.status === 'executing' && repairing.run.currentTaskId) {
+            return {
+              decision: 'retrying', snapshot: repairing,
+              reason: 'Final checks failed. Alpha routed a bounded correction to the affected code owner, followed by an independent review and fresh validation.'
+            };
+          }
+          return {
+            decision: 'blocked', snapshot: repairing,
+            reason: repairing.run.stoppedReason ?? 'Alpha saved the correction plan but could not start its next specialist. Review the recovery details in project chat.'
+          };
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Alpha could not safely plan an owner correction.';
+          return {
+            decision: 'blocked', snapshot: blocked,
+            reason: `${reason} Alpha could not safely assign an automatic correction: ${detail}`,
+            evidence: { ...evidence, automaticRepairError: detail }
+          };
+        }
+      }
       return { decision: 'blocked', snapshot: blocked, reason, evidence };
     }
     const awaitingApproval = this.store.transitionOrchestrationRun({

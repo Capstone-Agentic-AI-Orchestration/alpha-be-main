@@ -59,6 +59,7 @@ export class ChatRouteError extends Error {
     super(message);
   }
 }
+import { runWithWorkspace } from './workspaceContext.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -665,8 +666,17 @@ export class ChatService extends EventEmitter {
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
+    // Links the run to this chat so recovery updates and milestones reach it.
+    const bindToChat = (runId: string | undefined, buildMessageId: string) => {
+      const { workspaceId, userId } = input.context;
+      if (!runId || !workspaceId || !userId) return;
+      runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({ runId, threadId, buildMessageId, actorId: userId }));
+    };
     const existingBuildReply = sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`);
-    if (existingBuildReply) return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
+    if (existingBuildReply) {
+      bindToChat(existingBuildReply.orchestrationRunId, existingBuildReply.id);
+      return { userMessage, agentMessage: existingBuildReply, agentMessages: [existingBuildReply] };
+    }
 
     const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
     const buildAttachmentContext = chatAttachmentService.promptContext(threadId, input.attachmentIds ?? [], messageId, false, false);
@@ -746,6 +756,7 @@ export class ChatService extends EventEmitter {
       timestamp: new Date().toISOString()
     };
     saveChatMessageAndShare(reply);
+    bindToChat(build.orchestrationRunId, reply.id);
     this.emit('chat_message', reply);
     return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
   }

@@ -97,7 +97,8 @@ describe('orchestration runner adapter', () => {
       readinessFor: () => ({ status: 'ready', detail: 'Ready.' })
     });
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 3,
+      packageVersion: 6,
+      reportSchemaVersion: 1,
       goal: 'Create and complete tasks.',
       projectContext: '',
       exclusions: ['No authentication.'],
@@ -132,6 +133,7 @@ describe('orchestration runner adapter', () => {
       branchName: 'alpha/orchestration/orchestrationrun123',
       personaHash: 'persona-v1', modelProvider: 'OpenAI', modelName: 'gpt-test'
     });
+    expect(prepared.contextManifest).toMatchObject({ packageVersion: 6, reportSchemaVersion: 1 });
     expect(prepared.startingCommit).toBe(await getHeadCommit(worktree));
     expect(await getCurrentBranch(worktree)).toBe(prepared.branchName);
     expect(await isGitWorkingTreeClean(worktree)).toBe(true);
@@ -232,5 +234,16 @@ describe('orchestration runner adapter', () => {
     attempts.push({ ...acceptedAttempt('create-endpoint', retryCommit), status: 'rejected' });
 
     expect((await adapter.prepare({ ...request, attemptNumber: 2 })).startingCommit).toBe(retryCommit);
+  });
+
+  it('stops a retry when the branch no longer matches the failed attempt checkpoint', async () => {
+    await adapter.prepare(request);
+    baseCommit = git(source, 'rev-parse', 'HEAD');
+    const savedCommit = commitChange('preserved failed attempt');
+    attempts.push({ ...acceptedAttempt('create-endpoint', savedCommit), status: 'failed' });
+    commitChange('unexpected later commit');
+
+    await expect(adapter.prepare({ ...request, attemptNumber: 2 }))
+      .rejects.toThrow('retry worktree no longer matches its latest saved checkpoint');
   });
 });

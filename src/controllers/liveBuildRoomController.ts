@@ -4,6 +4,7 @@ import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
 import { agentStore, chatStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import type { Agent, AgentCall, AgentCallActivity, ProjectBuildStep, PrototypeRun, RunActivity, Squad, SquadRun } from '../models/index.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { orchestrationRecoveryService } from '../services/orchestrationRecoveryService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
@@ -54,6 +55,9 @@ interface RoomAgentCard {
   runId?: string;
   agentCallId?: string;
   squadRunId?: string;
+  orchestrationTaskId?: string;
+  orchestrationAttemptNumber?: number;
+  orchestrationTaskCount?: number;
   activity: RoomActivity[];
   filePaths: string[];
   branchName?: string;
@@ -237,7 +241,8 @@ function safeRepositoryPath(value: unknown): string | undefined {
 function safeOrchestrationProjection(
   snapshot: NonNullable<ReturnType<typeof sqliteService.getOrchestrationSnapshot>>,
   agentsById: ReadonlyMap<string, Agent>,
-  visibleAgentIds: ReadonlySet<string>
+  visibleAgentIds: ReadonlySet<string>,
+  recovery?: Awaited<ReturnType<typeof orchestrationRecoveryService.getState>>['recovery']
 ) {
   const finalValidationEvent = runWithWorkspace(snapshot.run.workspaceId, () => sqliteService.listOrchestrationEvents(snapshot.run.id, 0, 500))
     .reverse()
@@ -294,35 +299,44 @@ function safeOrchestrationProjection(
       createdAt: snapshot.run.createdAt,
       updatedAt: snapshot.run.updatedAt
     },
+    recovery,
     requirements: snapshot.run.plan.requirements.map(requirement => ({
       id: requirement.id,
       description: safeOperationalText(requirement.description, 360) ?? ''
     })),
-    tasks: snapshot.tasks.map(task => ({
-      id: task.id,
-      title: safeOperationalText(task.title, 180) ?? '',
-      description: safeOperationalText(task.description, 700) ?? '',
-      kind: task.kind,
-      repository: safeOperationalText(planTasksById.get(task.id)?.repository ?? snapshot.run.repository, 180) ?? '',
-      ownerAgentId: safeAgentId(task.ownerAgentId),
-      ownerName: safeAgentName(task.ownerAgentId),
-      dependsOn: task.dependsOn,
-      requirementIds: task.requirementIds,
-      acceptanceCriteria: task.acceptanceCriteria.map(item => safeOperationalText(item, 280) ?? ''),
-      requiredChecks: task.requiredChecks,
-      assignmentReason: safeOperationalText(planTasksById.get(task.id)?.assignmentReason, 500) ??
-        `This task needs a ${safeAgentName(task.ownerAgentId)} specialist for ${task.kind} work.`,
-      scope: {
-        includePaths: task.scope.includePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item)),
-        excludePaths: task.scope.excludePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item))
-      },
-      required: task.required,
-      status: task.status,
-      revision: task.revision,
-      attemptCount: task.attemptCount,
-      correctionOfTaskId: task.correctionOfTaskId,
-      correctionCycle: task.correctionCycle
-    })),
+    tasks: snapshot.tasks.map(task => {
+      const executionAttemptCount = snapshot.attempts.filter(attempt => attempt.taskId === task.id &&
+        attempt.contextManifest.reportOnlyReportRetry !== true).length;
+      return {
+        id: task.id,
+        title: safeOperationalText(task.title, 180) ?? '',
+        description: safeOperationalText(task.description, 700) ?? '',
+        kind: task.kind,
+        repository: safeOperationalText(planTasksById.get(task.id)?.repository ?? snapshot.run.repository, 180) ?? '',
+        ownerAgentId: safeAgentId(task.ownerAgentId),
+        ownerName: safeAgentName(task.ownerAgentId),
+        dependsOn: task.dependsOn,
+        requirementIds: task.requirementIds,
+        acceptanceCriteria: task.acceptanceCriteria.map(item => safeOperationalText(item, 280) ?? ''),
+        requiredChecks: task.requiredChecks,
+        assignmentReason: safeOperationalText(planTasksById.get(task.id)?.assignmentReason, 500) ??
+          `This task needs a ${safeAgentName(task.ownerAgentId)} specialist for ${task.kind} work.`,
+        scope: {
+          includePaths: task.scope.includePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item)),
+          excludePaths: task.scope.excludePaths.map(safeRepositoryPath).filter((item): item is string => Boolean(item))
+        },
+        required: task.required,
+        status: task.status,
+        revision: task.revision,
+        attemptCount: task.attemptCount,
+        executionAttemptCount,
+        retryAvailable: !IS_CLOUD && ALPHA_ORCHESTRATION_ENABLED &&
+          ['executing', 'blocked'].includes(snapshot.run.status) &&
+          ['failed', 'blocked'].includes(task.status) && executionAttemptCount < 2,
+        correctionOfTaskId: task.correctionOfTaskId,
+        correctionCycle: task.correctionCycle
+      };
+    }),
     attempts: snapshot.attempts.map(attempt => {
       const result = attempt.result ?? {};
       const report = result.agentReport && typeof result.agentReport === 'object'
@@ -348,6 +362,7 @@ function safeOrchestrationProjection(
         id: attempt.id,
         taskId: attempt.taskId,
         attemptNumber: attempt.attemptNumber,
+        reportFormatRetry: attempt.contextManifest.reportOnlyReportRetry === true,
         prototypeRunId: attempt.prototypeRunId,
         agentId: safeAgentId(attempt.agentId),
         agentName: safeAgentName(attempt.agentId),
@@ -356,6 +371,15 @@ function safeOrchestrationProjection(
         completedAt: attempt.completedAt,
         resultCommit: attempt.resultCommit,
         summary: safeOperationalText(result.summary as string | undefined, 900),
+        reportResponse: safeOperationalText(result.agentReportResponse as string | undefined, 12_000),
+        reportResponseTruncated: result.agentReportResponseTruncated === true,
+        reportError: safeOperationalText(result.agentReportError as string | undefined, 900),
+        reportSchemaVersionExpected: Number.isInteger(result.agentReportSchemaVersionExpected)
+          ? result.agentReportSchemaVersionExpected as number
+          : undefined,
+        reportSchemaVersionReceived: Number.isInteger(result.agentReportSchemaVersionReceived)
+          ? result.agentReportSchemaVersionReceived as number
+          : undefined,
         failureReason: safeOperationalText(attempt.failureReason ?? result.rejectionReason as string | undefined, 500),
         report: report ? {
           requirementCoverage: coverage.map(item => ({
@@ -978,17 +1002,25 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   }
 
   const orchestrationTaskById = new Map((selectedOrchestration?.tasks ?? []).map(task => [task.id, task]));
+  const orchestrationTaskCountByAgent = new Map<string, number>();
+  for (const task of selectedOrchestration?.tasks ?? []) {
+    if (task.ownerAgentId) orchestrationTaskCountByAgent.set(task.ownerAgentId,
+      (orchestrationTaskCountByAgent.get(task.ownerAgentId) ?? 0) + 1);
+  }
   for (const run of orchestrationPrototypeRuns) {
     const agent = membersById.get(run.agentId);
     if (!agent) continue;
     const task = run.orchestrationTaskId ? orchestrationTaskById.get(run.orchestrationTaskId) : undefined;
     const taskIndex = task ? selectedOrchestration!.tasks.findIndex(item => item.id === task.id) : -1;
+    const attempt = selectedOrchestration?.attempts.find(item => item.prototypeRunId === run.id);
     const status = cardStatus(run, undefined, 0);
     const activity = orchestrationRunActivity(run);
     agentCards.push({
       executionId: run.id,
       source: 'agent_run',
-      sourceLabel: taskIndex >= 0 ? `Orchestrator · Step ${String(taskIndex + 1).padStart(2, '0')}` : 'Orchestrator assignment',
+      sourceLabel: taskIndex >= 0
+        ? `Orchestrator · Step ${String(taskIndex + 1).padStart(2, '0')}${attempt ? ` · Attempt ${attempt.attemptNumber}${attempt.contextManifest.reportOnlyReportRetry === true ? ' · report format only' : ''}` : ''}`
+        : 'Orchestrator assignment',
       agentId: run.agentId,
       agentName: agent.name,
       agentRole: agent.role ?? 'Agent',
@@ -996,9 +1028,14 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       color: agent.color,
       status,
       progress: progressForRun(run),
-      currentTask: task?.title ?? currentTask(run, status),
+      currentTask: attempt?.contextManifest.reportOnlyReportRetry === true
+        ? 'Fixing the report format only'
+        : task?.title ?? currentTask(run, status),
       currentStage: run.stages?.[run.currentStageIndex]?.label,
       runId: run.id,
+      orchestrationTaskId: task?.id,
+      orchestrationAttemptNumber: attempt?.attemptNumber,
+      orchestrationTaskCount: orchestrationTaskCountByAgent.get(run.agentId) ?? 1,
       activity,
       filePaths: [...new Set(activity.flatMap(item => item.paths ?? []))],
       branchName: run.branchName,
@@ -1010,6 +1047,43 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
           ? { kind: 'branch', label: 'Working branch', value: run.branchName }
           : undefined
     });
+  }
+
+  if (selectedOrchestration) {
+    const tasksByAgent = new Map<string, typeof selectedOrchestration.tasks>();
+    for (const task of selectedOrchestration.tasks) {
+      if (!task.ownerAgentId || !visibleAgentIds.has(task.ownerAgentId)) continue;
+      const assigned = tasksByAgent.get(task.ownerAgentId) ?? [];
+      assigned.push(task);
+      tasksByAgent.set(task.ownerAgentId, assigned);
+    }
+    for (const [agentId, assignedTasks] of tasksByAgent) {
+      if (agentCards.some(card => card.source === 'agent_run' && card.agentId === agentId &&
+          Boolean(card.runId && orchestrationPrototypeRuns.some(run => run.id === card.runId)))) continue;
+      const agent = membersById.get(agentId);
+      if (!agent) continue;
+      const currentTask = assignedTasks.find(task => ['running', 'submitted', 'ready', 'failed', 'blocked'].includes(task.status)) ??
+        assignedTasks.find(task => task.status === 'pending') ?? assignedTasks.at(-1);
+      const allAccepted = assignedTasks.every(task => task.status === 'accepted');
+      const hasStoppedTask = assignedTasks.some(task => ['failed', 'blocked'].includes(task.status));
+      agentCards.push({
+        executionId: `planned:${selectedOrchestration.run.id}:${agentId}`,
+        source: 'agent_run',
+        sourceLabel: 'Orchestrator · Planned',
+        agentId,
+        agentName: agent.name,
+        agentRole: agent.role ?? 'Agent',
+        avatar: agent.avatar,
+        color: agent.color,
+        status: allAccepted ? 'completed' : hasStoppedTask ? 'failed' : 'waiting',
+        progress: allAccepted ? 100 : 0,
+        currentTask: currentTask?.title ?? 'Waiting for an assignment',
+        orchestrationTaskId: currentTask?.id,
+        orchestrationTaskCount: assignedTasks.length,
+        activity: [],
+        filePaths: []
+      });
+    }
   }
 
   for (const call of liveChatCalls) {
@@ -1217,8 +1291,15 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     });
   }
   buildRuns.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const recoveryState = selectedOrchestration
+    ? await orchestrationRecoveryService.getState({
+        workspaceId,
+        runId: selectedOrchestration.run.id,
+        canControl: workspaceRegistry.can(req.workspace!.role, 'squad.run')
+      }).catch(() => undefined)
+    : undefined;
   const orchestration = selectedOrchestration
-    ? safeOrchestrationProjection(selectedOrchestration, membersById, visibleAgentIds)
+    ? safeOrchestrationProjection(selectedOrchestration, membersById, visibleAgentIds, recoveryState?.recovery)
     : selectedPlanningReservation ? {
         run: {
           id: selectedPlanningReservation.runId,

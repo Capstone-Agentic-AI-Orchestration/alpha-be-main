@@ -51,6 +51,23 @@ export const ALPHA_ORCHESTRATION_ENABLED = !IS_CLOUD &&
   process.env.ALPHA_ORCHESTRATION_ENABLED !== '0' &&
   (process.env.NODE_ENV !== 'test' || process.env.ALPHA_ORCHESTRATION_ENABLED === '1');
 
+function boundedIntegerSetting(name: string, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+
+/** Safe retries only for confirmed process-start failures with no child PID. */
+export const ALPHA_ORCHESTRATION_TRANSPORT_RETRIES = boundedIntegerSetting('ALPHA_ORCHESTRATION_TRANSPORT_RETRIES', 2, 0, 3);
+/** Maximum measured input+output tokens per coordinated build; 0 disables this cap. */
+export const ALPHA_ORCHESTRATION_MAX_TOKENS = boundedIntegerSetting('ALPHA_ORCHESTRATION_MAX_TOKENS', 0, 0, 10_000_000);
+/** Maximum provider-reported cost per coordinated build in USD; 0 disables this cap. */
+function boundedNumberSetting(name: string, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number.parseFloat(process.env[name] ?? '');
+  return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+export const ALPHA_ORCHESTRATION_MAX_COST_USD = boundedNumberSetting('ALPHA_ORCHESTRATION_MAX_COST_USD', 0, 0, 100_000);
+/** Maximum total build age; 0 disables it. Saved builds remain resumable by default. */
+export const ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS = boundedIntegerSetting('ALPHA_ORCHESTRATION_MAX_BUILD_AGE_HOURS', 0, 0, 24 * 7) * 60 * 60_000;
 // Phase 3: cloud-only email rollout. Unset/off leaves existing behavior intact.
 export const ALPHA_TICKETING_ACK_EMAIL_ENABLED = process.env.ALPHA_TICKETING_ACK_EMAIL_ENABLED === '1';
 export const TICKET_ACK_EMAIL_PROVIDER = (process.env.TICKET_ACK_EMAIL_PROVIDER ?? 'resend').trim().toLowerCase();

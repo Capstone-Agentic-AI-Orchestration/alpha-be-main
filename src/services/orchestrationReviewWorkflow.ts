@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import type { Agent } from '../models/index.js';
 import {
   MAX_PLAN_TASKS,
   orchestrationPlanSchema,
+  roleCanOwnOrchestrationTask,
   validateOrchestrationPlan,
   type OrchestrationAgentReport,
   type OrchestrationPlan,
@@ -184,11 +186,12 @@ export function buildOrchestrationReviewAmendment(
   }
 
   const existingTasks = snapshot.run.plan.tasks.map(task => ({ ...task }));
-  const requiredValidators = existingTasks.filter(task => task.kind === 'validation' && task.required);
+  const validationTemplates = existingTasks.filter(task => task.kind === 'validation');
+  const requiredValidators = validationTemplates.filter(task => task.required);
   if (requiredValidators.length > 1) {
     throw new OrchestrationReviewPlanError('The plan has multiple required validation gates; review correction needs a reviewed plan amendment before it can continue.');
   }
-  const priorValidationIds = new Set(requiredValidators.map(task => task.id));
+  const priorValidationIds = new Set(validationTemplates.map(task => task.id));
   for (const validator of requiredValidators) validator.required = false;
 
   const nextReviewId = `review-${nextPlanVersion}`;
@@ -204,7 +207,7 @@ export function buildOrchestrationReviewAmendment(
   correctionDefinitions.push(reviewDefinition);
   addedTasks.push({ ...reviewDefinition, status: 'pending', revision: 0, attemptCount: 0 });
 
-  const validationTemplate = requiredValidators[0];
+  const validationTemplate = requiredValidators[0] ?? validationTemplates[0];
   let nextValidationId: string | undefined;
   if (validationTemplate) {
     nextValidationId = `validation-${nextPlanVersion}`;
@@ -244,4 +247,162 @@ export function buildOrchestrationReviewAmendment(
   // Ensure no derived UI/build-step marker can be mistaken for a new project step.
   for (const task of normalizedTasks) delete (task as OrchestrationTaskRecord & { buildStepId?: string }).buildStepId;
   return { plan: parsedPlan, addedTasks: normalizedTasks, findings };
+}
+
+/**
+ * Convert failed, observed final checks into the same bounded owner/review/
+ * validation chain used by independent review. Owners are selected only from
+ * accepted code tasks that contributed files in the affected repository.
+ */
+export function buildFinalValidationAmendment(
+  snapshot: OrchestrationSnapshot,
+  evidence: Record<string, unknown>,
+  eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[]
+): OrchestrationReviewAmendment {
+  const checks = evidence.checks && typeof evidence.checks === 'object'
+    ? evidence.checks as Record<string, unknown>
+    : undefined;
+  const observed = Array.isArray(checks?.observed) ? checks.observed as Array<Record<string, unknown>> : [];
+  const failedChecks = observed.filter(check => check.exitCode !== 0 || check.signal != null);
+  if (checks?.status !== 'failed' || !failedChecks.length ||
+      (Array.isArray(checks.missingScripts) && checks.missingScripts.length)) {
+    throw new OrchestrationReviewPlanError('The saved evidence does not identify a failed repository check that can be safely routed to code owners. Keep the build blocked for human review.');
+  }
+
+  const repositories = Array.isArray(evidence.repositories)
+    ? evidence.repositories as Array<Record<string, unknown>>
+    : [];
+  const evidenceByRepository = new Map<string, Record<string, unknown>>();
+  for (const repository of repositories) {
+    if (typeof repository.repository === 'string') evidenceByRepository.set(repository.repository.toLowerCase(), repository);
+  }
+  const primaryRepository = typeof evidence.repository === 'string' ? evidence.repository : snapshot.run.repository;
+  if (!evidenceByRepository.size) evidenceByRepository.set(primaryRepository.toLowerCase(), {
+    repository: primaryRepository,
+    cumulativeChangedPaths: Array.isArray(evidence.cumulativeChangedPaths) ? evidence.cumulativeChangedPaths : [],
+    checks
+  });
+
+  const taskChanges = new Map<string, string[]>();
+  for (const task of snapshot.tasks.filter(candidate => candidate.status === 'accepted' && CODE_TASK_KINDS.has(candidate.kind))) {
+    const attempt = [...snapshot.attempts].reverse().find(candidate => candidate.taskId === task.id && candidate.status === 'accepted');
+    const acceptance = attempt?.result?.acceptanceEvidence;
+    const changedPaths = acceptance && typeof acceptance === 'object'
+      ? (acceptance as Record<string, unknown>).changedPaths
+      : undefined;
+    taskChanges.set(task.id, Array.isArray(changedPaths) ? changedPaths.filter((item): item is string => typeof item === 'string') : []);
+  }
+
+  const reportFindings: OrchestrationReviewFinding[] = [];
+  for (const [repositoryKey, repositoryEvidence] of evidenceByRepository) {
+    const repository = typeof repositoryEvidence.repository === 'string' ? repositoryEvidence.repository : repositoryKey;
+    const repositoryChecks = repositoryEvidence.checks && typeof repositoryEvidence.checks === 'object'
+      ? repositoryEvidence.checks as Record<string, unknown>
+      : checks;
+    const commands = Array.isArray(repositoryChecks?.observed)
+      ? repositoryChecks.observed as Array<Record<string, unknown>>
+      : failedChecks;
+    const repoFailed = commands.filter(check => check.exitCode !== 0 || check.signal != null);
+    if (!repoFailed.length) continue;
+    const repoTasks = snapshot.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
+      (task.repository ?? snapshot.run.repository).toLowerCase() === repositoryKey && (taskChanges.get(task.id)?.length ?? 0) > 0);
+    if (!repoTasks.length) {
+      throw new OrchestrationReviewPlanError(`Final checks failed in ${repository}, but no accepted implementation task can be tied to changed files there. Keep the build blocked for human review.`);
+    }
+    const outputText = repoFailed.map(check => `${String(check.display ?? check.script ?? 'Repository check')} ${String(check.exitCode ?? check.signal ?? 'failed')}: ${String(check.outputSummary ?? '')}`).join('\n').toLowerCase();
+    const allPaths = [...new Set(repoTasks.flatMap(task => taskChanges.get(task.id) ?? []))];
+    const matchedPaths = allPaths.filter(filePath => outputText.includes(filePath.toLowerCase()) ||
+      outputText.includes(path.posix.basename(filePath).toLowerCase()));
+    const affectedTasks = matchedPaths.length
+      ? repoTasks.filter(task => (taskChanges.get(task.id) ?? []).some(filePath => matchedPaths.includes(filePath)))
+      : repoTasks;
+    for (const target of affectedTasks) {
+      const implicatedPaths = (taskChanges.get(target.id) ?? []).filter(filePath => !matchedPaths.length || matchedPaths.includes(filePath));
+      const checkLabels = repoFailed.map(check => String(check.display ?? check.script ?? 'Repository check')).slice(0, 8);
+      reportFindings.push({
+        targetTaskId: target.id,
+        title: `Final validation failed: ${checkLabels.join(', ')}`.slice(0, 240),
+        severity: 'blocking',
+        path: implicatedPaths[0],
+        evidence: `The final repository checks failed after all required tasks were accepted: ${repoFailed.map(check => `${String(check.display ?? check.script ?? 'check')} exited ${String(check.exitCode ?? check.signal ?? 'with an error')}`).join('; ')}.`,
+        instruction: `Review the saved final-check evidence and correct only files owned by this task. Keep changes inside task ${target.id}'s original path scope, rerun its required checks, and report any issue that cannot be tied to this scope.`
+      });
+    }
+  }
+  if (!reportFindings.length || reportFindings.length > 20) {
+    throw new OrchestrationReviewPlanError('Final validation did not map to a bounded set of accepted code owners. Keep the build blocked for human review.');
+  }
+
+  const ownerIds = new Set(reportFindings.flatMap(finding => {
+    const task = snapshot.tasks.find(candidate => candidate.id === finding.targetTaskId);
+    return task ? [task.ownerAgentId] : [];
+  }));
+  const reviewAgentId = eligibleAgents.find(agent => roleCanOwnOrchestrationTask('review', agent.role) && !ownerIds.has(agent.id))?.id ??
+    snapshot.tasks.find(task => task.kind === 'review' && task.status === 'accepted' && !ownerIds.has(task.ownerAgentId))?.ownerAgentId;
+  const reviewTemplate = snapshot.tasks.find(task => task.kind === 'review' && task.status === 'accepted');
+  if (!reviewTemplate || !reviewAgentId) {
+    throw new OrchestrationReviewPlanError('Final-check corrections require an available reviewer who is different from every correction owner. Keep the build blocked for human review.');
+  }
+
+  const syntheticReview: OrchestrationTaskRecord = { ...reviewTemplate, ownerAgentId: reviewAgentId, status: 'submitted' };
+  const amendmentSnapshot: OrchestrationSnapshot = {
+    ...snapshot,
+    run: { ...snapshot.run, currentTaskId: syntheticReview.id },
+    tasks: snapshot.tasks.map(task => task.id === syntheticReview.id ? syntheticReview : task)
+  };
+  let amendment = buildOrchestrationReviewAmendment(amendmentSnapshot, syntheticReview, reportFindings, eligibleAgents);
+  if (!amendment.addedTasks.some(task => task.kind === 'validation')) {
+    const validator = eligibleAgents.find(agent => roleCanOwnOrchestrationTask('validation', agent.role));
+    const followupReview = amendment.addedTasks.find(task => task.kind === 'review');
+    if (!validator || !followupReview) {
+      throw new OrchestrationReviewPlanError('Final-check corrections need an available validation specialist after independent review. Keep the build blocked for human review.');
+    }
+    const nextValidationId = `validation-${snapshot.run.planVersion + 1}`;
+    if (amendment.plan.tasks.some(task => task.id === nextValidationId)) {
+      throw new OrchestrationReviewPlanError('A final-validation task with this identity already exists. Reconcile the current plan before retrying.');
+    }
+    const validationTask: OrchestrationTaskDefinition = {
+      id: nextValidationId,
+      title: `Revalidate corrected implementation (plan ${snapshot.run.planVersion + 1})`,
+      description: 'Run the configured repository checks after independent review of the owner corrections. Do not change repository files.',
+      kind: 'validation',
+      repository: snapshot.run.repository,
+      ownerAgentId: validator.id,
+      assignmentReason: `A ${validator.role} specialist is assigned to verify the corrected implementation after independent review.`,
+      dependsOn: [followupReview.id],
+      requirementIds: [snapshot.run.plan.requirements[0].id],
+      acceptanceCriteria: ['Record what the configured checks confirm after the independent review.'],
+      requiredChecks: [...new Set(snapshot.run.plan.tasks
+        .filter(task => task.required && (task.repository ?? snapshot.run.repository).toLowerCase() === snapshot.run.repository.toLowerCase())
+        .flatMap(task => task.requiredChecks))].slice(0, 7),
+      scope: { includePaths: [], excludePaths: [] },
+      required: true
+    };
+    const plan = orchestrationPlanSchema.parse({
+      ...amendment.plan,
+      tasks: amendment.plan.tasks.map(task => task.kind === 'delivery' && task.dependsOn.includes(followupReview.id)
+        ? { ...task, dependsOn: [...task.dependsOn.filter(id => id !== followupReview.id), validationTask.id] }
+        : task).concat(validationTask)
+    });
+    if (plan.tasks.length > MAX_PLAN_TASKS) {
+      throw new OrchestrationReviewPlanError(`The correction plan would exceed the ${MAX_PLAN_TASKS}-task limit. Keep the build blocked for a human plan decision.`);
+    }
+    const issues = validateOrchestrationPlan(plan, eligibleAgents);
+    if (issues.length) {
+      throw new OrchestrationReviewPlanError(`The fresh validation gate did not pass its role and dependency checks: ${issues.map(issue => issue.detail).join(' ')}`);
+    }
+    amendment = {
+      ...amendment,
+      plan,
+      addedTasks: [...amendment.addedTasks, { ...validationTask, status: 'pending', revision: 0, attemptCount: 0 }]
+    };
+  }
+  return {
+    ...amendment,
+    findings: amendment.findings.map(finding => ({
+      ...finding,
+      sourceTaskId: finding.taskId,
+      evidence: { ...finding.evidence, origin: 'final_validation' }
+    }))
+  };
 }
