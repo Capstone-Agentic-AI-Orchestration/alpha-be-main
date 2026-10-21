@@ -97,7 +97,8 @@ describe('orchestration runner adapter', () => {
       readinessFor: () => ({ status: 'ready', detail: 'Ready.' })
     });
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 5,
+      packageVersion: 6,
+      reportSchemaVersion: 1,
       goal: 'Create and complete tasks.',
       projectContext: '',
       exclusions: ['No authentication.'],
@@ -132,6 +133,7 @@ describe('orchestration runner adapter', () => {
       branchName: 'alpha/orchestration/orchestrationrun123',
       personaHash: 'persona-v1', modelProvider: 'OpenAI', modelName: 'gpt-test'
     });
+    expect(prepared.contextManifest).toMatchObject({ packageVersion: 6, reportSchemaVersion: 1 });
     expect(prepared.startingCommit).toBe(await getHeadCommit(worktree));
     expect(await getCurrentBranch(worktree)).toBe(prepared.branchName);
     expect(await isGitWorkingTreeClean(worktree)).toBe(true);

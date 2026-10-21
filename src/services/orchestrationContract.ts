@@ -7,6 +7,8 @@ import type { Agent } from '../models/index.js';
  * the selected project squad before persisting or dispatching anything.
  */
 export const ORCHESTRATION_PLAN_SCHEMA_VERSION = 1 as const;
+/** Version expected in every specialist's structured task report. */
+export const ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION = 1 as const;
 export const MAX_INITIAL_PLAN_TASKS = 12;
 export const MAX_PLAN_TASKS = 64;
 export const MAX_TASK_DEPENDENCIES = 8;
@@ -89,7 +91,7 @@ const repositoryPath = z.string().trim().min(1).max(1_000).refine(value =>
 
 /** Provider-independent specialist submission; Alpha adds trusted run evidence separately. */
 export const orchestrationAgentReportSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION),
   taskId: identifier,
   summary: z.string().trim().min(1).max(4_000),
   requirementCoverage: z.array(z.object({

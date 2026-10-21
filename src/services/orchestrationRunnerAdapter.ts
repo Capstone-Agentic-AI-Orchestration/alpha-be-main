@@ -183,6 +183,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         workingDir,
         contextManifest: {
           packageVersion: request.taskPackage.packageVersion,
+          reportSchemaVersion: request.taskPackage.reportSchemaVersion,
           taskPackageHash,
           personaHash: persona.personaHash,
           modelProvider: persona.modelProvider,

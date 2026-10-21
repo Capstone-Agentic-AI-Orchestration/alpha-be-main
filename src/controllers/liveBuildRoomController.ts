@@ -374,6 +374,12 @@ function safeOrchestrationProjection(
         reportResponse: safeOperationalText(result.agentReportResponse as string | undefined, 12_000),
         reportResponseTruncated: result.agentReportResponseTruncated === true,
         reportError: safeOperationalText(result.agentReportError as string | undefined, 900),
+        reportSchemaVersionExpected: Number.isInteger(result.agentReportSchemaVersionExpected)
+          ? result.agentReportSchemaVersionExpected as number
+          : undefined,
+        reportSchemaVersionReceived: Number.isInteger(result.agentReportSchemaVersionReceived)
+          ? result.agentReportSchemaVersionReceived as number
+          : undefined,
         failureReason: safeOperationalText(attempt.failureReason ?? result.rejectionReason as string | undefined, 500),
         report: report ? {
           requirementCoverage: coverage.map(item => ({

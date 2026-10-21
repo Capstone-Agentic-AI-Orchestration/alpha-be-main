@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
-import { orchestrationAgentReportSchema } from './orchestrationContract.js';
+import { normalizeAndValidateAgentReport } from './orchestrationAgentReport.js';
 import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { runVerification, type VerificationResult } from './verificationService.js';
 import { projectRunWorkspacePath } from './workspaceService.js';
@@ -111,6 +111,13 @@ function previousAgentReportResponse(result: Record<string, unknown> | undefined
     return JSON.stringify(result.agentReport).slice(0, 12_000);
   }
   return typeof result?.summary === 'string' ? result.summary.slice(0, 12_000) : '';
+}
+
+function validateAttemptReport(attempt: OrchestrationAttemptRecord) {
+  const expectedVersion = typeof attempt.contextManifest.reportSchemaVersion === 'number'
+    ? attempt.contextManifest.reportSchemaVersion
+    : undefined;
+  return normalizeAndValidateAgentReport(attempt.result?.agentReport, expectedVersion);
 }
 
 export class TaskAcceptanceService {
@@ -281,6 +288,13 @@ export class TaskAcceptanceService {
         return { decision: 'rejected', snapshot: rejected, reason: rejection.reason };
       }
 
+      const reportValidation = validateAttemptReport(attempt);
+      if (!reportValidation.success) {
+        return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy,
+          new Error(reportValidation.error), input.now);
+      }
+      const canonicalReport = reportValidation.report as unknown as Record<string, unknown>;
+
       let evidence: Record<string, unknown>;
       try {
         evidence = await this.acceptanceEvidence(snapshot, task, attempt);
@@ -288,7 +302,7 @@ export class TaskAcceptanceService {
         return this.blockAcceptanceFailure(snapshot, task, attempt, input.acceptedBy, error, input.now);
       }
       if (task.kind === 'review') {
-        const report = orchestrationAgentReportSchema.parse(attempt.result?.agentReport);
+        const report = reportValidation.report;
         let amendment;
         try {
           amendment = buildOrchestrationReviewAmendment(
@@ -319,6 +333,7 @@ export class TaskAcceptanceService {
           expectedPlanVersion: snapshot.run.planVersion,
           acceptedBy: input.acceptedBy,
           evidence,
+          canonicalReport,
           amendment,
           dispatchNext: input.dispatchNext,
           now: input.now
@@ -338,6 +353,7 @@ export class TaskAcceptanceService {
         expectedTaskRevision: task.revision,
         acceptedBy: input.acceptedBy,
         evidence,
+        canonicalReport,
         dispatchNext: input.dispatchNext,
         now: input.now
       });
@@ -435,28 +451,29 @@ export class TaskAcceptanceService {
     if (!result || result.resultSchemaVersion !== 1 || typeof result.summary !== 'string' || !result.summary.trim()) {
       return fail('The task result is missing the required versioned summary.', { check: 'result_schema' });
     }
-    const report = orchestrationAgentReportSchema.safeParse(result.agentReport);
-    if (!report.success) {
-      const detail = result.agentReportError ?? report.error.issues[0]?.message ?? 'invalid report';
+    const reportValidation = validateAttemptReport(attempt);
+    if (!reportValidation.success) {
+      const detail = typeof result.agentReportError === 'string' ? result.agentReportError : reportValidation.error;
       return fail(`The specialist report is invalid: ${detail}`, {
         check: 'agent_report', detail,
         instruction: `The report could not be read: ${detail}`
       });
     }
-    if (report.data.taskId !== task.id) {
-      const detail = `Expected taskId "${task.id}" but received "${report.data.taskId}".`;
+    const report = reportValidation.report;
+    if (report.taskId !== task.id) {
+      const detail = `Expected taskId "${task.id}" but received "${report.taskId}".`;
       return fail(`The specialist report names a different task. ${detail}`, {
-        check: 'report_identity', detail, expectedTaskId: task.id, reportedTaskId: report.data.taskId
+        check: 'report_identity', detail, expectedTaskId: task.id, reportedTaskId: report.taskId
       });
     }
     if (task.kind === 'review') {
-      if (!report.data.reviewFindings) {
+      if (!report.reviewFindings) {
         return fail('The independent reviewer must return a reviewFindings array, including an explicit empty array when no defect is found.', {
           check: 'review_findings_missing', detail: 'The report must include "reviewFindings": [].'
         });
       }
       const seenFindings = new Set<string>();
-      for (const finding of report.data.reviewFindings) {
+      for (const finding of report.reviewFindings) {
         const key = `${finding.targetTaskId}\0${finding.path ?? ''}\0${finding.title.toLowerCase()}`;
         if (seenFindings.has(key)) return fail('The independent review contains a duplicate finding.', { check: 'duplicate_review_finding', title: finding.title });
         seenFindings.add(key);
@@ -484,25 +501,25 @@ export class TaskAcceptanceService {
       const expectedFindingIds = snapshot.findings
         .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id)
         .map(finding => finding.id).sort();
-      const reportedFindingCoverage = report.data.findingCoverage?.map(item => item.findingId).sort() ?? [];
+      const reportedFindingCoverage = report.findingCoverage?.map(item => item.findingId).sort() ?? [];
       if (!expectedFindingIds.length || expectedFindingIds.length !== reportedFindingCoverage.length ||
           expectedFindingIds.some((id, index) => id !== reportedFindingCoverage[index]) ||
-          report.data.findingCoverage?.some(item => !item.evidence.trim())) {
+          report.findingCoverage?.some(item => !item.evidence.trim())) {
         return fail('The correction report must address every linked reviewer finding exactly once with concrete evidence.', {
           check: 'review_finding_coverage', expectedFindingIds, reportedFindingIds: reportedFindingCoverage
         });
       }
     }
-    const coveredRequirementIds = report.data.requirementCoverage.map(item => item.requirementId);
+    const coveredRequirementIds = report.requirementCoverage.map(item => item.requirementId);
     if (new Set(coveredRequirementIds).size !== coveredRequirementIds.length ||
         task.requirementIds.length !== coveredRequirementIds.length ||
         task.requirementIds.some(id => !coveredRequirementIds.includes(id)) ||
-        report.data.requirementCoverage.some(item => !item.evidence.trim())) {
+        report.requirementCoverage.some(item => !item.evidence.trim())) {
       return fail('The specialist report does not provide evidence for every assigned requirement exactly once.', {
         check: 'requirement_coverage', expected: task.requirementIds, reported: coveredRequirementIds
       });
     }
-    const reportedCriteria = report.data.criteriaEvidence.map(item => item.criterion);
+    const reportedCriteria = report.criteriaEvidence.map(item => item.criterion);
     if (new Set(reportedCriteria).size !== reportedCriteria.length ||
         task.acceptanceCriteria.length !== reportedCriteria.length ||
         task.acceptanceCriteria.some(criterion => !reportedCriteria.includes(criterion))) {
@@ -510,10 +527,10 @@ export class TaskAcceptanceService {
         check: 'acceptance_criteria', expected: task.acceptanceCriteria, reported: reportedCriteria
       });
     }
-    const unresolvedBlocker = report.data.blockers[0];
+    const unresolvedBlocker = report.blockers[0];
     if (unresolvedBlocker) {
       return fail(`The specialist reported a blocker: ${unresolvedBlocker}`, {
-        check: 'agent_blocker', blockers: report.data.blockers
+        check: 'agent_blocker', blockers: report.blockers
       });
     }
     const authorizedWorkspace = repositoryWorkspaceForTask(snapshot, task.id);
@@ -568,7 +585,7 @@ export class TaskAcceptanceService {
       return fail('The attempt has no recorded starting commit, so its changed-file scope cannot be verified.', { check: 'starting_commit' });
     }
     const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, diffStartingCommit, attempt.resultCommit);
-    const declaredDeliverablePaths = new Set(report.data.deliverables.flatMap(deliverable => deliverable.paths));
+    const declaredDeliverablePaths = new Set(report.deliverables.flatMap(deliverable => deliverable.paths));
     const undeclaredChangedPath = changedPaths.find(filePath => !declaredDeliverablePaths.has(filePath));
     if (undeclaredChangedPath) {
       return fail(`The specialist report does not identify changed file ${undeclaredChangedPath} as a deliverable.`, {

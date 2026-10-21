@@ -4523,6 +4523,7 @@ export class SQLiteService {
     expectedTaskRevision: number;
     acceptedBy: string;
     evidence: Record<string, unknown>;
+    canonicalReport?: Record<string, unknown>;
     now?: string;
   }): OrchestrationSnapshot {
     const workspaceId = this.workspaceId();
@@ -4536,8 +4537,13 @@ export class SQLiteService {
         .get(workspaceId, input.runId, input.taskId, input.attemptId) as any;
       if (!attempt || attempt.status !== 'submitted') throw new Error('Only a submitted attempt can be accepted.');
       const resultPayload = parseJson<Record<string, unknown>>(attempt.result_json, {});
+      const acceptedResult = JSON.stringify({
+        ...resultPayload,
+        ...(input.canonicalReport ? { agentReport: input.canonicalReport } : {}),
+        acceptanceEvidence: input.evidence
+      });
       const updated = this.db.prepare("UPDATE orchestration_attempts SET status = 'accepted', result_json = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = 'submitted'")
-        .run(JSON.stringify({ ...resultPayload, acceptanceEvidence: input.evidence }), now,
+        .run(acceptedResult, now,
           workspaceId, input.runId, input.taskId, input.attemptId);
       if (updated.changes !== 1) throw new Error('Attempt changed before acceptance was saved.');
       this.db.prepare("UPDATE orchestration_artifacts SET status = 'accepted' WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND attempt_id = ? AND status = 'submitted'")
@@ -4581,6 +4587,7 @@ export class SQLiteService {
     expectedPlanVersion: number;
     acceptedBy: string;
     evidence: Record<string, unknown>;
+    canonicalReport?: Record<string, unknown>;
     plan: OrchestrationPlan;
     addedTasks: readonly OrchestrationTaskRecord[];
     findings: readonly PersistedReviewFinding[];
@@ -4607,9 +4614,9 @@ export class SQLiteService {
       if (!attempt || attempt.status !== 'submitted') throw new Error('Only a submitted review attempt can be accepted.');
 
       const submitted = parseJson<Record<string, unknown>>(attempt.result_json, {});
-      const agentReport = submitted.agentReport && typeof submitted.agentReport === 'object'
+      const agentReport = input.canonicalReport ?? (submitted.agentReport && typeof submitted.agentReport === 'object'
         ? submitted.agentReport as Record<string, unknown>
-        : undefined;
+        : undefined);
       const reportedFindings = agentReport?.reviewFindings;
       if (!Array.isArray(reportedFindings) || reportedFindings.length !== input.findings.length) {
         throw new Error('The accepted review findings do not match the submitted reviewer report.');
@@ -4672,7 +4679,11 @@ export class SQLiteService {
         throw new Error('The amended plan does not contain its correction tasks.');
       }
       const nextPlanVersion = snapshot.run.planVersion + (hasAmendment ? 1 : 0);
-      const acceptedResult = JSON.stringify({ ...submitted, acceptanceEvidence: input.evidence });
+      const acceptedResult = JSON.stringify({
+        ...submitted,
+        ...(input.canonicalReport ? { agentReport: input.canonicalReport } : {}),
+        acceptanceEvidence: input.evidence
+      });
       const attemptUpdate = this.db.prepare("UPDATE orchestration_attempts SET status = 'accepted', result_json = ?, completed_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND id = ? AND status = 'submitted'")
         .run(acceptedResult, now, workspaceId, input.runId, input.taskId, input.attemptId);
       if (attemptUpdate.changes !== 1) throw new Error('Review attempt changed before acceptance was saved.');
