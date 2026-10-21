@@ -7,7 +7,7 @@ import { OrchestrationRecoveryService } from './orchestrationRecoveryService.js'
 const reportError = "The specialist report is invalid: reportedChecks.0.result Required; reportedChecks.0 Unrecognized key(s) in object: 'name', 'status'.";
 
 function snapshot(input: {
-  status: 'executing' | 'blocked';
+  status: 'executing' | 'blocked' | 'cancelled';
   taskStatus: 'running' | 'failed';
   correctionAttempts: number;
   revision?: number;
@@ -47,6 +47,39 @@ function snapshot(input: {
 }
 
 describe('orchestration recovery chat milestones', () => {
+  it('closes the recovery once when a build is cancelled and never reopens it for the failed task', () => {
+    const opened: OrchestrationRecoveryEpisode = {
+      id: 'recovery-1', workspaceId: 'workspace-1', projectId: 'project-1', runId: 'run-1', issueId: 'issue-1',
+      taskId: 'review-calculator', source: 'orchestrator', category: 'project_code', code: 'process_exit',
+      summary: 'Error: Process exited with error code: 2', fingerprint: 'f', phase: 'ready_to_continue',
+      episodeNumber: 1, repairBudget: 2, attemptsUsed: 1, evidence: {}, threadId: 'thread-1',
+      buildMessageId: 'build-1', initiatedBy: 'orchestrator', revision: 0,
+      createdAt: '2026-10-21T10:00:00.000Z', updatedAt: '2026-10-21T10:00:00.000Z'
+    } as unknown as OrchestrationRecoveryEpisode;
+    let open: OrchestrationRecoveryEpisode | undefined = opened;
+    const milestones: string[] = [];
+    const store = {
+      getOrchestrationChatBinding: vi.fn(() => ({
+        runId: 'run-1', projectId: 'project-1', threadId: 'thread-1', buildMessageId: 'build-1', ownerId: 'owner-1'
+      })),
+      getOpenOrchestrationRecoveryEpisode: vi.fn(() => open),
+      listOrchestrationEvents: vi.fn(() => []),
+      saveOrchestrationRecoveryEpisode: vi.fn((input: { episode: OrchestrationRecoveryEpisode; milestone?: { key: string } }) => {
+        if (input.milestone) milestones.push(input.milestone.key);
+        open = ['repairing', 'waiting_for_user', 'ready_to_continue'].includes(input.episode.phase) ? input.episode : undefined;
+        return { episode: input.episode, changed: true, milestone: undefined };
+      })
+    } as unknown as SQLiteService;
+    const recovery = new OrchestrationRecoveryService(store);
+    const cancelled = snapshot({ status: 'cancelled', taskStatus: 'failed', correctionAttempts: 0 });
+
+    expect(recovery.reconcileSnapshot(cancelled)?.phase).toBe('cancelled');
+    for (let check = 0; check < 5; check += 1) recovery.reconcileSnapshot(cancelled);
+
+    expect(milestones).toEqual(['build_cancelled']);
+    expect(store.saveOrchestrationRecoveryEpisode).toHaveBeenCalledTimes(1);
+  });
+
   it('posts the exact report error as retries start and escalates after the bounded corrections', () => {
     let episode: OrchestrationRecoveryEpisode | undefined;
     const milestones: Array<{ key: string; content: string } | undefined> = [];

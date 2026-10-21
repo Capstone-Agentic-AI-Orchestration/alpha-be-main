@@ -303,6 +303,10 @@ export class OrchestrationRecoveryService {
       });
       return saved.episode;
     }
+    // A stopped build keeps its failed task as history and gets no new recovery. Opening one here
+    // would be closed again by the cancel above on the next check, posting both chat messages each
+    // time; every room refresh runs this check, so the pair repeated about once a second.
+    if (terminalCancel) return undefined;
     const currentFailure = Boolean(failedTask || finalValidation ||
       ['blocked', 'recovery_required', 'failed'].includes(snapshot.run.status));
 
