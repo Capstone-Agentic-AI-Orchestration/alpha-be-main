@@ -71,6 +71,19 @@ function blocked(reason: string, project?: Project, repository?: string): Projec
   };
 }
 
+/** Says what is holding the repository, so the user knows whether to approve, wait, or stop it. */
+function activeBuildReason(status: string, repository: string): string {
+  if (status === 'awaiting_plan_approval') {
+    return `A build plan for ${repository} is waiting for your approval, so Alpha did not start another one. Review it in the Live Build Room and choose Start planned work, or stop it to plan this request instead.`;
+  }
+  if (status === 'planning') return `The Orchestrator is still planning a build for ${repository}. Wait for the plan, or stop it to plan this request instead.`;
+  if (status === 'awaiting_approval') return `The last build for ${repository} is finished and waiting for your review. Accept or stop it in the Live Build Room before starting another one.`;
+  if (status === 'blocked' || status === 'recovery_required' || status === 'paused') {
+    return `A build for ${repository} is paused and needs you. Open the Live Build Room to continue or stop it before starting another one.`;
+  }
+  return `A build is already underway for ${repository}. Open the Live Build Room to see its plan and current progress.`;
+}
+
 /** Resolve an intentionally unpinned role to the first model in its live runtime catalog. */
 function plannerModelName(provider: string, configuredModel: string, runtimes: RuntimeEngine[]): string {
   const pinned = configuredModel.trim();
@@ -280,7 +293,7 @@ async function startOrchestratedProjectBuild(input: {
       reservation.requestKey === expectedReservationKey && reservation.requestFingerprint === requestFingerprint &&
       reservation.ownerSessionId === orchestrationOwnerSessionId;
     if (activeWorkflow && !stillOwnsPlanning) {
-      return blocked(`A build is already underway for ${selected.repository}. Open the Live Build Room to see its plan and current progress.`, project, selected.repository);
+      return blocked(activeBuildReason(activeWorkflow.status, selected.repository), project, selected.repository);
     }
   }
 
