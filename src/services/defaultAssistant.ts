@@ -43,6 +43,7 @@ export const DEFAULT_ASSISTANT_PROMPT = [
 export interface DefaultAssistantRuntime {
   provider: string;
   modelName: string;
+  endpoint?: string;
   /** Why this runtime was chosen, for the log and for an error message. */
   reason: string;
 }
@@ -72,6 +73,7 @@ export function pickDefaultRuntime(runtimes: RuntimeEngine[]): DefaultAssistantR
   return {
     provider: chosen.provider,
     modelName: chosen.models[0],
+    endpoint: chosen.endpoint,
     reason: chosen.isDefault
       ? `${chosen.name} is this machine's default runtime`
       : `${chosen.name} is the only signed-in runtime available`

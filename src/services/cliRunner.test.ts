@@ -483,6 +483,26 @@ describe('Codex isolation from the operator config', () => {
     expect(valueOf(args, '--sandbox')).toBe('read-only');
   });
 
+  it('applies only the explicit local model catalog overrides before the model flag', () => {
+    const { args } = buildTurnInvocation(options({
+      provider: 'OpenAI',
+      modelName: 'gpt-6-astra',
+      codexConfigArgs: [
+        '--config', 'openai_base_url="http://127.0.0.1:10100/v1"',
+        '--config', 'model_catalog_json="C:\\\\Users\\\\Lloyd\\\\.codex\\\\opencodex-catalog.json"'
+      ]
+    }), noMcp);
+    const ignoredConfig = args.indexOf('--ignore-user-config');
+    const baseUrl = args.indexOf('openai_base_url="http://127.0.0.1:10100/v1"');
+    const modelCatalog = args.indexOf('model_catalog_json="C:\\\\Users\\\\Lloyd\\\\.codex\\\\opencodex-catalog.json"');
+    const model = args.indexOf('--model');
+
+    expect(ignoredConfig).toBeGreaterThanOrEqual(0);
+    expect(baseUrl).toBeGreaterThan(ignoredConfig);
+    expect(modelCatalog).toBeGreaterThan(baseUrl);
+    expect(model).toBeGreaterThan(modelCatalog);
+  });
+
   it('cannot be undone through customCliArgs', () => {
     const { args } = buildTurnInvocation(
       options({ provider: 'OpenAI', customCliArgs: '--sandbox danger-full-access' }),
