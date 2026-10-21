@@ -116,7 +116,7 @@ function appendOrchestrationTaskPolicy(
   const reviewReadGuidance = orchestration.modelProvider === 'Anthropic'
     ? 'Use the built-in Read, Glob, and Grep tools for scoped repository inspection. Do not try shell commands such as rg, git, or cat; they are unavailable in review mode.'
     : orchestration.modelProvider === 'OpenAI'
-      ? 'Use the file-reading and search tools that Codex explicitly provides in this read-only workspace. Do not request writes or repository mutations. If a needed file is not in the supplied review context and no read tool works, report the exact path and stop.'
+      ? 'Use Codex local shell tools for read-only listing, search, and file inspection in the supplied worktree; this review runs non-interactively with approval prompts disabled and the read-only sandbox still enforced. Do not attempt writes, network access, or repository mutations. If a needed file is not in the supplied review context and cannot be read inside the sandbox, report the exact path and stop.'
       : 'Use only file-listing, search, and reading tools explicitly provided by this runner. Do not assume shell commands are available. If a needed file cannot be read safely, report the exact path and stop.';
   const policy = [
     'Orchestrated specialist assignment — this task is your complete scope for this run.',
