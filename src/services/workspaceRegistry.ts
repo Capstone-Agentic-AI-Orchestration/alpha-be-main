@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 
 import { DB_PATH, IS_CLOUD } from '../config/env.js';
 import { database } from '../store/database.js';
-import { agentStore, squadStore } from '../store/stores.js';
+import { agentStore } from '../store/stores.js';
 import { PostgresWorkspaceDirectory } from '../store/postgresWorkspaceDirectory.js';
 import { SqliteWorkspaceDirectory } from '../store/sqliteWorkspaceDirectory.js';
 import type {

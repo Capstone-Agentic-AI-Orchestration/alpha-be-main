@@ -6,7 +6,7 @@ import { ALPHA_ORG } from '../config/env.js';
 import { githubApi } from '../services/githubApi.js';
 import { roleForTeamSlug } from '../services/identityService.js';
 import { refreshMemberships, usesCloudDirectory } from '../services/cloudWorkspaces.js';
-import { agentStore, squadStore } from '../store/stores.js';
+import { agentStore } from '../store/stores.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../services/workspaceRegistry.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';

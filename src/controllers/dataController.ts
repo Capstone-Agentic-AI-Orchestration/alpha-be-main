@@ -46,7 +46,6 @@ import {
   requireDiscoverableProject,
   requireEntityWorkspace,
   requireProjectWorkspace,
-  requireSquadManagement,
   requireSquadWorkspace,
   requireWorkspaceCapability
 } from './workspaceContext.js';

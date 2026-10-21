@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { runnerService } from '../services/runnerService.js';
-import { squadRunner, SquadRunError } from '../services/squadRunner.js';
+import { squadRunner } from '../services/squadRunner.js';
 import { route } from './asyncRoute.js';
 import { agentStore, issueStore, projectStore, runStore } from '../store/stores.js';
 import { analyticsFrom } from '../services/runAnalytics.js';
@@ -10,7 +10,6 @@ import { logError, logInfo } from '../utils/logger.js';
 import {
   requireEntityWorkspace,
   requireProjectWorkspace,
-  requireSquadWorkspace,
   requireWorkspaceCapability
 } from './workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';

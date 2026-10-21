@@ -238,7 +238,6 @@ async function startOrchestratedProjectBuild(input: {
   const { context, project, members, buildSteps } = input;
   const repositories = input.repositories;
   const repository = repositories[0]?.repository ?? '';
-  const checkoutDir = repositories[0]?.checkoutDir ?? '';
   if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
   if (!ALPHA_ORCHESTRATION_ENABLED) return blocked('The Orchestrator is unavailable in this desktop version. Update the app before starting a build.', project, repository);
 
