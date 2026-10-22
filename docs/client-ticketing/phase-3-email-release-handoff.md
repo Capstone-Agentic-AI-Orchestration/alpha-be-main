@@ -152,12 +152,14 @@ OAuth branch.
 
 - Backend typecheck and production build passed; focused Gmail, inquiry,
   invitation, account setup and portal regressions passed (6 files, 86 tests).
+- After adding Gmail's documented HTTP 403 rate-limit classification, the
+  acknowledgment/invitation/transport suites passed again (3 files, 71 tests).
 - Frontend typecheck and production build passed; frontend suite passed (40 files,
   418 tests). The build retains the existing large-chunk warning.
-- The full backend suite reported 2,955 passed and 6 failed in
-  `chatOrchestratorRouting.test.ts` (`Orchestration run not found`). The same six
-  failures reproduce on the clean `origin/main` worktree; they are unrelated to
-  the email/account changes.
+- Before the final rate-limit test additions, the full backend suite reported
+  2,955 passed and 6 failed in `chatOrchestratorRouting.test.ts`
+  (`Orchestration run not found`). The same six failures reproduce on the clean
+  `origin/main` worktree; they are unrelated to the email/account changes.
 - No real Gmail OAuth credentials, Google verification, inbox delivery, Render
   change or deployment was performed. Those remain external setup/acceptance
   steps before the new sender is live.
