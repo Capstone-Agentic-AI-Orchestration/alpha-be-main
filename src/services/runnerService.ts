@@ -222,7 +222,7 @@ export function formatOrchestrationReportContract(taskPackage: OrchestrationTask
     reportedChecks: taskPackage.reportCorrection ? [] : taskPackage.task.requiredChecks.map(script => ({
       script,
       result: 'not_run' as const,
-      evidence: 'Report only what you personally observed; Alpha records its own check results separately.'
+      evidence: 'Report only what you personally observed; Alpha records its own check results separately. If this check cannot run in your sandbox, keep result not_run and say why here; that is not a blocker.'
     })),
     blockers: [] as string[]
   };

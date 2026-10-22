@@ -255,7 +255,22 @@ describe('official agent instruction upgrades', () => {
     const workspaces = new Set(versions.map(row => row.workspace_id));
     expect(workspaces.size).toBe(2);
     expect(workspaces.has(second.id)).toBe(true);
-    expect(versions.every(row => row.template_version === 2)).toBe(true);
+    expect(versions.every(row => row.template_version === OFFICIAL_AGENT_TEMPLATES[0].version)).toBe(true);
+  });
+
+  it('moves an untouched version 2 agent to the current instructions', async () => {
+    const first = await startDaemon();
+    first.close();
+    const db = new Database(dbPath());
+    db.prepare('UPDATE agents SET template_version = 2, system_prompt = ? WHERE template_key = ?')
+      .run(PREVIOUS_TEMPLATE_PROMPTS.validation.at(-1), 'validation');
+    const { id } = db.prepare('SELECT id FROM agents WHERE template_key = ?').get('validation') as { id: string };
+    db.close();
+    fs.rmSync(path.join(tmp, 'agents', id + '.md'), { force: true });
+    const svc = await startDaemon();
+    const validation = svc.getAgents().find(agent => agent.templateKey === 'validation')!;
+    expect(validation.systemPrompt).toContain('A check that cannot run in your sandbox is not a blocker');
+    expect(validation.templateVersion).toBe(OFFICIAL_AGENT_TEMPLATES[0].version);
   });
 
   it('gives every official role the shared instruction structure', () => {

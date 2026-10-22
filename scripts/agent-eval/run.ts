@@ -23,7 +23,11 @@ const fixtureDir = path.join(here, 'fixture');
 // Every task copy lives under one folder, which the evaluation's own database allows agents to work in.
 const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-agent-eval-work-'));
 
-type Version = 'v1' | 'v2';
+/**
+ * v1: the first shipped wording. vN for an earlier numbered version: the last
+ * wording kept for it. current: the template as it is now.
+ */
+type Version = string;
 
 function argument(name: string, fallback: string): string {
   const index = process.argv.indexOf('--' + name);
@@ -62,7 +66,7 @@ async function main() {
 
   const model = argument('model', 'gpt-6-luna');
   const parallel = Math.max(1, Number(argument('parallel', '3')));
-  const versions = argument('versions', 'v1,v2').split(',') as Version[];
+  const versions = argument('versions', 'v1,current').split(',') as Version[];
   const caseIds = argument('cases', '').split(',').filter(Boolean);
   const outDir = argument('out', path.join(os.tmpdir(), 'alpha-agent-eval'));
   fs.mkdirSync(outDir, { recursive: true });
@@ -74,7 +78,11 @@ async function main() {
 
   const runOne = async ({ item, version }: typeof jobs[number]) => {
     const template = OFFICIAL_AGENT_TEMPLATES.find(entry => entry.key === item.role)!;
-    const persona = version === 'v1' ? PREVIOUS_TEMPLATE_PROMPTS[item.role][0] : template.systemPrompt;
+    const earlier = PREVIOUS_TEMPLATE_PROMPTS[item.role];
+    const persona = version === 'v1' ? earlier[0]
+      : version === 'current' ? template.systemPrompt
+      : /^v\d+$/.test(version) && Number(version.slice(1)) < template.version ? earlier[earlier.length - 1]
+      : (() => { throw new Error('Unknown version ' + version); })();
     const cwd = fs.mkdtempSync(path.join(workRoot, item.id + '-' + version + '-'));
     fs.cpSync(fixtureDir, cwd, { recursive: true });
     for (const [file, content] of Object.entries(item.setupFiles ?? {})) {
@@ -115,7 +123,11 @@ async function main() {
         scope: { includePaths: item.includePaths, excludePaths: item.excludePaths ?? [] }
       },
       requirements: item.requirements,
-      acceptedDependencies: [],
+      acceptedDependencies: item.handoff ? [{
+        ...item.handoff, acceptedRevision: 1, requirementCoverage: [], verificationStatus: 'passed' as const,
+        missingScripts: [], observedChecks: [{ script: 'test', result: 'passed' as const }],
+        changedPaths: item.handoff.deliverables.flatMap(entry => entry.paths)
+      }] : [],
       reviewInputs,
       corrections: [],
       findingIds: []
@@ -151,28 +163,35 @@ async function main() {
     }
     const blockers: string[] = report?.blockers ?? [];
     const findings: any[] = report?.reviewFindings ?? [];
+    // Evidence that the criterion fails, not merely that something stopped the agent.
     const reportedFailure = Boolean(report && (
       (report.reportedChecks ?? []).some((check: any) => check.result === 'failed') ||
-      blockers.length > 0 ||
-      JSON.stringify(report.criteriaEvidence ?? []).match(/\bfail/i)
+      JSON.stringify(report.criteriaEvidence ?? []).match(/\b(fail|not met|does not|returns? "?[a-z])/i)
     ));
 
+    // Alpha rejects any report with a blocker, so only the blocker case may have one.
+    const unexpectedBlocker = item.expect !== 'blocker' && blockers.length > 0;
     let pass = false;
-    if (item.expect === 'change') pass = Boolean(report) && Boolean(hiddenPass) && checksPass && outOfScope.length === 0 && allChanged.length > 0;
+    if (item.expect === 'change') pass = Boolean(report) && Boolean(hiddenPass) && checksPass && outOfScope.length === 0 && allChanged.length > 0 && !unexpectedBlocker;
     if (item.expect === 'blocker') pass = Boolean(report) && blockers.length > 0 && allChanged.length === 0;
     if (item.expect === 'finding') pass = Boolean(report) && allChanged.length === 0 && findings.some(finding =>
       ['blocking', 'critical'].includes(finding.severity) && (finding.path ?? '').replace(/\\/g, '/').endsWith(item.findingPath ?? ''));
-    if (item.expect === 'validation_fail') pass = Boolean(report) && allChanged.length === 0 && reportedFailure;
+    if (item.expect === 'no_blocking_finding') pass = Boolean(report) && allChanged.length === 0 && !unexpectedBlocker &&
+      !findings.some(finding => ['blocking', 'critical'].includes(finding.severity));
+    if (item.expect === 'validation_fail') pass = Boolean(report) && allChanged.length === 0 && reportedFailure && !unexpectedBlocker;
+    if (item.expect === 'finding') pass = pass && !unexpectedBlocker;
 
     const record = {
-      case: item.id, version, model, pass, seconds,
+      case: item.id, version, model, pass, seconds, unexpectedBlocker,
       reportValid: Boolean(report), reportError: parsed.error,
       blockers, blockerTooLong: blockers.some(text => text.length > 240),
       changed: allChanged, outOfScope, checksPass, hiddenPass,
       findings: findings.map(finding => ({ severity: finding.severity, path: finding.path, title: finding.title })),
       failure: result.failureDetail
     };
-    fs.writeFileSync(path.join(outDir, item.id + '-' + version + '.json'), JSON.stringify({ ...record, response: result.content }, null, 2));
+    const files = Object.fromEntries(allChanged.filter(file => fs.existsSync(path.join(cwd, file)))
+      .map(file => [file, fs.readFileSync(path.join(cwd, file), 'utf8').slice(0, 6_000)]));
+    fs.writeFileSync(path.join(outDir, item.id + '-' + version + '.json'), JSON.stringify({ ...record, response: result.content, files }, null, 2));
     console.log((pass ? 'PASS' : 'FAIL') + ' ' + item.id + ' ' + version + ' (' + seconds + 's)' + (record.reportValid ? '' : ' report: ' + record.reportError));
     return record;
   };
@@ -192,7 +211,7 @@ async function main() {
     if (!record) return 'error';
     const notes = [!record.reportValid && 'invalid report', record.outOfScope.length && 'out of scope: ' + record.outOfScope.join(', '),
       record.hiddenPass === false && 'hidden test failed', !record.checksPass && item.expect === 'change' && 'checks failed',
-      record.blockerTooLong && 'blocker over 240 chars'].filter(Boolean).join('; ');
+      record.blockerTooLong && 'blocker over 240 chars', record.unexpectedBlocker && 'reported a blocker'].filter(Boolean).join('; ');
     return (record.pass ? 'pass' : 'fail') + (notes ? ' (' + notes + ')' : '') + ' · ' + record.seconds + 's';
   }).join(' | ') + ' |');
   const score = (version: Version) => results.filter(entry => entry.version === version && entry.pass).length + '/' + cases.length;
