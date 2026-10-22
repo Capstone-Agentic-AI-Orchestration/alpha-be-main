@@ -1076,6 +1076,17 @@ export class SQLiteService {
         FOREIGN KEY (workspace_id, recovery_id) REFERENCES orchestration_recovery_episodes(workspace_id, id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS agent_lesson_decisions (
+        workspace_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        lesson_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('accepted', 'dismissed')),
+        text TEXT NOT NULL,
+        decided_by TEXT NOT NULL,
+        decided_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, agent_id, lesson_id)
+      );
+
       CREATE TABLE IF NOT EXISTS orchestration_recovery_milestones (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -3241,6 +3252,64 @@ export class SQLiteService {
       ownerId: thread.owner_id
     };
   }
+
+  /**
+   * What one agent did in builds: its attempts, and the independent review
+   * findings raised against tasks it owned. Read-only; feeds the scorecard
+   * and the lesson suggestions in the Agent Directory.
+   */
+  getAgentBuildHistory(agentId: string): {
+    attempts: Array<{ runId: string; taskId: string; attemptNumber: number; status: string; failureReason?: string; reportRetry: boolean; createdAt: string }>;
+    reviewFindings: Array<{ runId: string; taskId: string; severity: string; path?: string; title?: string; instruction?: string; status: string; createdAt: string }>;
+  } {
+    const workspaceId = this.workspaceId();
+    const attempts = (this.db.prepare(`SELECT run_id, task_id, attempt_number, status, failure_reason, context_manifest_json, created_at
+      FROM orchestration_attempts WHERE workspace_id = ? AND agent_id = ? ORDER BY created_at`).all(workspaceId, agentId) as any[])
+      .map(row => ({
+        runId: row.run_id,
+        taskId: row.task_id,
+        attemptNumber: Number(row.attempt_number),
+        status: row.status,
+        failureReason: row.failure_reason ?? undefined,
+        reportRetry: parseJson<Record<string, unknown>>(row.context_manifest_json, {}).reportOnlyReportRetry === true,
+        createdAt: row.created_at
+      }));
+    const reviewFindings = (this.db.prepare(`SELECT f.run_id, f.task_id, f.severity, f.path, f.evidence, f.status, f.created_at
+      FROM orchestration_findings f
+      WHERE f.workspace_id = ? AND f.source_task_id <> f.task_id AND EXISTS (
+        SELECT 1 FROM orchestration_tasks t
+        WHERE t.workspace_id = f.workspace_id AND t.run_id = f.run_id AND t.task_id = f.task_id AND t.owner_agent_id = ?
+      ) ORDER BY f.created_at`).all(workspaceId, agentId) as any[])
+      .map(row => {
+        const evidence = parseJson<Record<string, unknown>>(row.evidence, {});
+        return {
+          runId: row.run_id,
+          taskId: row.task_id,
+          severity: row.severity,
+          path: row.path ?? undefined,
+          title: typeof evidence.title === 'string' ? evidence.title : undefined,
+          instruction: typeof evidence.instruction === 'string' ? evidence.instruction : undefined,
+          status: row.status,
+          createdAt: row.created_at
+        };
+      });
+    return { attempts, reviewFindings };
+  }
+
+  getAgentLessonDecisions(agentId: string): Array<{ lessonId: string; status: 'accepted' | 'dismissed'; text: string; decidedBy: string; decidedAt: string }> {
+    return (this.db.prepare(`SELECT lesson_id, status, text, decided_by, decided_at FROM agent_lesson_decisions
+      WHERE workspace_id = ? AND agent_id = ? ORDER BY decided_at`).all(this.workspaceId(), agentId) as any[])
+      .map(row => ({ lessonId: row.lesson_id, status: row.status, text: row.text, decidedBy: row.decided_by, decidedAt: row.decided_at }));
+  }
+
+  saveAgentLessonDecision(input: { agentId: string; lessonId: string; status: 'accepted' | 'dismissed'; text: string; decidedBy: string; now?: string }): void {
+    this.db.prepare(`INSERT INTO agent_lesson_decisions (workspace_id, agent_id, lesson_id, status, text, decided_by, decided_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (workspace_id, agent_id, lesson_id) DO UPDATE SET status = excluded.status, text = excluded.text,
+        decided_by = excluded.decided_by, decided_at = excluded.decided_at`)
+      .run(this.workspaceId(), input.agentId, input.lessonId, input.status, input.text, input.decidedBy, input.now ?? new Date().toISOString());
+  }
+
 
   listOrchestrationRecoveryEpisodes(runId: string): OrchestrationRecoveryEpisode[] {
     const rows = this.db.prepare(`SELECT * FROM orchestration_recovery_episodes
