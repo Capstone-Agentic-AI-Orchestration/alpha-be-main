@@ -159,8 +159,8 @@ interface ToolDef {
   inputSchema: Record<string, unknown>;
   run: (args: Record<string, any>) => Promise<unknown>;
   /**
-   * Omitted means readable by anyone who can reach this server. Only the two
-   * tools that change a remote carry 'write'.
+   * Omitted means readable by anyone who can reach this server. Only the tools
+   * that change a remote (push, branch, pull request, posted review) carry 'write'.
    */
   access?: 'write';
 }
@@ -419,6 +419,8 @@ const TOOLS: Record<string, ToolDef> = {
   },
 
   github_review_pull_request: {
+    // Posting a review writes to GitHub, so a read-only turn (the Orchestrator's chat) must not.
+    access: 'write',
     description:
       'Post a code review on a pull request. Use when asked to review work — read the diff first, then say what you found. ' +
       'State your verdict as the first line: APPROVE, REQUEST CHANGES, or COMMENT, followed by the reasoning and any specific problems. ' +

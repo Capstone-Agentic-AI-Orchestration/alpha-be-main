@@ -225,6 +225,7 @@ export function describeChatToolPolicy(
     '## Tool access for this conversation',
     '',
     `You can use: ${allowed.join(', ')}.${mcp}`,
+    'These are Claude Code tool names; on another runtime, use its equivalent file-reading and search tools.',
     ''
   ];
 
