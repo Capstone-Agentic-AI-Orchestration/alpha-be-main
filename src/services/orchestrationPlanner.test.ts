@@ -60,6 +60,24 @@ describe('read-only orchestration planner', () => {
     expect(request?.prompt).toContain('task.requiredChecks = verify, check, validate, ci, test, typecheck, lint');
   });
 
+  it('shows the planner a profile of each agent and asks it to prefer official agents', async () => {
+    let request: CliTurnOptions | undefined;
+    const planner = new OrchestrationPlanner(async options => {
+      request = options;
+      return response(JSON.stringify(plan));
+    });
+    await planner.createPlan({
+      ...input,
+      eligibleAgents: [
+        { id: 'backend-agent', role: 'Backend Agent', name: 'Backend Agent', description: 'Implements server modules and tests.', official: true },
+        { id: 'agent-kaelen', role: 'Coder', name: 'Developer', description: 'Full-stack demo agent.', official: false }
+      ]
+    });
+    expect(request?.prompt).toContain('"description": "Implements server modules and tests."');
+    expect(request?.prompt).toContain('"official": false');
+    expect(request?.systemPrompt).toContain('choose the official one unless a configured build step names the other');
+  });
+
   it('explains which planner setup is missing when no model is selected', async () => {
     const planner = new OrchestrationPlanner(async () => response(JSON.stringify(plan)));
     await expect(planner.createPlan({ ...input, planner: { ...input.planner, modelName: '' } }))

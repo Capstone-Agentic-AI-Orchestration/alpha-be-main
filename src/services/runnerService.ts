@@ -108,7 +108,7 @@ function appendSquadAssignmentPolicy(
   return [personaPrompt.trim(), policy].filter(Boolean).join('\n\n---\n\n');
 }
 
-function appendOrchestrationTaskPolicy(
+export function appendOrchestrationTaskPolicy(
   personaPrompt: string,
   agent: { name: string; role: string },
   orchestration: NonNullable<StartRunParams['orchestration']>
@@ -141,7 +141,10 @@ function appendOrchestrationTaskPolicy(
     orchestration.taskPackage.findingIds.length
       ? `For every targeted finding ID below, include one findingCoverage entry with concrete evidence that it is fixed. A correction is not complete merely because its checks pass.\n${orchestration.taskPackage.findingIds.map(id => `- ${id}`).join('\n')}`
       : '',
-    'For reportedChecks, use only passed, failed, or not_run. Use not_run when a check did not execute, including when it was blocked, and explain why in evidence. Put unresolved task-level blockers in blockers so Alpha can escalate them clearly.',
+    'For reportedChecks, use only passed, failed, or not_run. Use not_run when a check did not execute, including when your sandbox blocked it, and explain why in evidence; a check that cannot run is not a task blocker, because Alpha runs the required checks itself. Put only problems that stop the task itself, such as a missing requirement or file, in blockers so Alpha can escalate them clearly.',
+    process.platform === 'win32' && ['database', 'backend', 'frontend', 'mobile'].includes(task.kind) && !orchestration.taskPackage.reportCorrection
+      ? 'This machine runs Windows. Edit files in place with targeted changes: read the current file first and change only the lines your task needs. Never rewrite a whole file from memory, and never write source files with PowerShell redirection, Set-Content, or Out-File, which can drop existing code and corrupt non-ASCII characters such as ₱ or ·. If you edit through the shell, use a short Node or Python script that reads the file as UTF-8, replaces the exact text, and writes it back as UTF-8. If one editing method is unavailable, use another; that is not a blocker. Keep every existing export and line you were not asked to change.'
+      : '',
     'Follow your persona and role boundaries. Do not implement another planned task, broaden the scope, or rework an accepted dependency. If the assigned work conflicts with your role or cannot be completed safely, explain the conflict and stop.',
     orchestration.taskPackage.reportCorrection
       ? 'Do not make or claim repository changes. Do not push, open a pull request, merge, deploy, run commands, or change ticket status.'
@@ -150,7 +153,7 @@ function appendOrchestrationTaskPolicy(
   return [personaPrompt.trim(), policy].filter(Boolean).join('\n\n---\n\n');
 }
 
-function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): string {
+export function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): string {
   const requirements = taskPackage.requirements.map(item => `- ${item.id}: ${item.description}`).join('\n') || '- None.';
   const dependencies = formatAcceptedDependencies(taskPackage.acceptedDependencies);
   const reportCorrection = taskPackage.reportCorrection ? [
@@ -198,7 +201,7 @@ function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): 
   ].filter(Boolean).join('\n\n');
 }
 
-function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage): string {
+export function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage): string {
   const template: Record<string, unknown> = {
     schemaVersion: taskPackage.reportSchemaVersion,
     taskId: taskPackage.task.id,
@@ -223,7 +226,7 @@ function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage
     reportedChecks: taskPackage.reportCorrection ? [] : taskPackage.task.requiredChecks.map(script => ({
       script,
       result: 'not_run' as const,
-      evidence: 'Report only what you personally observed; Alpha records its own check results separately.'
+      evidence: 'Report only what you personally observed; Alpha records its own check results separately. If this check cannot run in your sandbox, keep result not_run and say why here; that is not a blocker.'
     })),
     blockers: [] as string[]
   };

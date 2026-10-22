@@ -16,6 +16,18 @@ function validReviewReport(requirementCoverage: Record<string, unknown>[]) {
 }
 
 describe('structured specialist report parsing', () => {
+  it('accepts a blocked report that delivered no files instead of rejecting its format', () => {
+    const blocked = {
+      ...validReviewReport([{ requirementId: 'REQ-1', evidence: 'docs/payments-api.md is missing.' }]),
+      deliverables: [],
+      blockers: ['docs/payments-api.md does not exist, so the endpoints and error codes cannot be implemented as specified.']
+    };
+    const parsed = parseAgentReport(JSON.stringify(blocked), 1);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.report?.deliverables).toEqual([{ summary: 'No files delivered; see the summary, evidence, and blockers.', paths: [] }]);
+    expect(parsed.report?.blockers).toHaveLength(1);
+  });
+
   it('recovers the unambiguous requirement field alias from a single JSON report', () => {
     const raw = JSON.stringify(validReviewReport([
       { requirement: 'REQ-1', evidence: 'The supplied code was inspected.' }

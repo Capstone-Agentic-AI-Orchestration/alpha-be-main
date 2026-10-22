@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "audit:migrations": "node scripts/audit-migrations.mjs",
-    "test:migrations": "node --test scripts/migration-audit.node-test.mjs"
+    "test:migrations": "node --test scripts/migration-audit.node-test.mjs",
+    "eval:agents": "tsx scripts/agent-eval/run.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

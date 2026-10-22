@@ -57,6 +57,12 @@ function normalizeVersion1Report(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const report = value as Record<string, unknown>;
   const normalized: Record<string, unknown> = { ...report };
+  // A blocked or read-only task often delivers no files. An empty list used to
+  // reject an otherwise correct report; acceptance still fails any changed
+  // file the report does not declare, so the placeholder cannot hide changes.
+  if (Array.isArray(report.deliverables) && report.deliverables.length === 0) {
+    normalized.deliverables = [{ summary: 'No files delivered; see the summary, evidence, and blockers.', paths: [] }];
+  }
   if (Array.isArray(report.requirementCoverage)) {
     normalized.requirementCoverage = report.requirementCoverage.map(item => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return item;

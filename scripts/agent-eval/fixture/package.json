@@ -1,0 +1,9 @@
+{
+  "name": "eval-money-tracker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.js\"",
+    "lint": "node scripts/lint.js"
+  }
+}

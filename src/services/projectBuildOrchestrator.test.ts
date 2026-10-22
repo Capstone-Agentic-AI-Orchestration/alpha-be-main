@@ -346,9 +346,9 @@ describe('project builds triggered from chat', () => {
       projectContext: 'Keep the interface accessible.',
       planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
       eligibleAgents: [
-        { id: 'agent-1', role: 'Research Agent', ready: true },
-        { id: 'agent-2', role: 'Frontend Agent', ready: true },
-        { id: 'agent-3', role: 'Backend Agent', ready: true }
+        expect.objectContaining({ id: 'agent-1', role: 'Research Agent', ready: true, official: false }),
+        expect.objectContaining({ id: 'agent-2', role: 'Frontend Agent', ready: true, official: false }),
+        expect.objectContaining({ id: 'agent-3', role: 'Backend Agent', ready: true, official: false })
       ]
     }));
     expect(startOrchestration).toHaveBeenCalledTimes(1);
