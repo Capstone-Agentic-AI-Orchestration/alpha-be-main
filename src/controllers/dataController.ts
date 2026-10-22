@@ -24,6 +24,7 @@ import {
   bindProject,
   boundCheckoutStatus,
   cloneAndBindProject,
+  cloneProjectInto,
   projectBinding,
   repositoryCheckouts,
   unbindProject
@@ -406,6 +407,26 @@ dataRouter.post('/projects/:id/clone', desktopOnly, route(async (req: Request, r
     // A clone can fail for a dozen reasons on the far side -- no access, no
     // network, a repository that has moved -- and git says which.
     return res.status(502).json({ error: String((err as Error)?.message ?? err) });
+  }
+}));
+
+/**
+ * Clone some of the project's repositories into a folder the developer chose on
+ * this computer, and optionally make them this machine's working copies. Like
+ * the managed clone above, this is the developer's own act on their own disk.
+ * Answers one result per repository, so one failure does not hide the others.
+ */
+dataRouter.post('/projects/:id/clone-to', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  try {
+    res.json({ results: await cloneProjectInto(project, req.body?.intoDir, req.body?.repos, req.body?.bind === true) });
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
   }
 }));
 

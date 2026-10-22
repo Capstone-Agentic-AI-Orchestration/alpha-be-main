@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 import type { LocalProjectBinding, Project } from '../models/index.js';
@@ -218,6 +219,79 @@ export async function cloneAndBindProject(project: Project, repo?: string): Prom
     bound.push(await bindProject(project, dir, { managed: true, repo: ownerRepo }));
   }
   return bound;
+}
+
+/** What happened to one repository when cloning a project into a folder the developer chose. */
+export interface FolderCloneResult {
+  repo: string;
+  /** Where the checkout is, when there is one. */
+  path: string | null;
+  /** False when a checkout of this repository was already at that path and was reused. */
+  cloned: boolean;
+  /** True when it became this machine's working copy of the repository for Alpha. */
+  bound: boolean;
+  error?: string;
+}
+
+/**
+ * Clone some of the project's repositories into a folder the developer picked,
+ * one subfolder per repository, and optionally make each this machine's working
+ * copy so Alpha's builds use it.
+ *
+ * Only the project's own repositories can be cloned. A checkout of the same
+ * repository already in place is reused; anything else in the way is reported
+ * for that repository while the others still clone.
+ */
+export async function cloneProjectInto(
+  project: Project,
+  intoDir: unknown,
+  repos: unknown,
+  bind: boolean
+): Promise<FolderCloneResult[]> {
+  if (typeof intoDir !== 'string' || !intoDir.trim() || !path.isAbsolute(intoDir.trim())) {
+    throw new BindingError('Choose a folder on this computer to clone into.', 'invalid_folder');
+  }
+  const folder = path.resolve(intoDir.trim());
+  if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
+    throw new BindingError(folder + ' is not a folder on this computer.', 'invalid_folder');
+  }
+  const projectRepos = reposForProject(project);
+  if (projectRepos.length === 0) {
+    throw new BindingError(project.name + ' has no GitHub repository to clone.', 'invalid_folder');
+  }
+  const requested = Array.isArray(repos) ? repos.filter((item): item is string => typeof item === 'string') : [];
+  if (requested.length === 0) throw new BindingError('Choose at least one repository to clone.', 'wrong_repository');
+  const wanted: string[] = [];
+  for (const candidate of requested) {
+    const match = projectRepos.find(repo => repo.toLowerCase() === candidate.trim().toLowerCase());
+    if (!match) throw new BindingError(candidate + ' is not one of ' + project.name + "'s repositories.", 'wrong_repository');
+    if (!wanted.includes(match)) wanted.push(match);
+  }
+
+  const results: FolderCloneResult[] = [];
+  for (const repo of wanted) {
+    const target = path.join(folder, repo.split('/').pop()!);
+    try {
+      let cloned = false;
+      if (!isExistingCheckout(target)) {
+        if (!isEmptyOrMissing(target)) {
+          throw new BindingError(target + ' already exists and is not a checkout of ' + repo + '.', 'invalid_folder');
+        }
+        await githubService.cloneRepository(repo, folder);
+        cloned = true;
+        logInfo('Cloned ' + repo + ' into ' + target + ' for ' + (project.key || project.name));
+      }
+      let bound = false;
+      if (bind) {
+        await bindProject(project, target, { repo });
+        bound = true;
+      }
+      results.push({ repo, path: target, cloned, bound });
+    } catch (err) {
+      results.push({ repo, path: fs.existsSync(target) ? target : null, cloned: false, bound: false, error: String((err as Error)?.message ?? err) });
+    }
+  }
+  return results;
 }
 
 /** One repository of the project, and where -- if anywhere -- this machine has it. */
