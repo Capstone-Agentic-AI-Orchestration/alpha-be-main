@@ -7,6 +7,7 @@ import { ProcessTerminationReason, processManager } from './processManager.js';
 import { classifyProcessExit } from './runLifecycle.js';
 import { StreamParser, RunTelemetry } from './streamParser.js';
 import { buildTurnInvocation, codexGatewayArgs, writeTurnPersona } from './cliRunner.js';
+import { RuntimeService } from './runtimeService.js';
 import { resolveAgentLogged } from './personaService.js';
 import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceService.js';
 import { agentReadiness } from './agentReadiness.js';
@@ -671,7 +672,10 @@ export class RunnerService extends EventEmitter {
         customCliArgs: agent.customCliArgs,
         skills: taskIsReadOnly ? [] : persona.skills,
         // The same local gateway chat uses, so a Codex specialist reaches its model.
-        codexConfigArgs: codexGatewayArgs(persona.modelProvider, persona.modelName)
+        codexConfigArgs: codexGatewayArgs(persona.modelProvider, persona.modelName),
+        codexApproveForMe: persona.modelProvider === 'OpenAI' && !taskIsReadOnly
+          ? await RuntimeService.codexSupportsApproveForMe()
+          : false
       },
       mcp
     );

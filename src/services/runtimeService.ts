@@ -71,6 +71,9 @@ function runClosedStdin(
 /** What a detector reports. scanRuntimes() stamps `type` and `latencyMs`. */
 type DetectedEngine = Omit<RuntimeEngine, 'type' | 'latencyMs'>;
 
+/** One `codex exec --help` check per Codex binary and version. */
+const codexApproveForMeProbes = new Map<string, Promise<boolean>>();
+
 type CatalogDiscovery = {
   models: string[];
   source: RuntimeCatalogSource;
@@ -555,6 +558,31 @@ export class RuntimeService {
 
   static codexPath(): string {
     return findCodex();
+  }
+
+  /**
+   * Whether this machine's Codex CLI accepts `--approve-for-me`.
+   *
+   * Codex builds from 0.163 have it, but the npm release (0.144) rejects it
+   * with "unexpected argument" and exit code 2 before the agent does anything,
+   * which failed every Codex build task on a machine with that release first
+   * on PATH. Read from `codex exec --help`, once per binary and modified time;
+   * a check that could not run is not cached, so the next run asks again.
+   */
+  static codexSupportsApproveForMe(): Promise<boolean> {
+    const bin = RuntimeService.codexPath();
+    let stamp = '';
+    try { stamp = String(fs.statSync(bin).mtimeMs); } catch { /* a bare command name */ }
+    const key = bin + '|' + stamp;
+    let probe = codexApproveForMeProbes.get(key);
+    if (!probe) {
+      probe = runClosedStdin(bin, ['exec', '--help'], 15_000).then(result => {
+        if (!result.ok) codexApproveForMeProbes.delete(key);
+        return result.ok && /--approve-for-me\b/.test(result.stdout + result.stderr);
+      });
+      codexApproveForMeProbes.set(key, probe);
+    }
+    return probe;
   }
 
   static agyPath(): string {
