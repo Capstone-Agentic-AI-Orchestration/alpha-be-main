@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   // Restricted Windows workers may deny Vite's realpath on package imports.
@@ -7,6 +7,8 @@ export default defineConfig({
   resolve: { preserveSymlinks: true },
   test: {
     setupFiles: ['./src/test/setup.ts'],
+    // The agent evaluation fixture has its own node:test suite, run inside each task copy.
+    exclude: [...configDefaults.exclude, 'scripts/agent-eval/fixture/**'],
     /**
      * Room for the tests that boot the whole API.
      *
