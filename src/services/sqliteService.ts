@@ -38,7 +38,8 @@ import { ensureMemoryScaffold } from './memoryService.js';
 import {
   agentFromOfficialTemplate,
   LEGACY_TEMPLATE_MAPPINGS,
-  OFFICIAL_AGENT_TEMPLATES
+  OFFICIAL_AGENT_TEMPLATES,
+  PREVIOUS_TEMPLATE_PROMPTS
 } from './officialAgentTemplates.js';
 import { discoverInstalledSkills } from './skillDiscoveryService.js';
 import { currentWorkspaceId, DEFAULT_WORKSPACE_ID, runWithWorkspace } from './workspaceContext.js';
@@ -1648,7 +1649,9 @@ export class SQLiteService {
         stmt.run({
           id,
           templateKey: template.key,
-          templateVersion: template.version,
+          // These records predate the templates; they match version 1 at most,
+          // and the upgrade below decides whether their text is untouched.
+          templateVersion: 1,
           phase: template.phase,
           sharedKey: `official:${template.key}`,
           workspaceId
@@ -1729,6 +1732,40 @@ export class SQLiteService {
       existingIds.add(seeded.id);
     }
 
+    this.upgradeUnmodifiedOfficialAgents(workspaceId);
+  }
+
+  /**
+   * Move official agents onto the current template, but only agents nobody edited.
+   *
+   * An agent's instructions live in two places: the database column and its
+   * persona file, which wins when it has text. Both must still read exactly as
+   * an earlier template wrote them; any other wording is its owner's work and
+   * keeps its version, so the Agent Directory can offer the update instead.
+   */
+  private upgradeUnmodifiedOfficialAgents(workspaceId: string): void {
+    const normalize = (text: string | undefined, name: string) => (text ?? '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(new RegExp('^\\s*#\\s*' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\n'), '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const rows = this.db.prepare(`SELECT id, name, template_key, template_version, system_prompt FROM agents
+      WHERE workspace_id = ? AND template_key IS NOT NULL`).all(workspaceId) as Array<{
+        id: string; name: string; template_key: string; template_version: number | null; system_prompt: string | null;
+      }>;
+    for (const row of rows) {
+      const template = OFFICIAL_AGENT_TEMPLATES.find(item => item.key === row.template_key);
+      if (!template || (row.template_version ?? 0) >= template.version) continue;
+      const earlier = new Set((PREVIOUS_TEMPLATE_PROMPTS[template.key] ?? []).map(prompt => normalize(prompt, row.name)));
+      const fromFile = readAgentFile(row.id)?.systemPrompt;
+      const untouched = earlier.has(normalize(row.system_prompt ?? '', row.name)) &&
+        (fromFile === undefined || earlier.has(normalize(fromFile, row.name)));
+      if (!untouched) continue;
+      this.db.prepare(`UPDATE agents SET system_prompt = ?, description = ?, template_version = ?
+        WHERE id = ? AND workspace_id = ?`).run(template.systemPrompt, template.description, template.version, row.id, workspaceId);
+      const agent = runWithWorkspace(workspaceId, () => this.getAgents().find(item => item.id === row.id));
+      if (agent) syncAgentFile(agent, 'replace');
+    }
   }
 
   shareAgentAcrossWorkspaces(workspaceId: string, id: string, workspaceIds: string[]): Agent | null {

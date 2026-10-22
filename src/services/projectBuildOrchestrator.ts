@@ -355,7 +355,15 @@ async function startOrchestratedProjectBuild(input: {
     reasoningEffort: plannerCandidate.persona.reasoningEffort,
     systemPrompt: plannerCandidate.persona.systemPrompt
   };
-  const availableAgents = eligible.map(item => ({ id: item.agent.id, role: item.persona.role, ready: true as const }));
+  // A short profile per agent, so the planner chooses on fit rather than on an id.
+  const availableAgents = eligible.map(item => ({
+    id: item.agent.id,
+    role: item.persona.role,
+    ready: true as const,
+    name: item.persona.name,
+    description: (item.agent.description ?? '').slice(0, 240),
+    official: Boolean(item.agent.templateKey)
+  }));
   const activeIndependentCall = repositories.map(item => runWithWorkspace(workspaceId, () =>
     sqliteService.getActiveAgentCallProjectLock(project.id, item.repository)
   )).find(Boolean);

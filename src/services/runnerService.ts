@@ -107,7 +107,7 @@ function appendSquadAssignmentPolicy(
   return [personaPrompt.trim(), policy].filter(Boolean).join('\n\n---\n\n');
 }
 
-function appendOrchestrationTaskPolicy(
+export function appendOrchestrationTaskPolicy(
   personaPrompt: string,
   agent: { name: string; role: string },
   orchestration: NonNullable<StartRunParams['orchestration']>
@@ -149,7 +149,7 @@ function appendOrchestrationTaskPolicy(
   return [personaPrompt.trim(), policy].filter(Boolean).join('\n\n---\n\n');
 }
 
-function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): string {
+export function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): string {
   const requirements = taskPackage.requirements.map(item => `- ${item.id}: ${item.description}`).join('\n') || '- None.';
   const dependencies = formatAcceptedDependencies(taskPackage.acceptedDependencies);
   const reportCorrection = taskPackage.reportCorrection ? [
@@ -197,7 +197,7 @@ function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPackage): 
   ].filter(Boolean).join('\n\n');
 }
 
-function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage): string {
+export function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage): string {
   const template: Record<string, unknown> = {
     schemaVersion: taskPackage.reportSchemaVersion,
     taskId: taskPackage.task.id,
