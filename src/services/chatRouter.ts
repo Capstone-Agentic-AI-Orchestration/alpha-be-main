@@ -178,10 +178,33 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     'Rules:',
     '- Do not write or edit the code yourself for a build. The Orchestrator plans the work, the user approves the plan, and specialists make the change.',
     '- Use the conversation. After you proposed a build, "yes", "go ahead", or "do it" means route 2.',
+    '- Write the goal so it stands on its own. The planner and the specialists see only the repository and the goal; they cannot read this conversation, issue keys such as MON-104, earlier builds, saved plans, or failure details. Never point at those. When the user asks to continue, retry, or redo earlier work, restate that work in full as concrete product changes.',
     '- The decision line must be plain text, never inside a code block, and appear at most once.',
     '- When unsure between a question and a build, prefer route 3 over starting a build.',
     '',
     scope
   ].join('\n');
+}
+
+/**
+ * "continue", "go ahead", "try again": a request to carry on with earlier
+ * work that names no change of its own. Only short messages count, so "continue
+ * and also add dark mode" is still read as a request in its own right.
+ */
+export function isBareContinueRequest(message: string): boolean {
+  const text = message.trim().toLowerCase().replace(/[.!?]+$/, '');
+  if (!text || text.length > 80) return false;
+  return /^(?:(?:ok(?:ay)?|yes|yeah|sure|please)[, ]+)?(?:can you |could you |please )?(?:continue|carry on|keep going|go ahead|proceed|resume|retry|try again|run (?:it )?again|start again|do it again|pick (?:it|this) (?:back )?up)(?: (?:with |on )?(?:the |that |this )?(?:plan|build|work|task|redesign|change))?(?: please)?$/.test(text);
+}
+
+/**
+ * Words a specialist cannot act on: they point at Alpha's own records (issue
+ * keys, earlier builds, saved plans, failure details) that are never in the
+ * repository a specialist works in.
+ */
+export function referencesAlphaRecords(goal: string): boolean {
+  return /\b[A-Z][A-Z0-9]{1,9}-\d+\b/.test(goal)
+    || /\b(?:saved|previous|prior|earlier|last|stopped|failed)\s+(?:build|plan|run|attempt|failure|work)\b/i.test(goal)
+    || /\bpreserved work\b/i.test(goal);
 }
 

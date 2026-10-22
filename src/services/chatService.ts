@@ -30,9 +30,11 @@ import { processManager } from './processManager.js';
 import { chatAttachmentService } from './chatAttachmentService.js';
 import {
   chooseBuildRepositories,
+  isBareContinueRequest,
   orchestratorRoutingPrompt,
   parseAlphaRoute,
-  parseChatOverride
+  parseChatOverride,
+  referencesAlphaRecords
 } from './chatRouter.js';
 import { isProjectBuildRequest } from './projectBuildIntent.js';
 import { reposForProject } from './githubIssueMapping.js';
@@ -595,7 +597,12 @@ export class ChatService extends EventEmitter {
     const bindToChat = (runId: string | undefined, buildMessageId: string) => {
       const { workspaceId, userId } = input.context;
       if (!runId || !workspaceId || !userId) return;
-      runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({ runId, threadId, buildMessageId, actorId: userId }));
+      // The reply is already saved; a link that cannot be made must not lose it or the build.
+      try {
+        runWithWorkspace(workspaceId, () => sqliteService.bindOrchestrationChat({ runId, threadId, buildMessageId, actorId: userId }));
+      } catch (error) {
+        logInfo(`Build ${runId} was not linked to conversation ${threadId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     };
     const existingBuildReply = sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build`);
     if (existingBuildReply) {
@@ -685,6 +692,26 @@ export class ChatService extends EventEmitter {
     return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
   }
 
+  /**
+   * The goal of this conversation's most recent build that stopped (cancelled or
+   * failed), skipping goals that only point back at an earlier build. Undefined
+   * while a build is still open, which keeps "continue" on that build instead.
+   */
+  private restartableGoal(threadId: string): string | undefined {
+    const runIds = [...new Set(sqliteService.getChatMessages(threadId)
+      .filter(message => message.messageType === 'build' && message.orchestrationRunId)
+      .reverse()
+      .map(message => message.orchestrationRunId!))];
+    for (const runId of runIds) {
+      const run = sqliteService.getOrchestrationSnapshot(runId)?.run;
+      if (!run) continue;
+      if (!['cancelled', 'failed'].includes(run.status)) return undefined;
+      const goal = run.plan?.goal?.trim();
+      if (goal && !referencesAlphaRecords(goal)) return goal;
+    }
+    return undefined;
+  }
+
   /** Orchestrator instructions describing what this conversation can build. */
   private routingPromptFor(routing: ChatRoutingContext, thread: ChatThread): string {
     const project = thread.projectId
@@ -747,6 +774,19 @@ export class ChatService extends EventEmitter {
     const decision = parsed.decision ?? { route: 'confirm_build' as const, goal: request, repositories: [] };
     const goal = decision.goal || request;
     const repositories = chooseBuildRepositories(routing.repositories, decision.repositories);
+
+    // "continue" after a build stopped: plan that build's own goal again. A goal that points at
+    // the stopped build ("continue MON-104 from the saved plan") gives specialists nothing they can open.
+    const restartGoal = projectId && (decision.route === 'build' || decision.route === 'confirm_build') && isBareContinueRequest(request)
+      ? this.restartableGoal(thread.id)
+      : undefined;
+    if (restartGoal && projectId) {
+      return this.startChatBuild({
+        threadId: thread.id, thread, userMessage, context: routing.context,
+        request: restartGoal, originalRequest: request, repositories, attachmentIds: input.attachmentIds,
+        note: 'The last build stopped, so the Orchestrator planned its request again from the start.'
+      });
+    }
 
     if (decision.route === 'build' && projectId) {
       return this.startChatBuild({

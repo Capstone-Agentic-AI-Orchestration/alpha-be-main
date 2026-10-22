@@ -235,5 +235,31 @@ describe('Alpha routes unaddressed chat messages', () => {
     })).rejects.toMatchObject({ status: 409 });
     expect(cancelRun).not.toHaveBeenCalled();
   });
+
+  it('plans a stopped build\'s own goal again when the user just says continue', async () => {
+    const { chatService, sqlite } = await load();
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Create a redesigned Money Tracker UI with clear navigation"}' };
+    await send(chatService, 'redesign the ui', { projectId: 'project-1' });
+    (sqlite as any).getOrchestrationSnapshot = () => ({
+      run: { status: 'cancelled', plan: { goal: 'Create a redesigned Money Tracker UI with clear navigation' } }
+    });
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Continue the redesign from the saved MON-1 plan and preserved work"}' };
+    const result = await send(chatService, 'continue', { projectId: 'project-1' });
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(2);
+    const input = startProjectBuildBatch.mock.calls[1][0];
+    expect(input.content).toContain('Create a redesigned Money Tracker UI with clear navigation');
+    expect(input.content).not.toContain('MON-1');
+    expect(result.agentMessage.content).toContain('planned its request again from the start');
+  });
+
+  it('keeps Alpha\'s goal for continue while the earlier build is still open', async () => {
+    const { chatService, sqlite } = await load();
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search"}' };
+    await send(chatService, 'add search', { projectId: 'project-1' });
+    (sqlite as any).getOrchestrationSnapshot = () => ({ run: { status: 'blocked', plan: { goal: 'Add search' } } });
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search to the header"}' };
+    await send(chatService, 'continue', { projectId: 'project-1' });
+    expect(startProjectBuildBatch.mock.calls[1][0].content).toContain('Add search to the header');
+  });
 });
 
