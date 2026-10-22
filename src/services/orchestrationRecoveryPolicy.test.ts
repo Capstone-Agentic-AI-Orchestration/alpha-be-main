@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { classifyRecoveryCategory, recoveryAvailableActions, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
+import { classifyRecoveryCategory, isContentFreeDirection, recoveryAvailableActions, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
 
 function blockedReviewSnapshot(reportOnlyRetries: number): OrchestrationSnapshot {
   return {
@@ -109,5 +109,36 @@ describe('orchestration recovery classification and report retry', () => {
 
     expect(stale.availableActions).toContain('repair_and_continue');
     expect(stale.actionReasons.provide_guidance).toBeUndefined();
+  });
+});
+
+describe('a specialist that reports a blocker', () => {
+  const blocker = 'The specialist reported a blocker: The frontend has no API client or documented endpoint contract, so API-backed workflows cannot be implemented without guessing.';
+  const snapshot = {
+    run: { status: 'blocked' },
+    tasks: [{ id: 'frontend', status: 'failed' }],
+    attempts: [{ id: 'attempt-1', taskId: 'frontend', status: 'rejected', failureReason: blocker, contextManifest: {} }],
+    findings: []
+  } as unknown as OrchestrationSnapshot;
+
+  it('asks for the missing detail instead of resending the same task', () => {
+    const recovery = recoveryAvailableActions({ snapshot, category: 'project_code', taskId: 'frontend', canControl: true, episodeAgeMs: 0 });
+    expect(recovery.availableActions).toContain('provide_guidance');
+    expect(recovery.availableActions).not.toContain('repair_and_continue');
+    expect(recovery.actionReasons.repair_and_continue).toContain('no API client or documented endpoint contract');
+  });
+
+  it('still offers a plain repair for a failed check', () => {
+    const failedCheck = { ...snapshot, attempts: [{ ...snapshot.attempts[0], failureReason: 'Required check failed: npm run test' }] } as unknown as OrchestrationSnapshot;
+    const recovery = recoveryAvailableActions({ snapshot: failedCheck, category: 'project_code', taskId: 'frontend', canControl: true, episodeAgeMs: 0 });
+    expect(recovery.availableActions).toContain('repair_and_continue');
+  });
+
+  it('treats short continue phrases as carrying no new information', () => {
+    for (const phrase of ['continue', 'Continue.', 'go ahead', 'fix and continue', 'continue with the plan', 'please retry']) {
+      expect(isContentFreeDirection(phrase)).toBe(true);
+    }
+    expect(isContentFreeDirection('Use GET /transactions returning { id, amount, category, date }')).toBe(false);
+    expect(isContentFreeDirection('continue, but store transactions in local state for now')).toBe(false);
   });
 });

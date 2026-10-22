@@ -46,6 +46,24 @@ export function hasRepeatedRecoveryFailure(
   ).length >= 2;
 }
 
+const SPECIALIST_BLOCKER_PREFIX = 'The specialist reported a blocker:';
+
+/** The specialist stopped because it lacks information, not because its code failed a check. */
+export function isSpecialistBlocker(reason: string | undefined): boolean {
+  return Boolean(reason?.trim().startsWith(SPECIALIST_BLOCKER_PREFIX));
+}
+
+/** "continue", "go ahead", "fix it" and similar carry no new information for a blocked specialist. */
+export function isContentFreeDirection(guidance: string | undefined): boolean {
+  const text = (guidance ?? '').trim().toLowerCase().replace(/[.!\s]+$/g, '');
+  return !text || /^(?:please\s+)?(?:continue|go ahead|go on|keep going|carry on|proceed|resume|retry|try again|fix(?: it)?(?: and continue)?|fix and continue|continue with the plan|continue the plan|do it|ok(?:ay)?|yes)(?:\s+please)?$/.test(text);
+}
+
+export function specialistBlockerDirectionMessage(reason: string): string {
+  const blocker = reason.trim().slice(SPECIALIST_BLOCKER_PREFIX.length).trim();
+  return `The specialist needs information it does not have: ${blocker} Sending the same task again will stop at the same point. Reply with the missing detail, or stop this build and ask again so the Orchestrator plans with it in mind.`;
+}
+
 export function workAttemptCount(snapshot: OrchestrationSnapshot, taskId: string): number {
   return snapshot.attempts.filter(attempt => attempt.taskId === taskId &&
     attempt.contextManifest.reportOnlyReportRetry !== true).length;
@@ -114,7 +132,15 @@ export function recoveryAvailableActions(input: {
   // checkpoint; retryTask and the runner adapter revalidate workspace identity.
   void episodeAgeMs;
   if (canAct && task && ['failed', 'blocked'].includes(task.status)) {
-    if (category === 'project_code') {
+    if (category === 'project_code' && isSpecialistBlocker(latestFailedAttempt?.failureReason)) {
+      // A retry without new information meets the same blocker, so ask for the missing detail.
+      if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) {
+        availableActions.push('provide_guidance');
+        actionReasons.repair_and_continue = specialistBlockerDirectionMessage(latestFailedAttempt!.failureReason!);
+      } else {
+        actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review the saved changes before starting a new build.';
+      }
+    } else if (category === 'project_code') {
       if (repeatedFailure && attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
       else if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
       else if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');

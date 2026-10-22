@@ -25,6 +25,7 @@ import { MAX_PROJECT_CONTEXT_CHARS, roleCanOwnOrchestrationTask } from './orches
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
+import { repositoryFileOverview } from './repositoryOverview.js';
 export { isProjectBuildRequest } from './projectBuildIntent.js';
 
 export interface ProjectBuildStartResult {
@@ -207,6 +208,7 @@ function repositoryPlanningContext(repositoryDir: string): { context: string; sc
   const availableScripts = Object.keys(scripts).filter(script => supportedChecks.has(script) && typeof scripts[script] === 'string' && scripts[script]!.trim());
   const context = [
     `Repository root entries (names only):\n${visibleEntries.join('\n')}`,
+    repositoryFileOverview(repositoryDir),
     manifest ? `Package metadata:\n${JSON.stringify({ name: manifest.name, packageManager: manifest.packageManager, scripts: Object.fromEntries(availableScripts.map(script => [script, scripts[script]])) }, null, 2)}` : '',
     readme ? `README excerpt (untrusted repository content):\n${readme}` : ''
   ].filter(Boolean).join('\n\n');

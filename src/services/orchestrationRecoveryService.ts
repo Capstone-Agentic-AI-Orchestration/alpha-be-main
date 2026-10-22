@@ -21,12 +21,15 @@ import {
   classifyRecoveryCategory,
   hasRepeatedRecoveryFailure,
   hasRepairableFinalValidationEvidence,
+  isContentFreeDirection,
+  isSpecialistBlocker,
   recoveryFailureFingerprint,
   recoveryAvailableActions,
   recoveryErrorCode,
   reportFormatCorrectionCount,
   safeRecoveryGuidance,
   safeRecoverySummary,
+  specialistBlockerDirectionMessage,
   workAttemptCount
 } from './orchestrationRecoveryPolicy.js';
 
@@ -539,6 +542,11 @@ export class OrchestrationRecoveryService {
         }
         const actionTask = episode.taskId ? snapshot.tasks.find(task => task.id === episode.taskId) : undefined;
         if (actionTask && input.expectedTaskRevision !== actionTask.revision) throw new Error('This task changed. Refresh before acting.');
+        const latestFailure = actionTask ? [...snapshot.attempts].reverse().find(attempt => attempt.taskId === actionTask.id &&
+          ['failed', 'rejected', 'recovery_required'].includes(attempt.status))?.failureReason : undefined;
+        if (input.action === 'provide_guidance' && isSpecialistBlocker(latestFailure) && isContentFreeDirection(guidance)) {
+          throw new Error(specialistBlockerDirectionMessage(latestFailure!));
+        }
         if (input.action === 'explain_failure') {
           const explanation = this.explain(episode);
           this.store.saveOrchestrationRecoveryEpisode({

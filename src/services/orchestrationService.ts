@@ -29,7 +29,10 @@ import {
 } from '../config/env.js';
 import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount } from './orchestrationRecoveryPolicy.js';
 
-const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
+// The reviewer reads every accepted patch in one prompt, sent through stdin. 64 KiB
+// stopped a first feature build on a starter project (72 KB of real code), so the
+// budget allows about 64k tokens, well inside the context of the review models.
+const MAX_REVIEW_CONTEXT_BYTES = 256 * 1024;
 const MAX_REVIEW_SOURCE_CONTEXT_BYTES = 16 * 1024;
 const MAX_REVIEW_SOURCE_FILES = 12;
 const MAX_REVIEW_SOURCE_FILE_BYTES = 16 * 1024;
