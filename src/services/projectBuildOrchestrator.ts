@@ -20,6 +20,7 @@ import { resolveAgent } from './personaService.js';
 import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity } from './orchestrationPlanner.js';
+import { composeProjectContext } from './projectPlaybook.js';
 import { MAX_PROJECT_CONTEXT_CHARS, roleCanOwnOrchestrationTask } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
@@ -422,7 +423,11 @@ async function startOrchestratedProjectBuild(input: {
       runId: reservation.runId,
       cwd: reservation.worktreePath,
       goal: cleanGoal,
-      projectContext: project.description?.trim() ?? '',
+      // The team's playbook and the detected stack, read from the planning checkouts.
+      projectContext: composeProjectContext({
+        description: project.description,
+        repositories: reservations.map(item => ({ repository: item.repository, dir: item.worktreePath }))
+      }),
       repositoryContext: planningContexts[0]?.context.context ?? '',
       availableScripts: planningContexts[0]?.context.scripts ?? [],
       repositories: planningContexts.map(item => ({
