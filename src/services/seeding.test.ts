@@ -233,6 +233,31 @@ describe('official agent instruction upgrades', () => {
     expect(byKey.get('security')).toMatchObject({ templateVersion: 1, systemPrompt: 'Review only for SQL injection.' });
   });
 
+  it('upgrades untouched agents in every workspace at startup, including older Alpha wording', async () => {
+    const first = await startDaemon();
+    const second = first.createWorkspace({ name: 'Second' });
+    first.close();
+    const db = new Database(dbPath());
+    db.prepare('UPDATE agents SET template_version = 1, system_prompt = ? WHERE template_key = ?')
+      .run(PREVIOUS_TEMPLATE_PROMPTS.frontend[0], 'frontend');
+    // The Manager Agent shipped with two wordings before version 2; both count as untouched.
+    db.prepare('UPDATE agents SET template_version = 1, system_prompt = ? WHERE template_key = ?')
+      .run(PREVIOUS_TEMPLATE_PROMPTS.manager.at(-1), 'manager');
+    const rows = db.prepare('SELECT id FROM agents WHERE template_key IN (?, ?)').all('frontend', 'manager') as Array<{ id: string }>;
+    db.close();
+    for (const { id } of rows) fs.rmSync(path.join(tmp, 'agents', id + '.md'), { force: true });
+
+    await startDaemon();
+    const check = new Database(dbPath(), { readonly: true });
+    const versions = check.prepare('SELECT workspace_id, template_key, template_version FROM agents WHERE template_key IN (?, ?)')
+      .all('frontend', 'manager') as Array<{ workspace_id: string; template_key: string; template_version: number }>;
+    check.close();
+    const workspaces = new Set(versions.map(row => row.workspace_id));
+    expect(workspaces.size).toBe(2);
+    expect(workspaces.has(second.id)).toBe(true);
+    expect(versions.every(row => row.template_version === 2)).toBe(true);
+  });
+
   it('gives every official role the shared instruction structure', () => {
     for (const template of OFFICIAL_AGENT_TEMPLATES) {
       for (const part of ['Mission:', 'What you receive:', 'How to work:', 'Never:', 'When blocked:', 'Done when:', 'Reporting:']) {

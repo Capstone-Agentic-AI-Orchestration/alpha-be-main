@@ -381,6 +381,10 @@ export class SQLiteService {
     if (options.seedDefaults !== false) {
       this.seedDefaultsIfEmpty();
       this.ensureOfficialAgents();
+      // Other workspaces are ensured when opened; their untouched agents still move to the current instructions now.
+      for (const { id } of this.db.prepare('SELECT id FROM workspaces').all() as Array<{ id: string }>) {
+        this.upgradeUnmodifiedOfficialAgents(id);
+      }
     }
   }
 
