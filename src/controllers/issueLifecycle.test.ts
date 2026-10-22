@@ -167,7 +167,7 @@ describe('PUT /issues/:id lifecycle guard', () => {
     const res = await request(app, 'PUT', '/api/issues/iss-1', { status: 'done' });
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('/api/issues/:id/complete');
+    expect(res.body.error).toContain('after a person has reviewed it');
     expect(svc.getIssues()[0].status).toBe('review');
   });
 
@@ -214,7 +214,7 @@ describe('POST /issues/:id/complete', () => {
     const res = await request(app, 'POST', '/api/issues/iss-1/complete', {});
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('reviewed must be true');
+    expect(res.body.error).toContain('only be completed after it has been reviewed');
     expect(svc.getIssues()[0].status).toBe('review');
   });
 

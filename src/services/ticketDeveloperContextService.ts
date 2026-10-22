@@ -11,11 +11,11 @@ export function createTicketDeveloperContextService(store: TicketDeveloperContex
   return {
     async read(workspaceId: string, issueId: string, subject: TicketSubject) {
       if (subject.kind !== 'internal' || !opaque(workspaceId) || !opaque(issueId) || !opaque(subject.userId)) {
-        throw new TicketWorkflowError(404, 'ticket_not_found', 'Issue not found.');
+        throw new TicketWorkflowError(404, 'ticket_not_found', 'Task not found.');
       }
       return store.transaction(async tx => {
         const snapshot = await tx.loadAuthorizedWorkContext(workspaceId, issueId, subject);
-        if (!snapshot) throw new TicketWorkflowError(404, 'ticket_not_found', 'Issue not found.');
+        if (!snapshot) throw new TicketWorkflowError(404, 'ticket_not_found', 'Task not found.');
         return projectDeveloperTicketContext(workspaceId, issueId, subject.userId, snapshot);
       });
     },

@@ -35,9 +35,9 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     if (!subject) return;
     const workspaceId = req.workspace?.workspaceId ?? '';
     const issueId = req.params.issueId ?? '';
-    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Issue work not found.' });
+    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Task not found.' });
     const snapshot = await db.transaction(sql => loadTicketWorkContext(sql, { workspaceId, issueId }, subject));
-    if (!snapshot) return res.status(404).json({ error: 'Issue work not found.' });
+    if (!snapshot) return res.status(404).json({ error: 'Task not found.' });
     return res.json({ workContext: projectDeveloperTicketContext(workspaceId, issueId, subject.userId, snapshot) });
   }));
 
@@ -51,7 +51,7 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     if (!subject) return;
     const workspaceId = req.workspace?.workspaceId ?? '';
     const issueId = req.params.issueId ?? '';
-    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Issue work not found.' });
+    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Task not found.' });
     const runId = `ticket-run-${randomUUID()}`;
     const result = await runtime.reserve({ workspaceId, issueId }, subject, {
       operationId: typeof req.body?.operationId === 'string' ? req.body.operationId : `reserve-${randomUUID()}`,
@@ -77,7 +77,7 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     if (!subject) return;
     const workspaceId = req.workspace?.workspaceId ?? '';
     const issueId = req.params.issueId ?? '';
-    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Issue work not found.' });
+    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Task not found.' });
     const result = await runtime.admit({ workspaceId, issueId }, subject, req.body);
     if (!result.context || result.context.issueId !== issueId || typeof result.launch !== 'boolean') throw new Error('Invalid ticket execution admission.');
     return res.json({ launch: result.launch, workContext: result.context });
@@ -95,7 +95,7 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     const issueId = req.params.issueId ?? '';
     const claimId = req.params.claimId ?? '';
     if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId) || !opaqueTicketRequestValue(claimId)) {
-      return res.status(404).json({ error: 'Issue work not found.' });
+      return res.status(404).json({ error: 'Task not found.' });
     }
     await runtime.stop({ workspaceId, issueId }, subject, claimId);
     return res.json({ stopped: true });
@@ -112,7 +112,7 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
     const workspaceId = req.workspace?.workspaceId ?? '';
     const issueId = req.params.issueId ?? '';
-    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Issue work not found.' });
+    if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Task not found.' });
     const runId = req.body?.runId;
     if (runId !== undefined && !opaqueTicketRequestValue(runId)) return res.status(400).json({ error: 'Invalid review evidence.' });
     const decision = req.body?.decision ?? 'passed';

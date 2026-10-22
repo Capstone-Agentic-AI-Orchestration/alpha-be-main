@@ -282,7 +282,7 @@ export class RunnerService extends EventEmitter {
     const { issueId, agentId, plan, scenario = 'success' } = params;
 
     const issue = sqliteService.getIssues().find(i => i.id === issueId);
-    if (!issue) throw new Error(`Issue not found: ${issueId}`);
+    if (!issue) throw new Error(`Task not found: ${issueId}`);
 
     const agent = sqliteService.getAgents().find(a => a.id === agentId);
     if (!agent) throw new Error(`Agent not found: ${agentId}`);
@@ -304,7 +304,7 @@ export class RunnerService extends EventEmitter {
     if (!workspace) {
       throw new Error(
         issue.githubRepo
-          ? `${issue.githubRepo} is not on this machine. Clone it from the project's resources, or link the folder you cloned it into, before running an agent on this issue.`
+          ? `${issue.githubRepo} is not on this machine. Clone it from the project's resources, or link the folder you cloned it into, before running an agent on this task.`
           : `Project "${project.name}" has no working copy. Attach a local folder, or clone one of its repositories, before running an agent.`
       );
     }
