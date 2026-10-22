@@ -959,7 +959,7 @@ describe('task acceptance and targeted correction', () => {
       eligibleAgents, plan, baseRef: 'main'
     });
     const request = launches[0];
-    fs.writeFileSync(path.join(repository, 'src', 'payload.ts'), `export const payload = "${'x'.repeat(70 * 1024)}";\n`);
+    fs.writeFileSync(path.join(repository, 'src', 'payload.ts'), `export const payload = "${'x'.repeat(270 * 1024)}";\n`);
     const resultCommit = commit(repository, 'Store large payload');
     const submitted = (await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, ['src/payload.ts'])))!;
     const outcome = await acceptance.evaluateAndAccept({
@@ -969,7 +969,7 @@ describe('task acceptance and targeted correction', () => {
     expect(outcome.decision).toBe('accepted');
     expect(outcome.snapshot.run.status).toBe('blocked');
     expect(outcome.snapshot.tasks.find(task => task.id === 'review-payload')?.status).toBe('blocked');
-    expect(outcome.snapshot.run.stoppedReason).toContain('64 KiB');
+    expect(outcome.snapshot.run.stoppedReason).toContain('256 KiB');
     expect(launches.map(launch => launch.taskId)).toEqual(['payload']);
     expect(snapshot.run.status).toBe('executing');
   });
