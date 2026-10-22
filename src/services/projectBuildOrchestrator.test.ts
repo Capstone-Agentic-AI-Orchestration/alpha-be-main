@@ -343,7 +343,7 @@ describe('project builds triggered from chat', () => {
     }));
     expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
       goal: 'Build a full stack calculator.',
-      projectContext: 'Keep the interface accessible.',
+      projectContext: expect.stringContaining('Project: Keep the interface accessible.'),
       planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
       eligibleAgents: [
         expect.objectContaining({ id: 'agent-1', role: 'Research Agent', ready: true, official: false }),
@@ -410,7 +410,7 @@ describe('project builds triggered from chat', () => {
     expect(result.status).toBe('plan_ready');
     expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
       planner: expect.objectContaining({ modelName: 'gpt-default' }),
-      projectContext: 'Keep the interface accessible.'
+      projectContext: expect.stringContaining('Project: Keep the interface accessible.')
     }));
   });
 
