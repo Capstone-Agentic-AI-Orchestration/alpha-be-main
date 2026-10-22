@@ -140,7 +140,10 @@ export function appendOrchestrationTaskPolicy(
     orchestration.taskPackage.findingIds.length
       ? `For every targeted finding ID below, include one findingCoverage entry with concrete evidence that it is fixed. A correction is not complete merely because its checks pass.\n${orchestration.taskPackage.findingIds.map(id => `- ${id}`).join('\n')}`
       : '',
-    'For reportedChecks, use only passed, failed, or not_run. Use not_run when a check did not execute, including when it was blocked, and explain why in evidence. Put unresolved task-level blockers in blockers so Alpha can escalate them clearly.',
+    'For reportedChecks, use only passed, failed, or not_run. Use not_run when a check did not execute, including when your sandbox blocked it, and explain why in evidence; a check that cannot run is not a task blocker, because Alpha runs the required checks itself. Put only problems that stop the task itself, such as a missing requirement or file, in blockers so Alpha can escalate them clearly.',
+    process.platform === 'win32' && ['database', 'backend', 'frontend', 'mobile'].includes(task.kind) && !orchestration.taskPackage.reportCorrection
+      ? 'This machine runs Windows. Change files with your patch or file-editing tool, not shell commands: PowerShell redirection, Set-Content, and Out-File replace whole files and can corrupt non-ASCII characters such as ₱ or ·. Keep files UTF-8, and keep existing code and exports you were not asked to change.'
+      : '',
     'Follow your persona and role boundaries. Do not implement another planned task, broaden the scope, or rework an accepted dependency. If the assigned work conflicts with your role or cannot be completed safely, explain the conflict and stop.',
     orchestration.taskPackage.reportCorrection
       ? 'Do not make or claim repository changes. Do not push, open a pull request, merge, deploy, run commands, or change ticket status.'

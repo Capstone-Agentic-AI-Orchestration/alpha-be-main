@@ -184,11 +184,26 @@ async function main() {
     if (item.expect === 'validation_fail') pass = Boolean(report) && allChanged.length === 0 && reportedFailure && !unexpectedBlocker;
     if (item.expect === 'finding') pass = pass && !unexpectedBlocker;
 
+    // Damage an editor would never cause: replacement characters, or exports the fixture had that are now gone.
+    const damage: string[] = [];
+    for (const file of allChanged) {
+      const after = path.join(cwd, file);
+      const before = path.join(fixtureDir, file);
+      if (!fs.existsSync(after)) continue;
+      const text = fs.readFileSync(after, 'utf8');
+      if (text.includes('\uFFFD')) damage.push(file + ': corrupted characters');
+      if (fs.existsSync(before)) {
+        const exported = [...fs.readFileSync(before, 'utf8').matchAll(/export function (\w+)/g)].map(match => match[1]);
+        const lost = exported.filter(name => !new RegExp('export function ' + name + '\\b').test(text));
+        if (lost.length) damage.push(file + ': removed ' + lost.join(', '));
+      }
+    }
+
     const record = {
       case: item.id, version, model, pass, seconds, unexpectedBlocker,
       reportValid: Boolean(report), reportError: parsed.error,
       blockers, blockerTooLong: blockers.some(text => text.length > 240),
-      changed: allChanged, outOfScope, checksPass, failedChecks, hiddenPass,
+      changed: allChanged, outOfScope, checksPass, failedChecks, hiddenPass, damage,
       findings: findings.map(finding => ({ severity: finding.severity, path: finding.path, title: finding.title })),
       failure: result.failureDetail
     };
@@ -214,7 +229,8 @@ async function main() {
     if (!record) return 'error';
     const notes = [!record.reportValid && 'invalid report', record.outOfScope.length && 'out of scope: ' + record.outOfScope.join(', '),
       record.hiddenPass === false && 'hidden test failed', !record.checksPass && item.expect === 'change' && 'checks failed',
-      record.blockerTooLong && 'blocker over 240 chars', record.unexpectedBlocker && 'reported a blocker'].filter(Boolean).join('; ');
+      record.blockerTooLong && 'blocker over 240 chars', record.unexpectedBlocker && 'reported a blocker',
+      record.damage.length && 'damaged ' + record.damage.join(', ')].filter(Boolean).join('; ');
     return (record.pass ? 'pass' : 'fail') + (notes ? ' (' + notes + ')' : '') + ' · ' + record.seconds + 's';
   }).join(' | ') + ' |');
   const score = (version: Version) => results.filter(entry => entry.version === version && entry.pass).length + '/' + cases.length;
