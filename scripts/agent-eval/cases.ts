@@ -32,6 +32,8 @@ export interface EvalCase {
   /** For implementation cases: an accepted earlier task whose output this one must use. */
   handoff?: { taskId: string; taskKind: OrchestrationTaskKind; ownerAgentId: string; summary: string; deliverables: Array<{ summary: string; paths: string[] }> };
   expect: 'change' | 'blocker' | 'finding' | 'no_blocking_finding' | 'validation_fail';
+  /** For validation cases: what a correct report says about the failure, as a case-insensitive pattern. */
+  failureEvidence?: string;
   findingPath?: string;
 }
 
@@ -118,7 +120,8 @@ export const EVAL_CASES: EvalCase[] = [
     setupFiles: {
       'tests/remaining.test.js': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { remaining } from '../src/budget.js';\ntest('remaining subtracts every expense', () => {\n  assert.equal(remaining(100, [{ amount: 10 }, { amount: 20 }]), 70);\n});\n"
     },
-    expect: 'validation_fail'
+    expect: 'validation_fail',
+    failureEvidence: '\\b90\\b|last expense|final expense|first expense|skips?|omit|off.by.one|length - 1'
   },
   {
     id: 'split-expense-conventions',
@@ -178,6 +181,7 @@ export const EVAL_CASES: EvalCase[] = [
     acceptanceCriteria: ['categoryLabel("eating_out") returns "Eating Out".', 'npm test passes.'],
     requiredChecks: ['test', 'lint'],
     includePaths: ['src/**', 'tests/**'],
-    expect: 'validation_fail'
+    expect: 'validation_fail',
+    failureEvidence: 'eating out"|lower.?case|not title case|title case is not'
   }
 ];

@@ -49,9 +49,9 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp('^' + source + '$');
 }
 
-function npm(cwd: string, script: string): boolean {
+function npm(cwd: string, script: string): { ok: boolean; output: string } {
   const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', script, '--silent'], { cwd, encoding: 'utf8', shell: process.platform === 'win32' });
-  return result.status === 0;
+  return { ok: result.status === 0, output: ((result.stdout ?? '') + (result.stderr ?? '') + (result.error ? String(result.error) : '')).slice(-1_500) };
 }
 
 async function main() {
@@ -155,7 +155,9 @@ async function main() {
     const include = item.includePaths.map(globToRegExp);
     const exclude = (item.excludePaths ?? []).map(globToRegExp);
     const outOfScope = allChanged.filter(file => !include.some(re => re.test(file)) || exclude.some(re => re.test(file)));
-    const checksPass = item.requiredChecks.every(script => npm(cwd, script));
+    const checkRuns = item.requiredChecks.map(script => ({ script, ...npm(cwd, script) }));
+    const checksPass = checkRuns.every(check => check.ok);
+    const failedChecks = checkRuns.filter(check => !check.ok).map(check => ({ script: check.script, output: check.output }));
     let hiddenPass: boolean | undefined;
     if (item.hiddenTest) {
       fs.writeFileSync(path.join(cwd, 'tests', '__hidden.test.js'), item.hiddenTest);
@@ -164,9 +166,10 @@ async function main() {
     const blockers: string[] = report?.blockers ?? [];
     const findings: any[] = report?.reviewFindings ?? [];
     // Evidence that the criterion fails, not merely that something stopped the agent.
+    const reportText = JSON.stringify([report?.summary, report?.criteriaEvidence, report?.requirementCoverage]);
     const reportedFailure = Boolean(report && (
       (report.reportedChecks ?? []).some((check: any) => check.result === 'failed') ||
-      JSON.stringify(report.criteriaEvidence ?? []).match(/\b(fail|not met|does not|returns? "?[a-z])/i)
+      (item.failureEvidence ? new RegExp(item.failureEvidence, 'i').test(reportText) : /\bfail/i.test(reportText))
     ));
 
     // Alpha rejects any report with a blocker, so only the blocker case may have one.
@@ -185,7 +188,7 @@ async function main() {
       case: item.id, version, model, pass, seconds, unexpectedBlocker,
       reportValid: Boolean(report), reportError: parsed.error,
       blockers, blockerTooLong: blockers.some(text => text.length > 240),
-      changed: allChanged, outOfScope, checksPass, hiddenPass,
+      changed: allChanged, outOfScope, checksPass, failedChecks, hiddenPass,
       findings: findings.map(finding => ({ severity: finding.severity, path: finding.path, title: finding.title })),
       failure: result.failureDetail
     };
