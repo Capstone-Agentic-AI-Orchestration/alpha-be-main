@@ -2,10 +2,32 @@ import { describe, expect, it } from 'vitest';
 import {
   ALPHA_ROUTE_MARKER,
   chooseBuildRepositories,
+  isBareContinueRequest,
   orchestratorRoutingPrompt,
   parseAlphaRoute,
-  parseChatOverride
+  parseChatOverride,
+  referencesAlphaRecords
 } from './chatRouter.js';
+
+describe('continuing a stopped build', () => {
+  it('recognises short requests to carry on that name no change of their own', () => {
+    for (const message of ['continue', 'Continue.', 'can you continue with the plan', 'ok, go ahead', 'try again', 'retry the build', 'keep going please'])
+      expect(isBareContinueRequest(message), message).toBe(true);
+    for (const message of ['continue and add a dark mode toggle', 'why did it stop?', 'add a budget page', 'continue explaining the login flow'])
+      expect(isBareContinueRequest(message), message).toBe(false);
+  });
+
+  it('flags goals that point at records a specialist cannot open', () => {
+    expect(referencesAlphaRecords('Continue the Money Tracker UI redesign from the saved MON-104 plan and preserved work.')).toBe(true);
+    expect(referencesAlphaRecords('Review the previous failure and finish the redesign.')).toBe(true);
+    expect(referencesAlphaRecords('Create a redesigned UI for Money tracker with clear navigation and responsive layouts.')).toBe(false);
+  });
+
+  it('tells Alpha that build goals must stand on their own', () => {
+    const prompt = orchestratorRoutingPrompt({ projectName: 'Money tracker', repositories: ['org/app-fe'], canBuild: true });
+    expect(prompt).toContain('cannot read this conversation, issue keys such as MON-104, earlier builds');
+  });
+});
 
 describe('parseAlphaRoute', () => {
   it('reads a build decision and removes the line from the visible reply', () => {

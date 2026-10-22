@@ -241,6 +241,7 @@ function formatOrchestrationReportContract(taskPackage: OrchestrationTaskPackage
     taskPackage.reportCorrection
       ? 'Return exactly one JSON object matching this template, with taskId, requirement IDs, and acceptance criteria unchanged. This correction is format-only: use no new facts, files, or checks. Do not claim that review passed if the previous response does not contain evidence for that conclusion; report missing review evidence as a blocker.'
       : 'Return exactly one JSON object matching this template. Do not add prose or markdown around it. Keep taskId, requirement IDs, and acceptance criteria exactly as shown. Include every changed repository path under a deliverable using forward slashes. Do not claim Alpha verification results; those are collected independently after your process exits.',
+    'Each blocker is one plain sentence of at most 240 characters. Use blockers only for something that stops this task; anything else belongs in the summary or evidence.',
     JSON.stringify(template, null, 2)
   ].join('\n\n');
 }
@@ -1159,7 +1160,7 @@ ${issue.description}
             this.appendLog(
               runId,
               'review',
-              `Handing over to the next squad member. The pull request opens when the squad finishes.`
+              `Task result saved. The Orchestrator checks it before the next task starts; the pull request opens after you approve the finished build.`
             );
           }
 
