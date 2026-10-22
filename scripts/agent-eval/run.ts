@@ -20,6 +20,8 @@ process.env.ALPHA_HOME = evalHome;
 
 const here = path.dirname(path.resolve(process.argv[1]));
 const fixtureDir = path.join(here, 'fixture');
+// Every task copy lives under one folder, which the evaluation's own database allows agents to work in.
+const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-agent-eval-work-'));
 
 type Version = 'v1' | 'v2';
 
@@ -55,6 +57,8 @@ async function main() {
   const { runCliTurn } = await import('../../src/services/cliRunner.js');
   const { parseAgentReport } = await import('../../src/services/orchestrationAgentReport.js');
   const { RuntimeService } = await import('../../src/services/runtimeService.js');
+  const { sqliteService } = await import('../../src/services/sqliteService.js');
+  sqliteService.addAllowedPath(workRoot, 'Agent evaluation');
 
   const model = argument('model', 'gpt-6-luna');
   const parallel = Math.max(1, Number(argument('parallel', '3')));
@@ -71,7 +75,7 @@ async function main() {
   const runOne = async ({ item, version }: typeof jobs[number]) => {
     const template = OFFICIAL_AGENT_TEMPLATES.find(entry => entry.key === item.role)!;
     const persona = version === 'v1' ? PREVIOUS_TEMPLATE_PROMPTS[item.role][0] : template.systemPrompt;
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-eval-' + item.id + '-' + version + '-'));
+    const cwd = fs.mkdtempSync(path.join(workRoot, item.id + '-' + version + '-'));
     fs.cpSync(fixtureDir, cwd, { recursive: true });
     for (const [file, content] of Object.entries(item.setupFiles ?? {})) {
       fs.mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
@@ -131,8 +135,9 @@ async function main() {
 
     const parsed = parseAgentReport(result.content ?? '', 1);
     const report = parsed.report as any;
-    const status = git(cwd, 'status', '--porcelain', '--untracked-files=all');
-    const changedPaths = status.split('\n').filter(Boolean).map(line => line.slice(3).trim().replace(/^"|"$/g, ''));
+    // Not trimmed: the first porcelain line starts with a status column that may be a space.
+    const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd, encoding: 'utf8' });
+    const changedPaths = status.split('\n').filter(line => line.trim()).map(line => line.slice(3).trim().replace(/^"|"$/g, ''));
     const committed = git(cwd, 'diff', '--name-only', baseCommit, 'HEAD').split('\n').filter(Boolean);
     const allChanged = [...new Set([...changedPaths, ...committed])];
     const include = item.includePaths.map(globToRegExp);
@@ -196,7 +201,10 @@ async function main() {
     'Score: ' + versions.map(version => version + ' ' + score(version)).join(' · ')].join('\n');
   fs.writeFileSync(path.join(outDir, 'summary.md'), summary + '\n');
   console.log('\n' + summary + '\n\nDetails: ' + outDir);
-  fs.rmSync(evalHome, { recursive: true, force: true });
+  try { sqliteService.close(); } catch { /* already closed */ }
+  for (const dir of [evalHome, workRoot]) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may still hold a file; the OS temp folder clears it later */ }
+  }
 }
 
 main().then(() => process.exit(0), error => { console.error(error); process.exit(1); });
