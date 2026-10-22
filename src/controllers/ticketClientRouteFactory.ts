@@ -43,14 +43,11 @@ export interface TicketClientRouteDependencies {
   messageStore: TicketMessageStore;
   creationStore: TicketCreationStore;
   identityVerifier: TicketClientIdentityVerifier;
-  /** Omit only when email-link auth is intentionally unavailable in this composition. */
+  /** Used only to verify PM-issued invitation links. */
   emailLinkVerifier?: Pick<TicketClientIdentityProvider, 'verifyEmailLink'>;
-  /** Omit only when repeat sign-in email delivery is intentionally unavailable. */
-  requestSignInLink?: (email: unknown) => Promise<{ accepted: true }>;
   sessionPolicy: TicketClientSessionPolicy;
   cookiePolicy: TicketClientSessionCookiePolicy;
-  /** Use distinct durable budgets for activation and repeat sign-in. */
-  sessionAdmission: TicketClientSessionAdmission;
+  /** Durable rate-limit budget for account activation. */
   activationAdmission: TicketClientSessionAdmission;
 }
 
@@ -75,19 +72,7 @@ export function createTicketClientRouteBoundary(dependencies: TicketClientRouteD
   const messages = createTicketMessageService(dependencies.messageStore);
   const creation = createTicketCreationService(dependencies.creationStore);
 
-  const sessionApplication = {
-    ...sessions,
-    async exchangeEmailLink(tokenHash: string, type: 'invite' | 'magiclink') {
-      const verified = await dependencies.emailLinkVerifier?.verifyEmailLink(tokenHash, type);
-      return verified ? sessions.exchange(verified.credential) : null;
-    },
-    async requestSignInLink(email: unknown) {
-      if (!dependencies.requestSignInLink) {
-        throw new TicketWorkflowError(503, 'client_sign_in_unavailable', 'Client sign-in is unavailable right now.');
-      }
-      return dependencies.requestSignInLink(email);
-    },
-  };
+  const sessionApplication = { authenticate: sessions.authenticate, revoke: sessions.revoke };
   const activationApplication = {
     async activate(input: unknown) {
       if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -125,7 +110,7 @@ export function createTicketClientRouteBoundary(dependencies: TicketClientRouteD
   };
 
   return createTicketClientRouter({
-    session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy, dependencies.sessionAdmission),
+    session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy),
     activation: createTicketClientActivationRouter(activationApplication, dependencies.cookiePolicy, dependencies.activationAdmission),
     api: createTicketClientApiRouter(apiApplication, dependencies.cookiePolicy),
   });

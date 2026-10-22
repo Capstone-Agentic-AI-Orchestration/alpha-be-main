@@ -53,7 +53,7 @@ export interface TicketClientComposition {
 
 /**
  * Compose client-only auth/read routes from the same Postgres pool and the
- * server-only Supabase Auth/Resend credentials. Call only after validating the
+ * server-only Supabase Auth/Gmail OAuth credentials. Call only after validating the
  * rollout gates and exact HTTPS web origin; no browser receives service keys.
  */
 export function createTicketClientComposition(input: {
@@ -63,7 +63,10 @@ export function createTicketClientComposition(input: {
   supabaseServiceRoleKey: string;
   sessionSecret: string;
   webOrigin: string;
+  /** Gmail: PM invitations, client activation, and password recovery only. */
   emailProvider: TicketInvitationContentEmailProvider;
+  /** Optional legacy Resend route for PM/client conversation notices; never Gmail. */
+  notificationEmailProvider?: TicketInvitationContentEmailProvider | null;
   onSignInDeliveryUnavailable?: () => void;
   workflow?: TicketLifecycleRuntime;
 }): TicketClientComposition {
@@ -80,9 +83,6 @@ export function createTicketClientComposition(input: {
     ...(input.emailProvider.canSendTo ? { recipientAllowed: (email: string) => input.emailProvider.canSendTo!(email) } : {}),
   };
   const rateStore = new PostgresTicketClientAuthRateLimitStore(input.database);
-  const sessionAdmission = createTicketClientAuthAdmission({
-    store: rateStore, secret: input.sessionSecret, bucket: 'client_sign_in', maximumPerMinute: 8,
-  });
   const activationAdmission = createTicketClientAuthAdmission({
     store: rateStore, secret: input.sessionSecret, bucket: 'client_activation', maximumPerMinute: 8,
   });
@@ -90,9 +90,11 @@ export function createTicketClientComposition(input: {
     new PostgresTicketDocumentStore(input.database),
     new SupabaseTicketDocumentObjectStore(input.supabaseUrl, input.supabaseServiceRoleKey),
   );
-  const communicationDelivery = createTicketCommunicationNotificationService(
-    new PostgresTicketCommunicationNotificationStore(input.database), input.emailProvider, input.webOrigin,
-  );
+  const communicationDelivery = input.notificationEmailProvider
+    ? createTicketCommunicationNotificationService(
+      new PostgresTicketCommunicationNotificationStore(input.database), input.notificationEmailProvider, input.webOrigin,
+    )
+    : null;
   const messages = createTicketMessageService(new PostgresTicketTriageStore(input.database, { communicationEnabled: true }));
 
   const router = createTicketClientPortalRouteBoundary({
@@ -114,7 +116,6 @@ export function createTicketClientComposition(input: {
     webOrigin: input.webOrigin,
     sessionPolicy: { lifetimeMs: CLIENT_SESSION_LIFETIME_MS },
     cookiePolicy: { secure: true, allowedOrigins: [input.webOrigin] },
-    sessionAdmission,
     activationAdmission,
     workflow: input.workflow,
   });
@@ -133,9 +134,9 @@ export function createTicketClientComposition(input: {
       const stopInvitations = startTicketClientInvitationDeliveryWorker({
         isCloud: true, enabled: true, delivery, onUnavailable,
       });
-      const stopCommunications = startTicketCommunicationNotificationWorker({
+      const stopCommunications = communicationDelivery ? startTicketCommunicationNotificationWorker({
         isCloud: true, enabled: true, delivery: communicationDelivery, onUnavailable, onActionNoticesUnavailable,
-      });
+      }) : () => undefined;
       return () => { stopInvitations(); stopCommunications(); };
     },
   };

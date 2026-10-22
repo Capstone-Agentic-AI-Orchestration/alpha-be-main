@@ -15,6 +15,7 @@ export interface TicketClientInvitationClaim {
   eventId: string;
   leaseToken: string;
   attempt: number;
+  identityMatches: boolean;
   signal: { workspaceId: string; ticketId: string; invitationId: string; protectedToken: string };
   invitation: TicketInvitationRecord & { providerLinkEnvelope: string | null; providerLinkType: ProviderEmailLinkType | null };
   ticket: { status: TicketStatus; source: string; clientId: string | null; scopeVersionId: string | null;
@@ -23,7 +24,7 @@ export interface TicketClientInvitationClaim {
 }
 
 export interface TicketClientInvitationDeliveryStore {
-  claimNext(input: { now: string; leaseUntil: string }): Promise<TicketClientInvitationClaim | null>;
+  claimNext(input: { now: string; leaseUntil: string; providerIdentity: string }): Promise<TicketClientInvitationClaim | null>;
   cacheProviderLink(claim: TicketClientInvitationClaim, envelope: string, type: ProviderEmailLinkType): Promise<{ envelope: string; type: ProviderEmailLinkType } | null>;
   markDelivered(claim: TicketClientInvitationClaim, deliveredAt: string): Promise<boolean>;
   scheduleRetry(claim: TicketClientInvitationClaim, retryAt: string, code: ClientInvitationFailureCode): Promise<boolean>;
@@ -60,7 +61,8 @@ function payloadRecord(value: unknown): Record<string, unknown> | null {
 export class PostgresTicketClientInvitationDeliveryStore implements TicketClientInvitationDeliveryStore {
   constructor(private readonly db: TransactionalSql) {}
 
-  claimNext(input: { now: string; leaseUntil: string }): Promise<TicketClientInvitationClaim | null> {
+  claimNext(input: { now: string; leaseUntil: string; providerIdentity: string }): Promise<TicketClientInvitationClaim | null> {
+    if (!/^[a-f0-9]{64}$/.test(input.providerIdentity)) return Promise.resolve(null);
     return this.db.transaction(async sql => {
       const { rows } = await sql.query<OutboxRow>(
         `select o.id as event_id,o.workspace_id,o.ticket_id,o.payload,o.attempt,
@@ -117,18 +119,30 @@ export class PostgresTicketClientInvitationDeliveryStore implements TicketClient
         await this.discardLocked(sql, row, 'contact_changed');
         return null;
       }
+      const recipientHash = createHash('sha256').update(row.contact_email.trim().toLowerCase()).digest('hex');
+      const previousDelivery = payload.clientInvitationDelivery;
+      const previous = previousDelivery && typeof previousDelivery === 'object' && !Array.isArray(previousDelivery)
+        ? previousDelivery as Record<string, unknown> : null;
+      const identityMatches = previous
+        ? previous.providerIdentity === input.providerIdentity && previous.recipientHash === recipientHash
+          && typeof previous.firstAttemptAt === 'string' && Number.isFinite(Date.parse(previous.firstAttemptAt))
+        : Number(row.attempt) === 0 && previousDelivery === undefined;
       const token = randomUUID();
       const leaseHash = createHash('sha256').update(token).digest('hex');
       const { rows: leased } = await sql.query<{ id: string }>(
         `update alpha_private.ticket_outbox_events
-            set status='leased',lease_token_hash=$3,lease_until=$4,attempt=attempt+1
+            set status='leased',lease_token_hash=$3,lease_until=$4,attempt=attempt+1,
+                payload=case when not (payload ? 'clientInvitationDelivery') and attempt=0
+                  then payload || jsonb_build_object('clientInvitationDelivery',$5::jsonb) else payload end
           where id=$1 and workspace_id=$2
           returning id`,
-        [row.event_id, row.workspace_id, leaseHash, input.leaseUntil],
+        [row.event_id, row.workspace_id, leaseHash, input.leaseUntil,
+          JSON.stringify({ providerIdentity: input.providerIdentity, recipientHash, firstAttemptAt: input.now })],
       );
       if (leased.length !== 1) return null;
       return {
         eventId: row.event_id, leaseToken: token, attempt: Number(row.attempt) + 1,
+        identityMatches,
         signal: { workspaceId: row.workspace_id, ticketId: row.ticket_id,
           invitationId: row.invitation_id, protectedToken: payload.protectedToken },
         invitation: {

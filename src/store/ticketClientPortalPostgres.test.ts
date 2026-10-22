@@ -5,7 +5,6 @@ import { createTicketCommandService } from '../services/ticketCommandService.js'
 import { createTicketClientActivationService } from '../services/ticketClientActivationService.js';
 import { createTicketClientInvitationDeliveryService } from '../services/ticketClientInvitationDeliveryService.js';
 import { createTicketClientSessionService } from '../services/ticketClientSessionService.js';
-import { createTicketClientSignInService } from '../services/ticketClientSignInService.js';
 import { createTicketClientWorkspaceService } from '../services/ticketClientWorkspaceService.js';
 import { createTicketInvitationService } from '../services/ticketInvitationService.js';
 import { createTicketPublicIntakeService } from '../services/ticketPublicIntakeService.js';
@@ -13,11 +12,10 @@ import { createTicketQueueService } from '../services/ticketQueueService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
 import type { TicketClientIdentityProvider } from '../services/ticketClientIdentityProvider.js';
 import type { Router } from 'express';
-import type { TicketInvitationContentEmailProvider } from '../services/ticketInvitationEmailProvider.js';
+import { TicketInvitationEmailError, type TicketInvitationContentEmailProvider } from '../services/ticketInvitationEmailProvider.js';
 import { PostgresTicketClientActivationStore } from './ticketClientActivationPostgresStore.js';
 import { PostgresTicketClientInvitationDeliveryStore } from './ticketClientInvitationDeliveryStore.js';
 import { PostgresTicketClientSessionStore } from './ticketClientSessionPostgresStore.js';
-import { PostgresTicketClientSignInStore } from './ticketClientSignInPostgresStore.js';
 import { PostgresTicketClientWorkspaceStore } from './ticketClientWorkspacePostgresStore.js';
 import { PostgresTicketInvitationStore } from './ticketInvitationPostgresStore.js';
 import { PostgresTicketInvitationEmailStore } from './ticketInvitationEmailPostgresStore.js';
@@ -292,77 +290,42 @@ describe('Client invitation-to-ticket flow on PostgreSQL', () => {
     expect(grantCounts.rows[0]).toEqual({ ticket_grants: 1, service_grants: 1 });
   }, 60_000);
 
-  it('sends returning sign-in links only to an already activated client without revealing account status', async () => {
-    await submitInquiry(firstTarget, clientEmail, 'd15921fb-f001-4b9b-94c3-8f2b8f431003');
+  it('does not replay an uncertain invitation through a different provider', async () => {
+    await submitInquiry(firstTarget, clientEmail, 'd15921fb-f001-4b9b-94c3-8f2b8f431006');
     await reviewInquiry(firstTarget);
-
     const secrets = createClientTicketInvitationSecretProtector(sessionSecret);
-    const invitations = createTicketInvitationService(
-      new PostgresTicketInvitationStore(db), { lifetimeMs: 60 * 60 * 1000 }, secrets.invitation,
-      () => now, () => 'client-portal-invitation-2',
-    );
-    const invitation = await invitations.issue(firstTarget, pm);
-    const activation = createTicketClientActivationService(new PostgresTicketClientActivationStore(db), {
-      verifyCredential: vi.fn(async () => verifiedIdentity),
-    }, () => now);
-
-    // This test covers the returning-sign-in eligibility lookup, so create the
-    // provider-owned auth.users row as Supabase Auth would after link creation.
-    await db.query(`create table if not exists auth.users (
-      id uuid primary key, email text not null, email_confirmed_at timestamptz
-    )`);
-    await db.query(`insert into auth.users(id,email,email_confirmed_at) values ($1,$2,$3)`,
-      [clientId, clientEmail, now.toISOString()]);
-
-    const token = Buffer.alloc(32, 41).toString('base64url');
-    // The invitation secret hash must match the token supplied to activation;
-    // obtain the token from the protected outbox payload as a worker would.
-    const pending = await db.query<{ payload: Record<string, unknown> }>(
-      `select payload from alpha_private.ticket_outbox_events
-        where workspace_id=$1 and ticket_id=$2 and event_type='ticket_invitation_requested'
-          and payload->>'activationVersion'='1'`, [workspaceId, firstTarget.ticketId],
-    );
-    const protectedToken = pending.rows[0]?.payload.protectedToken;
-    expect(typeof protectedToken).toBe('string');
-    const invitationToken = secrets.invitation.unprotect(protectedToken as string, {
-      workspaceId, ticketId: firstTarget.ticketId,
-      invitationId: invitation.invitationId, expiresAt: invitation.expiresAt,
-    });
-    await activation.activate({ invitationToken, providerCredential });
-
-    const generatedLinks: Array<{ email: string; type: string }> = [];
+    await createTicketInvitationService(new PostgresTicketInvitationStore(db), { lifetimeMs: 60 * 60 * 1000 }, secrets.invitation,
+      () => now, () => 'client-portal-provider-switch-invitation').issue(firstTarget, pm);
     const identityProvider = {
-      async generateEmailLink(email: string, type: 'invite' | 'magiclink') {
-        generatedLinks.push({ email, type });
-        return { userId: clientId, tokenHash: providerTokenHash, type };
-      },
+      async generateEmailLink() { return { userId: clientId, tokenHash: providerTokenHash, type: 'invite' as const }; },
     } as unknown as TicketClientIdentityProvider;
-    const sent: string[] = [];
-    const emailProvider: TicketInvitationContentEmailProvider = {
-      identity: 'client-portal-test-provider', async send() {},
-      async sendContent(recipient) { sent.push(recipient); },
+    let instant = now;
+    const policy = { webOrigin, leaseDurationMs: 60_000, retryBaseDelayMs: 1_000, retryMaxDelayMs: 60_000, maxAttempts: 3 };
+    const oldProvider: TicketInvitationContentEmailProvider = {
+      identity: 'a'.repeat(64), async send() {},
+      async sendContent() { throw new TicketInvitationEmailError(true); },
     };
-    const signIn = createTicketClientSignInService(
-      new PostgresTicketClientSignInStore(db), identityProvider, emailProvider, webOrigin,
-    );
+    const store = new PostgresTicketClientInvitationDeliveryStore(db);
+    const oldDelivery = createTicketClientInvitationDeliveryService(store, identityProvider, oldProvider,
+      secrets.invitation, secrets.providerLink, policy, () => instant);
+    await expect(oldDelivery.deliverNext()).resolves.toBe('retry_scheduled');
 
-    await expect(signIn.request(clientEmail)).resolves.toEqual({ accepted: true });
-    await expect(signIn.request('unknown@example.test')).resolves.toEqual({ accepted: true });
-    expect(generatedLinks).toEqual([{ email: clientEmail, type: 'magiclink' }]);
-    expect(sent).toEqual([clientEmail]);
-
-    const unavailable = vi.fn();
-    const restrictedSignIn = createTicketClientSignInService(
-      new PostgresTicketClientSignInStore(db), identityProvider,
-      { ...emailProvider, canSendTo: () => false }, webOrigin, unavailable,
-    );
-    await expect(restrictedSignIn.request(clientEmail)).resolves.toEqual({ accepted: true });
-    expect(generatedLinks).toHaveLength(1);
-    expect(sent).toHaveLength(1);
-    expect(unavailable).toHaveBeenCalledWith();
+    instant = new Date(now.getTime() + 1_000);
+    const newSendContent = vi.fn(async () => undefined);
+    const newProvider: TicketInvitationContentEmailProvider = {
+      identity: 'b'.repeat(64), async send() {}, sendContent: newSendContent,
+    };
+    const newDelivery = createTicketClientInvitationDeliveryService(store, identityProvider, newProvider,
+      secrets.invitation, secrets.providerLink, policy, () => instant);
+    await expect(newDelivery.deliverNext()).resolves.toBe('dead_lettered');
+    expect(newSendContent).not.toHaveBeenCalled();
+    const outbox = await db.query<{ status: string }>(
+      `select status from alpha_private.ticket_outbox_events where ticket_id=$1 and payload->>'activationVersion'='1'`,
+      [firstTarget.ticketId]);
+    expect(outbox.rows[0]?.status).toBe('dead');
   }, 60_000);
 
-  it('connects production activation, secure cookies, scoped reads, returning sign-in and logout routes', async () => {
+  it('connects activation, secure cookies, scoped reads and logout; passwordless sign-in routes are gone', async () => {
     await submitInquiry(firstTarget, clientEmail, 'd15921fb-f001-4b9b-94c3-8f2b8f431004');
     await submitInquiry(secondTarget, 'other-client@example.test', 'd15921fb-f001-4b9b-94c3-8f2b8f431005');
     await reviewInquiry(firstTarget);
@@ -421,12 +384,10 @@ describe('Client invitation-to-ticket flow on PostgreSQL', () => {
     expect(await invokeClientRoute(composition.router, 'POST', '/session/logout', { cookie, body: {} })).toMatchObject({ status: 403 });
     expect(await invokeClientRoute(composition.router, 'POST', '/session/logout', { cookie, csrf, body: {} })).toMatchObject({ status: 204 });
     expect(await invokeClientRoute(composition.router, 'GET', '/session', { cookie })).toMatchObject({ status: 200, body: { authenticated: false } });
-    const returning = await invokeClientRoute(composition.router, 'POST', '/auth/sign-in-link', { body: { email: clientEmail } });
-    expect(returning).toMatchObject({ status: 202, body: { accepted: true } });
-    expect(sendContent).toHaveBeenCalledWith(clientEmail, 'Your Alpha client sign-in link', expect.stringContaining('/#/client/activate?'), expect.any(String));
-    const signedIn = await invokeClientRoute(composition.router, 'POST', '/auth/session', { body: { providerTokenHash, providerTokenType: 'magiclink' } });
-    expect(signedIn).toMatchObject({ status: 200, body: { authenticated: true } });
-    expect(await invokeClientRoute(composition.router, 'POST', '/auth/session', { body: { providerTokenHash, providerTokenType: 'magiclink' } }))
-      .toMatchObject({ status: 401 });
+    const hasRoute = (stack: any[], method: string, routePath: string): boolean => stack.some(layer =>
+      (layer.route?.path === routePath && layer.route.methods[method.toLowerCase()])
+      || (layer.handle?.stack && hasRoute(layer.handle.stack, method, routePath)));
+    expect(hasRoute((composition.router as any).stack, 'POST', '/auth/sign-in-link')).toBe(false);
+    expect(hasRoute((composition.router as any).stack, 'POST', '/auth/session')).toBe(false);
   }, 60_000);
 });

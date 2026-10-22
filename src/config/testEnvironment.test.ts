@@ -29,11 +29,13 @@ describe('test configuration isolation', () => {
     expect(config.DATABASE_URL).toBe('');
   });
 
-  it('defaults to Resend with email disabled and no real provider credentials', async () => {
-    vi.stubEnv('TICKET_ACK_EMAIL_PROVIDER', undefined);
+  it('keeps inquiry acknowledgments disabled without real provider credentials', async () => {
     const config = await import('./env.js');
-    expect(config.TICKET_ACK_EMAIL_PROVIDER).toBe('resend');
     expect(config.ALPHA_TICKETING_ACK_EMAIL_ENABLED).toBe(false);
+    expect(config.GMAIL_OAUTH_CLIENT_ID).toBe('');
+    expect(config.GMAIL_OAUTH_CLIENT_SECRET).toBe('');
+    expect(config.GMAIL_OAUTH_REFRESH_TOKEN).toBe('');
+    expect(config.GMAIL_SENDER_EMAIL).toBe('');
     expect(config.RESEND_API_KEY).toBe('');
     expect(config.RESEND_SENDER_EMAIL).toBe('');
     expect(config.RESEND_TEST_RECIPIENT).toBe('');

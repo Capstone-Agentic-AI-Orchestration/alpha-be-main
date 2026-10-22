@@ -2,16 +2,22 @@
 
 ## What this adds
 
-Resend's HTTPS transactional API sends a generic inquiry receipt after the
+Gmail's HTTPS API, authenticated with server-side OAuth, sends a generic inquiry receipt after the
 existing PostgreSQL inquiry transaction commits. The public response stays
 `{ received: true }`: it does not reveal private ticket identifiers, create a
 client account, or claim that work has been approved.
 
-The implementation is in the existing `src/services` and `src/store` folders.
-No desktop source, frontend screen, GitHub App, database connection credentials,
-runner, session logic, package dependency, or database schema is changed.
-Automated tests reuse the existing PostgreSQL/Vitest harness. No new localhost
-server, local-only adapter, checkout folder, or preservation folder is needed.
+The same Gmail sender also delivers PM-issued client invitations and password
+recovery links through their existing, separate account-access queue. Conversation
+message notices are not sent through Gmail; the existing optional Resend route
+remains separate for those notices.
+
+The Gmail transport is in the existing backend `src/services` structure. The
+client UI removes the separate passwordless sign-in-link option; invitation
+verification, password setup, password recovery and password sign-in remain.
+No desktop source, GitHub App, runner, package dependency, or database schema is
+changed. Automated tests reuse the existing test harness; no new dependency or
+Supabase migration is needed.
 
 ## Durable delivery and safety
 
@@ -24,9 +30,10 @@ server, local-only adapter, checkout folder, or preservation folder is needed.
   payloads or error logs.
 - Workers claim one row using `FOR UPDATE SKIP LOCKED`, persist a two-minute
   lease and commit before calling the provider. Requests are time-limited to ten seconds.
-- The event UUID is the stable provider idempotency key. A persisted dispatch
-  timestamp and identity fingerprint survive deployment/restarts. Changed sender
-  content or recipient stops automatic delivery rather than mutating a retry.
+- The event UUID is Alpha's stable delivery key. Gmail has no send-idempotency
+  API; a stable RFC Message-ID helps correlate retries but does not prevent a
+  duplicate after an ambiguous timeout. A persisted dispatch timestamp and
+  identity fingerprint prevent replay through a changed provider or recipient.
 - Retries are automatic and controlled: maximum five dispatch attempts, backoff
   of 30/60/120/240 seconds, and a conservative ten-minute first-dispatch window.
   Expired leases are recoverable only within that window. Permanent rejections,
@@ -34,9 +41,9 @@ server, local-only adapter, checkout folder, or preservation folder is needed.
 - A stale worker cannot overwrite a newer lease. An unknown claim COMMIT never
   initiates a provider call. Lost post-send confirmation is recovered with the
   same key, never a freshly generated delivery key.
-- Existing schema status `delivered` means **accepted by the selected provider**,
-  including confirmed idempotent responses. It does NOT prove inbox delivery. Bounces,
-  webhook delivery tracking and account-invitation email are not this phase.
+- Existing schema status `delivered` means **accepted by Gmail**, not proven inbox
+  delivery. Bounces and webhook tracking are not implemented. Account invitations
+  use a separate queue, even though they share the Gmail OAuth sender.
 - An email outage does not undo the saved inquiry or stop Alpha's server. Queue
   work is bounded and polling cannot overlap within a process. Shared instances
   coordinate through database leases. No provider request runs inside a DB
@@ -49,77 +56,64 @@ Do not use the staging project, reset schema, or replay prior sample inquiries.
 Phase 2's allowed-origin configuration, published intake entry and public intake
 must already be ready. No Turnstile configuration is required.
 
-1. Create a Resend account. For delivery to real clients, verify an owned sending
-   domain and use a sender address on that domain. The desktop app and a Vercel
-   hosting URL are not owned sending domains. Quotas are controlled by Resend.
-   If no domain is available yet, follow the restricted account-only path below;
-   it is NOT a release-ready email service for arbitrary clients.
-2. Generate a sending API key in Resend. Do not share it in chat or commit it.
-3. Configure only the hosted backend secret/environment settings:
-   - `RESEND_API_KEY`: secret API key, stored only on the hosted backend.
-   - `RESEND_SENDER_EMAIL`: sender address on the verified domain.
-   - `RESEND_SENDER_NAME`: sender display name, such as Alpha.
-   - `RESEND_TEST_RECIPIENT`: optional approved recipient restriction for a pilot;
-     mandatory when using the default `onboarding@resend.dev` sender.
-   - `ALPHA_TICKETING_ACK_EMAIL_ENABLED=0` while preparing deployment.
-   - `TICKET_ACK_EMAIL_PROVIDER=resend`: selected adapter; defaults to Resend when
-     unset. Empty/unsupported values disable delivery
-     rather than silently switching providers.
-4. Deploy the reviewed Phase 3 backend branch after the user merges/approves it.
-   Keep the existing `ALPHA_TICKETING_TRIAGE_ENABLED` setting and Phase 2 intake
-   switches; this phase does not silently change them.
-5. Once configuration is verified, explicitly enable
-   `ALPHA_TICKETING_ACK_EMAIL_ENABLED=1` on the hosted backend. Do not add these
-   settings to Vite, the Electron settings allowlist, or any desktop artifact.
-6. Submit one NEW inquiry through the approved hosted client page using the
-   recipient already approved by the user (do not hardcode their address).
-   Confirm the PM queue contains
-   one ticket, reload/retry the same submission, and verify only one receipt.
-   A manual localhost acceptance test is not required or planned.
-7. Confirm actual inbox receipt with the recipient and check Resend activity.
-   Do not mark this phase complete just because automated tests passed.
+1. In Google Cloud, enable the Gmail API and configure Alphaexplora's OAuth
+   consent screen. Use the Google account that will send Alpha's messages.
+2. Create an OAuth client and grant only
+   `https://www.googleapis.com/auth/gmail.send`, with offline access so the
+   backend can send while nobody is signed in. Do not request Gmail read,
+   mailbox, or full-access scopes.
+3. Configure the consent screen's app name, support contact, home page, privacy
+   policy and authorized domains. `gmail.send` is a sensitive scope. Google
+   requires verification for public external production use unless an exception
+   applies. Testing mode is limited to listed test users, shows an unverified-app
+   warning, and refresh tokens expire after seven days.
+4. Configure these values only in the hosted backend's secret environment:
+   - `GMAIL_OAUTH_CLIENT_ID`
+   - `GMAIL_OAUTH_CLIENT_SECRET`
+   - `GMAIL_OAUTH_REFRESH_TOKEN`
+   - `GMAIL_SENDER_EMAIL`: the authorized Gmail account or its verified send-as
+     address.
+   - `GMAIL_SENDER_NAME`: for example, `Alphaexplora`.
+   Keep all OAuth credentials out of Vite, the desktop app, source control and
+   chat. `RESEND_*` remains only for the separately configured optional
+   conversation-notice route; Gmail does not send those notices.
+5. Keep `ALPHA_TICKETING_ACK_EMAIL_ENABLED=0` while setting up and checking the
+   provider. The cloud code selects Gmail directly; the old
+   `TICKET_ACK_EMAIL_PROVIDER` selector does not switch it back to Resend.
+   Client-access routes also require a configured Gmail provider.
+6. Keep the existing Phase 2 intake settings unchanged. Once credentials and
+   consent are verified, enable
+   `ALPHA_TICKETING_ACK_EMAIL_ENABLED=1` on the hosted backend. Do not change
+   Render as part of this source-code branch.
+7. Verify the real workflow: client submits an inquiry → PM sees it in shared
+   intake → PM accepts and invites that email → client verifies the invitation
+   and chooses a password → client signs in and sees only shared tickets. Also
+   test password recovery and confirm conversation notices remain separate.
+   Automated tests cannot prove real inbox delivery; check the sender account
+   and recipient inbox.
 
-### Without an owned domain
+This Gmail approach does not require a custom sending domain, but the sender
+must be the authorized Google account or a verified send-as address. Sending
+limits still depend on that Google account. Keep sending disabled until hosted
+secrets, OAuth consent and a real recipient test are ready. Switching providers
+does not replay uncertain or previously attempted deliveries; reconcile those
+first to avoid duplicates.
 
-Use `RESEND_SENDER_EMAIL=onboarding@resend.dev` and set
-`RESEND_TEST_RECIPIENT` to the email address associated with the Resend account,
-only if that address is the approved real-test recipient. Resend enforces this
-restriction; Alpha's allowlist does not itself verify account ownership.
-Missing/invalid allowlist configuration disables this sender. A receipt for a
-different recipient is rejected before any provider call, never redirected to
-the account owner. The inquiry remains saved. Nonmatching enrolled receipts can
-become `dead`, so do not enable this restricted setup for a general client launch.
+## Provider boundaries
 
-Keep sending disabled until the hosted configuration and approved test are
-ready. To enable arbitrary client delivery later, verify an owned domain, change
-the sender, and remove the restriction only after reconciling attempted rows.
-Switching senders changes the identity guard; it does not replay earlier failed
-or uncertain receipts automatically.
+The cloud composition uses Gmail for inquiry receipts and client-access email:
+PM invitations, account activation and password recovery. It does not fall back
+to Resend if Gmail credentials or delivery fail. Resend's optional conversation-
+notice route is separate and is not used for inquiry or account-access email.
+The client no longer has a standalone passwordless sign-in-link request; access
+uses invitation/password setup, password sign-in or password recovery.
 
-## Future provider changes
-
-The delivery worker accepts the common `TicketAcknowledgmentEmailProvider`
-contract through a factory. Provider selection/credentials remain in cloud
-composition, separate from queue processing and ticket submission. Resend is the
-default adapter. Brevo remains an explicitly selected alternative using
-`TICKET_ACK_EMAIL_PROVIDER=brevo` and its existing `BREVO_API_KEY`,
-`BREVO_SENDER_EMAIL`, and `BREVO_SENDER_NAME` settings. Neither adapter falls back
-to the other when credentials or delivery fail. Other names are unsupported.
-
-To add another provider, implement its adapter, error classification and verified
-idempotency guarantees, register it in `createTicketAcknowledgmentEmailProvider`,
-and run adapter/queue regression tests. Then configure its hosted credentials
-and change the selector. No ticket tables, PM interface or desktop logic need
-to change merely to replace this acknowledgment sender. Other email features
-such as Supabase Auth invitations have their own configuration and are not
-automatically switched by this selector.
-
-Stop sending before switching. Reconcile attempted/uncertain deliveries with the
-old provider first; deduplication keys are not shared between providers. The
-existing identity guard blocks replay of attempted rows through a changed
-provider or sender. New/unattempted enrolled inquiries can use the new adapter.
-Never clear dispatch metadata to force a migration and never enable automatic
-cross-provider failover: an uncertain response could otherwise send two emails.
+Gmail does not provide an idempotency key for sends. Alpha reuses its stable
+delivery key in the RFC Message-ID for correlation, but an ambiguous timeout can
+still cause a duplicate on retry. Do not clear dispatch metadata or automatically
+fail over an uncertain delivery. The provider-identity guard blocks retrying an
+attempted invitation through a different provider or sender; a PM can issue a
+fresh invitation after checking the previous send status.
 
 ## Failures, recovery and rollback
 
@@ -136,7 +130,10 @@ configuration restart. It does not erase contacts, tickets, audit history or
 outbox rows. Accepted emails cannot be recalled by toggling the flag.
 No DROP, DELETE, new migration, or live data mutation is required by this phase.
 
-## Verification status (2026-10-09)
+## Historical Resend implementation verification (2026-10-09)
+
+This section records the earlier Resend implementation, not the current Gmail
+OAuth branch.
 
 - Backend typecheck and production build passed.
 - Phase 3-focused regression recheck: 4 test files, 74 tests passed.
@@ -151,24 +148,32 @@ No DROP, DELETE, new migration, or live data mutation is required by this phase.
   performed. The Phase 3 source branch was pushed for review; hosted credentials
   and a confirmed real receipt remain outstanding, so Phase 3 is not yet complete.
 
-## Provider documentation
+## Current Gmail branch verification (2026-10-22)
 
-- [Resend send email API](https://resend.com/docs/api-reference/emails/send-email)
-- [Resend idempotency keys](https://resend.com/docs/dashboard/emails/idempotency-keys)
-- [Resend default sender restrictions](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain)
-- [Brevo transactional email API](https://developers.brevo.com/reference/send-transac-email)
-- [Brevo idempotency](https://developers.brevo.com/docs/heterogenous-versions-batch-emails)
-- [Create and manage API keys](https://help.brevo.com/hc/en-us/articles/209467485-Create-and-manage-your-API-keys)
+- Backend typecheck and production build passed; focused Gmail, inquiry,
+  invitation, account setup and portal regressions passed (6 files, 86 tests).
+- Frontend typecheck and production build passed; frontend suite passed (40 files,
+  418 tests). The build retains the existing large-chunk warning.
+- The full backend suite reported 2,955 passed and 6 failed in
+  `chatOrchestratorRouting.test.ts` (`Orchestration run not found`). The same six
+  failures reproduce on the clean `origin/main` worktree; they are unrelated to
+  the email/account changes.
+- No real Gmail OAuth credentials, Google verification, inbox delivery, Render
+  change or deployment was performed. Those remain external setup/acceptance
+  steps before the new sender is live.
 
-Resend retains idempotency keys for 24 hours. Brevo's current guidance documents
-a 30-minute TTL; older guidance documented 15 minutes. Alpha deliberately keeps
-the same conservative ten-minute retry window for both adapters rather than assuming
-unlimited exactly-once email delivery. Provider acceptance and recipient delivery
-must be checked separately before team release.
+## Google provider documentation
 
-Resend uses the HTTP `Idempotency-Key` header. Concurrent-idempotency conflicts
-can retry with the same key; a changed-payload conflict is permanent. Successful
-responses must contain an email ID before being marked accepted. Authentication,
-permission and validation errors are permanent; rate limiting and server/network
-errors use the existing bounded retry policy. No provider response bodies or keys
-are exposed to clients or logs.
+- [Gmail send endpoint and required scopes](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send)
+- [Gmail API scope classifications](https://developers.google.com/workspace/gmail/api/auth/scopes)
+- [Gmail API error handling and rate limits](https://developers.google.com/workspace/gmail/api/guides/handle-errors)
+- [Google OAuth sensitive-scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification)
+- [OAuth web-server flow and offline refresh tokens](https://developers.google.com/identity/protocols/oauth2/web-server)
+- [Google OAuth refresh-token behavior](https://developers.google.com/identity/protocols/oauth2/)
+
+The Gmail API accepts a base64url-encoded MIME message and returns a Gmail
+message resource when accepted. A successful API response is not proof of inbox
+delivery. The Gmail `send` scope is sensitive; verification, testing-user limits
+and refresh-token lifetime depend on the OAuth project's publishing status and
+Google's review. Gmail rate-limit responses are retried within Alpha's existing
+bounded delivery policy; permission and consent errors are not.

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { createGmailEmailTransport, GmailEmailTransportError } from './gmailApiEmailTransport.js';
 
 export const ACKNOWLEDGMENT_SUBJECT = 'Alpha has received your inquiry';
 export const ACKNOWLEDGMENT_TEXT = [
@@ -21,13 +22,14 @@ export interface TicketAcknowledgmentEmailProvider {
   // Include provider + sender + content version in identity. Never migrate an
   // uncertain in-flight send to another provider: their dedupe stores differ.
   readonly identity: string;
-  // Adapters must support the same UUID key and identical-request deduplication
-  // for at least the queue's ten-minute retry window. Verify before adding one.
+  // Reuse the same key on retries. Providers without native deduplication may
+  // send a duplicate if a network failure hides an accepted request.
   send(recipient: string, idempotencyKey: string, publicReference?: string): Promise<void>;
 }
 
 export interface TicketAcknowledgmentProviderConfiguration {
   providerName: string;
+  gmail?: { clientId: string; clientSecret: string; refreshToken: string; senderEmail: string; senderName: string };
   brevo: { apiKey: string; senderEmail: string; senderName: string };
   resend?: { apiKey: string; senderEmail: string; senderName: string; testRecipient?: string };
 }
@@ -37,6 +39,7 @@ export function createTicketAcknowledgmentEmailProvider(
   config: TicketAcknowledgmentProviderConfiguration, send: typeof fetch = fetch,
 ): TicketAcknowledgmentEmailProvider | null {
   switch (config.providerName.trim().toLowerCase()) {
+    case 'gmail': return config.gmail ? createGmailTicketAcknowledgmentProvider(config.gmail, send) : null;
     case 'resend': return config.resend ? createResendTicketAcknowledgmentProvider(config.resend, send) : null;
     case 'brevo': return createBrevoTicketAcknowledgmentProvider(config.brevo, send);
     default: return null;
@@ -51,6 +54,30 @@ function acknowledgmentText(publicReference?: string): string {
   if (publicReference === undefined) return ACKNOWLEDGMENT_TEXT;
   if (!inquiryReference.safeParse(publicReference).success) throw new TicketAcknowledgmentEmailError(false);
   return `${ACKNOWLEDGMENT_TEXT}\n\nYour inquiry reference: ${publicReference}`;
+}
+
+/** Gmail OAuth sender for inquiry receipts. Requires only the gmail.send scope. */
+export function createGmailTicketAcknowledgmentProvider(config: {
+  clientId: string; clientSecret: string; refreshToken: string; senderEmail: string; senderName: string;
+}, send: typeof fetch = fetch): TicketAcknowledgmentEmailProvider | null {
+  const transport = createGmailEmailTransport(config, send);
+  if (!transport) return null;
+  return {
+    identity: createHash('sha256').update(JSON.stringify([
+      'gmail-ack-v1', transport.identity, ACKNOWLEDGMENT_SUBJECT, ACKNOWLEDGMENT_TEXT,
+    ])).digest('hex'),
+    async send(recipient, idempotencyKey, publicReference) {
+      if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success
+        || (publicReference !== undefined && !inquiryReference.safeParse(publicReference).success)) {
+        throw new TicketAcknowledgmentEmailError(false);
+      }
+      try {
+        await transport.send(recipient, ACKNOWLEDGMENT_SUBJECT, acknowledgmentText(publicReference), idempotencyKey);
+      } catch (error) {
+        throw new TicketAcknowledgmentEmailError(error instanceof GmailEmailTransportError ? error.retryable : true);
+      }
+    },
+  };
 }
 
 /** The default resend.dev sender is restricted to the Resend account's email. */

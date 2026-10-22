@@ -213,15 +213,27 @@ describe('client password account workflow on PostgreSQL', () => {
     expect((await db.query(`select * from alpha_private.ticket_client_grants`)).rows).toHaveLength(1);
   }, 60000);
 
-  it('migrates an existing passwordless client without creating a new identity or inquiry', async () => {
+  it('lets an existing passwordless client set a password through recovery without creating a new identity or inquiry', async () => {
     const link = await invite();
     await createTicketClientActivationService(new PostgresTicketClientActivationStore(db), provider)
       .activate({ invitationToken: link.invitationToken, providerCredential: credential });
-    const setup = await app.begin({ providerTokenHash: 'legacy-sign-in-proof-long-enough', providerTokenType: 'magiclink' });
-    expect(setup.action).toBe('set_password');
+    await app.recover({ email });
+    expect(sendContent).toHaveBeenCalledWith(email, 'Set your Alpha client password',
+      expect.stringContaining('providerTokenType=recovery'), expect.any(String));
+    const setup = await app.begin({ providerTokenHash: 'legacy-recovery-proof-long-enough', providerTokenType: 'recovery' });
+    expect(setup.action).toBe('reset_password');
     await app.finish(setup.token, setup.csrf, { password: initialPassword });
     expect((await db.query(`select * from alpha_private.tickets`)).rows).toHaveLength(1);
     expect((await db.query(`select * from auth.users`)).rows).toHaveLength(1);
     expect((await db.query(`select client_user_id from alpha_private.ticket_client_grants`)).rows).toEqual([{ client_user_id: userId }]);
+  }, 60000);
+
+  it('rejects standalone passwordless sign-in links but accepts magiclinks tied to a real invitation', async () => {
+    await expect(app.begin({ providerTokenHash: 'legacy-sign-in-proof-long-enough', providerTokenType: 'magiclink' }))
+      .rejects.toMatchObject({ status: 404 });
+    expect(provider.verifyEmailLink).not.toHaveBeenCalled();
+    const link = await invite();
+    await expect(app.begin({ ...link, providerTokenType: 'magiclink' })).resolves.toMatchObject({ action: 'set_password' });
+    expect(provider.verifyEmailLink).toHaveBeenCalledWith(link.providerTokenHash, 'magiclink');
   }, 60000);
 });
