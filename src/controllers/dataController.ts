@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
+import { agentLearningService, AgentLessonError } from '../services/agentLearningService.js';
 import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORCHESTRATION_ENABLED, ALPHA_ORG, IS_CLOUD } from '../config/env.js';
@@ -748,6 +749,31 @@ dataRouter.get('/agents/:id/persona', desktopOnly, route(async (req: Request, re
   } catch (err: any) {
     // agentFilePath throws on an id that would escape the agents directory.
     res.status(400).json({ error: err?.message ?? 'Could not read the persona file' });
+  }
+}));
+
+/** How an agent has done in builds, and lessons suggested from its rejections and review findings. */
+dataRouter.get('/agents/:id/performance', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.read')) return;
+  if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
+  const agent = await agentStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  res.json(agentLearningService.performance(req.params.id));
+}));
+
+/** Accept a suggested lesson into the agent's memory, or dismiss it. */
+dataRouter.post('/agents/:id/lessons/:lessonId', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
+  if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
+  const action = req.body?.action;
+  if (action !== 'accept' && action !== 'dismiss') return res.status(400).json({ error: 'action must be accept or dismiss' });
+  const agent = await agentStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  try {
+    res.json(agentLearningService.decide({ agentId: req.params.id, lessonId: req.params.lessonId, action, actorId: req.workspace!.userId }));
+  } catch (err) {
+    if (err instanceof AgentLessonError) return res.status(err.status).json({ error: err.message });
+    throw err;
   }
 }));
 
