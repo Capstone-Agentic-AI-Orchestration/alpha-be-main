@@ -390,10 +390,10 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       return res.status(410).json({ error: 'Squads were removed. Mention an agent, or ask Alpha to build and the Orchestrator assigns agents per task.' });
     }
     if (issueId !== undefined && (typeof issueId !== 'string' || !issueId.trim() || issueId.length > 200)) {
-      return res.status(400).json({ error: 'issueId must be a non-empty string of at most 200 characters' });
+      return res.status(400).json({ error: 'A task identifier is required and must be at most 200 characters' });
     }
     if (issueId && intent !== 'build') {
-      return res.status(400).json({ error: 'An issue can only be attached to a build request' });
+      return res.status(400).json({ error: 'A task can only be attached to a build request' });
     }
     if (repository !== undefined && repository !== null && typeof repository !== 'string') {
       return res.status(400).json({ error: 'repository must be a repository name or omitted' });
@@ -415,7 +415,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     const scopedProjectId = existingThread?.projectId ?? projectId ?? undefined;
     if (scopedProjectId && !requireProjectWorkspace(req, res, scopedProjectId)) return;
     if (issueId) {
-      if (!scopedProjectId) return res.status(400).json({ error: "Choose the issue's project before starting its build" });
+      if (!scopedProjectId) return res.status(400).json({ error: "Choose the task's project before starting its build" });
       if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
     }
     if (existingThread && !existingThread.projectId && scopedProjectId) {

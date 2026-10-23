@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { createGmailEmailTransport, GmailEmailTransportError } from './gmailApiEmailTransport.js';
 
 export const TICKET_INVITATION_EMAIL_SUBJECT = 'An invitation to continue your Alpha inquiry';
 export const TICKET_INVITATION_EMAIL_TEXT = [
@@ -25,13 +26,47 @@ export interface TicketInvitationEmailProvider {
   send(recipient: string, idempotencyKey: string): Promise<void>;
 }
 
-/** Provider interface used by client invitations, activation, and sign-in emails. */
+/** Provider interface used by PM invitations, client activation, and password recovery. */
 export interface TicketInvitationContentEmailProvider extends TicketInvitationEmailProvider {
   /** Dynamic, server-authored email; never accepts browser HTML. */
   sendContent(recipient: string, subject: string, text: string, idempotencyKey: string): Promise<void>;
 }
 
-/** Uses the existing Resend settings; no new Render variables are required. */
+/** Gmail OAuth sender for inquiry invitations and client account-access emails. */
+export function createGmailTicketInvitationEmailProvider(config: {
+  clientId: string; clientSecret: string; refreshToken: string; senderEmail: string; senderName: string;
+}, send: typeof fetch = fetch): TicketInvitationContentEmailProvider | null {
+  const email = z.string().email().max(254);
+  const transport = createGmailEmailTransport(config, send);
+  if (!transport) return null;
+
+  const canSendTo = (recipient: string): boolean => email.safeParse(recipient.trim().toLowerCase()).success;
+  const sendContent = async (recipientInput: string, subject: string, text: string, idempotencyKey: string): Promise<void> => {
+    const recipient = recipientInput.trim().toLowerCase();
+    if (!canSendTo(recipient) || idempotencyKey.length < 1 || idempotencyKey.length > 256
+      || /[\r\n]/.test(idempotencyKey) || typeof subject !== 'string' || !subject.trim()
+      || subject.length > 200 || /[\r\n]/.test(subject) || typeof text !== 'string'
+      || !text.trim() || text.length > 12_000) throw new TicketInvitationEmailError(false);
+    try { await transport.send(recipient, subject, text, idempotencyKey); }
+    catch (error) {
+      throw new TicketInvitationEmailError(error instanceof GmailEmailTransportError ? error.retryable : true);
+    }
+  };
+
+  return {
+    identity: createHash('sha256').update(JSON.stringify([
+      'gmail-ticket-invitation-v1', transport.identity,
+      TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT,
+    ])).digest('hex'),
+    canSendTo,
+    send: (recipient, idempotencyKey) => sendContent(
+      recipient, TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT, idempotencyKey,
+    ),
+    sendContent,
+  };
+}
+
+/** Legacy Resend sender, retained only for the optional conversation-notice route. */
 export function createTicketInvitationEmailProvider(config: {
   apiKey: string; senderEmail: string; senderName: string; testRecipient?: string;
 }, send: typeof fetch = fetch): TicketInvitationContentEmailProvider | null {

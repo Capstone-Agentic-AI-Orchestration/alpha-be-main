@@ -1,11 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createBrevoTicketAcknowledgmentProvider, createResendTicketAcknowledgmentProvider, createTicketAcknowledgmentEmailProvider,
+import { createBrevoTicketAcknowledgmentProvider, createGmailTicketAcknowledgmentProvider,
+  createResendTicketAcknowledgmentProvider, createTicketAcknowledgmentEmailProvider,
   TicketAcknowledgmentEmailError } from './ticketAcknowledgmentEmailProvider.js';
 
 const configuration = { apiKey: 'synthetic-key', senderEmail: 'sender@example.invalid', senderName: 'Alpha test' };
+const gmailConfiguration = { clientId: 'client-id', clientSecret: 'client-secret', refreshToken: 'refresh-token',
+  senderEmail: 'sender@example.invalid', senderName: 'Alpha test' };
 const id = '00000000-0000-4000-8000-000000000001';
 
 describe('provider selection', () => {
+  it('selects Gmail explicitly and has no silent fallback when Gmail OAuth is missing', () => {
+    const selected = createTicketAcknowledgmentEmailProvider({ providerName: ' Gmail ', brevo: configuration, gmail: gmailConfiguration });
+    expect(selected?.identity).toBe(createGmailTicketAcknowledgmentProvider(gmailConfiguration)?.identity);
+    expect(createTicketAcknowledgmentEmailProvider({ providerName: 'gmail', brevo: configuration })).toBeNull();
+  });
   it('selects Brevo without coupling queue processing to its configuration', () => {
     const selected = createTicketAcknowledgmentEmailProvider({ providerName: ' Brevo ', brevo: configuration });
     expect(selected?.identity).toBe(createBrevoTicketAcknowledgmentProvider(configuration)?.identity);
@@ -25,6 +33,32 @@ describe('provider selection', () => {
   });
   it('keeps delivery unavailable when the selected provider is not configured', () => {
     expect(createTicketAcknowledgmentEmailProvider({ providerName: 'brevo', brevo: { ...configuration, apiKey: '' } })).toBeNull();
+  });
+});
+
+describe('Gmail inquiry acknowledgment provider', () => {
+  it('sends to the inquiry email through the Gmail API without adding extra scopes or recipient restrictions', async () => {
+    const send = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'access-token', expires_in: 3600 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'gmail-message-id' }), { status: 200 }));
+    const provider = createGmailTicketAcknowledgmentProvider(gmailConfiguration, send)!;
+    await expect(provider.send('client@example.invalid', id, 'INQ-0123456789ABCDEF0123456789ABCDEF')).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][0]).toBe('https://gmail.googleapis.com/gmail/v1/users/me/messages/send');
+    const raw = JSON.parse(String(send.mock.calls[1][1]?.body)) as { raw: string };
+    const message = Buffer.from(raw.raw, 'base64url').toString('utf8');
+    expect(message).toContain('To: client@example.invalid');
+    expect(Buffer.from(message.split('Content-Transfer-Encoding: base64\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString())
+      .toContain('Your inquiry reference: INQ-0123456789ABCDEF0123456789ABCDEF');
+    expect(provider.identity).not.toContain(gmailConfiguration.refreshToken);
+  });
+
+  it('does not relay provider failures or permit invalid inquiry references', async () => {
+    const send = vi.fn<typeof fetch>();
+    const provider = createGmailTicketAcknowledgmentProvider(gmailConfiguration, send)!;
+    await expect(provider.send('client@example.invalid', id, 'invalid-reference'))
+      .rejects.toEqual(new TicketAcknowledgmentEmailError(false));
+    expect(send).not.toHaveBeenCalled();
   });
 });
 

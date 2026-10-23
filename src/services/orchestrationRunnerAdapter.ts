@@ -104,7 +104,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       }
       if (normalizeRepository(issue.githubRepo) !== normalizeRepository(snapshot!.run.repository) &&
           !(snapshot!.run.repositoryWorkspaces ?? []).some(item => normalizeRepository(item.repository) === normalizeRepository(request.repository))) {
-        throw new Error('The build issue no longer matches a codebase authorized for this orchestration run.');
+        throw new Error('The build task no longer matches a codebase authorized for this orchestration run.');
       }
 
       const repository = this.resolveWorkspace(project, request.repository);
@@ -259,7 +259,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
 
   private loadEntities(request: OrchestrationLaunchRequest): { project: Project; issue: ReturnType<SQLiteService['getIssues']>[number]; agent: Agent } {
     const issue = this.store.getIssues().find(candidate => candidate.id === request.issueId);
-    if (!issue || issue.projectId !== request.projectId) throw new Error('The build issue is unavailable or no longer belongs to the requested project.');
+    if (!issue || issue.projectId !== request.projectId) throw new Error('The build task is unavailable or no longer belongs to the requested project.');
     const project = this.store.getProjects().find(candidate => candidate.id === request.projectId);
     if (!project) throw new Error('The build project is unavailable in this workspace.');
     const agent = this.store.getAgents().find(candidate => candidate.id === request.ownerAgentId && !candidate.isArchived);

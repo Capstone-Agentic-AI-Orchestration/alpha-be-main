@@ -83,6 +83,9 @@ export function createTicketClientInvitationDeliveryService(
     || !Number.isSafeInteger(policy.retryMaxDelayMs) || policy.retryMaxDelayMs < policy.retryBaseDelayMs
     || !Number.isSafeInteger(policy.maxAttempts) || policy.maxAttempts < 1 || policy.maxAttempts > CLIENT_INVITATION_MAX_ATTEMPTS
     || typeof emailProvider.sendContent !== 'function') throw new Error('Client email delivery is not configured.');
+  const providerIdentity = createHash('sha256').update(JSON.stringify([
+    'ticket-client-activation-email-v1', emailProvider.identity,
+  ])).digest('hex');
 
   async function fail(claim: TicketClientInvitationClaim, at: string, code: ClientInvitationFailureCode) {
     if (claim.attempt >= policy.maxAttempts) {
@@ -100,8 +103,12 @@ export function createTicketClientInvitationDeliveryService(
       if (!(instant instanceof Date) || !Number.isFinite(instant.getTime())) return 'outcome_unknown';
       const claimedAt = instant.toISOString();
       const claim = await store.claimNext({ now: claimedAt,
-        leaseUntil: new Date(instant.getTime() + policy.leaseDurationMs).toISOString() });
+        leaseUntil: new Date(instant.getTime() + policy.leaseDurationMs).toISOString(), providerIdentity });
       if (!claim) return 'idle';
+      if (!claim.identityMatches) {
+        const dead = await store.deadLetter(claim, claimedAt, 'provider_failure');
+        return dead ? 'dead_lettered' : 'outcome_unknown';
+      }
 
       const inactive = claim.invitation.status !== 'pending'
         || Date.parse(claim.invitation.expiresAt) <= instant.getTime()

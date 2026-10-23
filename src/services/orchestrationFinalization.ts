@@ -11,12 +11,12 @@ export async function synchronizePublishedOrchestrationIssue(
 ): Promise<void> {
   const publication = snapshot.run.publication;
   if (snapshot.run.status !== 'completed' || !publication) {
-    throw new Error('A reconciled pull request is required before the project issue can move to review.');
+    throw new Error('A reconciled pull request is required before the project task can move to review.');
   }
 
   const issue = await store.get(snapshot.run.workspaceId, snapshot.run.issueId);
   if (!issue || issue.projectId !== snapshot.run.projectId) {
-    throw new Error('The project issue for this published build is unavailable. Retry to synchronize it.');
+    throw new Error('The project task for this published build is unavailable. Retry to synchronize it.');
   }
 
   const commentId = `comm-${snapshot.run.id}-${PUBLISHED_COMMENT_SUFFIX}`;
@@ -43,7 +43,7 @@ export async function synchronizePublishedOrchestrationIssue(
       branchName: publication.branchName
     });
     if (!savedIssue) {
-      throw new Error('The pull request is open, but the project issue could not be synchronized. Retry to update it.');
+      throw new Error('The pull request is open, but the project task could not be synchronized. Retry to update it.');
     }
   }
 }

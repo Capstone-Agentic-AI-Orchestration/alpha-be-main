@@ -228,7 +228,7 @@ export class OrchestrationPublicationService {
     });
     const issue = await this.issues.get(snapshot.run.workspaceId, snapshot.run.issueId);
     if (!issue || issue.projectId !== snapshot.run.projectId) {
-      throw new Error('The linked project issue is unavailable. Reconnect it before opening the pull requests.');
+      throw new Error('The linked project task is unavailable. Reconnect it before opening the pull requests.');
     }
     const published: OrchestrationPublicationRecord[] = [];
     for (const { workspace, target } of targets) {

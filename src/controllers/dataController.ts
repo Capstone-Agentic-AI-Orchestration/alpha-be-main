@@ -432,75 +432,12 @@ dataRouter.post('/projects/:id/clone-to', desktopOnly, route(async (req: Request
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    // No folder named: the project's own folder, created on first use.
-    const intoDir = typeof req.body?.intoDir === 'string' && req.body.intoDir.trim() ? req.body.intoDir : ensureProjectFolder(project);
-    res.json({ results: await cloneProjectInto(project, intoDir, req.body?.repos, req.body?.bind === true) });
+    res.json({ results: await cloneProjectInto(project, req.body?.intoDir, req.body?.repos, req.body?.bind === true) });
   } catch (err) {
     if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
     throw err;
   }
 }));
-
-/**
- * The project's folder on this computer, and each repository's state there:
- * registered, found in the project folder, moved, or missing. Looks in two
- * places only -- the registered folder and <project folder>\<repository> --
- * so it answers at once.
- */
-dataRouter.get('/projects/:id/folder', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
-  if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-  res.json(locateProjectRepositories(project));
-}));
-
-/** Choose the project's folder on this computer; `dir: null` goes back to the default. */
-dataRouter.put('/projects/:id/folder', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
-  if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-  try {
-    setProjectFolder(project, req.body?.dir ?? null);
-    res.json(locateProjectRepositories(project));
-  } catch (err) {
-    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
-    throw err;
-  }
-}));
-
-/** Use the copy of `repo` found in the project folder, so builds branch from it too. */
-dataRouter.post('/projects/:id/folder/use', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
-  if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-  try {
-    await useFoundCopy(project, req.body?.repo);
-    res.json(locateProjectRepositories(project));
-  } catch (err) {
-    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
-    throw err;
-  }
-}));
-
-/** This computer's code folder: where project folders go unless one is chosen. */
-dataRouter.get('/machine/code-folder', desktopOnly, (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
-  res.json({ codeFolder: codeFolder(), defaultCodeFolder: defaultCodeFolder() });
-});
-
-dataRouter.put('/machine/code-folder', desktopOnly, (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
-  try {
-    setCodeFolder(req.body?.dir ?? null);
-    res.json({ codeFolder: codeFolder(), defaultCodeFolder: defaultCodeFolder() });
-  } catch (err) {
-    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
-    throw err;
-  }
-});
 
 /**
  * What state this machine's checkout is in.
@@ -1018,16 +955,16 @@ async function statusTransitionError(workspaceId: string, issue: Issue, requeste
       return 'Run ' + activeRun.id + ' is awaiting approval; approve it through POST /api/runs/' + activeRun.id + '/approve.';
     }
     if (activeRun) {
-      return 'Run ' + activeRun.id + ' is still ' + activeRun.status + '; wait for it to reach review before completing the issue.';
+      return 'Run ' + activeRun.id + ' is still ' + activeRun.status + '; wait for it to reach review before completing the task.';
     }
     if (issue.status === 'agent_running') {
-      return 'An Agent Running issue must reach review before it can be completed.';
+      return 'A task with an agent running must reach review before it can be completed.';
     }
-    return 'Complete the issue through POST /api/issues/:id/complete with { reviewed: true }; direct Done transitions are not allowed.';
+    return 'Complete the task only after a person has reviewed it; direct status changes to Done are not allowed.';
   }
 
   if (activeRun) {
-    return 'This issue has an active agent run (' + activeRun.id + ') still ' + activeRun.status + '; use the run controls before changing this issue.';
+    return 'This task has an active agent run (' + activeRun.id + ') still ' + activeRun.status + '; use the run controls before changing this task.';
   }
 
   return null;
@@ -1071,7 +1008,7 @@ dataRouter.post('/issues', route(async (req: Request, res: Response) => {
 
   const identity = await currentIdentity();
   if (!rest.projectId || typeof rest.projectId !== 'string') {
-    return res.status(400).json({ error: 'projectId is required for a workspace-scoped issue.' });
+    return res.status(400).json({ error: 'A project is required for a task in this workspace.' });
   }
   if (!requireProjectWorkspace(req, res, rest.projectId)) return;
   const workspaceId = req.workspace!.workspaceId;
@@ -1127,7 +1064,7 @@ dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!before) return res.status(404).json({ error: 'Issue not found' });
+  if (!before) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
   // Empty strings are explicit clears from the owner selector; normalize before either store writes foreign keys.
@@ -1142,7 +1079,7 @@ dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   }
 
   const updated = await issueStore().update(req.workspace!.workspaceId, req.params.id, req.body);
-  if (!updated) return res.status(404).json({ error: 'Issue not found' });
+  if (!updated) return res.status(404).json({ error: 'Task not found' });
 
   /**
    * Only when a field GitHub owns actually moved.
@@ -1181,11 +1118,11 @@ dataRouter.post('/issues/:id/complete', route(async (req: Request, res: Response
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!before) return res.status(404).json({ error: 'Issue not found' });
+  if (!before) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
   if (req.body?.reviewed !== true) {
-    return res.status(400).json({ error: 'reviewed must be true to complete an issue.' });
+    return res.status(400).json({ error: 'A task can only be completed after it has been reviewed.' });
   }
 
   if (before.status === 'done') return res.json(before);
@@ -1194,22 +1131,22 @@ dataRouter.post('/issues/:id/complete', route(async (req: Request, res: Response
   if (activeRun) {
     if (activeRun.status === 'awaiting_approval') {
       return res.status(409).json({
-        error: 'This issue has a run awaiting approval; approve the run before completing the issue.'
+        error: 'This task has a run awaiting approval; approve the run before completing the task.'
       });
     }
     return res.status(409).json({
-      error: 'This issue has an active agent run; wait for it to reach review before completing the issue.'
+      error: 'This task has an active agent run; wait for it to reach review before completing the task.'
     });
   }
 
   if (before.status === 'agent_running') {
     return res.status(409).json({
-      error: 'An Agent Running issue must reach review before it can be completed.'
+      error: 'A task with an agent running must reach review before it can be completed.'
     });
   }
 
   const updated = await issueStore().update(req.workspace!.workspaceId, before.id, { status: 'done' });
-  if (!updated) return res.status(404).json({ error: 'Issue not found' });
+  if (!updated) return res.status(404).json({ error: 'Task not found' });
 
   if (!needsPush(before, updated)) {
     void supabaseService.shareIssue(updated);
@@ -1228,7 +1165,7 @@ dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const issue = await issueStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!issue) return res.status(404).json({ error: 'Issue not found' });
+  if (!issue) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
   const deleted = await issueStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) {
@@ -1242,7 +1179,7 @@ dataRouter.post('/issues/:id/comments', route(async (req: Request, res: Response
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
   const issue = await issueStore().get(req.workspace!.workspaceId, req.params.id);
-  if (!issue) return res.status(404).json({ error: 'Issue not found' });
+  if (!issue) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
   const comment = await issueStore().addComment(req.workspace!.workspaceId, {
     ...req.body,

@@ -122,7 +122,7 @@ describe('orchestration publication finalization', () => {
     );
 
     expect(result.synchronized).toEqual(['orchestration-1']);
-    expect(result.failed).toEqual([{ runId: 'orchestration-missing', reason: 'The project issue for this published build is unavailable. Retry to synchronize it.' }]);
+    expect(result.failed).toEqual([{ runId: 'orchestration-missing', reason: 'The project task for this published build is unavailable. Retry to synchronize it.' }]);
   });
 
   it('preserves a completed issue while filling in the published PR reference', async () => {

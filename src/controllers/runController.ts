@@ -135,12 +135,12 @@ runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) =
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const { issueId, agentId, plan, scenario } = req.body;
     if (!issueId || !agentId) {
-      return res.status(400).json({ error: 'issueId and agentId are required' });
+      return res.status(400).json({ error: 'A task and an agent are required' });
     }
     if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
     if (!requireEntityWorkspace(req, res, 'agents', agentId)) return;
     const issue = await issueStore().get(req.workspace!.workspaceId, issueId);
-    if (!issue) return res.status(404).json({ error: 'Issue not found' });
+    if (!issue) return res.status(404).json({ error: 'Task not found' });
     if (!requireProjectWorkspace(req, res, issue.projectId)) return;
     const workspaceId = req.workspace!.workspaceId;
     const runId = `run-${randomUUID()}`;
@@ -448,5 +448,5 @@ runRouter.post('/squad-runs/:id/cancel', desktopOnly, async (req: Request, res: 
 
 /** Squads were removed; past squad runs stay readable above. */
 runRouter.post('/squads/:id/run', desktopOnly, (_req: Request, res: Response) => {
-  res.status(410).json({ error: 'Squads were removed. Start a build with the Orchestrator from the issue or project chat.' })
+  res.status(410).json({ error: 'Squads were removed. Start a build with the Orchestrator from the task or project chat.' })
 });

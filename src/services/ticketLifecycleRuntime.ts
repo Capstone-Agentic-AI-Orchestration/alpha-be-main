@@ -26,7 +26,7 @@ const reserveSchema=z.object({operationId:id,executor:executorSchema,runId:id}).
 const resultSchema=z.object({schemaVersion:z.literal(1),operationId:id,expectedVersion:z.number().int().nonnegative(),
   publicSummary:z.string().trim().min(1).max(4000).refine(value=>!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value))}).strict();
 const unavailable=()=>new TicketWorkflowError(503,'ticket_workflow_unavailable','Ticket workflow is unavailable right now.');
-const executionConflict=()=>new TicketWorkflowError(409,'ticket_execution_conflict','Reconcile the current Issue execution before starting work.');
+const executionConflict=()=>new TicketWorkflowError(409,'ticket_execution_conflict','Reconcile the current task execution before starting work.');
 
 /** Production composition of the existing lifecycle decisions and durable stores. */
 export function createTicketLifecycleRuntime(db:TransactionalSql,enabled:boolean) {

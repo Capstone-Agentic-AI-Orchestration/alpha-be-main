@@ -90,7 +90,7 @@ export async function reserveTicketExecution(input: {
   });
   const result = record(answer.body);
   if (answer.status !== 200 || !result) {
-    throw new TicketExecutionRelayError('This ticket-linked Issue could not be safely reserved. Refresh and try again.', answer.status);
+    throw new TicketExecutionRelayError('This ticket-linked task could not be safely reserved. Refresh and try again.', answer.status);
   }
   if (result.kind === 'unlinked') return null;
   if (result.kind !== 'ticket' || typeof result.claimId !== 'string' || !result.claimId.trim()
