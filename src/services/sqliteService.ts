@@ -4839,6 +4839,22 @@ export class SQLiteService {
         .run(now, workspaceId, input.runId, input.expectedPlanVersion, input.taskId, input.expectedTaskRevision);
       if (taskUpdate.changes !== 1) throw new Error('Review task changed before acceptance was saved.');
 
+      // A reviewer whose earlier report was sent back for its format (a finding naming the
+      // wrong requirement, a missing field…) has now filed one that passed. Those format
+      // findings were raised by Alpha against this review task, not against the code, and
+      // the corrected report answers them. Left open they would fail final validation even
+      // though every check passed, as ordinary task acceptance already resolves them.
+      const reportFindings = this.db.prepare("SELECT id, evidence FROM orchestration_findings WHERE workspace_id = ? AND run_id = ? AND correction_task_id = ? AND status = 'open'")
+        .all(workspaceId, input.runId, input.taskId) as Array<{ id: string; evidence: string }>;
+      const answeredReportFindingIds = reportFindings
+        .filter(finding => parseJson<Record<string, unknown>>(finding.evidence, {}).origin !== 'independent_review')
+        .map(finding => finding.id);
+      if (answeredReportFindingIds.length) {
+        const placeholders = answeredReportFindingIds.map(() => '?').join(', ');
+        this.db.prepare(`UPDATE orchestration_findings SET status = 'resolved', resolved_at = ? WHERE workspace_id = ? AND run_id = ? AND id IN (${placeholders})`)
+          .run(now, workspaceId, input.runId, ...answeredReportFindingIds);
+      }
+
       if (hasAmendment) {
         this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
           .run(workspaceId, input.runId, nextPlanVersion, plan.schemaVersion, JSON.stringify(plan), 'model', now, now);
@@ -5063,6 +5079,24 @@ export class SQLiteService {
     });
     amend();
     return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  /**
+   * Close format findings Alpha raised against a task's report once that task has been
+   * accepted: the accepted report answered them. Builds saved before review acceptance
+   * did this themselves can otherwise never pass final validation. Returns how many closed.
+   */
+  resolveAnsweredReportFindings(runId: string, now = new Date().toISOString()): number {
+    const workspaceId = this.workspaceId();
+    const rows = this.db.prepare(`SELECT f.id, f.evidence FROM orchestration_findings f
+      JOIN orchestration_tasks t ON t.workspace_id = f.workspace_id AND t.run_id = f.run_id AND t.task_id = f.correction_task_id
+      WHERE f.workspace_id = ? AND f.run_id = ? AND f.status = 'open' AND t.status = 'accepted'`)
+      .all(workspaceId, runId) as Array<{ id: string; evidence: string }>;
+    const ids = rows.filter(row => parseJson<Record<string, unknown>>(row.evidence, {}).origin !== 'independent_review').map(row => row.id);
+    if (!ids.length) return 0;
+    this.db.prepare(`UPDATE orchestration_findings SET status = 'resolved', resolved_at = ? WHERE workspace_id = ? AND run_id = ? AND id IN (${ids.map(() => '?').join(', ')})`)
+      .run(now, workspaceId, runId, ...ids);
+    return ids.length;
   }
 
   rejectOrchestrationAttempt(input: {

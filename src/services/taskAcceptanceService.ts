@@ -56,6 +56,37 @@ function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolea
     !task.scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
 }
 
+/** Title of a finding, as the reviewer or Alpha's acceptance gate wrote it. */
+function findingTitle(finding: OrchestrationSnapshot['findings'][number]): string {
+  const { title, instruction } = finding.evidence;
+  if (typeof title === 'string' && title.trim()) return title.trim();
+  if (typeof instruction === 'string' && instruction.trim()) return instruction.trim();
+  return finding.path ? `Finding in ${finding.path}` : 'Unnamed finding';
+}
+
+/**
+ * Why final validation stopped, naming the exact failed commands or open findings so
+ * the person (and the chat) can see what is wrong instead of a generic sentence.
+ */
+export function finalValidationBlockReason(
+  results: ReadonlyArray<{ repository: string; verification: VerificationResult }>,
+  openBlockingFindings: ReadonlyArray<OrchestrationSnapshot['findings'][number]>
+): string {
+  const short = (repository: string) => repository.split('/').pop() || repository;
+  const failed = results.flatMap(result => result.verification.commands
+    .filter(command => command.exitCode !== 0 || command.signal !== null)
+    .map(command => `${short(result.repository)}: ${command.command.display} (${command.signal ? 'stopped by ' + command.signal : 'exit ' + command.exitCode})`));
+  const parts: string[] = [];
+  if (failed.length) parts.push(`Final checks failed: ${failed.join('; ')}.`);
+  else if (results.some(result => result.verification.status !== 'passed')) parts.push(`Final checks did not pass: ${results.map(result => short(result.repository) + ': ' + result.verification.summary).join(' ')}`);
+  if (openBlockingFindings.length) {
+    const titles = openBlockingFindings.slice(0, 3).map(finding => `“${findingTitle(finding)}”`).join(', ');
+    const more = openBlockingFindings.length > 3 ? ` and ${openBlockingFindings.length - 3} more` : '';
+    parts.push(`${failed.length ? 'Also, ' : 'Every final check passed, but '}${openBlockingFindings.length} blocking review ${openBlockingFindings.length === 1 ? 'finding is' : 'findings are'} still open: ${titles}${more}.`);
+  }
+  return parts.join(' ') || 'Final validation failed.';
+}
+
 function dependsTransitivelyOn(
   task: OrchestrationTaskRecord,
   dependencyId: string,
@@ -837,7 +868,7 @@ export class TaskAcceptanceService {
         : verification.missingScripts.length
         ? `Final validation could not run required checks: ${verification.missingScripts.join(', ')}.`
         : verification.commands.length
-          ? 'Final validation failed or unresolved blocking findings remain.'
+          ? finalValidationBlockReason(repositoryResults, current.findings.filter(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity)))
           : 'No configured automated checks were observed; add a validation path before approval.';
       const blocked = this.store.transitionOrchestrationRun({
         runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason,

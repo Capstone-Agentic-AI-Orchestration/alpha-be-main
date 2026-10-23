@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseOrchestrationPlan } from './orchestrationContract.js';
 import { OrchestrationService, type OrchestrationLaunchRequest } from './orchestrationService.js';
 import { SQLiteService } from './sqliteService.js';
-import { TaskAcceptanceService, pathMatchesScope } from './taskAcceptanceService.js';
+import { TaskAcceptanceService, finalValidationBlockReason, pathMatchesScope } from './taskAcceptanceService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { getHeadCommit } from '../utils/gitUtils.js';
 
@@ -91,6 +91,16 @@ function completedRun(
 }
 
 describe('task acceptance scope matching', () => {
+  it('says exactly why final validation stopped', () => {
+    const passed = { status: 'passed' as const, missingScripts: [], summary: 'ok', commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }] };
+    const failed = { status: 'failed' as const, missingScripts: [], summary: 'lint failed', commands: [{ command: { script: 'lint', bin: 'npm', args: ['run', 'lint'], display: 'npm run lint' }, exitCode: 1, signal: null, output: '' }] };
+    const finding = (title: string) => ({ id: title, runId: 'r', taskId: 't', sourceTaskId: 's', severity: 'blocking', evidence: { title }, status: 'open', createdAt: '' });
+    expect(finalValidationBlockReason([{ repository: 'acme/shop-fe', verification: passed }], [finding('Token in local storage')]))
+      .toBe('Every final check passed, but 1 blocking review finding is still open: “Token in local storage”.');
+    expect(finalValidationBlockReason([{ repository: 'acme/shop-fe', verification: passed }, { repository: 'acme/shop-be', verification: failed }], []))
+      .toBe('Final checks failed: shop-be: npm run lint (exit 1).');
+  });
+
   it('supports nested globs without letting a single star cross directories', () => {
     expect(pathMatchesScope('src/api/handler.ts', 'src/**')).toBe(true);
     expect(pathMatchesScope('src/api/handler.test.ts', '**/*.test.ts')).toBe(true);
@@ -895,6 +905,94 @@ describe('task acceptance and targeted correction', () => {
     expect(launches.map(request => request.ownerAgentId)).toEqual([
       'backend-agent', 'reviewer-agent', 'backend-agent', 'reviewer-agent', 'qa-agent'
     ]);
+  });
+
+  it('closes report-format findings once the corrected review is accepted, so final validation can pass', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-review-format-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'tasks.ts'), 'export function createTask() { return null; }\n');
+    const baseCommit = commit(repository, 'Initial task service');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    store.addAllowedPath(directory, 'review format fixture');
+    const eligibleAgents = [
+      { id: 'backend-agent', role: 'Backend Agent' },
+      { id: 'reviewer-agent', role: 'Security / Code Quality Agent' }
+    ] as const;
+    vi.spyOn(store, 'getAgents').mockReturnValue(eligibleAgents.map(agent => ({ ...agent })) as any);
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) {
+        launches.push(request);
+        return { prototypeRunId: `prototype-${request.attemptId}` };
+      }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1,
+      goal: 'Create task records safely.',
+      exclusions: [],
+      requirements: [
+        { id: 'REQ-CREATE', description: 'The service creates tasks.' },
+        { id: 'REQ-SAFE', description: 'The build has no security defects.' }
+      ],
+      tasks: [
+        {
+          id: 'create-api', title: 'Implement task creation', description: 'Create a task.',
+          kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-CREATE'],
+          acceptanceCriteria: ['Tasks are created.'], requiredChecks: ['test'],
+          scope: { includePaths: ['src/**'], excludePaths: [] }
+        },
+        {
+          id: 'review-1', title: 'Review task creation', description: 'Inspect the accepted backend changes.',
+          kind: 'review', ownerAgentId: 'reviewer-agent', dependsOn: ['create-api'], requirementIds: ['REQ-CREATE', 'REQ-SAFE'],
+          acceptanceCriteria: ['Review the implementation.']
+        }
+      ]
+    });
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
+      })
+    });
+    let snapshot = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/tasks', requestKey: 'request-review-format',
+      requestFingerprint: 'fingerprint-review-format', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents, plan, baseRef: 'main', baseCommit
+    });
+    const execute = async (request: OrchestrationLaunchRequest, changedPaths: string[], reportOverrides: Record<string, unknown> = {}) => {
+      if (changedPaths.length) fs.writeFileSync(path.join(repository, 'src', 'tasks.ts'), 'export function createTask(id: string) { return { id }; }\n');
+      const resultCommit = changedPaths.length ? commit(repository, 'Implement task creation') : await getHeadCommit(repository);
+      snapshot = (await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, changedPaths, reportOverrides)))!;
+      return acceptance.evaluateAndAccept({ workspaceId, runId: snapshot.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator' });
+    };
+
+    expect((await execute(launches[0], ['src/tasks.ts'])).decision).toBe('accepted');
+    const finding = {
+      targetTaskId: 'create-api', severity: 'warning', title: 'Responses are not validated',
+      path: 'src/tasks.ts', evidence: 'The identifier is returned unchecked.', instruction: 'Validate the identifier.'
+    };
+    // The reviewer ties its warning to REQ-SAFE, which the backend task does not own: a report-format rejection.
+    const rejected = await execute(launches[1], [], { reviewFindings: [{ ...finding, requirementId: 'REQ-SAFE' }] });
+    expect(rejected.snapshot.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'open', severity: 'blocking', evidence: expect.objectContaining({ check: 'review_requirement' }) })
+    ]));
+    expect(launches[2].ownerAgentId).toBe('reviewer-agent');
+
+    const corrected = await execute(launches[2], [], { reviewFindings: [finding] });
+    expect(corrected.snapshot.findings.filter(item => item.evidence.check === 'review_requirement').map(item => item.status)).toEqual(['resolved']);
+    expect(corrected.snapshot.run.status).toBe('awaiting_approval');
   });
 
   it('blocks before reviewer dispatch when accepted patches exceed the review context limit', async () => {
