@@ -19,8 +19,11 @@ export interface CloneResult {
   repo: string;
   localPath: string;
   branch: string;
-  /** 'cloned' on first fetch, 'refreshed' when the checkout already existed. */
-  action: 'cloned' | 'refreshed';
+  /**
+   * 'cloned' on first fetch, 'refreshed' when a workspace checkout was reset to
+   * the remote, 'existing' when a project-folder copy was left untouched.
+   */
+  action: 'cloned' | 'refreshed' | 'existing';
 }
 
 /**
@@ -102,4 +105,39 @@ async function refreshCheckout(dir: string, branch: string): Promise<void> {
   await execFileAsync('git', ['fetch', 'origin', '--prune'], { cwd: dir });
   await execFileAsync('git', ['checkout', branch], { cwd: dir });
   await execFileAsync('git', ['reset', '--hard', `origin/${branch}`], { cwd: dir });
+}
+
+/**
+ * Clone one of a project's repositories into the project's folder on this
+ * computer: <folder>\<repository name>, where the developer and the next chat
+ * turn both look for it.
+ *
+ * A copy already there is left exactly as it is. That folder is the
+ * developer's: it may hold work they have not committed, so it is never
+ * reset the way Alpha's own workspace copies are.
+ */
+export async function cloneIntoProjectFolder(ownerRepo: string, folder: string, ref?: string): Promise<CloneResult> {
+  if (ref !== undefined) assertSafeBranchName(ref);
+  const info = await githubService.getRepository(ownerRepo);
+  if (info.isEmpty) {
+    throw new Error(`${ownerRepo} has no commits yet, so there is nothing to clone. Create the first commit and try again.`);
+  }
+
+  const dir = path.join(path.resolve(folder), clonePathFor(ownerRepo).repo);
+  const branch = ref ?? info.defaultBranch;
+  if (isExistingCheckout(dir)) {
+    logInfo(`${ownerRepo} is already at ${dir}; left as it is`);
+    return { repo: info.nameWithOwner, localPath: dir, branch, action: 'existing' };
+  }
+  if (!isEmptyOrMissing(dir)) {
+    throw new Error(`${dir} already exists and is not a git checkout. Move or remove it, then try again.`);
+  }
+
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  await githubService.cloneRepository(ownerRepo, path.dirname(dir));
+  if (branch !== info.defaultBranch) {
+    await execFileAsync('git', ['checkout', branch], { cwd: dir });
+  }
+  logInfo(`Cloned ${ownerRepo} into the project folder ${dir} (${branch})`);
+  return { repo: info.nameWithOwner, localPath: dir, branch, action: 'cloned' };
 }

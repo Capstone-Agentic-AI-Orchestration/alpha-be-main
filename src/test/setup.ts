@@ -1,4 +1,13 @@
 import { vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
+
+/**
+ * Project folders default to Documents\AlphaProjects, and cloning or starting
+ * a desktop creates them. A test run must never write there, so every test
+ * gets a scratch projects folder unless it sets its own.
+ */
+process.env.ALPHA_CODE_FOLDER ||= path.join(os.tmpdir(), `alpha-test-projects-${process.pid}`);
 
 /**
  * Configuration is a test fixture, never the workstation's .env.

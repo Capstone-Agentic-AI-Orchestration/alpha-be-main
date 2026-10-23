@@ -304,7 +304,13 @@ export function writeRunMcpConfig(
    * The folders `alpha-project-files` may read: the selected project's
    * repositories on this computer. Without any, that server is left out.
    */
-  projectRoots?: ProjectFolderRoot[]
+  projectRoots?: ProjectFolderRoot[],
+  /**
+   * The selected project's folder on this computer and its repositories, so
+   * `github_clone_repository` puts that project's code where the developer
+   * keeps it.
+   */
+  projectFolder?: { dir: string; repos: string[] }
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
 
@@ -390,6 +396,9 @@ export function writeRunMcpConfig(
               ALPHA_WORKSPACE: workspace,
               ALPHA_RUN_ID: runId,
               ALPHA_MCP_ACCESS: access,
+              ...(projectFolder
+                ? { ALPHA_PROJECT_FOLDER: projectFolder.dir, ALPHA_PROJECT_REPOS: JSON.stringify(projectFolder.repos) }
+                : {}),
               /**
                * The credentials, given back to this process alone.
                *

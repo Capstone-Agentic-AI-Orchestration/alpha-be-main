@@ -82,6 +82,17 @@ describe('the access band in the written config', () => {
 });
 
 describe('the project files server in the written config', () => {
+  it("tells the GitHub server the selected project's folder and repositories, for its clone tool", async () => {
+    const mcp = await startDaemon();
+    const folder = { dir: path.join(tmp, 'AlphaProjects', 'Test-Project'), repos: ['acme/app-be', 'acme/app-fe'] };
+    const res = mcp.writeRunMcpConfig('run-folder', ['alpha-github'], {}, path.join(tmp, 'workspace'), 'read', undefined, undefined, folder);
+    const env = JSON.parse(fs.readFileSync(res.configPath!, 'utf8')).mcpServers['alpha-github'].env;
+    mcp.cleanupRunMcpConfig('run-folder');
+    expect(env.ALPHA_PROJECT_FOLDER).toBe(folder.dir);
+    expect(JSON.parse(env.ALPHA_PROJECT_REPOS)).toEqual(folder.repos);
+    expect(builtInEnv(mcp, 'run-no-folder')?.ALPHA_PROJECT_FOLDER).toBeUndefined();
+  });
+
   it('carries the project folders, and is left out when there are none', async () => {
     const mcp = await startDaemon();
     const roots = [{ name: 'app-be', repo: 'acme/app-be', dir: path.join(tmp, 'app-be') }];

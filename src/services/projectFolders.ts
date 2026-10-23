@@ -8,6 +8,8 @@ import { reposForProject } from './githubIssueMapping.js';
 import { resolveProjectWorkspace } from './workspaceService.js';
 import { BindingError, bindProject, type BoundProject } from './projectBindings.js';
 import type { ProjectRoot } from './projectFiles.js';
+import { runWithWorkspace } from './workspaceContext.js';
+import { logError } from '../utils/logger.js';
 
 /**
  * Where a project's code lives on this computer.
@@ -31,7 +33,8 @@ const CODE_FOLDER_KEY = 'code_folder';
 const projectFolderKey = (projectId: string) => 'project_folder:' + projectId;
 
 export function defaultCodeFolder(): string {
-  return path.join(os.homedir(), 'Documents', 'AlphaProjects');
+  // ALPHA_CODE_FOLDER is for tests, so a test run never writes into a real Documents folder.
+  return process.env.ALPHA_CODE_FOLDER?.trim() || path.join(os.homedir(), 'Documents', 'AlphaProjects');
 }
 
 export function codeFolder(): string {
@@ -103,6 +106,48 @@ export function ensureProjectFolder(project: Pick<Project, 'id' | 'name' | 'key'
   const folder = projectFolder(project);
   fs.mkdirSync(folder.dir, { recursive: true });
   return folder.dir;
+}
+
+/**
+ * Create the code folder and every project's default folder on this computer,
+ * so each project has a place for its code before anything is cloned into it.
+ *
+ * A folder someone chose for a project is left alone, missing or not: it may
+ * be on a drive that is not plugged in. Never throws -- a folder that cannot be
+ * made must not stop the request or the start-up that asked for it.
+ */
+export function ensureDefaultProjectFolders(projects: Array<Pick<Project, 'id' | 'name' | 'key'>>): string[] {
+  const created: string[] = [];
+  try {
+    fs.mkdirSync(codeFolder(), { recursive: true });
+  } catch (err) {
+    logError('Could not create the projects folder ' + codeFolder() + ':', (err as Error).message);
+    return created;
+  }
+  for (const project of projects) {
+    const folder = projectFolder(project);
+    if (!folder.isDefault || fs.existsSync(folder.dir)) continue;
+    try {
+      fs.mkdirSync(folder.dir, { recursive: true });
+      created.push(folder.dir);
+    } catch (err) {
+      logError('Could not create the folder for ' + project.name + ':', (err as Error).message);
+    }
+  }
+  return created;
+}
+
+/** The same, for the projects of every workspace this computer holds. */
+export function ensureAllProjectFolders(): string[] {
+  const created: string[] = [];
+  try {
+    for (const workspace of sqliteService.getWorkspaces()) {
+      created.push(...runWithWorkspace(workspace.id, () => ensureDefaultProjectFolders(sqliteService.getProjects())));
+    }
+  } catch (err) {
+    logError('Could not create the project folders:', (err as Error).message);
+  }
+  return created;
 }
 
 /** owner/repo from a GitHub remote URL (https or ssh), or null. */

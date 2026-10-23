@@ -43,7 +43,7 @@ import {
 } from './chatRouter.js';
 import { isProjectBuildRequest } from './projectBuildIntent.js';
 import { reposForProject } from './githubIssueMapping.js';
-import { projectReadRoots } from './projectFolders.js';
+import { ensureProjectFolder, projectReadRoots } from './projectFolders.js';
 import type { ProjectRoot } from './projectFiles.js';
 import { createHash } from 'node:crypto';
 
@@ -1071,6 +1071,8 @@ export class ChatService extends EventEmitter {
         autonomyLevel: approvalSkills.includes('sk-git') ? 'Full Autonomy' : undefined,
         // Set, even empty, for Codex and Claude: the turn then reads files only through Alpha.
         projectRoots: localCode.roots,
+        // The project's repositories are cloned into its folder on this computer.
+        projectFolder: assistantProject ? { dir: ensureProjectFolder(assistantProject), repos: projectRepos } : undefined,
         onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
       });
 
@@ -1264,6 +1266,7 @@ ${priorTurn}` : prompt,
       // the same way it does for every other field.
       skills: persona.skills,
       projectRoots: localProjectRoots,
+      projectFolder: activeProject ? { dir: ensureProjectFolder(activeProject), repos: reposForProject(activeProject) } : undefined,
       autonomyLevel: persona.autonomyLevel,
       env,
       customCliArgs: agent.customCliArgs,
