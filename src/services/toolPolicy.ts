@@ -173,6 +173,19 @@ export interface ChatTools {
   denied: string[];
 }
 
+export type ChatApprovalMode = 'ask' | 'approve' | 'full';
+
+/**
+ * Alpha chat runs headlessly, so there is no terminal prompt to answer. `ask`
+ * therefore stays read-only; the separate Call Agent confirmation flow is the
+ * approval boundary for changes. The other choices grant only local-project
+ * edits, or project edits plus shell, respectively.
+ */
+export function skillsForChatApproval(mode: ChatApprovalMode, projectAvailable: boolean): string[] {
+  if (mode === 'ask' || (mode === 'approve' && !projectAvailable)) return [];
+  return mode === 'full' ? ['sk-fs', 'sk-bash', 'sk-git', 'sk-browser'] : ['sk-fs'];
+}
+
 /**
  * Resolve an agent's skills into the two argv lists.
  *
@@ -208,7 +221,9 @@ export function chatToolsFor(skills: string[] = []): ChatTools {
 export function describeChatToolPolicy(
   mcpServers: string[] = [],
   skills: string[] = [],
-  githubAccess: 'read' | 'write' = 'read'
+  githubAccess: 'read' | 'write' = 'read',
+  /** The turn reads files only through alpha-project-files; see cliRunner. */
+  readsThroughAlpha = false
 ): string {
   const { allowed, denied } = chatToolsFor(skills);
   const canWrite = allowed.includes('Write') || allowed.includes('Edit');
@@ -217,19 +232,36 @@ export function describeChatToolPolicy(
   const mcp = mcpServers.length
     ? ` You also have the MCP servers: ${mcpServers.join(', ')}.`
     : '';
+  /** Same rule as cliRunner's filesThroughAlpha. */
+  const filesThroughAlpha = readsThroughAlpha && !canWrite && !canRunShell;
+  const hasProjectFiles = mcpServers.includes('alpha-project-files');
 
   // One sentence per line, never wrapped mid-sentence: a hard break inside a
   // clause is one more thing for the model to resolve, and it makes the text
   // awkward to assert on or grep for later.
-  const lines = [
-    '## Tool access for this conversation',
-    '',
-    `You can use: ${allowed.join(', ')}.${mcp}`,
-    'These are Claude Code tool names; on another runtime, use its equivalent file-reading and search tools.',
-    ''
-  ];
+  const lines = filesThroughAlpha
+    ? [
+        '## Tool access for this conversation',
+        '',
+        `You have the MCP servers: ${mcpServers.join(', ')}.`,
+        ...(hasProjectFiles
+          ? [
+              'Read this project\'s code with the alpha-project-files tools: project_list_repositories, project_list_files, project_read_file, project_search and project_git (status, log, diff, branches).',
+              'They reach only this project\'s repositories on this computer; any other path is refused.',
+              'You have no shell and no other file tools here, so use those tools rather than saying you cannot read files.'
+            ]
+          : ['You have no access to files on this computer in this conversation. Read code from GitHub instead.']),
+        ''
+      ]
+    : [
+        '## Tool access for this conversation',
+        '',
+        `You can use: ${allowed.join(', ')}.${mcp}`,
+        'These are Claude Code tool names; on another runtime, use its equivalent file-reading and search tools.',
+        ''
+      ];
 
-  if (denied.length) {
+  if (denied.length && !filesThroughAlpha) {
     lines.push(`Do not ${denied.join(', ')} — those are not granted to you here.`, '');
   }
 

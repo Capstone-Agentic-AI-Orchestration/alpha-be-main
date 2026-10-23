@@ -191,6 +191,7 @@ interface ProfileRecord {
 
 interface ProfileRegistry {
   activeProfileId?: string;
+  signedOut?: boolean;
   profiles: ProfileRecord[];
 }
 
@@ -214,6 +215,11 @@ let sessionAuthenticationError: string | undefined;
 
 export function isSessionAuthenticated(): boolean {
   return sessionAuthenticated;
+}
+
+/** An explicit sign-out also disables source builds' machine-login fallback. */
+export function requiresSessionAuthentication(): boolean {
+  return IS_PACKAGED_DESKTOP || readRegistry().signedOut === true;
 }
 
 export function getSessionAuthenticationError(): string | undefined {
@@ -250,7 +256,11 @@ function readRegistry(): ProfileRegistry {
           profile && typeof profile.id === 'string' && typeof profile.login === 'string'
         ) as ProfileRecord[]
       : [];
-    cachedRegistry = { activeProfileId: typeof raw.activeProfileId === 'string' ? raw.activeProfileId : undefined, profiles };
+    cachedRegistry = {
+      activeProfileId: typeof raw.activeProfileId === 'string' ? raw.activeProfileId : undefined,
+      signedOut: raw.signedOut === true,
+      profiles
+    };
   } catch {
     cachedRegistry = { profiles: [] };
   }
@@ -361,6 +371,8 @@ export function saveCredential(credential: StoredCredential): void {
   cached = credential;
   sessionAuthenticated = true;
   sessionAuthenticationError = undefined;
+  const registry = readRegistry();
+  delete registry.signedOut;
 
   const id = profileIdFor(credential);
   // Kept against the account it belongs to, so switching back to it later does
@@ -368,7 +380,6 @@ export function saveCredential(credential: StoredCredential): void {
   // was), it serves this session only.
   if (id) rememberCredential(id, credential);
   if (id && credential.login) {
-    const registry = readRegistry();
     const now = new Date().toISOString();
     const existing = registry.profiles.find(profile => profile.id === id);
     const record: ProfileRecord = {
@@ -380,8 +391,8 @@ export function saveCredential(credential: StoredCredential): void {
     };
     registry.profiles = [record, ...registry.profiles.filter(profile => profile.id !== id)];
     registry.activeProfileId = id;
-    writeRegistry(registry);
   }
+  writeRegistry(registry);
 }
 
 /**
@@ -396,6 +407,7 @@ export function clearCredential(): void {
   sessionAuthenticated = false;
   sessionAuthenticationError = undefined;
   registry.activeProfileId = undefined;
+  registry.signedOut = true;
   writeRegistry(registry);
 }
 

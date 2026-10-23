@@ -7,7 +7,7 @@ import { logInfo, logError } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
-import { activeProfile, ghEnvironment, isSessionAuthenticated, sessionReady, storedToken } from './alphaGitHubToken.js';
+import { activeProfile, ghEnvironment, isSessionAuthenticated, requiresSessionAuthentication, sessionReady, storedToken } from './alphaGitHubToken.js';
 
 /**
  * Who is using this copy of Alpha.
@@ -345,7 +345,7 @@ async function resolve(): Promise<Identity> {
    */
   // The remembered account may still be resuming; boot resolves this once and caches it.
   if (IS_PACKAGED_DESKTOP) await sessionReady();
-  if (IS_PACKAGED_DESKTOP && (!storedToken() || !isSessionAuthenticated())) {
+  if (requiresSessionAuthentication() && (!storedToken() || !isSessionAuthenticated())) {
     githubState = 'signed_out';
     return localIdentity();
   }

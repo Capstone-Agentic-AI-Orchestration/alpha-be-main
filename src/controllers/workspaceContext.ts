@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { IS_CLOUD, IS_PACKAGED_DESKTOP } from '../config/env.js';
 import { currentIdentity } from '../services/identityService.js';
-import { isSessionAuthenticated, sessionReady } from '../services/alphaGitHubToken.js';
+import { isSessionAuthenticated, requiresSessionAuthentication, sessionReady } from '../services/alphaGitHubToken.js';
 import { workspaceRegistry, WorkspaceRole } from '../services/workspaceRegistry.js';
 
 /**
@@ -74,7 +74,7 @@ async function callerFor(
 
   // A remembered account may still be resuming at launch.
   if (IS_PACKAGED_DESKTOP) await sessionReady();
-  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
+  if (requiresSessionAuthentication() && !isSessionAuthenticated()) {
     return { login: '', refused: 'Sign in with GitHub to use Alpha.' };
   }
 

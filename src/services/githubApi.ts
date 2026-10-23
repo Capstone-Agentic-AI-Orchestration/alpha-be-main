@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { IS_CLOUD, IS_PACKAGED_DESKTOP } from '../config/env.js';
+import { IS_CLOUD } from '../config/env.js';
 import { currentGitHubIdentity } from './githubRequestContext.js';
-import { isSessionAuthenticated, storedToken } from './alphaGitHubToken.js';
+import { isSessionAuthenticated, requiresSessionAuthentication, storedToken } from './alphaGitHubToken.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,7 +71,7 @@ export async function tokenForThisRequest(): Promise<string> {
   }
 
   // Alpha's own sign-in, which is the account the person chose in the app.
-  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
+  if (requiresSessionAuthentication() && !isSessionAuthenticated()) {
     throw new GitHubApiError('Alpha is not signed in to GitHub. Sign in from Connected Accounts.', 401);
   }
   const own = storedToken();
@@ -86,7 +86,7 @@ export async function tokenForThisRequest(): Promise<string> {
    * A developer running Alpha from a checkout has `gh` already and should not
    * complete a device flow to run what they are editing.
    */
-  if (IS_PACKAGED_DESKTOP) {
+  if (requiresSessionAuthentication()) {
     throw new GitHubApiError('Alpha is not signed in to GitHub. Sign in from Connected Accounts.', 401);
   }
 

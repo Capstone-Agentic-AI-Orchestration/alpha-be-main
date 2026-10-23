@@ -29,6 +29,15 @@ import {
   repositoryCheckouts,
   unbindProject
 } from '../services/projectBindings.js';
+import {
+  codeFolder,
+  defaultCodeFolder,
+  ensureProjectFolder,
+  locateProjectRepositories,
+  setCodeFolder,
+  setProjectFolder,
+  useFoundCopy
+} from '../services/projectFolders.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
 import {
   AGENT_FILE_MAX_BYTES,

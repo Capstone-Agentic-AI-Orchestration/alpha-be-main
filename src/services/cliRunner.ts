@@ -3,13 +3,14 @@ import { createLineBuffer } from '../utils/lineBuffer.js';
 import { StreamParser, StreamFamily, ParsedEvent } from './streamParser.js';
 import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
 import { parseCustomCliArgs } from './customCliArgs.js';
-import { chatToolsFor } from './toolPolicy.js';
+import { chatToolsFor, skillsForChatApproval, type ChatApprovalMode } from './toolPolicy.js';
 import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
+import type { ProjectRoot } from './projectFiles.js';
 import { codexModelConfigArgs } from './codexModelConfig.js';
 import { sqliteService } from './sqliteService.js';
-import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, writeRunMcpConfig } from './mcpConfigService.js';
+import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
@@ -51,6 +52,8 @@ export interface CliTurnOptions {
   cwd: string;
   /** Defaults to 'chat', so existing callers keep today's read-only behaviour. */
   mode?: TurnMode;
+  /** Per-message Alpha approval choice. Defaults to read-only for old callers. */
+  approvalMode?: ChatApprovalMode;
   /**
    * Path to a file holding the composed persona.
    *
@@ -111,6 +114,14 @@ export interface CliTurnOptions {
    */
   mcpServers?: string[];
   /**
+   * The selected project's repositories on this computer, for the built-in
+   * `alpha-project-files` server. A read-only chat given that server reads
+   * the project only through it: Codex's own shell is switched off and
+   * Claude's Read, Glob and Grep are denied, because both can read anywhere
+   * on the disk. See projectFiles.
+   */
+  projectRoots?: ProjectRoot[];
+  /**
    * Values layered over the daemon's environment when resolving `${VAR}` in
    * those servers — the project's, then the agent's own.
    *
@@ -152,9 +163,38 @@ export interface CliTurnResult {
    * `spawn` — the process never started. `empty` — it ran but produced no
    * content. Callers word these differently: one is "could not start", the
    * other "could not reach", and the second is worth a "is it signed in?".
+   * `limit` — the CLI answered, but only to say its plan's usage is used up.
    */
-  failureKind: 'spawn' | 'empty' | null;
+  failureKind: 'spawn' | 'empty' | 'limit' | null;
   cancelled?: boolean;
+}
+
+/** How the CLIs word a used-up plan: Claude Code, Codex, Gemini and agy. */
+const USAGE_LIMIT =
+  /\b(?:hit|reached|exceeded)\s+(?:your\s+|the\s+)?(?:weekly|daily|monthly|session|5-hour|five-hour|usage|rate|plan)?\s*limit\b|\busage limit\b|\bquota (?:exceeded|exhausted)\b|\bresource[_ ]exhausted\b|\bout of (?:credits|quota)\b/i;
+
+/**
+ * The CLI's own words when a turn ended on a used-up plan, or null.
+ *
+ * Claude Code reports a weekly limit as an ordinary assistant message plus an
+ * error result, so the limit text used to arrive as the chat reply. Only a
+ * turn that also failed is checked, so an answer that merely talks about
+ * limits is never mistaken for one.
+ */
+export function usageLimitDetail(input: {
+  streamError?: string;
+  exitCode?: number | null;
+  content?: string;
+  stderr?: string;
+}): string | null {
+  const failed = Boolean(input.streamError) || (input.exitCode !== undefined && input.exitCode !== null && input.exitCode !== 0);
+  if (!failed) return null;
+  const lines = [input.streamError, input.content, input.stderr]
+    .flatMap(text => (text ?? '').split('\n'))
+    .map(line => line.trim())
+    .filter(Boolean);
+  const hit = lines.find(line => USAGE_LIMIT.test(line));
+  return hit ? hit.slice(0, 240) : null;
 }
 
 
@@ -235,7 +275,12 @@ function reasoningArgs(provider: string, effort?: ReasoningEffort): string[] {
       : [];
   }
 
-  if (provider === 'Antigravity' || provider === 'Google Gemini') {
+  // Antigravity models carry their level in the id (gemini-3.8-flash-high,
+  // claude-opus-4-6-thinking), and agy refuses --effort for them with
+  // "invalid model selection", so the turn never starts.
+  if (provider === 'Antigravity') return [];
+
+  if (provider === 'Google Gemini') {
     return ['low', 'medium', 'high'].includes(effort) ? ['--effort', effort] : [];
   }
 
@@ -280,6 +325,7 @@ export function buildTurnInvocation(
     priorSession
   } = options;
   const isRun = options.mode === 'run';
+  const approvalMode = options.mode === 'chat' ? (options.approvalMode ?? 'ask') : 'ask';
 
   /*
    * What this chat turn was granted, resolved from the agent's own skills.
@@ -289,9 +335,24 @@ export function buildTurnInvocation(
    * question those branches actually ask — not "is this a run" as it used to be,
    * which is now the wrong question for a chat granted `sk-fs`.
    */
-  const chatTools = chatToolsFor(options.mode === 'review' ? [] : options.skills);
-  const canWrite = isRun || chatTools.allowed.some(t => t === 'Write' || t === 'Edit');
-  const canRunShell = isRun || chatTools.allowed.includes('Bash');
+  const grantedSkills = options.mode === 'review'
+    ? []
+    : options.mode === 'chat' && options.approvalMode
+      ? skillsForChatApproval(approvalMode, Boolean(options.projectRoots?.length))
+      : options.skills;
+  const grantedTools = chatToolsFor(grantedSkills);
+  const canWrite = isRun || grantedTools.allowed.some(t => t === 'Write' || t === 'Edit');
+  const canRunShell = isRun || grantedTools.allowed.includes('Bash');
+  /**
+   * A read-only chat given `projectRoots` reads only the selected project.
+   * Codex and Claude rely on alpha-project-files; Antigravity receives only
+   * those repository folders as workspace directories as well as the same MCP.
+   */
+  const filesThroughAlpha = !isRun && options.mode !== 'review' && !canWrite && !canRunShell &&
+    options.projectRoots !== undefined;
+  const chatTools = filesThroughAlpha
+    ? { allowed: [] as string[], denied: [...new Set([...grantedTools.allowed, ...grantedTools.denied])] }
+    : grantedTools;
 
   /**
    * The agent's own extra flags, minus anything the runner owns.
@@ -307,7 +368,8 @@ export function buildTurnInvocation(
   const customArgs = custom.args;
 
   const isWin = process.platform === 'win32';
-  const isCodex = provider === 'OpenAI';
+  const isCodex = provider === 'OpenAI' || provider === 'Ollama' || provider === 'LM Studio';
+  const hasAccessChoice = options.mode === 'chat' && options.approvalMode !== undefined;
   /**
    * Whether this family continues the saved session.
    *
@@ -319,6 +381,7 @@ export function buildTurnInvocation(
    */
   const resumesSession = Boolean(priorSession) && providerResumesSessions(provider);
   const isAntigravity = provider === 'Antigravity' || provider === 'Google Gemini';
+  const isLocalCodex = provider === 'Ollama' || provider === 'LM Studio';
 
   /**
    * The persona, already composed by personaService — agent file body plus
@@ -388,6 +451,7 @@ export function buildTurnInvocation(
       args: [
         'exec',
         '--json',
+        ...(isLocalCodex ? ['--oss', '--local-provider', provider === 'Ollama' ? 'ollama' : 'lmstudio'] : []),
         // A run edits the repository it was given; so does a chat whose agent
         // was granted `sk-fs`. Codex's non-interactive approval switch is a
         // special case: `--approve-for-me` selects its workspace-write policy,
@@ -401,7 +465,19 @@ export function buildTurnInvocation(
           ? options.codexApproveForMe
             ? ['--approve-for-me']
             : ['--sandbox', 'workspace-write', '--config', 'approval_policy="never"']
-          : ['--sandbox', canWrite ? 'workspace-write' : 'read-only']),
+          : hasAccessChoice
+            ? approvalMode === 'full'
+              ? ['--dangerously-bypass-approvals-and-sandbox']
+              : approvalMode === 'approve'
+                ? ['--sandbox', 'workspace-write', '--config', 'approval_policy="never"']
+                : ['--sandbox', 'read-only']
+            : ['--sandbox', canWrite ? 'workspace-write' : 'read-only']),
+        // No shell: this chat reads the project through alpha-project-files,
+        // which checks every path. Codex's read-only sandbox reads anywhere.
+        ...(filesThroughAlpha ? ['--config', 'features.shell_tool=false', '--config', 'features.unified_exec=false'] : []),
+        ...(hasAccessChoice && approvalMode !== 'ask' && options.projectRoots?.length
+          ? options.projectRoots.flatMap(root => ['--add-dir', root.dir])
+          : []),
         // On Windows, Codex writes inside the workspace only once a Windows
         // sandbox is chosen, which normally comes from ~/.codex/config.toml and
         // is ignored below. Without it workspace-write quietly behaves as
@@ -465,7 +541,14 @@ export function buildTurnInvocation(
       bin: RuntimeService.agyPath(),
       // Isolates agy from ~/.gemini — the operator's own GEMINI.md, agents,
       // rules, skills and memory were all being loaded into every Alpha turn.
-      env: cliHomeEnv('antigravity'),
+      env: {
+        ...cliHomeEnv('antigravity'),
+        // Agy's settings are run-scoped and allow only this turn's MCP servers;
+        // this avoids inheriting repositories or connectors from another run.
+        ...(mcp.antigravitySettingsPath
+          ? { GEMINI_CLI_SYSTEM_SETTINGS_PATH: mcp.antigravitySettingsPath }
+          : {})
+      },
       args: [
         '-p', withPersona(prompt),
         '--output-format', 'stream-json',
@@ -529,10 +612,47 @@ export function buildTurnInvocation(
          * nothing rather than making the edit it was just told it could make.
          */
         '--add-dir', cwd,
-        ...(canWrite || canRunShell ? ['--dangerously-skip-permissions'] : []),
+        ...(options.projectRoots ?? []).flatMap(root => ['--add-dir', root.dir]),
+        ...(hasAccessChoice
+          ? approvalMode === 'full'
+            ? ['--dangerously-skip-permissions']
+            : ['--mode', approvalMode === 'approve' ? 'accept-edits' : 'plan']
+          : canWrite || canRunShell
+            ? ['--dangerously-skip-permissions']
+            : []),
         ...(modelName ? ['--model', modelName] : []),
         ...reasoningArgs(provider, reasoningEffort),
         ...(priorSession ? ['--conversation', priorSession] : []),
+        ...customArgs
+      ]
+    };
+  }
+
+  if (provider === 'OpenCode') {
+    const projectDirectories = Object.fromEntries((options.projectRoots ?? []).map(root => [
+      `${root.dir.replace(/\\/g, '/')}/**`, 'allow'
+    ]));
+    const permission = approvalMode === 'full'
+      ? {}
+      : {
+          edit: approvalMode === 'approve' && Object.keys(projectDirectories).length ? 'allow' : 'deny',
+          bash: 'deny',
+          webfetch: 'deny',
+          websearch: 'deny',
+          external_directory: Object.keys(projectDirectories).length ? projectDirectories : 'deny'
+        };
+    return {
+      // OpenCode's default text output is line-oriented and is handled by the
+      // shared raw-text parser. The format=json stream needs its own parser.
+      family: 'claude',
+      bin: RuntimeService.opencodePath(),
+      env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission, mcp: openCodeMcpConfig(mcp) }) },
+      stdin: withPersona(prompt),
+      args: [
+        'run', '--dir', cwd,
+        ...(modelName ? ['--model', modelName] : []),
+        ...(priorSession ? ['--session', priorSession] : []),
+        ...(approvalMode === 'full' ? ['--dangerously-skip-permissions'] : ['--auto']),
         ...customArgs
       ]
     };
@@ -625,7 +745,19 @@ export function buildTurnInvocation(
               ? ['--allowedTools', ...mcpToolPatterns(mcp.serverNames)]
               : [])
           ]
-        : [
+        : hasAccessChoice && approvalMode === 'approve'
+          ? [
+              '--permission-mode', 'acceptEdits',
+              '--allowedTools', ...chatTools.allowed, ...mcpToolPatterns(mcp.serverNames),
+              '--disallowedTools', ...chatTools.denied
+            ]
+          : hasAccessChoice && approvalMode === 'full'
+            ? [
+                '--dangerously-skip-permissions',
+                '--allowedTools', ...chatTools.allowed, ...mcpToolPatterns(mcp.serverNames),
+                '--disallowedTools', ...chatTools.denied
+              ]
+          : [
             /*
              * Built from the agent's skills rather than a fixed list. Both
              * halves matter: the allowed list is exhaustive, and the denied list
@@ -684,6 +816,9 @@ export function buildTurnInvocation(
        * who are not the machine owner.
        */
       '--strict-mcp-config',
+      ...(hasAccessChoice && approvalMode !== 'ask' && options.projectRoots?.length
+        ? options.projectRoots.flatMap(root => ['--add-dir', root.dir])
+        : []),
       ...(priorSession ? ['--resume', priorSession] : []),
       // Last, so the agent's own flags are visible in argv order — but they
       // cannot override anything above: parseCustomCliArgs drops every flag
@@ -747,7 +882,9 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     options.mcpServers,
     options.mcpEnv,
     options.cwd,
-    mcpAccessFor(options.autonomyLevel, options.mode ?? 'chat', options.skills)
+    mcpAccessFor(options.autonomyLevel, options.mode ?? 'chat', options.skills),
+    undefined,
+    options.projectRoots
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
@@ -773,6 +910,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     // occurs: those are content blocks nested inside an assistant message.
     const parser = new StreamParser(family);
     let cancelled = false;
+    let exitCode: number | null = null;
 
     await new Promise<void>((resolve) => {
       const child = processManager.spawnProcess({
@@ -793,8 +931,9 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
           */
         env: { ...options.env, ...invocation.env, ...agentCredentialEnv() },
         stdin: invocation.stdin,
-        onExit: (_code, _signal, terminationReason) => {
+        onExit: (code, _signal, terminationReason) => {
           cancelled = terminationReason === 'cancelled';
+          exitCode = typeof code === 'number' ? code : null;
           resolve();
         }
       });
@@ -829,6 +968,20 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
       return {
         content: '', thinking, tools: turn.getTools(), sessionId: parser.getSessionId() ?? null,
         bin, failureDetail: null, failureKind: null, cancelled: true
+      };
+    }
+
+    const limit = usageLimitDetail({ streamError: turn.getStreamError(), exitCode, content, stderr });
+    if (limit) {
+      logError('CLI turn stopped at a usage limit', limit);
+      return {
+        content: '',
+        thinking,
+        tools: turn.getTools(),
+        sessionId: parser.getSessionId() ?? null,
+        bin,
+        failureDetail: limit,
+        failureKind: 'limit'
       };
     }
 

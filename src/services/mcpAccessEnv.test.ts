@@ -80,3 +80,26 @@ describe('the access band in the written config', () => {
     expect(env?.ALPHA_WORKSPACE).toContain('workspace');
   });
 });
+
+describe('the project files server in the written config', () => {
+  it('carries the project folders, and is left out when there are none', async () => {
+    const mcp = await startDaemon();
+    const roots = [{ name: 'app-be', repo: 'acme/app-be', dir: path.join(tmp, 'app-be') }];
+    const res = mcp.writeRunMcpConfig('run-files', ['alpha-github', 'alpha-project-files'], {}, undefined, 'read', undefined, roots);
+    const cfg = JSON.parse(fs.readFileSync(res.configPath!, 'utf8'));
+    const agy = JSON.parse(fs.readFileSync(res.antigravitySettingsPath!, 'utf8'));
+    mcp.cleanupRunMcpConfig('run-files');
+    expect(res.serverNames).toEqual(['alpha-github', 'alpha-project-files']);
+    expect(JSON.parse(cfg.mcpServers['alpha-project-files'].env.ALPHA_PROJECT_ROOTS)).toEqual(roots);
+    expect(agy.mcp.allowed).toEqual(['alpha-github', 'alpha-project-files']);
+    expect(agy.mcpServers['alpha-github'].trust).toBe(true);
+    expect(agy.mcpServers['alpha-project-files'].trust).toBe(true);
+
+    const none = mcp.writeRunMcpConfig('run-none', ['alpha-github', 'alpha-project-files'], {}, undefined, 'read', undefined, []);
+    const emptyAgy = JSON.parse(fs.readFileSync(none.antigravitySettingsPath!, 'utf8'));
+    mcp.cleanupRunMcpConfig('run-none');
+    expect(none.serverNames).toEqual(['alpha-github']);
+    expect(emptyAgy.mcp.allowed).toEqual(['alpha-github']);
+  });
+});
+

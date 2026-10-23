@@ -120,7 +120,9 @@ export async function sendBuilderMessage(params: {
     throw new AgentBuilderError(
       turn.failureKind === 'spawn'
         ? `Could not start ${cli}. ${turn.failureDetail}`
-        : `${cli} returned nothing. ${turn.failureDetail} — check it is installed and signed in on the Runtimes page.`,
+        : turn.failureKind === 'limit'
+          ? `${cli} is at its usage limit. ${turn.failureDetail}`
+          : `${cli} returned nothing. ${turn.failureDetail} — check it is installed and signed in on the Runtimes page.`,
       502
     );
   }

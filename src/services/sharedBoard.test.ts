@@ -298,6 +298,46 @@ describe('pulling the team board', () => {
 });
 
 describe('the team’s roster', () => {
+  it('adopts the cloud ID for a locally seeded template, preserving settings, history and workspace isolation', async () => {
+    const { svc, board, inWorkspace } = await load();
+    const { runWithWorkspace } = await import('./workspaceContext.js');
+    const workspace = svc.createWorkspace({ name: 'Team workspace' });
+    const inTeam = <T>(fn: () => T) => runWithWorkspace(workspace.id, fn);
+    const local = inTeam(() => svc.getAgents()).find((a: Agent) => a.templateKey === 'frontend') as Agent;
+    const { agentFilePath } = await import('./agentFileService.js');
+    fs.writeFileSync(agentFilePath(local.id), '---\nmodel: my-local-model\n---\n\nKeep my local instructions.\n');
+    const memory = path.join(tmp, 'memory', 'agents', local.id);
+    fs.mkdirSync(memory, { recursive: true });
+    fs.writeFileSync(path.join(memory, 'learnings.md'), 'A local lesson.');
+    const cloud = { ...local, id: 'team-frontend', modelName: 'cloud-model' };
+    inTeam(() => {
+      svc.createProject({ ...cloudProject(), leadAgentId: local.id });
+      svc.createIssue({ ...cloudIssue(), assignedAgentId: local.id });
+      svc.savePrototypeRun({
+        id: 'local-history', issueId: 'gh-issue-9001', projectId: 'gh-repo-100', agentId: local.id,
+        status: 'completed', scenario: 'success', plan: [], currentStageIndex: 0, stages: [], activities: [],
+        createdAt: now, updatedAt: now
+      });
+      svc.createChatThread({ id: 'local-chat', title: 'Local chat', agentIds: [local.id], targetAgentId: local.id });
+      svc.createSquad(cloudSquad({ leaderAgentId: local.id, memberAgentIds: [local.id] }));
+    });
+    const report = await board.pullSharedBoard(workspace.id, source({
+      agents: [cloud], issues: [cloudIssue({ assignedAgentId: cloud.id })]
+    }));
+    expect(report.conflicts).toEqual([]);
+    expect(report.unpublished.agents.some(agent => agent.id === local.id)).toBe(false);
+    const roster = inTeam(() => svc.getAgents()) as Agent[];
+    expect(roster.filter(agent => agent.templateKey === 'frontend')).toHaveLength(1);
+    expect(roster.find(agent => agent.id === cloud.id)).toMatchObject({ modelName: 'my-local-model', systemPrompt: 'Keep my local instructions.' });
+    expect(inTeam(() => svc.getPrototypeRuns()).find((run: { id: string }) => run.id === 'local-history')?.agentId).toBe(cloud.id);
+    expect(inTeam(() => svc.getIssues())[0].assignedAgentId).toBe(cloud.id);
+    expect(inTeam(() => svc.getChatThreads())[0]).toMatchObject({ agentIds: [cloud.id], targetAgentId: cloud.id });
+    expect(inTeam(() => svc.getSquads())[0]).toMatchObject({ leaderAgentId: cloud.id, memberAgentIds: [cloud.id] });
+    expect(fs.readFileSync(path.join(tmp, 'memory', 'agents', cloud.id, 'learnings.md'), 'utf8')).toBe('A local lesson.');
+    expect(inWorkspace(() => svc.getAgents()).find((a: Agent) => a.id === 'agent-frontend')).toBeTruthy();
+    await expect(board.pullSharedBoard(workspace.id, source({ agents: [cloud] }))).resolves.toMatchObject({ agentsAdded: 0, conflicts: [] });
+  });
+
   it('adds an agent this machine does not have', async () => {
     const { svc, board, inWorkspace } = await load();
 

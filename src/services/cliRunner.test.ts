@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { buildTurnInvocation, CliTurnOptions } from './cliRunner.js';
+import { skillsForChatApproval } from './toolPolicy.js';
 
 vi.mock('./runtimeService.js', () => ({
   RuntimeService: {
@@ -254,6 +255,60 @@ describe('buildTurnInvocation — Codex', () => {
   });
 });
 
+describe('chat access choices across provider CLIs', () => {
+  const roots = [{ name: 'app-fe', repo: 'acme/app-fe', dir: 'C:/code/app-fe' }];
+
+  it.each([
+    ['OpenAI', 'workspace-write'],
+    ['Ollama', 'workspace-write'],
+    ['LM Studio', 'workspace-write']
+  ] as const)('%s auto-approves project edits while keeping shell fenced', (provider, sandbox) => {
+    const { args } = buildTurnInvocation(options({ provider, mode: 'chat', approvalMode: 'approve', projectRoots: roots }), noMcp);
+    expect(valueOf(args, '--sandbox')).toBe(sandbox);
+    expect(args).toContain('--add-dir');
+    expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+    if (provider !== 'OpenAI') expect(args).toContain('--local-provider');
+  });
+
+  it('applies project-scoped edit permissions to Claude and Gemini CLIs', () => {
+    const claude = buildTurnInvocation(options({ mode: 'chat', approvalMode: 'approve', projectRoots: roots }), noMcp).args;
+    expect(valueOf(claude, '--permission-mode')).toBe('acceptEdits');
+    expect(valueOf(claude, '--add-dir')).toBe(roots[0].dir);
+    const gemini = buildTurnInvocation(options({ provider: 'Antigravity', mode: 'chat', approvalMode: 'approve', projectRoots: roots }), noMcp).args;
+    expect(valueOf(gemini, '--mode')).toBe('accept-edits');
+    expect(gemini).toContain(roots[0].dir);
+    expect(gemini).not.toContain('--dangerously-skip-permissions');
+    const googleGemini = buildTurnInvocation(options({ provider: 'Google Gemini', mode: 'chat', approvalMode: 'approve', projectRoots: roots }), noMcp).args;
+    expect(valueOf(googleGemini, '--mode')).toBe('accept-edits');
+  });
+
+  it('configures OpenCode with only approved project roots and its safe shell/web policy', () => {
+    const invocation = buildTurnInvocation(options({
+      provider: 'OpenCode', mode: 'chat', approvalMode: 'approve', projectRoots: roots
+    }), noMcp);
+    const config = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT!);
+    expect(config.permission).toMatchObject({ edit: 'allow', bash: 'deny', webfetch: 'deny', websearch: 'deny' });
+    expect(config.permission.external_directory).toEqual({ 'C:/code/app-fe/**': 'allow' });
+    expect(invocation.args).toContain('--auto');
+  });
+
+  it.each(['OpenAI', 'Anthropic', 'Antigravity', 'Google Gemini', 'OpenCode', 'Ollama', 'LM Studio'] as const)(
+    '%s maps full access to its native bypass control', provider => {
+      const { args } = buildTurnInvocation(options({ provider, mode: 'chat', approvalMode: 'full', projectRoots: roots }), noMcp);
+      const bypass = provider === 'OpenAI' || provider === 'Ollama' || provider === 'LM Studio'
+        ? '--dangerously-bypass-approvals-and-sandbox'
+        : '--dangerously-skip-permissions';
+      expect(args).toContain(bypass);
+    }
+  );
+
+  it('grants web tools only for full access', () => {
+    expect(skillsForChatApproval('ask', true)).not.toContain('sk-browser');
+    expect(skillsForChatApproval('approve', true)).not.toContain('sk-browser');
+    expect(skillsForChatApproval('full', true)).toContain('sk-browser');
+  });
+});
+
 describe('persona re-injection mid-session', () => {
   // Antigravity continues its saved conversation, so it is the family where
   // "the persona is already in the transcript" is actually true.
@@ -402,9 +457,9 @@ describe('buildTurnInvocation — Antigravity', () => {
     expect(valueOf(args, '--conversation')).toBe('conv-3');
   });
 
-  it('passes the selected effort through Antigravity', () => {
-    const { args } = agy({ reasoningEffort: 'medium' });
-    expect(valueOf(args, '--effort')).toBe('medium');
+  it('leaves effort to the Antigravity model id, because agy refuses --effort for its models', () => {
+    const { args } = agy({ reasoningEffort: 'high' });
+    expect(args).not.toContain('--effort');
   });
 
   it('treats Google Gemini as the same family', () => {
@@ -420,6 +475,24 @@ describe('buildTurnInvocation — Antigravity', () => {
     );
     expect(args).not.toContain('--effort');
     expect(args).not.toContain('--config');
+  });
+
+  it('loads only this turn\'s MCP servers from its isolated system settings', () => {
+    const { env } = buildTurnInvocation(options({ provider: 'Antigravity' }), {
+      configPath: '/runs/chat-1/mcp.json',
+      antigravitySettingsPath: '/runs/chat-1/agy-system-settings.json',
+      serverNames: ['alpha-github', 'alpha-project-files']
+    });
+    expect(env.GEMINI_CLI_SYSTEM_SETTINGS_PATH).toBe('/runs/chat-1/agy-system-settings.json');
+  });
+
+  it('limits the agent to the selected project repository folders', () => {
+    const { args } = buildTurnInvocation(options({
+      provider: 'Antigravity',
+      projectRoots: [{ name: 'frontend', repo: 'acme/app-fe', dir: '/projects/app-fe' }]
+    }), noMcp);
+    expect(args).toContain('/projects/app-fe');
+    expect(args.filter(arg => arg === '--add-dir')).toHaveLength(2);
   });
 });
 
@@ -877,3 +950,37 @@ describe('chat capability reaching the other CLI families', () => {
     }
   });
 });
+
+describe('a chat that reads the project only through alpha-project-files', () => {
+  const files = { configPath: '/runs/chat-1/mcp.json', serverNames: ['alpha-github', 'alpha-project-files'] };
+  const roots = [{ name: 'app-be', repo: 'acme/app-be', dir: '/code/app-be' }];
+  const allowedIn = (args: string[]) => args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--disallowedTools'));
+  const deniedIn = (args: string[]) => args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--setting-sources'));
+
+  it('switches Codex\'s own shell off, since its read-only sandbox reads anywhere', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', modelName: 'gpt-6-astra', projectRoots: roots }), files);
+    expect(args).toContain('features.shell_tool=false');
+    expect(valueOf(args, '--sandbox')).toBe('read-only');
+  });
+
+  it('takes Read, Glob and Grep from Claude and leaves only the MCP tools', () => {
+    const { args } = buildTurnInvocation(options({ projectRoots: roots }), files);
+    expect(allowedIn(args)).toEqual(['mcp__alpha-github', 'mcp__alpha-project-files']);
+    expect(deniedIn(args)).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'Bash', 'Write']));
+  });
+
+  it('also applies with no repository on this computer: no local files at all', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', projectRoots: [] }), noMcp);
+    expect(args).toContain('features.shell_tool=false');
+  });
+
+  it('leaves chats without project roots, agents granted a shell, and runs as they were', () => {
+    expect(buildTurnInvocation(options({ provider: 'OpenAI' }), files).args).not.toContain('features.shell_tool=false');
+    expect(buildTurnInvocation(options({ provider: 'OpenAI', skills: ['sk-bash'], projectRoots: roots }), files).args)
+      .not.toContain('features.shell_tool=false');
+    expect(buildTurnInvocation(options({ provider: 'OpenAI', mode: 'run', projectRoots: roots }), files).args)
+      .not.toContain('features.shell_tool=false');
+    expect(allowedIn(buildTurnInvocation(options(), noMcp).args)).toEqual(['Read', 'Glob', 'Grep']);
+  });
+});
+

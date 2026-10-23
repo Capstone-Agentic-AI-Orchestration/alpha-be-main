@@ -74,6 +74,10 @@ export interface ResolveOptions {
    * and testable without it.
    */
   roster?: RosterEntry[];
+  /** Per-turn capability override from the chat access selector. */
+  skillsOverride?: string[];
+  /** Full chat access is the only selector state that enables GitHub writes. */
+  autonomyOverride?: AutonomyLevel;
 }
 
 /**
@@ -86,7 +90,12 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
   const { projectKey, includeMemory = true, includeToolPolicy = false, roster } = options;
 
   const overlay = readAgentFile(agent.id);
-  const merged = { ...agent, ...(overlay ?? {}) };
+  const merged = {
+    ...agent,
+    ...(overlay ?? {}),
+    ...(options.skillsOverride ? { skills: options.skillsOverride } : {}),
+    ...(options.autonomyOverride ? { autonomyLevel: options.autonomyOverride } : {})
+  };
   const mcpServers = merged.mcpServers ?? [];
   const skills = merged.skills ?? [];
 

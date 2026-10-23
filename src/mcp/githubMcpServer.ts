@@ -158,6 +158,8 @@ interface ToolDef {
   description: string;
   inputSchema: Record<string, unknown>;
   run: (args: Record<string, any>) => Promise<unknown>;
+  /** Provider-neutral MCP hint so each CLI treats reads consistently. */
+  annotations?: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
   /**
    * Omitted means readable by anyone who can reach this server. Only the tools
    * that change a remote (push, branch, pull request, posted review) carry 'write'.
@@ -551,7 +553,12 @@ async function handle(msg: any): Promise<void> {
           .map(([name, t]) => ({
             name,
             description: t.description,
-            inputSchema: t.inputSchema
+            inputSchema: t.inputSchema,
+            annotations: t.annotations ?? {
+              readOnlyHint: t.access !== 'write',
+              destructiveHint: false,
+              openWorldHint: true
+            }
           }))
       });
 
