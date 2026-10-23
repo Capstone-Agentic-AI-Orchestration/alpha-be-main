@@ -852,7 +852,32 @@ export function codexGatewayArgs(provider: string, modelName: string | undefined
   return provider === 'OpenAI' ? codexModelConfigArgs(modelName, baseUrl ?? scannedCodexEndpoint()) : [];
 }
 
+/**
+ * agy's headless refusal of a terminal command. It does not refuse the one
+ * call and carry on, as Claude Code and Codex do: the whole turn ends with no
+ * output, so a planner or chat turn without shell access dies the moment the
+ * model decides to run `ls` or `git log`. Its plan mode refuses the same way.
+ */
+const AGY_COMMAND_DENIED = /"command" permission[^.]*auto-denied|required the "command" permission/i;
+
+/** Told to the model on the second attempt, ahead of the original prompt. */
+export const NO_COMMANDS_NOTE =
+  'You cannot run terminal commands in this session; every command is refused and ends your turn. ' +
+  'Use only your file tools (list, read and search files) to look at the code, then answer.\n\n';
+
+/** Whether a turn died only because agy refused a terminal command, and is worth one retry without them. */
+export function isCommandDenial(provider: string, result: Pick<CliTurnResult, 'failureKind' | 'failureDetail'>): boolean {
+  return provider === 'Antigravity' && result.failureKind === 'empty' && AGY_COMMAND_DENIED.test(result.failureDetail ?? '');
+}
+
 export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
+  const result = await runCliTurnOnce(options);
+  if (!isCommandDenial(options.provider, result)) return result;
+  logInfo(`${options.runId}: Antigravity refused a terminal command; retrying once with file tools only`);
+  return runCliTurnOnce({ ...options, prompt: NO_COMMANDS_NOTE + options.prompt });
+}
+
+async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
   const { runId, cwd, provider, modelName } = options;
 
   // Owns the "what is the answer, what is narration" rule — see TurnAccumulator.

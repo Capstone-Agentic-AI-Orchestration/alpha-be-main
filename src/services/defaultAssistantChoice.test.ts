@@ -5,7 +5,7 @@ import {
   markUsageLimited,
   usageLimitFor
 } from './defaultAssistant.js';
-import { usageLimitDetail } from './cliRunner.js';
+import { isCommandDenial, usageLimitDetail } from './cliRunner.js';
 import { RuntimeEngine, ModelProvider } from '../models/index.js';
 
 const rt = (provider: ModelProvider, models: string[], isDefault = false, status: RuntimeEngine['status'] = 'online'): RuntimeEngine => ({
@@ -55,6 +55,14 @@ describe('who answers for Alpha', () => {
 });
 
 describe('recognising a used-up plan', () => {
+  it("recognises agy ending a turn over a refused terminal command, and nothing else", () => {
+    const detail = 'jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.';
+    expect(isCommandDenial('Antigravity', { failureKind: 'empty', failureDetail: detail })).toBe(true);
+    expect(isCommandDenial('Anthropic', { failureKind: 'empty', failureDetail: detail })).toBe(false);
+    expect(isCommandDenial('Antigravity', { failureKind: 'empty', failureDetail: 'the CLI produced no output' })).toBe(false);
+    expect(isCommandDenial('Antigravity', { failureKind: null, failureDetail: null })).toBe(false);
+  });
+
   it('reads Claude Code weekly limit, which arrives as the reply text with an error result', () => {
     const text = "You've hit your weekly limit · resets Oct 26, 2am (Asia/Manila)";
     expect(usageLimitDetail({ streamError: text, exitCode: 1, content: text })).toBe(text);
