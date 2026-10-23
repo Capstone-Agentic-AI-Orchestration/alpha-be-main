@@ -70,6 +70,7 @@ export class ChatRouteError extends Error {
   }
 }
 import { runWithWorkspace } from './workspaceContext.js';
+import { describeProjectBuild } from './chatBuildContext.js';
 
 export interface SendMessageParams {
   threadId: string;
@@ -1060,6 +1061,8 @@ export class ChatService extends EventEmitter {
         systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId),
           describeOrchestratorGitHubAccess(projectRepos),
           describeLocalProjectFiles(assistantProject?.name ?? null, localCode.roots, localCode.missing),
+          assistantProject ? describeProjectBuild(sqliteService.getLatestOrchestrationSnapshot(assistantProject.id),
+            agentId => sqliteService.getAgents().find(agent => agent.id === agentId)?.name ?? agentId) : undefined,
           describeChatToolPolicy(assistantServers, approvalSkills, approvalSkills.includes('sk-git') ? 'write' : 'read', approvalSkills.length === 0)]
           .filter(Boolean)
           .join('\n\n---\n\n'),

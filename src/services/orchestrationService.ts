@@ -729,6 +729,7 @@ export class OrchestrationService {
       if (['workspace_checkpoint', 'final_scope', 'workspace_missing'].includes(String(savedEvidence.check ?? ''))) {
         throw new Error('This blocker needs workspace or scope reconciliation before final checks can be repeated. Review the saved branch and changed files first.');
       }
+      this.store.resolveAnsweredReportFindings(input.runId, input.now);
       return this.store.transitionOrchestrationRun({
         runId: input.runId,
         expectedRevision: snapshot.run.revision,

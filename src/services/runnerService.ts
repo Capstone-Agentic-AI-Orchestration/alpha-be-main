@@ -17,6 +17,8 @@ import { writeRunMcpConfig, cleanupRunMcpConfig, hostingScopeFor } from './mcpCo
 import { redactToolInput } from './toolInputRedaction.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
+import { createStderrClassifier } from '../utils/stderrClassifier.js';
+import { readableCommand } from '../utils/readableCommand.js';
 import { createBranch, createBranchFrom, checkoutBranch, getCurrentBranch, getHeadCommit, getGitDiffStats, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
 import { githubService } from './githubService.js';
@@ -749,7 +751,12 @@ export class RunnerService extends EventEmitter {
               `[Tool Call] ${ev.toolName}: ${JSON.stringify(redactToolInput(ev.toolName, ev.toolInput || {}))}`,
               'tool',
               {
-                detail: JSON.stringify(redactToolInput(ev.toolName, ev.toolInput || {})),
+                detail: (() => {
+                  const input = redactToolInput(ev.toolName, ev.toolInput || {}) as Record<string, unknown>;
+                  const command = input?.command ?? input?.CommandLine;
+                  // A shell command reads better as the command itself than as its JSON arguments.
+                  return command !== undefined && Object.keys(input).length <= 2 ? readableCommand(command).slice(0, 2_000) : JSON.stringify(input);
+                })(),
                 activityMessage: this.describeToolActivity(ev.toolName, ev.toolInput),
                 toolName: String(ev.toolName).replace(/[^A-Za-z0-9_. -]/g, '').slice(0, 80)
               }
@@ -787,9 +794,11 @@ export class RunnerService extends EventEmitter {
       }
 
       if (child.stderr) {
+      const classifyStderr = createStderrClassifier();
       createLineBuffer(child.stderr, (line) => {
-        const currentStage = parser.getCurrentStage();
-        this.appendLog(runId, currentStage, `[stderr] ${line}`, 'error');
+        const sorted = classifyStderr(line);
+        if (sorted.drop) return;
+        this.appendLog(runId, parser.getCurrentStage(), sorted.message, sorted.kind);
       });
       }
       const result = await processFinished;
@@ -1565,7 +1574,7 @@ ${issue.description}
       return `Searched the workspace with ${toolName}`;
     }
     if (name.includes('bash') || name.includes('exec') || name.includes('command') || command) {
-      return command ? `Ran command: ${String(command).slice(0, 240)}` : `Ran a command with ${toolName}`;
+      return command ? `Ran command: ${readableCommand(command).slice(0, 240)}` : `Ran a command with ${toolName}`;
     }
     return `Used ${toolName}`;
   }
