@@ -121,7 +121,8 @@ export interface Resolved {
  * repository that points elsewhere is refused too.
  */
 export function resolveInProject(roots: ProjectRoot[], repository: string | undefined, given: string | undefined): Resolved {
-  const raw = (given ?? '').trim();
+  // Models often write Windows separators; on Linux a backslash would otherwise be read as part of a file name.
+  const raw = (given ?? '').trim().replace(/\\/g, '/');
   if (raw.includes('\0')) throw new ProjectFilesError('Invalid path.');
 
   let root: ProjectRoot;
