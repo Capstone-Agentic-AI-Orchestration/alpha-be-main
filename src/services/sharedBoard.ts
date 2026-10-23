@@ -343,9 +343,26 @@ export async function pullSharedBoard(
 function applyRoster(agents: Agent[], squads: Squad[], report: PullReport): void {
   const localAgents = sqliteService.getAgents();
   const byId = new Map(localAgents.map(agent => [agent.id, agent]));
+  const byTemplate = new Map(localAgents.filter(agent => agent.templateKey).map(agent => [agent.templateKey, agent]));
 
   for (const cloud of agents) {
-    const mine = byId.get(cloud.id);
+    let mine = byId.get(cloud.id);
+    let adopted = false;
+    const twin = cloud.templateKey ? byTemplate.get(cloud.templateKey) : undefined;
+    if (!mine && twin) {
+      // Each workspace seeds locally before its first team pull. The same
+      // template then arrives under the cloud's ID, which is what shared
+      // assignments and uploaded runs must reference.
+      if (!sqliteService.rekeyAgent(twin.id, cloud.id)) {
+        report.conflicts.push({ project: cloud.name, detail: 'Could not reconcile this official agent with the team ID.' });
+        continue;
+      }
+      byId.delete(twin.id);
+      twin.id = cloud.id;
+      byId.set(cloud.id, twin);
+      mine = twin;
+      adopted = true;
+    }
     if (!mine) {
       // Machine config is this machine's; the cloud has no column for it.
       sqliteService.createAgent({ ...cloud, customCliArgs: '', envVars: [] });
@@ -360,7 +377,7 @@ function applyRoster(agents: Agent[], squads: Squad[], report: PullReport): void
       // An unreadable persona file is not a reason to skip the update.
     }
     const next = sharedAgentFields(cloud, declared);
-    if (!differs(mine, next)) {
+    if (!adopted && !differs(mine, next)) {
       report.unchanged += 1;
       continue;
     }
@@ -369,7 +386,7 @@ function applyRoster(agents: Agent[], squads: Squad[], report: PullReport): void
   }
 
   const shared = new Set(agents.map(agent => agent.id));
-  report.unpublished.agents = localAgents.filter(agent => !shared.has(agent.id));
+  report.unpublished.agents = sqliteService.getAgents().filter(agent => !shared.has(agent.id));
 
   const localSquads = sqliteService.getSquads();
   const squadsById = new Map(localSquads.map(squad => [squad.id, squad]));

@@ -6,8 +6,7 @@ import {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
   ALPHA_CLOUD_API,
-  IS_CLOUD,
-  IS_PACKAGED_DESKTOP
+  IS_CLOUD
 } from '../config/env.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, Issue, IssueComment, Agent, Squad, ChatMessage, ChatThread, Project, SquadRun } from '../models/index.js';
@@ -23,7 +22,7 @@ import { RunPublishGate } from './runPublishGate.js';
 
 const execFileAsync = promisify(execFile);
 
-import { isSessionAuthenticated, storedToken } from './alphaGitHubToken.js';
+import { isSessionAuthenticated, requiresSessionAuthentication, storedToken } from './alphaGitHubToken.js';
 
 /**
  * The GitHub token the desktop presents as its identity.
@@ -37,12 +36,12 @@ import { isSessionAuthenticated, storedToken } from './alphaGitHubToken.js';
  * its own to do.
  */
 async function githubCliToken(): Promise<string | null> {
-  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) return null;
+  if (requiresSessionAuthentication() && !isSessionAuthenticated()) return null;
   const own = storedToken();
   if (own) return own;
   // An installed copy has its own sign-in; borrowing the machine's would write
   // board rows under an account nobody chose in the app.
-  if (IS_PACKAGED_DESKTOP) return null;
+  if (requiresSessionAuthentication()) return null;
   try {
     const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 10_000, windowsHide: true });
     return stdout.trim() || null;

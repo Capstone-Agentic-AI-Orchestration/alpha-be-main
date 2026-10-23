@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { DB_PATH, ALPHA_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
+import { DB_PATH, ALPHA_DIR, MEMORY_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
 import {
   Project,
   Issue,
@@ -33,7 +33,7 @@ import {
   OrchestrationRecoveryActionName,
   OrchestrationRecoveryMilestone
 } from '../models/index.js';
-import { syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
+import { agentFilePath, syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
 import {
   agentFromOfficialTemplate,
@@ -2044,6 +2044,21 @@ export class SQLiteService {
     return this.db.prepare('DELETE FROM local_repo_bindings WHERE project_id = ?').run(projectId).changes;
   }
 
+  /** A setting kept on this machine only, from the meta table, or null when unset. */
+  getMetaValue(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  /** Save a machine-local setting; null removes it. */
+  setMetaValue(key: string, value: string | null): void {
+    if (value === null) {
+      this.db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+      return;
+    }
+    this.db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(key, value);
+  }
+
   addAllowedPath(filePath: string, name: string) {
     const normalized = path.resolve(filePath);
     const stmt = this.db.prepare(`
@@ -2539,6 +2554,58 @@ export class SQLiteService {
     ensureMemoryScaffold({ agentId: a.id });
 
     return a;
+  }
+
+  /** Adopt the team's ID for the same official role, keeping this machine's history. */
+  rekeyAgent(from: string, to: string): boolean {
+    if (from === to) return true;
+    const mine = this.getAgents().find(agent => agent.id === from);
+    if (!mine || this.db.prepare('SELECT 1 FROM agents WHERE id = ?').get(to)) return false;
+
+    // Validate both IDs before using them in paths. Keep the originals as a
+    // recovery copy, and never overwrite a persona already saved for the new ID.
+    const oldFile = agentFilePath(from);
+    const newFile = agentFilePath(to);
+    if (fs.existsSync(oldFile) && !fs.existsSync(newFile)) fs.copyFileSync(oldFile, newFile, fs.constants.COPYFILE_EXCL);
+    const oldMemory = path.join(MEMORY_DIR, 'agents', from);
+    const newMemory = path.join(MEMORY_DIR, 'agents', to);
+    if (fs.existsSync(oldMemory)) fs.cpSync(oldMemory, newMemory, { recursive: true, force: false });
+
+    this.db.transaction(() => {
+      this.db.pragma('defer_foreign_keys = ON');
+      this.db.prepare('UPDATE agents SET id = ? WHERE id = ? AND workspace_id = ?')
+        .run(to, from, this.workspaceId());
+      this.repoint([
+        ['projects', 'lead_agent_id'], ['issues', 'assigned_agent_id'],
+        ['issue_comments', 'agent_id'], ['prototype_runs', 'agent_id'],
+        ['project_build_steps', 'agent_id'], ['remote_actions', 'agent_id'],
+        ['squads', 'leader_agent_id'], ['chat_threads', 'target_agent_id'],
+        ['chat_messages', 'agent_id'], ['agent_calls', 'agent_id'],
+        ['orchestration_tasks', 'owner_agent_id'], ['orchestration_attempts', 'agent_id'],
+        ['agent_lesson_decisions', 'agent_id'], ['thread_sessions', 'agent_id'],
+        ['workspace_entity_bindings', 'entity_id', "entity_type = 'agents'"]
+      ], from, to);
+
+      const replaceId = (value: unknown): unknown => {
+        if (value === from) return to;
+        if (Array.isArray(value)) return value.map(replaceId);
+        if (value && typeof value === 'object') {
+          return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceId(item)]));
+        }
+        return value;
+      };
+      for (const [table, column] of [
+        ['chat_threads', 'agent_ids'], ['squads', 'member_agent_ids'],
+        ['squad_runs', 'member_agent_ids'], ['squad_runs', 'member_assignments'],
+        ['squad_runs', 'plan'], ['orchestration_plans', 'plan_json']
+      ]) {
+        const rows = this.db.prepare(`SELECT rowid AS row_id, ${column} AS value FROM ${table} WHERE ${column} LIKE ?`)
+          .all(`%${from}%`) as Array<{ row_id: number; value: string }>;
+        const update = this.db.prepare(`UPDATE ${table} SET ${column} = ? WHERE rowid = ?`);
+        for (const row of rows) update.run(JSON.stringify(replaceId(JSON.parse(row.value))), row.row_id);
+      }
+    })();
+    return true;
   }
 
   updateAgent(id: string, updates: Partial<Agent>): Agent | null {

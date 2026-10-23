@@ -147,6 +147,26 @@ describe('waiting for the person to authorise it', () => {
 });
 
 describe('the stored credential', () => {
+  it.each([false, true])('keeps an explicit logout signed out across restart (packaged: %s)', async packaged => {
+    const mod = await load('Iv1.testclientid', packaged);
+    mod.clearCredential();
+    expect(mod.requiresSessionAuthentication()).toBe(true);
+
+    const reloaded = await load('Iv1.testclientid', packaged);
+    expect(reloaded.requiresSessionAuthentication()).toBe(true);
+    expect(reloaded.isSessionAuthenticated()).toBe(false);
+    const { refreshIdentity } = await import('./identityService.js');
+    await expect(refreshIdentity()).resolves.toMatchObject({ source: 'local', github: 'signed_out' });
+    const { tokenForThisRequest } = await import('./githubApi.js');
+    await expect(tokenForThisRequest()).rejects.toThrow(/not signed in/i);
+    const { GhCliGitHubService } = await import('./githubService.js');
+    await expect(new GhCliGitHubService().checkAuth()).resolves.toMatchObject({ authenticated: false });
+
+    reloaded.saveCredential({ token: 'gho_new', login: 'Dev2', obtainedAt: new Date().toISOString() });
+    expect((await load('Iv1.testclientid', packaged)).storedToken()).toBe('gho_new');
+    expect((await load('Iv1.testclientid', packaged)).requiresSessionAuthentication()).toBe(packaged);
+  });
+
   it('is forgotten on request, and nothing else is touched', async () => {
     const mod = await load();
     mod.saveCredential({ token: 'gho_thetoken', login: 'Dev1', obtainedAt: new Date().toISOString() });

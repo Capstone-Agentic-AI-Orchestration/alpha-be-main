@@ -27,6 +27,7 @@ import {
   clearCredential,
   getSessionAuthenticationError,
   isSessionAuthenticated,
+  requiresSessionAuthentication,
   setSessionAuthenticationError,
   userFor,
   requestDeviceCode,
@@ -52,7 +53,7 @@ const execGh = (args: string[], options: ExecOptions = {}) => {
   // Do not let a packaged build fall through to a developer's machine-level
   // `gh` credential while the profile picker is waiting for a fresh sign-in.
   // The version probe is safe and remains available for the status copy.
-  if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated() && !args.includes('--version')) {
+  if (requiresSessionAuthentication() && !isSessionAuthenticated() && !args.includes('--version')) {
     return Promise.reject(new Error('Alpha is not signed in to GitHub.'));
   }
   return execFileAsync('gh', args, { ...options, env: ghEnvironment(options.env) });
@@ -425,7 +426,7 @@ export class GhCliGitHubService implements IGitHubService {
     // used within the idle limit, or by a GitHub authorization in this process.
     // Wait for the launch-time resume, so the window's first check sees it.
     if (IS_PACKAGED_DESKTOP) await sessionReady();
-    if (IS_PACKAGED_DESKTOP && !isSessionAuthenticated()) {
+    if (requiresSessionAuthentication() && !isSessionAuthenticated()) {
       return {
         authenticated: false,
         mode: 'cli',
@@ -1802,7 +1803,7 @@ export class GitHubService implements IGitHubService {
   async checkAuth(): Promise<GitHubAuthInfo> {
     const cliAuth = await this.cliService.checkAuth();
     if (cliAuth.authenticated) return cliAuth;
-    if (IS_PACKAGED_DESKTOP) return cliAuth;
+    if (requiresSessionAuthentication()) return cliAuth;
 
     const restAuth = await this.restService.checkAuth();
     if (restAuth.authenticated) return restAuth;
