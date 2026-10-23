@@ -142,6 +142,7 @@ export function buildOrchestrationReviewAmendment(
       title: `Resolve review findings: ${root.title}`.slice(0, 240),
       description: `Correct the accepted ${root.kind} deliverable from task ${root.id}. Follow the linked review findings and keep all changes inside this task’s original scope.`,
       kind: root.kind,
+      ...(root.milestoneId ? { milestoneId: root.milestoneId } : {}),
       repository: root.repository ?? snapshot.run.repository,
       ownerAgentId: root.ownerAgentId,
       dependsOn: [reviewTask.id],
@@ -186,7 +187,7 @@ export function buildOrchestrationReviewAmendment(
   }
 
   const existingTasks = snapshot.run.plan.tasks.map(task => ({ ...task }));
-  const validationTemplates = existingTasks.filter(task => task.kind === 'validation');
+  const validationTemplates = existingTasks.filter(task => task.kind === 'validation' && (!reviewTask.milestoneId || task.milestoneId === reviewTask.milestoneId));
   const requiredValidators = validationTemplates.filter(task => task.required);
   if (requiredValidators.length > 1) {
     throw new OrchestrationReviewPlanError('The plan has multiple required validation gates; review correction needs a reviewed plan amendment before it can continue.');
@@ -226,7 +227,7 @@ export function buildOrchestrationReviewAmendment(
 
   const replacementDependency = nextValidationId ?? nextReviewId;
   const retargetedTasks = existingTasks.map(task => {
-    if (task.kind !== 'delivery') return task;
+    if (task.kind !== 'delivery' || (reviewTask.milestoneId && task.milestoneId !== reviewTask.milestoneId)) return task;
     const dependsOn = task.dependsOn.filter(id => !priorValidationIds.has(id));
     if (!dependsOn.includes(replacementDependency)) dependsOn.push(replacementDependency);
     return { ...task, dependsOn };
@@ -366,11 +367,12 @@ export function buildFinalValidationAmendment(
       title: `Revalidate corrected implementation (plan ${snapshot.run.planVersion + 1})`,
       description: 'Run the configured repository checks after independent review of the owner corrections. Do not change repository files.',
       kind: 'validation',
-      repository: snapshot.run.repository,
+      ...(followupReview.milestoneId ? { milestoneId: followupReview.milestoneId } : {}),
+      repository: followupReview.repository ?? snapshot.run.repository,
       ownerAgentId: validator.id,
       assignmentReason: `A ${validator.role} specialist is assigned to verify the corrected implementation after independent review.`,
       dependsOn: [followupReview.id],
-      requirementIds: [snapshot.run.plan.requirements[0].id],
+      requirementIds: [followupReview.requirementIds[0]],
       acceptanceCriteria: ['Record what the configured checks confirm after the independent review.'],
       requiredChecks: [...new Set(snapshot.run.plan.tasks
         .filter(task => task.required && (task.repository ?? snapshot.run.repository).toLowerCase() === snapshot.run.repository.toLowerCase())

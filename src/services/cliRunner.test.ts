@@ -657,6 +657,27 @@ describe('run mode — Alpha doing the work, not discussing it', () => {
     }
   });
 
+  it('lets a Codex build run reach the network so dependency installs work, unless turned off', () => {
+    const configs = (args: string[]) => args.filter((_, index) => args[index - 1] === '--config');
+    expect(configs(run({ provider: 'OpenAI' }).args)).toContain('sandbox_workspace_write.network_access=true');
+    expect(configs(run({ provider: 'OpenAI', codexApproveForMe: true }).args)).toContain('sandbox_workspace_write.network_access=true');
+    // npm's default cache is outside the sandbox; runs get a writable Alpha-owned one.
+    const invocation = run({ provider: 'OpenAI' });
+    const cacheDir = valueOf(invocation.args, '--add-dir');
+    expect(cacheDir).toMatch(/cache[\\/]packages$/);
+    expect(invocation.env.npm_config_cache?.startsWith(cacheDir!)).toBe(true);
+    // Install scripts cannot start child processes inside the Windows sandbox.
+    expect(invocation.env.npm_config_ignore_scripts).toBe('true');
+    // A chat keeps its own boundary: no network grant there.
+    expect(configs(buildTurnInvocation(options({ mode: 'chat', provider: 'OpenAI' }), noMcp).args)).not.toContain('sandbox_workspace_write.network_access=true');
+    process.env.ALPHA_RUN_NETWORK_ACCESS = 'off';
+    try {
+      expect(configs(run({ provider: 'OpenAI' }).args)).not.toContain('sandbox_workspace_write.network_access=true');
+    } finally {
+      delete process.env.ALPHA_RUN_NETWORK_ACCESS;
+    }
+  });
+
   it('still ignores the operator\'s codex config on a run', () => {
     expect(run({ provider: 'OpenAI' }).args).toContain('--ignore-user-config');
   });
@@ -739,11 +760,14 @@ describe('chat mode is unchanged by run mode existing', () => {
     }
   );
 
-  /** Only the agy family takes the flag; the others locate work by cwd alone. */
-  it.each(['Anthropic', 'OpenAI'] as const)('passes no --add-dir to %s', provider => {
+  /** Only the agy family is pointed at its work this way; the others locate it by cwd alone. */
+  it.each(['Anthropic', 'OpenAI'] as const)('passes no workspace --add-dir to %s', provider => {
     for (const mode of [undefined, 'chat', 'run'] as const) {
       const { args } = buildTurnInvocation(options({ provider, mode }), noMcp);
-      expect(args).not.toContain('--add-dir');
+      // A Codex build run's one extra writable folder is the shared package cache, never a workspace.
+      const extra = args.filter((_, index) => args[index - 1] === '--add-dir');
+      expect(extra.every(dir => /cache[\\/]packages$/.test(dir))).toBe(true);
+      expect(extra.length).toBe(provider === 'OpenAI' && mode === 'run' ? 1 : 0);
     }
   });
 

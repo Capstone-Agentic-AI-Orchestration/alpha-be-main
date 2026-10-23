@@ -14,10 +14,33 @@ import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpCon
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
-import { RUNS_DIR } from '../config/env.js';
+import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { logError, logInfo } from '../utils/logger.js';
+
+/** Build runs may use the network unless ALPHA_RUN_NETWORK_ACCESS turns it off. */
+function runNetworkAllowed(): boolean {
+  return !/^(off|false|0|no)$/i.test(process.env.ALPHA_RUN_NETWORK_ACCESS ?? '');
+}
+
+/** The package-manager cache build runs share, and the variables that point npm, pnpm and yarn at it. */
+function runPackageCache(): { dir: string; env: Record<string, string> } {
+  const dir = path.join(ALPHA_DIR, 'cache', 'packages');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* the run reports the cache error itself */ }
+  return {
+    dir,
+    env: {
+      npm_config_cache: path.join(dir, 'npm'),
+      // Windows' sandbox refuses the child processes that package install scripts start
+      // ("spawn EPERM"), which fails the whole install. Agents only need the manifest and
+      // lockfile; Alpha's own verification installs again outside the sandbox, with scripts.
+      npm_config_ignore_scripts: 'true',
+      npm_config_store_dir: path.join(dir, 'pnpm'),
+      YARN_CACHE_FOLDER: path.join(dir, 'yarn')
+    }
+  };
+}
 
 /**
  * One turn against whichever agent CLI a provider maps to.
@@ -434,12 +457,17 @@ export function buildTurnInvocation(
     return `${preamble}${persona}\n\n${stayInCharacter}---\n\n${message}`;
   };
 
+  // A build agent installs packages, and the package managers' default caches sit in
+  // the user's profile, outside the sandbox's writable roots: npm then fails with EPERM
+  // even with network allowed. Runs share one Alpha-owned cache that is writable.
+  const packageCache = isCodex && isRun && runNetworkAllowed() ? runPackageCache() : undefined;
+
   if (isCodex) {
     return {
       family: 'codex',
       // Left on the real home: codex keeps auth.json under ~/.codex, so
       // relocating it would sign the user out. See cliHome.
-      env: {},
+      env: packageCache?.env ?? {},
       bin: RuntimeService.codexPath(),
       // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
       // With the prompt first, codex silently ignores everything after it and
@@ -488,6 +516,15 @@ export function buildTurnInvocation(
         ...(process.platform === 'win32' && (isRun ? !options.codexApproveForMe : canWrite)
           ? ['--config', 'windows.sandbox="unelevated"']
           : []),
+        // Codex's workspace-write sandbox has no network unless this is set, so a build
+        // agent could not reach the package registry: `npm install` hung, the agent
+        // spent the run rebuilding npm's cache by hand, and the task timed out. Build
+        // runs get network like the other runtimes; files stay limited to the worktree.
+        // ALPHA_RUN_NETWORK_ACCESS=off keeps them offline.
+        ...(isRun && runNetworkAllowed()
+          ? ['--config', 'sandbox_workspace_write.network_access=true']
+          : []),
+        ...(packageCache ? ['--add-dir', packageCache.dir] : []),
         '--skip-git-repo-check',
         /**
          * Isolate codex from ~/.codex/config.toml — the operator's own file.
@@ -859,22 +896,45 @@ export function codexGatewayArgs(provider: string, modelName: string | undefined
  * model decides to run `ls` or `git log`. Its plan mode refuses the same way.
  */
 const AGY_COMMAND_DENIED = /"command" permission[^.]*auto-denied|required the "command" permission/i;
+const AGY_TOOL_DENIED = /required the "([a-z_]+)" permission|"([a-z_]+)" permission[^.]*auto-denied/i;
 
 /** Told to the model on the second attempt, ahead of the original prompt. */
 export const NO_COMMANDS_NOTE =
   'You cannot run terminal commands in this session; every command is refused and ends your turn. ' +
   'Use only your file tools (list, read and search files) to look at the code, then answer.\n\n';
 
+/** Told to the model after agy refused a file outside the folders this turn may read. */
+export const OUTSIDE_FILES_NOTE =
+  'Files outside the repository folders you were given are refused, and a refused read ends your turn. ' +
+  'Read only inside those folders. Never open Alpha configuration, logs, CLI transcripts or session files. ' +
+  'If something is missing, answer from what you already have.\n\n';
+
 /** Whether a turn died only because agy refused a terminal command, and is worth one retry without them. */
 export function isCommandDenial(provider: string, result: Pick<CliTurnResult, 'failureKind' | 'failureDetail'>): boolean {
   return provider === 'Antigravity' && result.failureKind === 'empty' && AGY_COMMAND_DENIED.test(result.failureDetail ?? '');
 }
 
+/** The note that lets a turn agy ended over a refused tool try again, if it is worth retrying. */
+export function toolDenialNote(provider: string, result: Pick<CliTurnResult, 'failureKind' | 'failureDetail'>): string | undefined {
+  if (provider !== 'Antigravity' || result.failureKind !== 'empty') return undefined;
+  const match = AGY_TOOL_DENIED.exec(result.failureDetail ?? '');
+  if (!match) return undefined;
+  return (match[1] ?? match[2]).toLowerCase() === 'command' ? NO_COMMANDS_NOTE : OUTSIDE_FILES_NOTE;
+}
+
 export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult> {
-  const result = await runCliTurnOnce(options);
-  if (!isCommandDenial(options.provider, result)) return result;
-  logInfo(`${options.runId}: Antigravity refused a terminal command; retrying once with file tools only`);
-  return runCliTurnOnce({ ...options, prompt: NO_COMMANDS_NOTE + options.prompt });
+  // agy ends the whole turn on one refused tool. Each kind of refusal earns one retry
+  // with a note about it, and the notes accumulate so a second refusal is not repeated.
+  const notes: string[] = [];
+  let result = await runCliTurnOnce(options);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const note = toolDenialNote(options.provider, result);
+    if (!note || notes.includes(note)) return result;
+    notes.push(note);
+    logInfo(`${options.runId}: Antigravity refused a ${note === NO_COMMANDS_NOTE ? 'terminal command' : 'file outside its folders'}; retrying with that tool ruled out`);
+    result = await runCliTurnOnce({ ...options, prompt: notes.join('') + options.prompt });
+  }
+  return result;
 }
 
 async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {

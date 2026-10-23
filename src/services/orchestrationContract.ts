@@ -47,7 +47,14 @@ const scopePattern = z.string().trim().min(1).max(240).refine(value =>
 , 'Scope patterns must be relative repository paths without dot segments.');
 
 export const orchestrationPlanSchema = z.object({
-  schemaVersion: z.literal(ORCHESTRATION_PLAN_SCHEMA_VERSION),
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  milestones: z.array(z.object({
+    id: identifier,
+    title: shortText,
+    objective: detailText,
+    requirementIds: z.array(identifier).min(1).max(20),
+    repositories: z.array(z.string().trim().min(1).max(200)).min(1).max(10)
+  }).strict()).min(2).max(6).optional(),
   goal: z.string().trim().min(1).max(4_000),
   /** Snapshot of saved project rules carried to each specialist. Set by Alpha, not trusted from model output. */
   projectContext: z.string().max(MAX_PROJECT_CONTEXT_CHARS).optional(),
@@ -59,6 +66,7 @@ export const orchestrationPlanSchema = z.object({
   tasks: z.array(z.object({
     id: identifier,
     buildStepId: identifier.optional(),
+    milestoneId: identifier.optional(),
     title: shortText,
     description: detailText,
     kind: orchestrationTaskKindSchema,
@@ -133,7 +141,7 @@ export interface PlanValidationIssue {
   code: 'duplicate_id' | 'duplicate_requirement_id' | 'no_required_tasks' | 'unknown_owner' | 'role_mismatch' | 'unknown_dependency'
     | 'self_dependency' | 'dependency_cycle' | 'unknown_requirement' | 'uncovered_requirement' | 'too_many_tasks'
     | 'missing_independent_review' | 'review_not_independent' | 'review_dependency_missing' | 'validation_after_review_missing'
-    | 'unknown_repository' | 'unassigned_repository';
+    | 'unknown_repository' | 'unassigned_repository' | 'invalid_milestone';
   taskId?: string;
   detail: string;
 }
@@ -194,6 +202,32 @@ export function validateOrchestrationPlan(
   const requirementIds = new Set(plan.requirements.map(requirement => requirement.id));
   const covered = new Set<string>();
 
+  const milestones = plan.milestones ?? [];
+  const invalidMilestone = (detail: string) => issues.push({ code: 'invalid_milestone' as const, detail });
+  if ((plan.schemaVersion === 2) !== Boolean(milestones.length)) invalidMilestone('Schema v2 requires a milestone roadmap; direct plans use v1.');
+  if (new Set(milestones.map(item => item.id)).size !== milestones.length) invalidMilestone('Milestone IDs must be unique.');
+  const plannedMilestones = new Set(plan.tasks.map(task => task.milestoneId).filter(Boolean));
+  let deferred = false;
+  for (const milestone of milestones) {
+    if (milestone.requirementIds.some(id => !requirementIds.has(id))) invalidMilestone(`Milestone ${milestone.id} contains an unknown requirement.`);
+    if (repositories && milestone.repositories.some(repo => !repositories.has(repo.toLowerCase()))) invalidMilestone(`Milestone ${milestone.id} names an unselected repository.`);
+    if (!plannedMilestones.has(milestone.id)) deferred = true;
+    else {
+      if (deferred) invalidMilestone('Milestones must be planned in roadmap order.');
+      const required = plan.tasks.filter(task => task.milestoneId === milestone.id && task.required);
+      for (const id of milestone.requirementIds) if (!required.some(task => task.requirementIds.includes(id))) invalidMilestone(`Milestone ${milestone.id} does not cover ${id}.`);
+      for (const repo of milestone.repositories) if (!required.some(task => task.repository?.toLowerCase() === repo.toLowerCase())) invalidMilestone(`Milestone ${milestone.id} has no required task for ${repo}.`);
+    }
+  }
+  if (milestones.length && !plannedMilestones.has(milestones[0].id)) invalidMilestone('The first milestone must have executable tasks.');
+  if (options.initialPlan && milestones.length && plannedMilestones.size !== 1) invalidMilestone('Initially detail only the first milestone.');
+  for (const task of plan.tasks) {
+    const milestone = milestones.find(item => item.id === task.milestoneId);
+    if (milestones.length && !milestone) invalidMilestone(`Task ${task.id} needs an approved milestone.`);
+    if (!milestones.length && task.milestoneId) invalidMilestone('Direct tasks cannot name milestones.');
+    if (milestone && (task.requirementIds.some(id => !milestone.requirementIds.includes(id)) || !task.repository || !milestone.repositories.some(repo => repo.toLowerCase() === task.repository!.toLowerCase()))) invalidMilestone(`Task ${task.id} exceeds its milestone requirements or repositories.`);
+  }
+
   for (const task of plan.tasks) {
     if (task.repository) {
       if (repositories && !repositories.has(task.repository.toLowerCase())) {
@@ -203,6 +237,9 @@ export function validateOrchestrationPlan(
       }
     } else if (repositories?.size && repositories.size > 1) {
       issues.push({ code: 'unknown_repository', taskId: task.id, detail: `Task ${task.id} must name the selected repository it belongs to.` });
+    } else if (repositories?.size === 1) {
+      // Legacy single-repository plans omit the per-task repository field.
+      assignedRepositories.add([...repositories][0]);
     }
     const owner = agents.get(task.ownerAgentId);
     if (!owner) {
@@ -229,13 +266,13 @@ export function validateOrchestrationPlan(
   }
 
   for (const repository of repositories ?? []) {
-    if (!assignedRepositories.has(repository)) {
+    if (!assignedRepositories.has(repository) && !milestones.some(item => item.repositories.some(repo => repo.toLowerCase() === repository))) {
       issues.push({ code: 'unassigned_repository', detail: `No task is assigned to selected repository ${repository}.` });
     }
   }
 
   for (const requirement of plan.requirements) {
-    if (!covered.has(requirement.id)) {
+    if (!covered.has(requirement.id) && !milestones.some(item => item.requirementIds.includes(requirement.id))) {
       issues.push({ code: 'uncovered_requirement', detail: `No task is assigned to requirement "${requirement.id}".` });
     }
   }

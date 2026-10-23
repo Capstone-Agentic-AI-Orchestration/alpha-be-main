@@ -153,6 +153,8 @@ describe('orchestration recovery chat milestones', () => {
         id: `attempt-failed-${index + 1}`,
         taskId: 'implement',
         status: 'failed',
+        // Each failed implementation attempt ran a specialist process.
+        prototypeRunId: `run-failed-${index + 1}`,
         failureReason: `TypeScript failed at src/repair-${['one', 'two', 'three', 'four'][index] ?? `attempt-${index + 1}`}.ts`,
         result: {},
         contextManifest: {},

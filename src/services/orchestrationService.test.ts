@@ -764,3 +764,101 @@ describe('deterministic orchestration orchestrator', () => {
     expect(launches.every(request => request.ownerAgentId === 'backend-agent')).toBe(true);
   });
 });
+
+describe('specialist launch safety', () => {
+  let directory = '';
+  let store: SQLiteService | undefined;
+
+  afterEach(() => {
+    delete process.env.ALPHA_ORCHESTRATION_LAUNCH_TIMEOUT_MS;
+    vi.restoreAllMocks();
+    store?.close();
+    store = undefined;
+    if (directory) fs.rmSync(directory, { recursive: true, force: true });
+    directory = '';
+  });
+
+  const request = (requestKey: string) => ({
+    workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+    requestKey, requestFingerprint: 'fingerprint-' + requestKey, createdBy: 'user-test',
+    executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+  });
+
+  /** A committed repository bound to the run, as a real build worktree would be. */
+  function bindRepository(runId: string) {
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(repository, { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repository, stdio: 'ignore' });
+    fs.writeFileSync(path.join(repository, 'README.md'), '# Launch fixture\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repository, stdio: 'ignore' });
+    execFileSync('git', ['-c', 'user.name=Alpha Test', '-c', 'user.email=alpha-test@example.com', 'commit', '-m', 'Initial fixture'], { cwd: repository, stdio: 'ignore' });
+    const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+    store!.addAllowedPath(directory, 'orchestration launch fixture');
+    runWithWorkspace('workspace-test', () => store!.bindOrchestrationWorkspace({ runId, branchName: 'main', baseRef: 'refs/heads/main', baseCommit, worktreePath: repository }));
+  }
+
+  /** A build whose first launch never returns, left the way a restarted daemon finds it. */
+  async function interruptedBeforeLaunch(requestKey: string) {
+    const testTempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(testTempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(testTempRoot, 'alpha-orchestration-launch-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const stalled = new OrchestrationService(store, { launch: () => new Promise(() => undefined) });
+    const saved = await stalled.start(request(requestKey) as any);
+    void stalled.startPlannedWork({ workspaceId: 'workspace-test', runId: saved.run.id, expectedRevision: saved.run.revision, actorId: 'user-test' });
+    await vi.waitFor(() => expect(runWithWorkspace('workspace-test', () => store!.getOrchestrationSnapshot(saved.run.id)!.attempts[0]?.status)).toBe('starting'));
+    bindRepository(saved.run.id);
+    runWithWorkspace('workspace-test', () => store!.markOrchestrationRecoveryRequired({ runId: saved.run.id, actorId: 'orchestrator', reason: 'The daemon restarted.' }));
+    return saved.run.id;
+  }
+
+  it('stops waiting for a launch that never returns, and stops a process that starts late', async () => {
+    process.env.ALPHA_ORCHESTRATION_LAUNCH_TIMEOUT_MS = '50';
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-launch-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    let release: (receipt: { prototypeRunId: string }) => void = () => undefined;
+    const cancelled: string[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      launch: () => new Promise(resolve => { release = resolve; }),
+      async cancel(prototypeRunId) { cancelled.push(prototypeRunId); }
+    });
+
+    const result = await startAndApprove(orchestrator, request('request-hung'));
+
+    expect(result.run.status).toBe('blocked');
+    expect(result.run.currentTaskId).toBeUndefined();
+    expect(result.attempts.map(attempt => attempt.status)).toEqual(['failed']);
+    expect(result.attempts[0].failureReason).toMatch(/did not start within/);
+    release({ prototypeRunId: 'late-process' });
+    await vi.waitFor(() => expect(cancelled).toEqual(['late-process']));
+  });
+
+  it('retries an interrupted attempt that never reached a specialist', async () => {
+    const runId = await interruptedBeforeLaunch('request-never-started');
+    const launches: OrchestrationLaunchRequest[] = [];
+    const restarted = new OrchestrationService(store!, {
+      async launch(launch) { launches.push(launch); return { prototypeRunId: 'prototype-' + launch.attemptId }; }
+    });
+
+    const resumed = await restarted.resume({ workspaceId: 'workspace-test', runId, actorId: 'user-test' });
+
+    expect(resumed.run.status).toBe('executing');
+    expect(resumed.run.currentTaskId).toBe('create-endpoint');
+    expect(resumed.attempts.map(attempt => attempt.status)).toEqual(['failed', 'running']);
+    expect(launches).toHaveLength(1);
+  });
+
+  it('still holds an attempt without a process id when a run was recorded for it', async () => {
+    const runId = await interruptedBeforeLaunch('request-recorded-run');
+    const attemptId = runWithWorkspace('workspace-test', () => store!.getOrchestrationSnapshot(runId)!.attempts[0].id);
+    vi.spyOn(store!, 'getPrototypeRuns').mockReturnValue([{ id: 'unbound-run', status: 'running', orchestrationAttemptId: attemptId } as any]);
+    const launches: OrchestrationLaunchRequest[] = [];
+    const restarted = new OrchestrationService(store!, {
+      async launch(launch) { launches.push(launch); return { prototypeRunId: 'prototype-' + launch.attemptId }; }
+    });
+
+    await expect(restarted.resume({ workspaceId: 'workspace-test', runId, actorId: 'user-test' })).rejects.toThrow(/cannot confirm/);
+    expect(launches).toHaveLength(0);
+  });
+});
+

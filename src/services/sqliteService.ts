@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { DB_PATH, ALPHA_DIR, MEMORY_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
+import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
 import {
   Project,
   Issue,
@@ -249,6 +250,7 @@ function orchestrationTaskFromRow(row: any, definition?: OrchestrationTaskDefini
     description: row.description,
     kind: row.kind,
     repository: definition?.repository,
+    ...(definition?.milestoneId ? { milestoneId: definition.milestoneId } : {}),
     assignmentReason: definition?.assignmentReason,
     ownerAgentId: row.owner_agent_id,
     dependsOn: parseJson(row.depends_on_json, []),
@@ -3209,6 +3211,65 @@ export class SQLiteService {
     return this.getOrchestrationSnapshot(input.runId)!;
   }
 
+  appendOrchestrationMilestone(input: {
+    runId: string; expectedRevision: number; expectedPlanVersion: number;
+    milestoneId: string; tasks: OrchestrationTaskDefinition[];
+    checkpoints: Array<{ repository: string; commit: string }>; actorId: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'executing' || snapshot.run.currentTaskId || snapshot.run.pauseRequestedAt ||
+          snapshot.run.revision !== input.expectedRevision || snapshot.run.planVersion !== input.expectedPlanVersion) throw new Error('The build changed before the milestone plan was saved.');
+      if (snapshot.tasks.some(task => task.required && task.status !== 'accepted')) throw new Error('Accept all required work before planning the next milestone.');
+      const next = snapshot.run.plan.milestones?.find(milestone => !snapshot.run.plan.tasks.some(task => task.milestoneId === milestone.id));
+      if (!next || next.id !== input.milestoneId || !input.tasks.length || input.tasks.some(task => task.milestoneId !== next.id)) throw new Error('Only the next approved milestone may be expanded.');
+      const stage = parseOrchestrationPlan({ schemaVersion: 1, goal: next.objective,
+        requirements: snapshot.run.plan.requirements.filter(item => next.requirementIds.includes(item.id)),
+        tasks: input.tasks.map(({ milestoneId: _milestoneId, ...task }) => task) });
+      const stageIssues = validateOrchestrationPlan(stage, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true, maxTaskCount: 12, repositories: next.repositories });
+      if (stageIssues.length) throw new Error(`Invalid milestone tasks: ${stageIssues.map(issue => issue.detail).join(' ')}`);
+      const plan = parseOrchestrationPlan({ ...snapshot.run.plan, tasks: [...snapshot.run.plan.tasks, ...input.tasks] });
+      const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), {
+        repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository]
+      });
+      if (issues.length) throw new Error(`Invalid milestone plan: ${issues.map(issue => issue.detail).join(' ')}`);
+      const version = snapshot.run.planVersion + 1;
+      this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(workspaceId, input.runId, version, plan.schemaVersion, JSON.stringify(plan), 'milestone', now, now);
+      this.db.prepare('UPDATE orchestration_tasks SET plan_version = ? WHERE workspace_id = ? AND run_id = ? AND plan_version = ?')
+        .run(version, workspaceId, input.runId, input.expectedPlanVersion);
+      const insert = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const task of input.tasks) insert.run(workspaceId, input.runId, version, task.id, task.title, task.description, task.kind, task.ownerAgentId,
+        JSON.stringify(task.dependsOn), JSON.stringify(task.requirementIds), JSON.stringify(task.acceptanceCriteria), JSON.stringify(task.requiredChecks), JSON.stringify(task.scope), task.required ? 1 : 0,
+        task.dependsOn.length ? 'pending' : 'ready', 0, 0, now);
+      this.db.prepare('UPDATE orchestration_runs SET plan_version = ?, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ?')
+        .run(version, now, workspaceId, input.runId);
+      this.appendOrchestrationEvent(input.runId, 'plan_amended', { planVersion: version, milestoneId: next.id, addedTaskIds: input.tasks.map(task => task.id), checkpoints: input.checkpoints }, input.actorId, now);
+    })();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  getOrchestrationPlans(runId: string): Array<{ version: number; plan: OrchestrationPlan }> {
+    const rows = this.db.prepare('SELECT version, plan_json FROM orchestration_plans WHERE workspace_id = ? AND run_id = ? ORDER BY version')
+      .all(this.workspaceId(), runId) as Array<{ version: number; plan_json: string }>;
+    return rows.map(row => ({ version: row.version, plan: JSON.parse(row.plan_json) as OrchestrationPlan }));
+  }
+
+  ensureOrchestrationPlanDocuments(runId: string) {
+    const documents = this.getOrchestrationPlans(runId).map(row => orchestrationPlanDocument(row.plan, row.version));
+    const key = createHash('sha256').update(`${this.workspaceId()}/${runId}`).digest('hex');
+    const directory = path.join(path.dirname(this.db.name === ':memory:' ? DB_PATH : this.db.name), 'orchestration-plans', key);
+    fs.mkdirSync(directory, { recursive: true });
+    for (const document of documents) {
+      const destination = path.join(directory, document.fileName);
+      if (fs.existsSync(destination) && fs.readFileSync(destination, 'utf8') === document.content) continue;
+      fs.writeFileSync(destination, document.content, 'utf8');
+    }
+    return documents;
+  }
+
   getOrchestrationSnapshot(runId: string): OrchestrationSnapshot | undefined {
     const workspaceId = this.workspaceId();
     const row = this.db.prepare('SELECT * FROM orchestration_runs WHERE workspace_id = ? AND id = ?').get(workspaceId, runId) as any;
@@ -4769,6 +4830,7 @@ export class SQLiteService {
       }
       const plan = parseOrchestrationPlan(input.plan);
       if (plan.tasks.length > MAX_PLAN_TASKS || plan.goal !== snapshot.run.plan.goal ||
+          plan.schemaVersion !== snapshot.run.plan.schemaVersion || !isDeepStrictEqual(plan.milestones, snapshot.run.plan.milestones) ||
           JSON.stringify(plan.exclusions) !== JSON.stringify(snapshot.run.plan.exclusions) ||
           JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements)) {
         throw new Error('A review correction cannot change the authorized goal, exclusions, requirements, or task ceiling.');
@@ -4982,6 +5044,7 @@ export class SQLiteService {
 
       const plan = parseOrchestrationPlan(input.plan);
       if (plan.tasks.length > MAX_PLAN_TASKS || plan.goal !== snapshot.run.plan.goal ||
+          plan.schemaVersion !== snapshot.run.plan.schemaVersion || !isDeepStrictEqual(plan.milestones, snapshot.run.plan.milestones) ||
           JSON.stringify(plan.exclusions) !== JSON.stringify(snapshot.run.plan.exclusions) ||
           JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements)) {
         throw new Error('A final-validation correction cannot change the approved goal, exclusions, requirements, or task ceiling.');
@@ -6120,14 +6183,18 @@ export class SQLiteService {
   }
 
   reconcileInterruptedAgentCalls(now = new Date().toISOString()): string[] {
-    const interrupted = this.db.prepare(`SELECT id FROM agent_calls
-      WHERE origin = 'agent_call' AND status IN ('queued', 'running') ORDER BY created_at`)
-      .all() as Array<{ id: string }>;
+    // Chat replies count too: a reply left "running" after a restart kept the composer in
+    // "queue a direction for the current agent" mode, and every message was refused.
+    const interrupted = this.db.prepare(`SELECT id, origin FROM agent_calls
+      WHERE origin IN ('agent_call', 'chat_turn') AND status IN ('queued', 'running') ORDER BY created_at`)
+      .all() as Array<{ id: string; origin: string }>;
     const reconcile = this.db.transaction(() => {
       for (const call of interrupted) {
         this.updateAgentCallRow(call.id, {
           status: 'failed',
-          error: 'This independent call was interrupted when Alpha stopped. Review its saved activity and run it again if needed.',
+          error: call.origin === 'chat_turn'
+            ? 'This reply was interrupted when Alpha stopped. Send the message again to get an answer.'
+            : 'This independent call was interrupted when Alpha stopped. Review its saved activity and run it again if needed.',
           completedAt: now
         });
         this.db.prepare('DELETE FROM project_code_execution_locks WHERE owner_call_id = ?').run(call.id);

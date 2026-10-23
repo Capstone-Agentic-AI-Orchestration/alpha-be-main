@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
@@ -61,6 +62,9 @@ export function getOrchestrationFinalValidationEvidence(
   snapshot: OrchestrationSnapshot,
   store: SQLiteService = sqliteService
 ): FinalValidationEvidence {
+  if (snapshot.run.plan.milestones?.some(milestone => !snapshot.run.plan.tasks.some(task => task.milestoneId === milestone.id))) {
+    throw new Error('The approved milestone roadmap is incomplete. Publication is unavailable.');
+  }
   const event = runWithWorkspace(snapshot.run.workspaceId, () =>
     store.listOrchestrationEvents(snapshot.run.id, 0, 500)
   ).reverse().find(candidate => {
@@ -209,4 +213,112 @@ export async function getOrchestrationDiffPreview(
     throw new Error('No committed task checkpoint is available to review yet. Alpha will preserve the branch and show its failure details in the project chat.');
   }
   return { ...primary, reviewType: validated ? 'validated' : 'saved_checkpoint', repositories: previews };
+}
+
+export interface OrchestrationLiveFileChange {
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  additions: number;
+  deletions: number;
+}
+
+export interface OrchestrationLiveChanges {
+  generatedAt: string;
+  repositories: Array<{
+    repository: string;
+    branchName: string;
+    baseCommit: string;
+    files: OrchestrationLiveFileChange[];
+    filesTruncated: boolean;
+    diff: string;
+    truncated: boolean;
+  }>;
+}
+
+const MAX_LIVE_UNTRACKED_FILES = 60;
+const MAX_LIVE_UNTRACKED_BYTES = 400_000;
+const MAX_LIVE_UNTRACKED_LINES = 600;
+
+/** A git-style "new file" diff for a file git does not track yet, so it reads like the rest. */
+async function untrackedFileDiff(worktree: string, relative: string): Promise<{ diff: string; additions: number }> {
+  const header = `diff --git a/${relative} b/${relative}\nnew file mode 100644\n--- /dev/null\n+++ b/${relative}\n`;
+  const file = path.resolve(worktree, relative);
+  if (!file.startsWith(worktree + path.sep)) return { diff: '', additions: 0 };
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat?.isFile()) return { diff: '', additions: 0 };
+  if (stat.size > MAX_LIVE_UNTRACKED_BYTES) return { diff: header + `@@ new file, ${stat.size} bytes; too large to preview @@\n`, additions: 0 };
+  const content = await fs.readFile(file);
+  if (content.includes(0)) return { diff: header + '@@ binary file @@\n', additions: 0 };
+  const lines = content.toString('utf8').replace(/\r\n/g, '\n').split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const shown = lines.slice(0, MAX_LIVE_UNTRACKED_LINES);
+  const more = lines.length > shown.length ? `\n@@ ${lines.length - shown.length} more lines not shown @@` : '';
+  return { diff: header + `@@ -0,0 +1,${lines.length} @@\n` + shown.map(line => '+' + line).join('\n') + more + '\n', additions: lines.length };
+}
+
+/**
+ * What the agents have changed so far, read straight from each build worktree:
+ * committed checkpoints, edits still in progress and new files git does not track yet,
+ * all against the commit the build started from. Read-only; it never stages anything.
+ */
+export async function getOrchestrationLiveChanges(
+  snapshot: OrchestrationSnapshot,
+  store: SQLiteService = sqliteService
+): Promise<OrchestrationLiveChanges> {
+  const workspaces = snapshot.run.repositoryWorkspaces?.length
+    ? snapshot.run.repositoryWorkspaces
+    : [repositoryWorkspaceForRun(snapshot.run, snapshot.run.repository)].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const repositories: OrchestrationLiveChanges['repositories'] = [];
+  for (const workspace of workspaces) {
+    const worktree = path.resolve(workspace.worktreePath);
+    const baseCommit = workspace.baseCommit;
+    if (!baseCommit || !/^[a-f0-9]{40,64}$/i.test(baseCommit) || !store.isPathAllowed(worktree) || !(await isGitRepo(worktree))) continue;
+    const git = (args: string[]) => execFileAsync('git', args, { cwd: worktree, encoding: 'utf8', maxBuffer: MAX_DIFF_BUFFER_BYTES, windowsHide: true })
+      .then(result => String(result.stdout ?? ''))
+      .catch((error: NodeJS.ErrnoException & { stdout?: string | Buffer }) => {
+        if (error.stdout !== undefined && String(error.stdout).length) return String(error.stdout);
+        throw error;
+      });
+    let truncated = false;
+    const files = new Map<string, OrchestrationLiveFileChange>();
+    const [numstat, nameStatus, untrackedList] = await Promise.all([
+      git(['diff', '--numstat', '--no-renames', baseCommit, '--']),
+      git(['diff', '--name-status', '--no-renames', baseCommit, '--']),
+      git(['ls-files', '--others', '--exclude-standard', '-z'])
+    ]);
+    const statusByPath = new Map(nameStatus.split('\n').filter(Boolean).map(line => {
+      const [code, ...rest] = line.split('\t');
+      return [rest.join('\t'), code] as const;
+    }));
+    for (const line of numstat.split('\n').filter(Boolean)) {
+      const [added, removed, ...rest] = line.split('\t');
+      const file = rest.join('\t');
+      const code = statusByPath.get(file);
+      files.set(file, { path: file, status: code === 'A' ? 'added' : code === 'D' ? 'deleted' : 'modified', additions: Number(added) || 0, deletions: Number(removed) || 0 });
+    }
+    let diff = '';
+    try {
+      diff = await git(['diff', '--no-ext-diff', '--no-color', '--no-renames', '--unified=3', baseCommit, '--']);
+    } catch {
+      truncated = true;
+    }
+    const untracked = untrackedList.split('\0').filter(item => item && !item.startsWith('node_modules/') && !item.includes('/node_modules/'));
+    for (const file of untracked.slice(0, MAX_LIVE_UNTRACKED_FILES)) {
+      const extra = await untrackedFileDiff(worktree, file);
+      files.set(file, { path: file, status: 'added', additions: extra.additions, deletions: 0 });
+      diff += extra.diff;
+    }
+    const filesTruncated = untracked.length > MAX_LIVE_UNTRACKED_FILES || files.size > 200;
+    if (diff.length > MAX_DIFF_PREVIEW_CHARS * 2) { diff = diff.slice(0, MAX_DIFF_PREVIEW_CHARS * 2); truncated = true; }
+    repositories.push({
+      repository: workspace.repository,
+      branchName: workspace.branchName,
+      baseCommit,
+      files: [...files.values()].sort((a, b) => a.path.localeCompare(b.path)).slice(0, 200),
+      filesTruncated,
+      diff,
+      truncated
+    });
+  }
+  return { generatedAt: new Date().toISOString(), repositories };
 }

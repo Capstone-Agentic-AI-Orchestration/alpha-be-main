@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, Project, PrototypeRun } from '../models/index.js';
@@ -214,13 +215,30 @@ describe('orchestration runner adapter', () => {
     await expect(adapter.prepare(request)).rejects.toThrow('planning worktree no longer matches its recorded base commit');
   });
 
-  it('retains dirty-worktree and wrong-branch protection after acceptance', async () => {
+  it('saves a stopped attempt\'s leftovers aside, but never while a specialist is active, and keeps wrong-branch protection', async () => {
     await adapter.prepare(request);
     baseCommit = git(source, 'rev-parse', 'HEAD');
     attempts.push(acceptedAttempt('create-endpoint', commitChange('accepted implementation')));
-    fs.writeFileSync(path.join(worktree, 'uncheckpointed.txt'), 'pending work');
+    const previousHome = process.env.ALPHA_HOME;
+    process.env.ALPHA_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-preserved-'));
+    try {
+      // While a specialist is active the changes are its work in progress: never touch them.
+      attempts.push({ ...acceptedAttempt('create-endpoint', ''), id: 'attempt-active', status: 'running' });
+      fs.writeFileSync(path.join(worktree, 'uncheckpointed.txt'), 'pending work');
+      await expect(adapter.prepare(request)).rejects.toThrow('uncheckpointed changes');
+      attempts.pop();
 
-    await expect(adapter.prepare(request)).rejects.toThrow('uncheckpointed changes');
+      // With nothing active they are a stopped attempt's leftovers: saved, then cleared.
+      const prepared = await adapter.prepare(request);
+      expect(fs.existsSync(path.join(worktree, 'uncheckpointed.txt'))).toBe(false);
+      const saved = prepared.contextManifest?.preservedLeftovers as { folder: string; movedPaths: string[] };
+      expect(saved.movedPaths).toEqual(['uncheckpointed.txt']);
+      expect(fs.readFileSync(path.join(saved.folder, 'untracked', 'uncheckpointed.txt'), 'utf8')).toBe('pending work');
+    } finally {
+      if (previousHome === undefined) delete process.env.ALPHA_HOME; else process.env.ALPHA_HOME = previousHome;
+    }
+
+    fs.writeFileSync(path.join(worktree, 'uncheckpointed.txt'), 'pending work');
     git(worktree, 'add', '-A');
     git(worktree, 'commit', '-m', 'preserve pending work');
     git(worktree, 'checkout', '-b', 'unexpected-branch');

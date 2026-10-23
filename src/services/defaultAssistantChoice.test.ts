@@ -5,7 +5,7 @@ import {
   markUsageLimited,
   usageLimitFor
 } from './defaultAssistant.js';
-import { isCommandDenial, usageLimitDetail } from './cliRunner.js';
+import { isCommandDenial, NO_COMMANDS_NOTE, OUTSIDE_FILES_NOTE, toolDenialNote, usageLimitDetail } from './cliRunner.js';
 import { RuntimeEngine, ModelProvider } from '../models/index.js';
 
 const rt = (provider: ModelProvider, models: string[], isDefault = false, status: RuntimeEngine['status'] = 'online'): RuntimeEngine => ({
@@ -61,6 +61,15 @@ describe('recognising a used-up plan', () => {
     expect(isCommandDenial('Anthropic', { failureKind: 'empty', failureDetail: detail })).toBe(false);
     expect(isCommandDenial('Antigravity', { failureKind: 'empty', failureDetail: 'the CLI produced no output' })).toBe(false);
     expect(isCommandDenial('Antigravity', { failureKind: null, failureDetail: null })).toBe(false);
+  });
+
+  it('gives a refused file read its own retry note, separate from a refused command', () => {
+    const read = 'jetski: no output produced — a tool required the "read_file" permission that headless mode cannot prompt for, so it was auto-denied.';
+    const command = 'jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.';
+    expect(toolDenialNote('Antigravity', { failureKind: 'empty', failureDetail: read })).toBe(OUTSIDE_FILES_NOTE);
+    expect(toolDenialNote('Antigravity', { failureKind: 'empty', failureDetail: command })).toBe(NO_COMMANDS_NOTE);
+    expect(toolDenialNote('Anthropic', { failureKind: 'empty', failureDetail: read })).toBeUndefined();
+    expect(toolDenialNote('Antigravity', { failureKind: 'empty', failureDetail: 'the CLI produced no output' })).toBeUndefined();
   });
 
   it('reads Claude Code weekly limit, which arrives as the reply text with an error result', () => {

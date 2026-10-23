@@ -12,6 +12,8 @@ import { processManager } from './processManager.js';
 const COMBINED_CHECK_SCRIPTS = ['verify', 'check', 'validate', 'ci'] as const;
 const INDIVIDUAL_CHECK_SCRIPTS = ['test', 'typecheck', 'lint'] as const;
 const MAX_OUTPUT_CHARS = 12_000;
+/** Install errors that mean the cached package listings are out of date, not that the lockfile is wrong. */
+const STALE_METADATA = /\bETARGET\b|notarget|No matching version found|ERR_PNPM_NO_MATCHING_VERSION|ERR_PNPM_META_FETCH/i;
 
 export type VerificationStatus = 'passed' | 'failed' | 'skipped' | 'cancelled';
 
@@ -229,6 +231,14 @@ export async function runVerification(options: {
       return { status: 'cancelled', commands: [], missingScripts, summary: resultSummary([], 'cancelled') };
     }
     preparation = await runCommand(`${options.runId}-dependencies`, options.cwd, install);
+    // --prefer-offline trusts cached package listings, and a stale cache does not know a
+    // version the agent's lockfile pins from fresh registry data ("ETARGET No matching
+    // version"). Ask the registry again once before calling the dependencies broken.
+    if (preparation.exitCode !== 0 && install.args.includes('--prefer-offline') && STALE_METADATA.test(preparation.output)) {
+      const online = { ...install, args: install.args.map(arg => arg === '--prefer-offline' ? '--prefer-online' : arg) };
+      online.display = `${install.display.split(' ')[0]} ${online.args.join(' ')}`;
+      preparation = await runCommand(`${options.runId}-dependencies-online`, options.cwd, online);
+    }
     if (preparation.exitCode !== 0) {
       const detail = preparation.output.split(/\r?\n/).slice(-8).join('\n').slice(-1_500);
       return {

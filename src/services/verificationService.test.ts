@@ -121,6 +121,32 @@ describe('verificationService', () => {
     expect(spawnProcess).toHaveBeenCalledTimes(2);
   });
 
+  it('asks the registry again when a stale package cache cannot find a pinned version', async () => {
+    const cwd = fixture({ test: 'jest' });
+    fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest' }, devDependencies: { browserslist: '^4.29.4' } }), 'utf8');
+    fs.writeFileSync(path.join(cwd, 'package-lock.json'), '{}', 'utf8');
+    const calls: string[][] = [];
+    spawnProcess.mockImplementation((options: any) => {
+      calls.push(options.args);
+      const child = new EventEmitter();
+      const stale = options.args.includes('--prefer-offline');
+      queueMicrotask(() => {
+        if (stale) options.onStderr?.(Buffer.from('npm error code ETARGET\nnpm error notarget No matching version found for browserslist@4.29.4.\n'));
+        options.onExit?.(stale ? 1 : 0, null);
+      });
+      return child;
+    });
+
+    const result = await runVerification({ runId: 'run-stale-cache', cwd });
+
+    expect(result.status).toBe('passed');
+    expect(calls).toEqual([
+      ['ci', '--no-audit', '--no-fund', '--prefer-offline'],
+      ['ci', '--no-audit', '--no-fund', '--prefer-online'],
+      ['run', 'test']
+    ]);
+  });
+
   it('leaves the run unverified when the repository has no supported scripts', async () => {
     const cwd = fixture({ dev: 'vite' });
 

@@ -17,12 +17,14 @@ import {
   MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
   hasRepeatedRecoveryFailure,
   hasRepairableFinalValidationEvidence,
+  isAlphaOwnedGitBlocker,
   reportFormatCorrectionCount,
   safeRecoverySummary,
   safeRecoveryGuidance,
   workAttemptCount
 } from './orchestrationRecoveryPolicy.js';
 export { pathMatchesScope } from '../utils/pathScope.js';
+export { isAlphaOwnedGitBlocker } from './orchestrationRecoveryPolicy.js';
 
 export interface TaskAcceptanceOutcome {
   decision: 'accepted' | 'rejected' | 'blocked' | 'retrying' | 'awaiting_approval';
@@ -558,7 +560,9 @@ export class TaskAcceptanceService {
         check: 'acceptance_criteria', expected: task.acceptanceCriteria, reported: reportedCriteria
       });
     }
-    const unresolvedBlocker = report.blockers[0];
+    // Alpha stages and commits the specialist's changes itself, so a sandbox refusing the
+    // agent's own git add or commit is expected and says nothing about the task.
+    const unresolvedBlocker = report.blockers.find(blocker => !isAlphaOwnedGitBlocker(blocker));
     if (unresolvedBlocker) {
       return fail(`The specialist reported a blocker: ${unresolvedBlocker}`, {
         check: 'agent_blocker', blockers: report.blockers
@@ -681,6 +685,15 @@ export class TaskAcceptanceService {
     }
     const modifiedAcceptedPath = changedPaths.find(filePath =>
       acceptedPathOwners.has(filePath) && !restoredAcceptedPaths.has(filePath) &&
+      // A persisted later milestone is an explicit scoped plan amendment. It may
+      // evolve earlier accepted files, while same-milestone ownership stays strict.
+      !(() => {
+        const owner = snapshot.tasks.find(candidate => candidate.id === acceptedPathOwners.get(filePath)!.taskId);
+        const milestones = snapshot.run.plan.milestones ?? [];
+        const prior = milestones.findIndex(item => item.id === owner?.milestoneId);
+        const current = milestones.findIndex(item => item.id === task.milestoneId);
+        return prior >= 0 && current > prior && taskAllowsPath(task, filePath);
+      })() &&
       !(task.correctionOfTaskId && correctionPaths.has(filePath) &&
         correctionLineageTaskIds.has(acceptedPathOwners.get(filePath)!.taskId) && taskAllowsPath(task, filePath)));
     if (modifiedAcceptedPath) {
@@ -767,6 +780,9 @@ export class TaskAcceptanceService {
   ): Promise<TaskAcceptanceOutcome> {
     const current = await this.store.getOrchestrationSnapshot(snapshot.run.id);
     if (!current) throw new Error('The orchestration run disappeared before final validation.');
+    if (current.run.plan.milestones?.some(milestone => !current.run.plan.tasks.some(task => task.milestoneId === milestone.id))) {
+      throw new Error('The approved milestone roadmap is incomplete; plan and accept its remaining work before final validation.');
+    }
     const repositoryResults: Array<Record<string, unknown> & { repository: string; worktree: string; branchName: string; resultCommit: string; baseCommit: string; cumulativeChangedPaths: string[]; verification: VerificationResult }> = [];
     for (const workspace of current.run.repositoryWorkspaces?.length
       ? current.run.repositoryWorkspaces

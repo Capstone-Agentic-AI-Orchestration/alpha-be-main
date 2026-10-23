@@ -300,6 +300,11 @@ function safeOrchestrationProjection(
       updatedAt: snapshot.run.updatedAt
     },
     recovery,
+    milestones: snapshot.run.plan.milestones?.map(milestone => {
+      const tasks = snapshot.tasks.filter(task => task.milestoneId === milestone.id && task.required);
+      return { id: milestone.id, title: safeOperationalText(milestone.title, 240) ?? '',
+        status: !tasks.length ? 'unplanned' : tasks.every(task => task.status === 'accepted') ? 'accepted' : 'active' };
+    }),
     requirements: snapshot.run.plan.requirements.map(requirement => ({
       id: requirement.id,
       description: safeOperationalText(requirement.description, 360) ?? ''

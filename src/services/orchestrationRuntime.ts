@@ -8,10 +8,11 @@ import { logError, logInfo } from '../utils/logger.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
 import { orchestrationRecoveryService } from './orchestrationRecoveryService.js';
+import { milestonePlanner } from './orchestrationMilestonePlanner.js';
 
 /** One local orchestrator/runner pair for the desktop's authoritative executor. */
 export const orchestrationRunnerAdapter = new OrchestrationRunnerAdapter({ store: sqliteService });
-export const orchestrationService = new OrchestrationService(sqliteService, orchestrationRunnerAdapter);
+export const orchestrationService = new OrchestrationService(sqliteService, orchestrationRunnerAdapter, undefined, milestonePlanner(sqliteService));
 export const taskAcceptanceService = new TaskAcceptanceService(sqliteService, orchestrationService);
 
 export function startOrchestrationEventDelivery(
@@ -176,10 +177,16 @@ export async function reconcileInterruptedOrchestrations(): Promise<void> {
         await orchestrationService.handleRunnerCancelled(prototypeRun);
         continue;
       }
+      // No process id and no run record: the launch never reached a specialist, so nothing
+      // ran and the task is safe to retry. Saying so keeps the person from hunting for work.
+      const neverStarted = activeAttempt?.status === 'starting' && !activeAttempt.prototypeRunId &&
+        !runWithWorkspace(snapshot.run.workspaceId, () => sqliteService.getPrototypeRuns().some(run => run.orchestrationAttemptId === activeAttempt.id));
       runWithWorkspace(snapshot.run.workspaceId, () => sqliteService.markOrchestrationRecoveryRequired({
         runId: snapshot.run.id,
         actorId: 'orchestrator',
-        reason: 'The Alpha daemon restarted while a specialist was active. Its process is no longer attached; the branch and attempt evidence were preserved for review before a controlled retry.'
+        reason: neverStarted
+          ? 'Alpha restarted before the specialist started, so no agent ran and nothing changed. Continue to start the task again.'
+          : 'The Alpha daemon restarted while a specialist was active. Its process is no longer attached; the branch and attempt evidence were preserved for review before a controlled retry.'
       }));
     } catch (error) {
       logError(`Could not reconcile task build ${snapshot.run.id}:`, error instanceof Error ? error.message : String(error));

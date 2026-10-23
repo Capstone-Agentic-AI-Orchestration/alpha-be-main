@@ -37,6 +37,47 @@ function response(content: string): CliTurnResult {
 }
 
 describe('read-only orchestration planner', () => {
+  it('passes both reserved repository roots to read-only file tools instead of guessing sibling paths', async () => {
+    const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(plan)));
+    const roots = [
+      { name: 'org/be', repo: 'org/be', dir: 'D:/runs/reserved-be' },
+      { name: 'org/fe', repo: 'org/fe', dir: 'D:/runs/reserved-fe' }
+    ];
+    await new OrchestrationPlanner(turn).createPlan({ ...input, repositoryRoots: roots });
+    expect(turn.mock.calls[0][0]).toMatchObject({ projectRoots: roots, mcpServers: ['alpha-project-files'], skills: [] });
+    expect(turn.mock.calls[0][0].prompt).toContain('authorizedRepositoryRoots');
+    expect(turn.mock.calls[0][0].systemPrompt).toContain('Never guess sibling folders');
+  });
+
+  it('reports a permission boundary without recommending a blanket bypass', async () => {
+    const turn = vi.fn(async () => ({ ...response(''), failureKind: 'empty' as const,
+      failureDetail: 'read_file permission was auto-denied in headless mode; use --dangerously-skip-permissions' }));
+    await expect(new OrchestrationPlanner(turn).createPlan(input)).rejects.toThrow('outside its read-only repository access');
+    expect(turn).toHaveBeenCalledTimes(1);
+  });
+  it('uses one model call for a roadmap and details only its first milestone', async () => {
+    const roadmap = { ...plan, schemaVersion: 2, requirements: [...plan.requirements, { id: 'REQ-CLIENT', description: 'Use the accepted API.' }],
+      milestones: [
+        { id: 'api', title: 'API', objective: 'Implement task creation.', requirementIds: ['REQ-CREATE'], repositories: ['acme/api'] },
+        { id: 'client', title: 'Client', objective: 'Use the accepted API.', requirementIds: ['REQ-CLIENT'], repositories: ['acme/client'] }
+      ], tasks: plan.tasks.map(task => ({ ...task, buildStepId: undefined, repository: 'acme/api', milestoneId: 'api' })) };
+    const turn = vi.fn(async () => response(JSON.stringify(roadmap)));
+    const result = await new OrchestrationPlanner(turn).createPlan({ ...input, buildSteps: [], repositories: [
+      { repository: 'acme/api', repositoryContext: 'API scaffold', availableScripts: ['test'] },
+      { repository: 'acme/client', repositoryContext: 'Client scaffold', availableScripts: ['test'] }
+    ] });
+    expect(turn).toHaveBeenCalledTimes(1);
+    expect(result.plan.schemaVersion).toBe(2);
+    expect(result.plan.tasks).toHaveLength(1);
+  });
+
+  it('passes accepted evidence and rejects changed requirements in a continuation', async () => {
+    const turn = vi.fn(async () => response(JSON.stringify({ ...plan, requirements: [{ id: 'UNAUTHORIZED', description: 'Unrelated work' }] })));
+    await expect(new OrchestrationPlanner(turn).createPlan({ ...input, buildSteps: [], approvedRequirements: plan.requirements,
+      milestoneContext: { id: 'api', title: 'API', objective: 'Implement task creation' }, acceptedEvidence: 'Accepted service exports createTask(title).' })).rejects.toThrow(/approved milestone requirements/);
+    expect(turn).toHaveBeenCalledTimes(2);
+    expect(turn.mock.calls[0]?.length).toBeGreaterThan(0);
+  });
   it('validates role, checks, scope, and project-step mapping before returning the plan', async () => {
     let request: CliTurnOptions | undefined;
     const planner = new OrchestrationPlanner(async options => {
@@ -51,10 +92,11 @@ describe('read-only orchestration planner', () => {
     expect(result.plan.tasks[0].buildStepId).toBe('step-api');
     expect(result.planHash).toMatch(/^[a-f0-9]{64}$/);
     expect(request).toMatchObject({
-      mode: 'chat', skills: [], mcpServers: [], priorSession: null,
+      mode: 'chat', skills: [], mcpServers: ['alpha-project-files'], priorSession: null,
       provider: 'OpenAI', modelName: 'fixture-model', cwd: input.cwd
     });
     expect(request?.systemPrompt).toContain('read-only planning orchestrator');
+    expect(request?.projectRoots).toEqual([{ name: 'planning', repo: 'planning', dir: input.cwd }]);
     expect(request?.prompt).toContain('"projectContext": "Keep the workflow keyboard accessible."');
     expect(request?.prompt).toContain('task.kind = requirements, architecture, database, backend, frontend, mobile, review, validation, delivery');
     expect(request?.prompt).toContain('task.requiredChecks = verify, check, validate, ci, test, typecheck, lint');

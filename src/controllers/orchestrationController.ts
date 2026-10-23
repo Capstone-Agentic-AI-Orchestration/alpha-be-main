@@ -2,7 +2,7 @@ import { Request, Response, Router } from 'express';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
 import { projectStore } from '../store/stores.js';
 import { sqliteService } from '../services/sqliteService.js';
-import { getOrchestrationDiffPreview } from '../services/orchestrationReviewService.js';
+import { getOrchestrationDiffPreview, getOrchestrationLiveChanges } from '../services/orchestrationReviewService.js';
 import { inspectOrchestrationPlanningWorktree, getOrchestrationPlanningRecoveryPreview, removeStaleOrchestrationPlanningWorktree } from '../services/orchestrationPlanningRecovery.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
@@ -62,6 +62,14 @@ orchestrationRouter.get('/issues/build-status', desktopOnly, route(async (req: R
     .map(project => project.id)
     .filter(projectId => workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, projectId));
   res.json(runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.listLatestIssueBuilds(projectIds)));
+}));
+
+orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/plans', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'squad.read')) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const documents = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.ensureOrchestrationPlanDocuments(snapshot.run.id));
+  res.json({ documents });
 }));
 
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery', desktopOnly, route(async (req: Request, res: Response) => {
@@ -175,6 +183,19 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/diff', deskt
   if (!snapshot) return;
   try {
     res.json(await getOrchestrationDiffPreview(snapshot));
+  } catch (error) {
+    errorResponse(res, error);
+  }
+}));
+
+/** Live edits for the chat's side panel: what each worktree holds now, compared with where the build started. */
+orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/live-changes', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res)) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(await getOrchestrationLiveChanges(snapshot));
   } catch (error) {
     errorResponse(res, error);
   }
@@ -345,7 +366,8 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
   const pausedByKillSwitch = snapshot.run.status === 'blocked' &&
     /orchestrator is (?:disabled|unavailable)/i.test(snapshot.run.stoppedReason || '');
   const needsRecovery = snapshot.run.status === 'recovery_required';
-  if (snapshot.run.currentTaskId || (!userPaused && !pausedByKillSwitch && !needsRecovery)) {
+  const milestonePlanningStopped = snapshot.run.status === 'blocked' && /^(Milestone planning stopped|Plan document could not be saved) before dispatch:/.test(snapshot.run.stoppedReason ?? '');
+  if (snapshot.run.currentTaskId || (!userPaused && !pausedByKillSwitch && !needsRecovery && !milestonePlanningStopped)) {
     return res.status(409).json({ error: 'This build is not paused at a resumable checkpoint.' });
   }
   try {

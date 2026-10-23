@@ -87,7 +87,7 @@ function activeBuildReason(status: string, repository: string): string {
 }
 
 /** Resolve an intentionally unpinned role to the first model in its live runtime catalog. */
-function plannerModelName(provider: string, configuredModel: string, runtimes: RuntimeEngine[]): string {
+export function plannerModelName(provider: string, configuredModel: string, runtimes: RuntimeEngine[]): string {
   const pinned = configuredModel.trim();
   if (pinned) return pinned;
   const matching = runtimes.filter(candidate => provider === 'Google Gemini'
@@ -186,7 +186,7 @@ function orchestrationBranchName(runId: string): string {
   return `alpha/orchestration/${suffix}`;
 }
 
-function repositoryPlanningContext(repositoryDir: string): { context: string; scripts: string[] } {
+export function repositoryPlanningContext(repositoryDir: string): { context: string; scripts: string[] } {
   const visibleEntries = fs.readdirSync(repositoryDir, { withFileTypes: true })
     .filter(entry => !['.git', 'node_modules', '.next', 'dist', 'build'].includes(entry.name))
     .slice(0, 50)
@@ -445,6 +445,7 @@ async function startOrchestratedProjectBuild(input: {
     planned = await planner.createPlan({
       runId: reservation.runId,
       cwd: reservation.worktreePath,
+      repositoryRoots: reservations.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })),
       goal: cleanGoal,
       // The team's playbook and the detected stack, read from the planning checkouts.
       projectContext: composeProjectContext({
