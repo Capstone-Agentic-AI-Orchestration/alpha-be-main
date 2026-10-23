@@ -37,6 +37,7 @@ function aCheckout(name: string, origin?: string): string {
 
 async function startApi() {
   process.env.ALPHA_HOME = path.join(tmp, 'home');
+  process.env.ALPHA_CODE_FOLDER = path.join(tmp, 'AlphaProjects');
   delete process.env.ALPHA_MODE;
   vi.resetModules();
 
@@ -292,7 +293,9 @@ describe('binding a project to a folder', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
-    expect(res.body[0]).toMatchObject({ projectId: 'p1', repo: 'acme/checkout', isManaged: true });
+    // Into the project's own folder, and not Alpha's to reset or delete.
+    expect(res.body[0]).toMatchObject({ projectId: 'p1', repo: 'acme/checkout', isManaged: false });
+    expect(path.dirname(res.body[0].localDir)).toBe(path.join(process.env.ALPHA_CODE_FOLDER!, 'Checkout'));
     expect(cloned).toHaveLength(1);
     expect(fs.existsSync(path.join(res.body[0].localDir, '.git'))).toBe(true);
   });
@@ -313,8 +316,7 @@ describe('binding a project to a folder', () => {
   it('leaves a folder it did not create alone', async () => {
     const { app, svc } = await startApi();
     await withProject(svc);
-    const { clonePathFor } = await import('../services/workspaceService.js');
-    const target = clonePathFor('acme/checkout').dir;
+    const target = path.join(process.env.ALPHA_CODE_FOLDER!, 'Checkout', 'checkout');
     fs.mkdirSync(target, { recursive: true });
     fs.writeFileSync(path.join(target, 'notes.txt'), 'mine');
 

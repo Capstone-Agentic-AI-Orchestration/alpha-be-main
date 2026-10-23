@@ -9,6 +9,7 @@ import { sqliteService } from './sqliteService.js';
 import { logInfo } from '../utils/logger.js';
 import { clonePathFor, isEmptyOrMissing, isExistingCheckout, resolveProjectWorkspace } from './workspaceService.js';
 import { checkoutStatus, type CheckoutStatus } from './localCheckout.js';
+import { ensureProjectFolder, originOf } from './projectFolders.js';
 
 /**
  * Binding a project to a folder on this machine.
@@ -208,15 +209,23 @@ export async function cloneAndBindProject(project: Project, repo?: string): Prom
     const existing = resolveProjectWorkspace(project, ownerRepo);
     if (!repo && existing && isExistingCheckout(existing.dir)) continue;
 
-    const { dir } = clonePathFor(ownerRepo);
+    // Into the project's folder on this computer, where the developer and the
+    // Orchestrator both look for it: <projects folder>\<project>\<repository>.
+    const dir = path.join(ensureProjectFolder(project), clonePathFor(ownerRepo).repo);
     if (!isExistingCheckout(dir)) {
       if (!isEmptyOrMissing(dir)) {
         throw new BindingError(`${dir} already holds something that is not a checkout.`, 'invalid_folder');
       }
       await githubService.cloneRepository(ownerRepo, path.dirname(dir));
       logInfo(`Cloned ${ownerRepo} for ${project.key || project.name}`);
+    } else {
+      const origin = originOf(dir);
+      if (origin && origin.toLowerCase() !== ownerRepo.toLowerCase()) {
+        throw new BindingError(`${dir} is a copy of ${origin}, not ${ownerRepo}.`, 'wrong_repository');
+      }
     }
-    bound.push(await bindProject(project, dir, { managed: true, repo: ownerRepo }));
+    // Not managed: this is the developer's folder, so Alpha never resets or deletes it.
+    bound.push(await bindProject(project, dir, { managed: false, repo: ownerRepo }));
   }
   return bound;
 }

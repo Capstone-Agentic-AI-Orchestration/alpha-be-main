@@ -33,6 +33,7 @@ vi.mock('./projectBindings.js', async importOriginal => ({
 
 import {
   codeFolder,
+  ensureDefaultProjectFolders,
   folderName,
   locateProjectRepositories,
   originOf,
@@ -69,6 +70,20 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
 
 describe('project folders', () => {
+  it('creates the projects folder and each default project folder, and leaves a chosen one alone', () => {
+    setCodeFolder(path.join(base, 'AlphaProjects'));
+    const chosen = path.join(base, 'other-drive', 'money');
+    setProjectFolder({ id: 'p2', name: 'Money tracker', key: 'MON' }, chosen);
+
+    const created = ensureDefaultProjectFolders([project, { id: 'p2', name: 'Money tracker', key: 'MON' }]);
+
+    expect(created).toEqual([path.join(base, 'AlphaProjects', 'Test-Project')]);
+    expect(fs.existsSync(path.join(base, 'AlphaProjects', 'Test-Project'))).toBe(true);
+    expect(fs.existsSync(chosen)).toBe(false);
+    // Already there: nothing new, and nothing thrown.
+    expect(ensureDefaultProjectFolders([project])).toEqual([]);
+  });
+
   it('names folders safely and adds the key when two projects share a name', () => {
     expect(folderName('Test Project')).toBe('Test-Project');
     expect(folderName('a/b:c?')).toBe('a-b-c-');

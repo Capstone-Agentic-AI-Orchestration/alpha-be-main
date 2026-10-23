@@ -47,7 +47,7 @@
 import { createInterface } from 'node:readline';
 
 import { githubService } from '../services/githubService.js';
-import { cloneToWorkspace } from '../services/repoCloneService.js';
+import { cloneIntoProjectFolder, cloneToWorkspace } from '../services/repoCloneService.js';
 import { getCurrentBranch, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -177,6 +177,22 @@ interface ToolDef {
 const ACCESS: 'read' | 'write' = process.env.ALPHA_MCP_ACCESS === 'write' ? 'write' : 'read';
 
 const permitted = (t: ToolDef) => t.access !== 'write' || ACCESS === 'write';
+
+/**
+ * The selected project's folder on this computer and its repositories, when
+ * the turn has a project. Its repositories are cloned there; anything else
+ * goes to Alpha's own workspace as before.
+ */
+const PROJECT_FOLDER = process.env.ALPHA_PROJECT_FOLDER?.trim() || '';
+const PROJECT_REPOS: string[] = (() => {
+  try {
+    const parsed = JSON.parse(process.env.ALPHA_PROJECT_REPOS ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+})();
+const inProject = (repo: string) => PROJECT_FOLDER !== '' && PROJECT_REPOS.some(item => item.toLowerCase() === repo.trim().toLowerCase());
 
 const str = (description: string) => ({ type: 'string', description });
 const int = (description: string, min: number, max: number) => ({
@@ -464,7 +480,7 @@ const TOOLS: Record<string, ToolDef> = {
 
   github_clone_repository: {
     description:
-      'Clone a repository onto this machine so its files can be worked on locally. Alpha chooses the destination inside its managed workspace — do not ask for a path and do not run git yourself. Cloning a repository that is already checked out refreshes it instead. Returns the local path.',
+      "Clone a repository onto this machine so its files can be worked on locally. Alpha chooses the destination — do not ask for a path and do not run git yourself. The selected project's repositories go into the project's folder on this computer, and a copy already there is left untouched. Other repositories go into Alpha's managed workspace, where an existing checkout is refreshed. Returns the local path.",
     inputSchema: schema(
       {
         repo: str('Repository as owner/name'),
@@ -473,13 +489,17 @@ const TOOLS: Record<string, ToolDef> = {
       ['repo']
     ),
     run: async ({ repo, ref }) => {
-      const result = await cloneToWorkspace(repo, ref);
+      const result = inProject(repo)
+        ? await cloneIntoProjectFolder(repo, PROJECT_FOLDER, ref)
+        : await cloneToWorkspace(repo, ref);
       return {
         ...result,
         note:
-          result.action === 'refreshed'
-            ? 'An existing checkout was reset to the remote state.'
-            : 'Cloned fresh.'
+          result.action === 'existing'
+            ? "Already in the project's folder; left as it was."
+            : result.action === 'refreshed'
+              ? 'An existing checkout was reset to the remote state.'
+              : inProject(repo) ? "Cloned into the project's folder." : 'Cloned fresh.'
       };
     }
   },

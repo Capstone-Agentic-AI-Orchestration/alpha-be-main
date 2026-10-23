@@ -32,6 +32,8 @@ import {
 import {
   codeFolder,
   defaultCodeFolder,
+  ensureAllProjectFolders,
+  ensureDefaultProjectFolders,
   ensureProjectFolder,
   locateProjectRepositories,
   setCodeFolder,
@@ -239,6 +241,8 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
        * refused when it is shared. Squads were removed and are not published.
        */
       for (const agent of pulled.unpublished.agents) await supabaseService.shareAgent(agent);
+      // Every project that reached this computer gets its folder.
+      runWithWorkspace(req.workspace!.workspaceId, () => ensureDefaultProjectFolders(sqliteService.getProjects()));
       res.json(asSyncReport(pulled));
     } catch (err: any) {
       /**
@@ -330,6 +334,8 @@ dataRouter.post('/projects', route(async (req: Request, res: Response) => {
     createdBy: req.workspace!.userId
   });
   workspaceRegistry.bind('projects', project.id, req.workspace!.workspaceId);
+  // On a desktop, the project's folder exists from the moment the project does.
+  if (!IS_CLOUD) runWithWorkspace(workspaceId, () => ensureDefaultProjectFolders([project]));
   // On a team's desktop, onto the team's board: nobody else sees it otherwise.
   await supabaseService.shareProject(project);
   res.status(201).json(project);
@@ -432,12 +438,79 @@ dataRouter.post('/projects/:id/clone-to', desktopOnly, route(async (req: Request
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    res.json({ results: await cloneProjectInto(project, req.body?.intoDir, req.body?.repos, req.body?.bind === true) });
+    // No folder named: the project's own folder.
+    const intoDir = typeof req.body?.intoDir === 'string' && req.body.intoDir.trim() ? req.body.intoDir : ensureProjectFolder(project);
+    res.json({ results: await cloneProjectInto(project, intoDir, req.body?.repos, req.body?.bind === true) });
   } catch (err) {
     if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
     throw err;
   }
 }));
+
+/**
+ * The project's folder on this computer, and each repository's state there:
+ * registered, found in the project folder, moved, or missing. Looks in two
+ * places only -- the registered folder and <project folder>\<repository> --
+ * so it answers at once.
+ */
+dataRouter.get('/projects/:id/folder', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  ensureDefaultProjectFolders([project]);
+  res.json(locateProjectRepositories(project));
+}));
+
+/** Choose the project's folder on this computer; `dir: null` goes back to the default. */
+dataRouter.put('/projects/:id/folder', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    setProjectFolder(project, req.body?.dir ?? null);
+    ensureDefaultProjectFolders([project]);
+    res.json(locateProjectRepositories(project));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+}));
+
+/** Use the copy of `repo` found in the project folder, so builds branch from it too. */
+dataRouter.post('/projects/:id/folder/use', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    await useFoundCopy(project, req.body?.repo);
+    res.json(locateProjectRepositories(project));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+}));
+
+/** This computer's code folder: where project folders go unless one is chosen. */
+dataRouter.get('/machine/code-folder', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  res.json({ codeFolder: codeFolder(), defaultCodeFolder: defaultCodeFolder() });
+});
+
+dataRouter.put('/machine/code-folder', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  try {
+    setCodeFolder(req.body?.dir ?? null);
+    // The new place gets every project's folder straight away.
+    ensureAllProjectFolders();
+    res.json({ codeFolder: codeFolder(), defaultCodeFolder: defaultCodeFolder() });
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+});
 
 /**
  * What state this machine's checkout is in.

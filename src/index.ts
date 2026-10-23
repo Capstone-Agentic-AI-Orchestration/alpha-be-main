@@ -37,6 +37,7 @@ import { sqliteService } from './services/sqliteService.js';
 import { ensureAgentFiles } from './services/agentFileService.js';
 import { ensureMemoryScaffold } from './services/memoryService.js';
 import { logInfo, logError } from './utils/logger.js';
+import { codeFolder, ensureAllProjectFolders } from './services/projectFolders.js';
 import { DEFAULT_WORKSPACE_ID, runWithWorkspace } from './services/workspaceContext.js';
 import { createTicketPmReadRouteBoundary } from './controllers/ticketPmReadRouteFactory.js';
 import { createTicketUnavailableRouter } from './controllers/ticketUnavailableRouter.js';
@@ -572,6 +573,13 @@ function onListening(): void {
   // Resolve who is using this copy, so the first issue anyone creates does not
   // pay for a `gh` subprocess.
   warmIdentity();
+
+  // Every project has a folder on this computer before anything is cloned:
+  // Documents\AlphaProjects\<project>, unless the code folder was moved.
+  if (IS_DESKTOP) {
+    const created = ensureAllProjectFolders();
+    if (created.length) logInfo(`Created ${created.length} project folder(s) under ${codeFolder()}`);
+  }
 
   /**
    * Give legacy conversations an owner.

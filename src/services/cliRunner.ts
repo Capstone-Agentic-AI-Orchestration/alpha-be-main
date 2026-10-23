@@ -121,6 +121,8 @@ export interface CliTurnOptions {
    * on the disk. See projectFiles.
    */
   projectRoots?: ProjectRoot[];
+  /** The selected project's folder and repositories, where the clone tool puts that project's code. */
+  projectFolder?: { dir: string; repos: string[] };
   /**
    * Values layered over the daemon's environment when resolving `${VAR}` in
    * those servers — the project's, then the agent's own.
@@ -884,7 +886,8 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
     options.cwd,
     mcpAccessFor(options.autonomyLevel, options.mode ?? 'chat', options.skills),
     undefined,
-    options.projectRoots
+    options.projectRoots,
+    options.projectFolder
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
