@@ -13,6 +13,7 @@ import {
   promote,
   RepoWorkspaceError
 } from '../services/githubRepoWorkspace.js';
+import { getRepoArchitecture } from '../services/githubRepoArchitecture.js';
 import { deleteProjectRepository, RepoDeletionError } from '../services/repoDeletionService.js';
 import type { Project } from '../models/index.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -95,6 +96,11 @@ projectRepoRouter.get(
 projectRepoRouter.get(
   '/projects/:id/repos/:owner/:name/tree',
   withProjectRepo(async (req, res, repo) => res.json(await getTree(repo, query(req, 'ref') ?? 'dev')))
+);
+
+projectRepoRouter.get(
+  '/projects/:id/repos/:owner/:name/architecture',
+  withProjectRepo(async (_req, res, repo) => res.json(await getRepoArchitecture(repo)))
 );
 
 projectRepoRouter.get(
