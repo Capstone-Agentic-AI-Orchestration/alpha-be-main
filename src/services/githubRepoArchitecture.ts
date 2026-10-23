@@ -143,52 +143,74 @@ function technologyFor(names: string[], patterns: Array<[RegExp, string]>): stri
   return patterns.find(([pattern]) => pattern.test(joined))?.[1];
 }
 
-function detectArchitecture(files: string[], contentByPath: Map<string, string>): Pick<RepoArchitecture, 'nodes' | 'edges'> {
-  const paths = files.map(path => path.toLowerCase());
-  const names = dependencyNames(contentByPath);
-  const pathAndDependencySignals = `${names.join('\n')}\n${paths.join('\n')}`;
+function hasWebPath(paths: string[]): boolean {
+  const directories = /(?:^|\/)(?:frontend|client|web|ui)(?:\/|$)/;
+  const pageComponents = /(?:^|\/)(?:pages|components)\/.*\.(?:tsx|jsx|vue|svelte)$/;
+  return paths.some(path => directories.test(path) || pageComponents.test(path));
+}
+
+function hasServerPath(paths: string[]): boolean {
+  return paths.some(path => /(?:^|\/)(?:api|server|backend|controllers|routes|handlers)(?:\/|$)/.test(path));
+}
+
+function fallbackTechnology(paths: string[]): string | undefined {
+  if (paths.some(path => path.endsWith('.py'))) return 'Python';
+  if (paths.some(path => path.endsWith('.go'))) return 'Go';
+  if (paths.some(path => /\.(?:ts|tsx|js|jsx)$/.test(path))) return 'JavaScript / TypeScript';
+  return undefined;
+}
+
+function applicationNodes(paths: string[], names: string[]): ArchitectureNode[] {
   const nodes: ArchitectureNode[] = [];
-
   const clientTechnology = technologyFor(names, FRAMEWORKS.slice(0, 4));
-  const hasWeb = Boolean(clientTechnology) || /(?:^|\/)(?:frontend|client|web|ui)(?:\/|$)/.test(paths.join('\n')) ||
-    paths.some(path => /(?:^|\/)(?:pages|components)\/.*\.(?:tsx|jsx|vue|svelte)$/.test(path));
-
   const apiTechnology = technologyFor(names, FRAMEWORKS.slice(4));
-  const hasServerPath = paths.some(path => /(?:^|\/)(?:api|server|backend|controllers|routes|handlers)(?:\/|$)/.test(path));
-  const hasBackend = Boolean(apiTechnology) || hasServerPath;
 
-  if (hasWeb) nodes.push({ id: 'web', label: 'Web client', kind: 'web', ...(clientTechnology ? { technology: clientTechnology } : {}) });
-  if (hasBackend) nodes.push({ id: 'api', label: 'API server', kind: 'api', ...(apiTechnology ? { technology: apiTechnology } : {}) });
+  if (clientTechnology || hasWebPath(paths)) {
+    nodes.push({ id: 'web', label: 'Web client', kind: 'web', ...(clientTechnology ? { technology: clientTechnology } : {}) });
+  }
+  if (apiTechnology || hasServerPath(paths)) {
+    nodes.push({ id: 'api', label: 'API server', kind: 'api', ...(apiTechnology ? { technology: apiTechnology } : {}) });
+  }
   if (!nodes.length) {
-    const language = paths.some(path => path.endsWith('.py')) ? 'Python' : paths.some(path => path.endsWith('.go')) ? 'Go' :
-      paths.some(path => /\.(?:ts|tsx|js|jsx)$/.test(path)) ? 'JavaScript / TypeScript' : undefined;
+    const language = fallbackTechnology(paths);
     nodes.push({ id: 'application', label: 'Application', kind: 'application', ...(language ? { technology: language } : {}) });
   }
+  return nodes;
+}
 
-  const authTechnology = technologyFor(names, AUTH_PROVIDERS);
+function authNode(paths: string[], names: string[]): ArchitectureNode | undefined {
+  const technology = technologyFor(names, AUTH_PROVIDERS);
   const hasAuthFiles = paths.some(path => /(?:^|\/)(?:auth|authentication|oauth)(?:\/|\.|$)/.test(path));
-  if (authTechnology || hasAuthFiles) nodes.push({ id: 'auth', label: 'Auth', kind: 'auth', ...(authTechnology ? { technology: authTechnology } : {}) });
+  if (!technology && !hasAuthFiles) return undefined;
+  return { id: 'auth', label: 'Auth', kind: 'auth', ...(technology ? { technology } : {}) };
+}
 
+function databaseNode(paths: string[], names: string[], contentByPath: Map<string, string>): ArchitectureNode | undefined {
   const databaseConfig = [...contentByPath]
     .filter(([path]) => /(?:schema\.prisma|docker-compose|drizzle\.config)/i.test(path))
     .map(([, content]) => content)
     .join('\n');
-  let databaseTechnology = technologyFor([...names, databaseConfig], DATABASES);
-  if (!databaseTechnology && /(?:^|\/)(?:migrations?|prisma|drizzle)(?:\/|$)|schema\.sql$/.test(paths.join('\n'))) {
-    databaseTechnology = 'Database';
-  }
-  if (databaseTechnology) nodes.push({ id: 'database', label: databaseTechnology, kind: 'database' });
+  let technology = technologyFor([...names, databaseConfig], DATABASES);
+  const hasDatabasePaths = /(?:(?:^|\/)(?:migrations?|prisma|drizzle)(?:\/|$)|schema\.sql$)/.test(paths.join('\n'));
+  if (!technology && hasDatabasePaths) technology = 'Database';
+  return technology ? { id: 'database', label: technology, kind: 'database' } : undefined;
+}
 
-  const jobsTechnology = technologyFor(names, JOB_QUEUES);
+function jobsNode(paths: string[], names: string[]): ArchitectureNode | undefined {
+  const technology = technologyFor(names, JOB_QUEUES);
   const hasJobsFiles = paths.some(path => /(?:^|\/)(?:jobs?|workers?|queues?|cron)(?:\/|\.|$)/.test(path));
-  if (jobsTechnology || hasJobsFiles) nodes.push({ id: 'jobs', label: 'Background jobs', kind: 'jobs', ...(jobsTechnology ? { technology: jobsTechnology } : {}) });
+  if (!technology && !hasJobsFiles) return undefined;
+  return { id: 'jobs', label: 'Background jobs', kind: 'jobs', ...(technology ? { technology } : {}) };
+}
 
-  const integrations = INTEGRATIONS
-    .filter(([pattern]) => pattern.test(pathAndDependencySignals))
+function integrationNodes(signals: string): ArchitectureNode[] {
+  return INTEGRATIONS
+    .filter(([pattern]) => pattern.test(signals))
     .slice(0, 2)
     .map(([, label], index): ArchitectureNode => ({ id: `integration-${index + 1}`, label, kind: 'integration' }));
-  nodes.push(...integrations);
+}
 
+function architectureEdges(nodes: ArchitectureNode[], integrations: ArchitectureNode[]): ArchitectureEdge[] {
   const edges: ArchitectureEdge[] = [];
   const app = nodes.find(node => node.kind === 'api') ?? nodes.find(node => node.kind === 'web') ?? nodes[0]!;
   for (const target of nodes.filter(node => ['auth', 'database', 'jobs'].includes(node.kind))) {
@@ -196,13 +218,71 @@ function detectArchitecture(files: string[], contentByPath: Map<string, string>)
   }
   const integrationSource = nodes.find(node => node.kind === 'jobs') ?? nodes.find(node => node.kind === 'api') ?? app;
   for (const target of integrations) edges.push({ from: integrationSource.id, to: target.id });
+  return edges;
+}
 
-  if (nodes.length > 8) {
-    const kept = nodes.slice(0, 8);
-    const ids = new Set(kept.map(node => node.id));
-    return { nodes: kept, edges: edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)) };
+function limitArchitecture(nodes: ArchitectureNode[], edges: ArchitectureEdge[]): Pick<RepoArchitecture, 'nodes' | 'edges'> {
+  if (nodes.length <= 8) return { nodes, edges };
+  const kept = nodes.slice(0, 8);
+  const ids = new Set(kept.map(node => node.id));
+  return { nodes: kept, edges: edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)) };
+}
+
+function detectArchitecture(files: string[], contentByPath: Map<string, string>): Pick<RepoArchitecture, 'nodes' | 'edges'> {
+  const paths = files.map(path => path.toLowerCase());
+  const names = dependencyNames(contentByPath);
+  const signals = `${names.join('\n')}\n${paths.join('\n')}`;
+  const integrations = integrationNodes(signals);
+  const nodes = [
+    ...applicationNodes(paths, names),
+    authNode(paths, names),
+    databaseNode(paths, names, contentByPath),
+    jobsNode(paths, names),
+    ...integrations,
+  ].filter((node): node is ArchitectureNode => node !== undefined);
+  return limitArchitecture(nodes, architectureEdges(nodes, integrations));
+}
+
+async function readSelectedFile(
+  repo: string,
+  path: string,
+  commit: string,
+  entries: Array<{ path: string; size?: number }>,
+  api: GitHubApi,
+): Promise<readonly [string, string] | null> {
+  const entry = entries.find(item => item.path === path);
+  if (entry?.size !== undefined && entry.size > MAX_FILE_SIZE) return null;
+  try {
+    const file = await getFile(repo, path, commit, api);
+    return file.content === null ? null : [path, file.content];
+  } catch (error) {
+    // Optional manifests can disappear from an unusual GitHub tree response.
+    // Auth, rate-limit and network failures still reach the caller.
+    if (error instanceof GitHubApiError && error.status === 404) return null;
+    throw error;
   }
-  return { nodes, edges };
+}
+
+async function readSelectedFiles(
+  repo: string,
+  selected: string[],
+  entries: Array<{ path: string; size?: number }>,
+  commit: string,
+  api: GitHubApi,
+): Promise<Map<string, string>> {
+  const rows = await Promise.all(selected.map(path => readSelectedFile(repo, path, commit, entries, api)));
+  return new Map(rows.filter((row): row is readonly [string, string] => row !== null));
+}
+
+async function currentBranchCommit(repo: string, api: GitHubApi): Promise<{ branch: string; commit: string }> {
+  const metadata = await api.get<{ default_branch?: string }>(`/repos/${repo}`);
+  const branch = metadata.default_branch;
+  if (!branch) throw new RepoWorkspaceError('GitHub did not return a default branch for this repository.', 502);
+
+  const reference = await api.get<{ object?: { sha?: string } }>(`/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`);
+  const commit = reference.object?.sha;
+  if (!commit) throw new RepoWorkspaceError(`GitHub did not return the current commit for ${branch}.`, 502);
+  return { branch, commit };
 }
 
 /**
@@ -212,32 +292,11 @@ function detectArchitecture(files: string[], contentByPath: Map<string, string>)
  */
 export async function getRepoArchitecture(repo: string, api: GitHubApi = githubApi()): Promise<RepoArchitecture> {
   if (!REPO.test(repo)) throw new RepoWorkspaceError(`Repository must be "owner/name", got "${repo}".`, 400);
-
-  const metadata = await api.get<{ default_branch?: string }> (`/repos/${repo}`);
-  const branch = metadata.default_branch;
-  if (!branch) throw new RepoWorkspaceError('GitHub did not return a default branch for this repository.', 502);
-
-  const reference = await api.get<{ object?: { sha?: string } }>(`/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`);
-  const commit = reference.object?.sha;
-  if (!commit) throw new RepoWorkspaceError(`GitHub did not return the current commit for ${branch}.`, 502);
-
+  const { branch, commit } = await currentBranchCommit(repo, api);
   const tree = await getTree(repo, commit, api);
   const files = tree.entries.filter(entry => entry.type === 'file').map(entry => entry.path).slice(0, MAX_TREE_ENTRIES);
   const selected = readRepositoryFiles(files);
-  const contentRows = await Promise.all(selected.map(async path => {
-    const entry = tree.entries.find(item => item.path === path);
-    if (entry?.size !== undefined && entry.size > MAX_FILE_SIZE) return null;
-    try {
-      const file = await getFile(repo, path, commit, api);
-      return file.content === null ? null : [path, file.content] as const;
-    } catch (error) {
-      // Optional manifests can disappear from an unusual GitHub tree response.
-      // Auth, rate-limit and network failures still reach the caller.
-      if (error instanceof GitHubApiError && error.status === 404) return null;
-      throw error;
-    }
-  }));
-  const contentByPath = new Map(contentRows.filter((row): row is readonly [string, string] => row !== null));
+  const contentByPath = await readSelectedFiles(repo, selected, tree.entries, commit, api);
   const diagram = detectArchitecture(files, contentByPath);
 
   return {
