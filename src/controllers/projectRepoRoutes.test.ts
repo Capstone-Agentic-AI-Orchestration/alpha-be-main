@@ -19,7 +19,7 @@ const project = {
   ]
 };
 
-async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number } = {}) {
+async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown } = {}) {
   vi.resetModules();
   const calls: string[] = [];
   vi.doMock('../store/stores.js', () => ({
@@ -38,6 +38,19 @@ async function startApi(options: { role?: string; canSeeProject?: boolean; promo
       const allowed = !managerOnly || ['pm', 'admin'].includes(options.role ?? 'dev');
       if (!allowed) res.status(403).json({ error: `Your workspace role cannot ${capability.replace('.', ' ')}.` });
       return allowed;
+    }
+  }));
+  vi.doMock('../services/githubRepoArchitecture.js', () => ({
+    getRepoArchitecture: async (repo: string) => {
+      calls.push(`architecture ${repo}`);
+      return options.architectureAnswer ?? {
+        repository: repo,
+        branch: 'main',
+        commit: '1234567890abcdef',
+        nodes: [{ id: 'api', label: 'API server', kind: 'api' }],
+        edges: [],
+        truncated: false
+      };
     }
   }));
   vi.doMock('../services/githubRepoWorkspace.js', async () => {
@@ -90,6 +103,7 @@ afterEach(() => {
   vi.doUnmock('../store/stores.js');
   vi.doUnmock('./workspaceContext.js');
   vi.doUnmock('../services/githubRepoWorkspace.js');
+  vi.doUnmock('../services/githubRepoArchitecture.js');
   vi.resetModules();
 });
 
@@ -111,11 +125,34 @@ describe('a project’s repositories', () => {
     expect(calls).toEqual(['branches acme/shop-be']);
   });
 
+  it('returns a diagram for an attached repository', async () => {
+    const architecture = {
+      repository: 'acme/shop-be', branch: 'main', commit: '1234567890abcdef',
+      nodes: [{ id: 'api', label: 'API server', kind: 'api' }], edges: [], truncated: false
+    };
+    const { app, calls } = await startApi({ architectureAnswer: architecture });
+
+    const res = await call(app, 'GET', '/api/projects/p1/repos/acme/shop-be/architecture');
+
+    expect(res).toEqual({ status: 200, body: architecture });
+    expect(calls).toEqual(['architecture acme/shop-be']);
+  });
+
   /** The caller's token could read it; a project page is still not a general GitHub browser. */
   it('refuses a repository that is not the project’s, without asking GitHub', async () => {
     const { app, calls } = await startApi();
 
     const res = await call(app, 'GET', '/api/projects/p1/repos/acme/payroll/branches');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/not a repository of this project/);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses to generate a diagram for a repository that is not attached', async () => {
+    const { app, calls } = await startApi();
+
+    const res = await call(app, 'GET', '/api/projects/p1/repos/acme/payroll/architecture');
 
     expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not a repository of this project/);
