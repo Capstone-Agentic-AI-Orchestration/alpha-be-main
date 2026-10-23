@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { TransactionalSql } from './database.js';
 
-// Conservative window: below Resend's 24-hour and Brevo's documented
-// idempotency TTLs. Never automatically resend outside this window.
+// Gmail has no send-idempotency API. Keep retries inside this conservative
+// window and never automatically resend after its deadline.
 export const ACKNOWLEDGMENT_RETRY_WINDOW_MS = 10 * 60_000;
 export const ACKNOWLEDGMENT_MAX_ATTEMPTS = 5;
 

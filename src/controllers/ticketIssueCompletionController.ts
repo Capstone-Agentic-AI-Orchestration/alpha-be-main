@@ -19,7 +19,7 @@ export function createTicketIssueCompletionRouter(runtime: TicketLifecycleRuntim
     const issueId = req.params.id ?? '';
     if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
     const localIssue = await issueStore().get(workspaceId, issueId);
-    if (!localIssue) return res.status(404).json({ error: 'Issue not found' });
+    if (!localIssue) return res.status(404).json({ error: 'Task not found' });
     if (!requireProjectWorkspace(req, res, localIssue.projectId)) return;
 
     if (!IS_CLOUD) {
@@ -39,7 +39,7 @@ export function createTicketIssueCompletionRouter(runtime: TicketLifecycleRuntim
     if (!runtime?.enabled) return next();
     const subject = assignedWorkTicketSubject(req, res);
     if (!subject) return;
-    if (req.body?.reviewed !== true) return res.status(400).json({ error: 'reviewed must be true to complete an issue.' });
+    if (req.body?.reviewed !== true) return res.status(400).json({ error: 'A task can only be completed after it has been reviewed.' });
     const runId = req.body?.runId;
     if (runId !== undefined && (typeof runId !== 'string' || !runId.trim() || runId.trim() !== runId || runId.length > 200)) {
       return res.status(400).json({ error: 'Invalid review evidence.' });
@@ -48,7 +48,7 @@ export function createTicketIssueCompletionRouter(runtime: TicketLifecycleRuntim
     if (result.kind === 'unlinked') return next();
 
     const after = await issueStore().get(workspaceId, issueId);
-    if (!after) return res.status(404).json({ error: 'Issue not found' });
+    if (!after) return res.status(404).json({ error: 'Task not found' });
     if (!needsPush(localIssue, after)) {
       void supabaseService.shareIssue(after);
       return res.json(after);

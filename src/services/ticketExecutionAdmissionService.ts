@@ -16,8 +16,8 @@ const opaque = z.string().min(1).max(200).refine(value => value.trim() === value
 const executorSchema = z.object({ kind: z.literal('agent'), id: opaque }).strict();
 const inputSchema = z.object({ schemaVersion: z.literal(1), operationId: opaque,
   expectedRevisionId: opaque, executor: executorSchema }).strict();
-const missing = () => new TicketWorkflowError(404, 'ticket_work_not_found', 'Issue work not found.');
-const conflict = () => new TicketWorkflowError(409, 'ticket_execution_conflict', 'Reconcile the current Issue execution before starting work.');
+const missing = () => new TicketWorkflowError(404, 'ticket_work_not_found', 'Task not found.');
+const conflict = () => new TicketWorkflowError(409, 'ticket_execution_conflict', 'Reconcile the current task execution before starting work.');
 function invariant(value: unknown): asserts value { if (!value) throw new TicketReadInvariantError(); }
 function validTarget(target: TicketIssueTarget) { return opaque.safeParse(target?.workspaceId).success && opaque.safeParse(target?.issueId).success; }
 function sameExecutor(a: TicketExecutor, b: TicketExecutor) { return a.kind === b.kind && a.id === b.id; }
@@ -41,7 +41,7 @@ function currentContext(target: TicketIssueTarget, userId: string, issue: Extrac
   assertOwner(target, userId, issue);
   if (issue.mode !== 'enabled') throw new TicketWorkflowError(503, 'ticket_writes_disabled', 'Ticket execution is unavailable right now.');
   if (issue.clientAccessActive !== true || issue.projectCreatorActive !== true) {
-    throw new TicketWorkflowError(409, 'ticket_work_not_authorized', 'This Issue has no current approved work context.');
+    throw new TicketWorkflowError(409, 'ticket_work_not_authorized', 'This task has no current approved work context.');
   }
   if (issue.executor.active !== true || issue.executor.allowed !== true || !sameExecutor(issue.executor, executor)) throw conflict();
   return projectDeveloperTicketContext(target.workspaceId, target.issueId, userId, issue.snapshot);

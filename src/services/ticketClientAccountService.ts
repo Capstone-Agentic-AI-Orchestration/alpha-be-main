@@ -16,7 +16,9 @@ const email = z.string().trim().toLowerCase().email().max(254);
 const password = z.string().min(1).max(128);
 const link = z.object({ invitationToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
   providerTokenHash: z.string().regex(/^[A-Za-z0-9_-]{20,256}$/),
-  providerTokenType: z.enum(['invite', 'magiclink', 'recovery']) }).strict();
+  providerTokenType: z.enum(['invite', 'magiclink', 'recovery']) }).strict()
+  .refine(({ invitationToken, providerTokenType }) => providerTokenType === 'recovery'
+    ? invitationToken === undefined : invitationToken !== undefined);
 const proofSchema = z.object({ credential: z.string().min(1).max(8192), invitationToken: z.string().nullable(),
   target: z.object({ workspaceId: z.string(), ticketId: z.string() }).nullable() });
 type AccountProof = z.infer<typeof proofSchema>;
@@ -129,7 +131,6 @@ export function createTicketClientAccountService(input: {
       const parsed = link.safeParse(body);
       if (!parsed.success) throw unavailable();
       const proof = parsed.data;
-      if (proof.invitationToken && proof.providerTokenType === 'recovery') throw unavailable();
       const verified = await input.provider.verifyEmailLink(proof.providerTokenHash, proof.providerTokenType);
       if (!verified?.identity.emailVerified) throw unavailable();
       const identity = verified.identity;

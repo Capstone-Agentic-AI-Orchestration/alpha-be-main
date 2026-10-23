@@ -2,7 +2,6 @@ import type { TicketClientIdentityProvider } from '../services/ticketClientIdent
 import type { TicketClientSessionPolicy } from '../services/ticketClientSessionService.js';
 import { createTicketClientSessionService } from '../services/ticketClientSessionService.js';
 import { createTicketClientActivationService } from '../services/ticketClientActivationService.js';
-import { createTicketClientSignInService } from '../services/ticketClientSignInService.js';
 import { createTicketClientWorkspaceService } from '../services/ticketClientWorkspaceService.js';
 import { createTicketClientIntakeContextService } from '../services/ticketClientIntakeContextService.js';
 import { createTicketCreationService } from '../services/ticketCreationService.js';
@@ -52,7 +51,6 @@ export interface TicketClientPortalRouteDependencies {
   webOrigin: string;
   sessionPolicy: TicketClientSessionPolicy;
   cookiePolicy: TicketClientSessionCookiePolicy;
-  sessionAdmission: TicketClientSessionAdmission;
   activationAdmission: TicketClientSessionAdmission;
   onSignInDeliveryUnavailable?: () => void;
   accountStore?: PostgresTicketClientAccountStore;
@@ -72,24 +70,13 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
   const activation = createTicketClientActivationService(
     dependencies.activationStore, dependencies.identityProvider,
   );
-  const signIn = createTicketClientSignInService(
-    dependencies.signInStore, dependencies.identityProvider, dependencies.emailProvider, dependencies.webOrigin,
-    dependencies.onSignInDeliveryUnavailable,
-  );
   const workspaces = createTicketClientWorkspaceService(dependencies.workspaceStore);
   const intakeContext = createTicketClientIntakeContextService(dependencies.intakeContextStore);
   const creation = createTicketCreationService(dependencies.creationStore);
   const queue = createTicketQueueService(dependencies.queueStore);
   const reads = createTicketReadService(dependencies.readStore);
 
-  const sessionApplication = {
-    ...sessions,
-    async exchangeEmailLink(tokenHash: string, type: 'invite' | 'magiclink') {
-      const verified = await dependencies.identityProvider.verifyEmailLink(tokenHash, type);
-      return verified ? sessions.exchange(verified.credential) : null;
-    },
-    requestSignInLink: signIn.request,
-  };
+  const sessionApplication = { authenticate: sessions.authenticate, revoke: sessions.revoke };
   const activationApplication = {
     async activate(input: unknown) {
       if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -146,7 +133,7 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
         onDeliveryUnavailable: dependencies.onSignInDeliveryUnavailable,
       }), dependencies.cookiePolicy, dependencies.activationAdmission),
     } : {}),
-    session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy, dependencies.sessionAdmission),
+    session: createTicketClientSessionRouter(sessionApplication, dependencies.cookiePolicy),
     activation: createTicketClientActivationRouter(activationApplication, dependencies.cookiePolicy, dependencies.activationAdmission),
     api: createTicketClientApiRouter(clientApi, dependencies.cookiePolicy),
   });

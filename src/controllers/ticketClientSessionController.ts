@@ -5,9 +5,6 @@ import type { TicketClientSessionCheck, TicketClientSessionIssue } from '../serv
 import type { TicketSubject } from '../store/ticketCommandStore.js';
 
 export interface TicketClientSessionApplication {
-  exchange(providerCredential: string): Promise<TicketClientSessionIssue | null>;
-  exchangeEmailLink(tokenHash: string, type: 'invite' | 'magiclink'): Promise<TicketClientSessionIssue | null>;
-  requestSignInLink(email: unknown): Promise<{ accepted: true }>;
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
   revoke(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<void>;
 }
@@ -100,17 +97,6 @@ function clearCookie(name: string, path: string, secure: boolean, httpOnly: bool
 function emptyJsonBody(body: unknown): boolean {
   return body === undefined || (body !== null && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === 0);
 }
-function requestRecord(body: unknown): Record<string, unknown> | null {
-  return body !== null && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null;
-}
-function providerEmailLink(value: unknown): value is { providerTokenHash: string; providerTokenType: 'invite' | 'magiclink' } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return Object.keys(record).length === 2
-    && typeof record.providerTokenHash === 'string'
-    && /^[A-Za-z0-9_-]{20,256}$/.test(record.providerTokenHash)
-    && (record.providerTokenType === 'invite' || record.providerTokenType === 'magiclink');
-}
 function validSecret(value: unknown): value is string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
   const bytes = Buffer.from(value, 'base64url');
@@ -122,11 +108,9 @@ function validSecret(value: unknown): value is string {
 export function createTicketClientSessionRouter(
   application: TicketClientSessionApplication,
   policy: TicketClientSessionCookiePolicy,
-  admission: TicketClientSessionAdmission,
 ): Router {
   const router = Router();
-  const policyValid = ticketClientOriginPolicyValid(policy?.secure, policy?.allowedOrigins)
-    && typeof admission?.check === 'function';
+  const policyValid = ticketClientOriginPolicyValid(policy?.secure, policy?.allowedOrigins);
   const secure = policy?.secure === true;
   const cookieNames = ticketClientCookieNames(secure);
   const sessionCookieName = cookieNames.session;
@@ -167,63 +151,6 @@ export function createTicketClientSessionRouter(
       clearCookie(csrfCookieName, csrfCookiePath, secure, false, 'Strict'),
     ]);
   }
-
-  function issueCookies(res: Response, issue: TicketClientSessionIssue): boolean {
-    const expiresAt = Date.parse(issue.expiresAt);
-    const maxAge = Math.floor((expiresAt - Date.now()) / 1000);
-    if (!validSecret(issue.sessionCookieValue) || !validSecret(issue.csrfCookieValue)
-      || !Number.isFinite(expiresAt) || maxAge <= 0 || maxAge > 24 * 60 * 60) return false;
-    res.setHeader('Set-Cookie', [
-      cookieHeader(sessionCookieName, issue.sessionCookieValue, maxAge, sessionCookiePath, secure, true, 'Lax'),
-      cookieHeader(csrfCookieName, issue.csrfCookieValue, maxAge, csrfCookiePath, secure, false, 'Strict'),
-    ]);
-    return true;
-  }
-
-  router.post('/auth/sign-in-link', async (req, res, next) => {
-    if (!available(res) || !requireAllowedOrigin(req, res)) return;
-    const body = requestRecord(req.body);
-    if (!req.is('application/json') || !body || Object.keys(body).length !== 1 || typeof body.email !== 'string'
-      || body.email.length > 254) return res.status(400).json({ error: 'This sign-in request is invalid.' });
-    let admissionResult: { allowed: boolean; retryAfterSeconds: number | null };
-    try { admissionResult = await admission.check(req); }
-    catch { return res.status(503).json({ error: 'Client sign-in is unavailable right now.' }); }
-    if (!admissionResult?.allowed) {
-      const retry = admissionResult?.retryAfterSeconds ?? 60;
-      res.setHeader('Retry-After', String(retry));
-      return res.status(429).json({ error: 'Too many sign-in attempts. Try again later.' });
-    }
-    try {
-      const receipt = await application.requestSignInLink(body.email);
-      return res.status(202).json({ accepted: receipt?.accepted === true,
-        message: 'If this email has active Alpha client access, a sign-in link will be sent.' });
-    } catch (error) { return next(error); }
-  });
-
-  router.post('/auth/session', async (req, res, next) => {
-    if (!available(res) || !requireAllowedOrigin(req, res)) return;
-    if (!req.is('application/json') || !providerEmailLink(req.body)) return res.status(400).json({ error: 'This sign-in request is invalid.' });
-    let admissionResult: { allowed: boolean; retryAfterSeconds: number | null };
-    try { admissionResult = await admission.check(req); }
-    catch { return res.status(503).json({ error: 'Client sign-in is unavailable right now.' }); }
-    if (!admissionResult || typeof admissionResult.allowed !== 'boolean'
-      || (admissionResult.retryAfterSeconds !== null
-        && (!Number.isSafeInteger(admissionResult.retryAfterSeconds)
-          || admissionResult.retryAfterSeconds < 1 || admissionResult.retryAfterSeconds > 3600))) {
-      return res.status(503).json({ error: 'Client sign-in is unavailable right now.' });
-    }
-    if (!admissionResult.allowed) {
-      if (admissionResult.retryAfterSeconds !== null) res.setHeader('Retry-After', String(admissionResult.retryAfterSeconds));
-      return res.status(429).json({ error: 'Too many sign-in attempts. Try again later.' });
-    }
-    try {
-      const body = req.body as { providerTokenHash: string; providerTokenType: 'invite' | 'magiclink' };
-      const issue = await application.exchangeEmailLink(body.providerTokenHash, body.providerTokenType);
-      if (!issue) return res.status(401).json({ error: 'Unable to sign in with this account.' });
-      if (!issueCookies(res, issue)) return res.status(503).json({ error: 'Client sign-in is unavailable right now.' });
-      return res.status(200).json({ authenticated: true, expiresAt: issue.expiresAt });
-    } catch (error) { return next(error); }
-  });
 
   router.get('/session', async (req, res, next) => {
     if (!available(res)) return;

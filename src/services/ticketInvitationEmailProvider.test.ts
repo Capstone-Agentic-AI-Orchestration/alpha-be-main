@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  createTicketInvitationEmailProvider, TicketInvitationEmailError,
+  createGmailTicketInvitationEmailProvider, createTicketInvitationEmailProvider, TicketInvitationEmailError,
   TICKET_INVITATION_EMAIL_SUBJECT, TICKET_INVITATION_EMAIL_TEXT,
 } from './ticketInvitationEmailProvider.js';
 
 const config = { apiKey: 'test-key', senderEmail: 'onboarding@resend.dev', senderName: 'Alpha',
   testRecipient: 'approved@example.test' };
+const gmailConfig = { clientId: 'client-id', clientSecret: 'client-secret', refreshToken: 'refresh-token',
+  senderEmail: 'sender@example.test', senderName: 'Alphaexplora' };
 const emailId = '2bd5f42c-1a8e-4bd4-afc5-b2a01b055f88';
 
 describe('ticket invitation email provider', () => {
@@ -82,5 +84,35 @@ describe('ticket invitation email provider', () => {
       JSON.stringify({ name: 'invalid_idempotent_request' }), { status: 409 },
     )) as typeof fetch)!;
     await expect(changed.send('approved@example.test', 'key')).rejects.toMatchObject({ retryable: false });
+  });
+});
+
+describe('Gmail client-access email provider', () => {
+  it('allows the real inquiry recipient and sends dynamic account-access content through Gmail OAuth', async () => {
+    const send = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'access-token', expires_in: 3600 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'gmail-message-id' }), { status: 200 }));
+    const provider = createGmailTicketInvitationEmailProvider(gmailConfig, send)!;
+    expect(provider.canSendTo!('Client@example.test')).toBe(true);
+    expect(provider.canSendTo!('invalid-address')).toBe(false);
+    await provider.sendContent('Client@example.test', 'Activate your account',
+      'Verify your email and choose your password: https://example.test/activate', 'activation/workspace/invitation');
+    expect(send.mock.calls.map(([url]) => url)).toEqual([
+      'https://oauth2.googleapis.com/token', 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+    ]);
+    const request = JSON.parse(String(send.mock.calls[1][1]?.body)) as { raw: string };
+    const message = Buffer.from(request.raw, 'base64url').toString('utf8');
+    expect(message).toContain('To: client@example.test');
+    expect(Buffer.from(message.split('Content-Transfer-Encoding: base64\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString())
+      .toContain('Verify your email and choose your password');
+  });
+
+  it('requires all OAuth and sender settings and refuses injected email content', async () => {
+    expect(createGmailTicketInvitationEmailProvider({ ...gmailConfig, clientSecret: '' })).toBeNull();
+    const send = vi.fn<typeof fetch>();
+    const provider = createGmailTicketInvitationEmailProvider(gmailConfig, send)!;
+    await expect(provider.sendContent('client@example.test', 'Subject\r\nBcc: attacker@example.test', 'Body', 'key'))
+      .rejects.toMatchObject({ retryable: false });
+    expect(send).not.toHaveBeenCalled();
   });
 });

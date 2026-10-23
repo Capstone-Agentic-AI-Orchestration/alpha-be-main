@@ -52,7 +52,7 @@ export function createTicketDeveloperContextRouter(application: TicketDeveloperC
     const workspaceId = req.workspace?.workspaceId;
     const issueId = req.params.issueId ?? '';
     if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) {
-      return res.status(404).json({ error: 'Issue not found.' });
+      return res.status(404).json({ error: 'Task not found.' });
     }
 
     const workContext = safeWorkContext(await application.read(workspaceId, issueId, subject));
