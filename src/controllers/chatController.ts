@@ -364,7 +364,7 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId, approvalMode } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -373,6 +373,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     }
     if (intent !== undefined && !['auto', 'build', 'ask'].includes(intent)) {
       return res.status(400).json({ error: 'intent must be auto, build, or ask' });
+    }
+    if (approvalMode !== undefined && !['ask', 'approve', 'full'].includes(approvalMode)) {
+      return res.status(400).json({ error: 'approvalMode must be ask, approve, or full' });
     }
     if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || !clientMessageId.trim() || clientMessageId.length > 200)) {
       return res.status(400).json({ error: 'clientMessageId must be a non-empty string of at most 200 characters' });
@@ -448,6 +451,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     const result = await chatService.sendMessage({
       threadId,
       content,
+      approvalMode,
       senderName,
       targetAgentId,
       projectId: scopedProjectId,

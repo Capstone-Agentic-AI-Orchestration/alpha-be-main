@@ -10,6 +10,7 @@ import { mintRunGrant, revokeRunGrant, type RunGrant } from './runBridge.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { hostingHintsFor } from './hosting/hostingService.js';
 import type { Project } from '../models/index.js';
+import type { ProjectRoot as ProjectFolderRoot } from './projectFiles.js';
 
 /**
  * One MCP server as the CLIs expect it.
@@ -118,6 +119,10 @@ export const BUILTIN_SERVERS: Record<string, McpServerSpec> = {
   /** Hosting status, logs and variables for the run's project repositories -- see hostingMcpServer. */
   get 'alpha-hosting'() {
     return builtinServer('hostingMcpServer');
+  },
+  /** Read-only, path-checked access to the selected project's repositories on this computer -- see projectFilesMcpServer. */
+  get 'alpha-project-files'() {
+    return builtinServer('projectFilesMcpServer');
   }
 };
 
@@ -182,9 +187,41 @@ export function codexMcpOverrides(mcp: RunMcpConfig): string[] {
     if (!/^[A-Za-z0-9_-]+$/.test(name)) continue;
     args.push('-c', `mcp_servers.${name}.command=${toml(launcher.command)}`);
     args.push('-c', `mcp_servers.${name}.args=${toml([...(launcher.args ?? []), mcp.configPath, name])}`);
+    // Alpha MCP servers mark read tools explicitly. Let those reads run in
+    // unattended Codex turns while leaving every unmarked/write tool gated.
+    args.push('-c', `mcp_servers.${name}.default_tools_approval_mode=${toml('writes')}`);
     if (launcher.env && Object.keys(launcher.env).length) args.push('-c', `mcp_servers.${name}.env=${toml(launcher.env)}`);
   }
   return args;
+}
+
+/** OpenCode's native local-MCP shape, backed by Alpha's run-scoped launcher. */
+export function openCodeMcpConfig(mcp: RunMcpConfig): Record<string, unknown> {
+  if (!mcp.configPath) return {};
+  let servers: Record<string, McpServerSpec>;
+  try {
+    servers = JSON.parse(fs.readFileSync(mcp.configPath, 'utf8'))?.mcpServers ?? {};
+  } catch (err: any) {
+    logError(`Could not read ${mcp.configPath} for OpenCode: ${err?.message ?? err}`);
+    return {};
+  }
+  const launcher = builtinServer('launchFromConfig');
+  if (isHttpSpec(launcher)) return {};
+  const configured: Record<string, unknown> = {};
+  for (const [name, spec] of Object.entries(servers)) {
+    if (isHttpSpec(spec)) {
+      logError(`OpenCode MCP server "${name}" is remote; skipping to keep credentials out of process configuration.`);
+      continue;
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) continue;
+    configured[name] = {
+      type: 'local',
+      command: [...(launcher.command ? [launcher.command] : []), ...(launcher.args ?? []), mcp.configPath, name],
+      enabled: true,
+      ...(launcher.env && Object.keys(launcher.env).length ? { environment: launcher.env } : {})
+    };
+  }
+  return configured;
 }
 
 /** What a run's `alpha-hosting` tools may reach. */
@@ -205,6 +242,8 @@ export function hostingScopeFor(project: Project | null | undefined, agentId: st
 export interface RunMcpConfig {
   /** Path to pass to `--mcp-config`, or null when the agent has no servers. */
   configPath: string | null;
+  /** Per-turn Gemini/Antigravity settings, isolated from the user's MCP config. */
+  antigravitySettingsPath?: string;
   /** Names actually resolved, for the allowlist and for logging. */
   serverNames: string[];
 }
@@ -260,10 +299,14 @@ export function writeRunMcpConfig(
    * and the workspace the run was started in. Without it that server is left
    * out -- a hosting tool with nothing to point at would only fail.
    */
-  hosting?: HostingRunScope
+  hosting?: HostingRunScope,
+  /**
+   * The folders `alpha-project-files` may read: the selected project's
+   * repositories on this computer. Without any, that server is left out.
+   */
+  projectRoots?: ProjectFolderRoot[]
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
-  if (!names.length) return { configPath: null, serverNames: [] };
 
   const available = availableServers();
   const mcpServers: Record<string, McpServerSpec> = {};
@@ -325,6 +368,15 @@ export function writeRunMcpConfig(
       continue;
     }
 
+    if (name === 'alpha-project-files') {
+      if (!projectRoots?.length || isHttpSpec(resolved)) {
+        logError(`MCP server "alpha-project-files" has no project folders for ${runId} — skipping.`);
+        continue;
+      }
+      mcpServers[name] = { ...resolved, env: { ...resolved.env, ALPHA_PROJECT_ROOTS: JSON.stringify(projectRoots) } };
+      continue;
+    }
+
     /**
      * The built-in server is the only one that acts on the local checkout, and
      * the only one Alpha can tell where that is.
@@ -352,20 +404,27 @@ export function writeRunMcpConfig(
         : resolved;
   }
 
-  if (!Object.keys(mcpServers).length) return { configPath: null, serverNames: [] };
-
   const dir = path.join(RUNS_DIR, runId);
-  const configPath = path.join(dir, 'mcp.json');
+  const configPath = Object.keys(mcpServers).length ? path.join(dir, 'mcp.json') : null;
+  const antigravitySettingsPath = path.join(dir, 'agy-system-settings.json');
 
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2), 'utf8');
+    if (configPath) fs.writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2), 'utf8');
+    const agyServers = Object.fromEntries(Object.entries(mcpServers).map(([name, spec]) => [
+      name,
+      // These Alpha servers enforce their own read/write boundary. Trusting
+      // only them lets headless agy use the same safe reads without granting
+      // blanket approval to arbitrary third-party MCP servers.
+      { ...spec, ...(name === 'alpha-github' || name === 'alpha-project-files' ? { trust: true } : {}) }
+    ]));
+    fs.writeFileSync(antigravitySettingsPath, JSON.stringify({ mcp: { allowed: Object.keys(mcpServers) }, mcpServers: agyServers }, null, 2), 'utf8');
   } catch (err: any) {
     logError(`Could not write MCP config for ${runId}: ${err?.message ?? err}`);
     return { configPath: null, serverNames: [] };
   }
 
-  return { configPath, serverNames: Object.keys(mcpServers) };
+  return { configPath, antigravitySettingsPath, serverNames: Object.keys(mcpServers) };
 }
 
 /**

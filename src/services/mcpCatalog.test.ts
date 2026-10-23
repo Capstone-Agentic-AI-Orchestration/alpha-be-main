@@ -95,7 +95,7 @@ describe('catalog writes', () => {
   });
 
   it('names the built-ins', () => {
-    expect(svc.builtinServerNames()).toEqual(['alpha-github', 'alpha-hosting']);
+    expect(svc.builtinServerNames()).toEqual(['alpha-github', 'alpha-hosting', 'alpha-project-files']);
   });
 });
 

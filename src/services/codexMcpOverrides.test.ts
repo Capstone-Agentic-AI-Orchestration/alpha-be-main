@@ -37,6 +37,7 @@ describe('MCP servers for a Codex turn', () => {
     expect(args.filter(a => a === '-c').length).toBeGreaterThanOrEqual(4);
     expect(joined).toContain('mcp_servers.alpha-hosting.command=');
     expect(joined).toContain('mcp_servers.alpha-github.args=');
+    expect(joined).toContain('mcp_servers.alpha-github.default_tools_approval_mode="writes"');
     expect(joined).toContain(JSON.stringify(file).slice(1, -1));
     expect(joined).toMatch(/launchFromConfig/);
     // The point of the launcher: no credential ever reaches argv.

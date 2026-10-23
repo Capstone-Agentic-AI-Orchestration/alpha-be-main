@@ -29,6 +29,15 @@ import {
   repositoryCheckouts,
   unbindProject
 } from '../services/projectBindings.js';
+import {
+  codeFolder,
+  defaultCodeFolder,
+  ensureProjectFolder,
+  locateProjectRepositories,
+  setCodeFolder,
+  setProjectFolder,
+  useFoundCopy
+} from '../services/projectFolders.js';
 import { AgentBuilderError, sendBuilderMessage } from '../services/agentBuilderService.js';
 import {
   AGENT_FILE_MAX_BYTES,
@@ -423,12 +432,75 @@ dataRouter.post('/projects/:id/clone-to', desktopOnly, route(async (req: Request
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    res.json({ results: await cloneProjectInto(project, req.body?.intoDir, req.body?.repos, req.body?.bind === true) });
+    // No folder named: the project's own folder, created on first use.
+    const intoDir = typeof req.body?.intoDir === 'string' && req.body.intoDir.trim() ? req.body.intoDir : ensureProjectFolder(project);
+    res.json({ results: await cloneProjectInto(project, intoDir, req.body?.repos, req.body?.bind === true) });
   } catch (err) {
     if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
     throw err;
   }
 }));
+
+/**
+ * The project's folder on this computer, and each repository's state there:
+ * registered, found in the project folder, moved, or missing. Looks in two
+ * places only -- the registered folder and <project folder>\<repository> --
+ * so it answers at once.
+ */
+dataRouter.get('/projects/:id/folder', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json(locateProjectRepositories(project));
+}));
+
+/** Choose the project's folder on this computer; `dir: null` goes back to the default. */
+dataRouter.put('/projects/:id/folder', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    setProjectFolder(project, req.body?.dir ?? null);
+    res.json(locateProjectRepositories(project));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+}));
+
+/** Use the copy of `repo` found in the project folder, so builds branch from it too. */
+dataRouter.post('/projects/:id/folder/use', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  if (!requireDiscoverableProject(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    await useFoundCopy(project, req.body?.repo);
+    res.json(locateProjectRepositories(project));
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+}));
+
+/** This computer's code folder: where project folders go unless one is chosen. */
+dataRouter.get('/machine/code-folder', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  res.json({ codeFolder: codeFolder(), defaultCodeFolder: defaultCodeFolder() });
+});
+
+dataRouter.put('/machine/code-folder', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'workspace.bind_local')) return;
+  try {
+    setCodeFolder(req.body?.dir ?? null);
+    res.json({ codeFolder: codeFolder(), defaultCodeFolder: defaultCodeFolder() });
+  } catch (err) {
+    if (err instanceof BindingError) return res.status(400).json({ error: err.message, reason: err.reason });
+    throw err;
+  }
+});
 
 /**
  * What state this machine's checkout is in.

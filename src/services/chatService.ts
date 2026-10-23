@@ -9,14 +9,19 @@ import {
   resolveProjectWorkspace,
   allowAttachedWorkspace
 } from './workspaceService.js';
-import { resolveAgentLogged } from './personaService.js';
+import { resolveAgent, resolveAgentLogged } from './personaService.js';
 import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import {
   DEFAULT_ASSISTANT,
   DEFAULT_ASSISTANT_PROMPT,
-  pickDefaultRuntime
+  clearUsageLimit,
+  defaultAssistantCandidates,
+  markUsageLimited,
+  usageLimitFor,
+  type DefaultAssistantRuntime,
+  type PreferredAssistantModel
 } from './defaultAssistant.js';
-import { describeChatToolPolicy, describeAlphaWorkspace } from './toolPolicy.js';
+import { describeChatToolPolicy, describeAlphaWorkspace, skillsForChatApproval, type ChatApprovalMode } from './toolPolicy.js';
 import { agentReadiness } from './agentReadiness.js';
 import { logInfo } from '../utils/logger.js';
 import { workspaceRegistry, WorkspaceRole } from './workspaceRegistry.js';
@@ -38,6 +43,9 @@ import {
 } from './chatRouter.js';
 import { isProjectBuildRequest } from './projectBuildIntent.js';
 import { reposForProject } from './githubIssueMapping.js';
+import { projectReadRoots } from './projectFolders.js';
+import type { ProjectRoot } from './projectFiles.js';
+import { createHash } from 'node:crypto';
 
 /**
  * How Alpha may route an unaddressed message.
@@ -66,6 +74,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 export interface SendMessageParams {
   threadId: string;
   content: string;
+  approvalMode?: ChatApprovalMode;
   senderName?: string;
   /** Explicit target from the chat picker. Null clears a persisted target. */
   targetAgentId?: string | null;
@@ -198,17 +207,53 @@ function chatWorkspace(threadId: string): string {
     // checkout. Use an empty, allowlisted scratch directory instead. The
     // explicit Agent Call path reports the missing working copy for code
     // review/revision; this legacy Alpha reply can still answer general text.
-    fs.mkdirSync(RUNS_DIR, { recursive: true });
-    const isolated = fs.mkdtempSync(path.join(RUNS_DIR, 'chat-empty-'));
-    sqliteService.addAllowedPath(isolated, `Empty chat context for ${project.name}`);
     logInfo(`Thread project "${project.name}" has no working copy on disk — using an empty isolated context`);
-    return isolated;
+    return chatScratchFolder(threadId, project.name);
   }
 
   // The same consent record a run makes: a hand-attached folder is registered,
   // a managed checkout is already covered by the root allowlist entry.
   allowAttachedWorkspace(workspace, project.name);
   return workspace.dir;
+}
+
+/**
+ * One empty folder per conversation, for turns that must not stand in any
+ * project's code: a chat that reads through alpha-project-files, or a project
+ * with nothing on this computer. The same folder every turn -- the old
+ * fallback made a new chat-empty-* folder on each one.
+ */
+function chatScratchFolder(threadId: string, label: string): string {
+  const dir = path.join(RUNS_DIR, 'chat-' + createHash('sha256').update(threadId).digest('hex').slice(0, 16));
+  fs.mkdirSync(dir, { recursive: true });
+  if (!sqliteService.isPathAllowed(dir)) sqliteService.addAllowedPath(dir, `Empty chat context for ${label}`);
+  return dir;
+}
+
+/**
+ * What the Orchestrator is told about the project's code on this computer:
+ * which repositories it can read, where, and which are not here.
+ */
+export function describeLocalProjectFiles(projectName: string | null, roots: ProjectRoot[], missing: string[]): string {
+  if (!projectName) {
+    return [
+      '## Code on this computer',
+      '',
+      'No project is selected, so this conversation reads no files on this computer. Read code from GitHub with the alpha-github tools, or ask the user to pick a project.'
+    ].join('\n');
+  }
+  const lines = ['## ' + projectName + ' on this computer', ''];
+  if (roots.length) {
+    lines.push('You can read these repositories with the alpha-project-files tools:');
+    for (const root of roots) lines.push('- ' + root.name + ' (' + root.repo + '): ' + root.dir);
+  } else {
+    lines.push('None of this project\'s repositories is on this computer yet, so you cannot read local files here.');
+  }
+  if (missing.length) {
+    lines.push('', 'Not on this computer: ' + missing.join(', ') + '. Read those from GitHub with the alpha-github tools, and tell the user they can clone them from the project\'s Code tab.');
+  }
+  lines.push('', 'Never read or describe another project\'s files from this conversation.');
+  return lines.join('\n');
 }
 
 /**
@@ -459,7 +504,7 @@ export class ChatService extends EventEmitter {
       turn.currentAgentName = DEFAULT_ASSISTANT.name;
       const routingPrompt = params.routing ? this.routingPromptFor(params.routing, thread) : undefined;
       const reply = await this.runWithSteering(turn, requestContent, prompt =>
-        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId, routingPrompt)
+        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId, routingPrompt, params.approvalMode)
       );
       if (!reply || turn.stopRequested) {
         if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -539,7 +584,7 @@ export class ChatService extends EventEmitter {
         turn.currentRunId = runId;
         turn.currentAgentName = agent.name;
         const steeredReply = await this.runWithSteering(turn, requestContent, prompt =>
-          this.generateAgentReply(agent, prompt, threadId, priorTurn, activityCallId, runId)
+          this.generateAgentReply(agent, prompt, threadId, priorTurn, activityCallId, runId, params.approvalMode)
         );
         if (!steeredReply || turn.stopRequested) {
           if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -933,7 +978,8 @@ export class ChatService extends EventEmitter {
     runId: string,
     activityCallId?: string,
     /** Orchestrator instructions for this turn, when Alpha may route it. */
-    routingPrompt?: string
+    routingPrompt?: string,
+    approvalMode?: ChatApprovalMode
   ): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
@@ -946,8 +992,22 @@ export class ChatService extends EventEmitter {
       timestamp: now()
     };
 
-    const runtime = pickDefaultRuntime(sqliteService.getRuntimes());
-    if (!runtime) {
+    // Alpha answers with the Orchestrator's model, the agent at the centre of
+    // the chat, so changing it there changes who replies here.
+    const agentsHere = workspaceId ? runWithWorkspace(workspaceId, () => sqliteService.getAgents()) : sqliteService.getAgents();
+    const orchestrator = agentsHere.find(agent => agent.templateKey === 'orchestrator' && !agent.isArchived);
+    let preferred: PreferredAssistantModel | undefined;
+    if (orchestrator) {
+      const setting = resolveAgent(orchestrator, { includeMemory: false });
+      preferred = {
+        provider: setting.modelProvider,
+        modelName: setting.modelName,
+        reasoningEffort: setting.reasoningEffort ?? null,
+        agentName: orchestrator.name
+      };
+    }
+    const candidates = defaultAssistantCandidates(sqliteService.getRuntimes(), preferred);
+    if (!candidates.length) {
       const unavailable: ChatMessage = {
         ...base,
         senderType: 'system',
@@ -961,69 +1021,113 @@ export class ChatService extends EventEmitter {
       return unavailable;
     }
 
-    const priorSession = sqliteService.getThreadSession(threadId, DEFAULT_ASSISTANT.id);
-    const cwd = chatWorkspace(threadId);
     const assistantProject = threadProject(threadId);
     const projectRepos = assistantProject ? reposForProject(assistantProject) : [];
-    // A routed turn on a runtime that starts fresh each turn sees no earlier
-    // messages, so "yes, go ahead" would mean nothing. Give it the recent ones.
-    const recentConversation = routingPrompt && !providerResumesSessions(runtime.provider)
-      ? describeRecentConversation(threadId)
-      : undefined;
+    const localCode = assistantProject ? projectReadRoots(assistantProject) : { roots: [] as ProjectRoot[], missing: [] as string[] };
+    const assistantServers = localCode.roots.length ? ['alpha-github', 'alpha-project-files'] : ['alpha-github'];
+    const cwd = chatScratchFolder(threadId, assistantProject?.name ?? 'Alpha');
+    const approvalSkills = skillsForChatApproval(approvalMode ?? 'ask', localCode.roots.length > 0);
 
-    logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}`);
+    // A runtime whose plan is used up is asked last, so its turn is not spent
+    // waiting on an answer that will only repeat the limit.
+    const ordered = [
+      ...candidates.filter(candidate => !usageLimitFor(candidate.provider)),
+      ...candidates.filter(candidate => usageLimitFor(candidate.provider))
+    ];
+    const runtimeLabel = (candidate: DefaultAssistantRuntime) => candidate.name ?? candidate.provider;
 
-    const turn = await runCliTurn({
-      runId,
-      cwd,
-      provider: runtime.provider,
-      modelName: runtime.modelName,
-      codexBaseUrl: runtime.endpoint,
-      // The tool policy still applies: a chat inspects, it does not mutate.
-      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId),
-        describeOrchestratorGitHubAccess(projectRepos), describeChatToolPolicy(['alpha-github'])]
-        .filter(Boolean)
-        .join(`
+    for (const runtime of ordered) {
+      // Each runtime keeps its own session: one CLI cannot resume another's id.
+      const sessionKey = `${DEFAULT_ASSISTANT.id}:${runtime.provider}`;
+      const priorSession = sqliteService.getThreadSession(threadId, sessionKey);
+      // A turn with no session of its own on this runtime sees no earlier
+      // messages, so "yes, go ahead" would mean nothing. Give it the recent ones.
+      const recentConversation = !priorSession || (routingPrompt && !providerResumesSessions(runtime.provider))
+        ? describeRecentConversation(threadId)
+        : undefined;
 
----
+      logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}: ${runtime.reason}`);
 
-`),
-      personaName: DEFAULT_ASSISTANT.name,
-      prompt,
-      priorSession: priorSession?.cliSessionId ?? null,
-      // Read-only GitHub tools: a chat turn without the sk-git skill gets 'read' access from mcpAccessFor.
-      mcpServers: ['alpha-github'],
-      onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
-    });
+      const turn = await runCliTurn({
+        runId,
+        cwd,
+        provider: runtime.provider,
+        approvalMode,
+        modelName: runtime.modelName,
+        codexBaseUrl: runtime.endpoint,
+        reasoningEffort: runtime.reasoningEffort ?? undefined,
+        // The tool policy still applies: a chat inspects, it does not mutate.
+        systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId),
+          describeOrchestratorGitHubAccess(projectRepos),
+          describeLocalProjectFiles(assistantProject?.name ?? null, localCode.roots, localCode.missing),
+          describeChatToolPolicy(assistantServers, approvalSkills, approvalSkills.includes('sk-git') ? 'write' : 'read', approvalSkills.length === 0)]
+          .filter(Boolean)
+          .join('\n\n---\n\n'),
+        personaName: DEFAULT_ASSISTANT.name,
+        prompt,
+        priorSession: priorSession?.cliSessionId ?? null,
+        // Read-only GitHub tools: a chat turn without the sk-git skill gets 'read' access from mcpAccessFor.
+        mcpServers: assistantServers,
+        autonomyLevel: approvalSkills.includes('sk-git') ? 'Full Autonomy' : undefined,
+        // Set, even empty, for Codex and Claude: the turn then reads files only through Alpha.
+        projectRoots: localCode.roots,
+        onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
+      });
 
-    if (turn.sessionId) {
-      sqliteService.setThreadSession(threadId, DEFAULT_ASSISTANT.id, turn.sessionId);
-    }
+      if (turn.sessionId) {
+        sqliteService.setThreadSession(threadId, sessionKey, turn.sessionId);
+      }
 
-    if (turn.failureKind) {
-      const cli = turn.bin.replace('.cmd', '');
-      const failed: ChatMessage = {
+      if (turn.failureKind === 'limit') {
+        markUsageLimited(runtime.provider, turn.failureDetail ?? 'Its usage limit was reached.');
+        continue;
+      }
+
+      if (turn.failureKind) {
+        const cli = turn.bin.replace('.cmd', '');
+        const failed: ChatMessage = {
+          ...base,
+          content:
+            `I could not reach the ${runtime.provider} CLI, so I have no answer for you.\n\n` +
+            `Reason: ${turn.failureDetail}\n\n` +
+            `Check that \`${cli}\` is installed and signed in — the Runtimes page shows its status.`,
+          thinkingProcess: turn.thinking
+        };
+        this.failedDefaultReplies.add(failed);
+        return failed;
+      }
+
+      clearUsageLimit(runtime.provider);
+      // Say so when the answer came from somewhere other than the first choice.
+      const skipped = candidates
+        .slice(0, candidates.indexOf(runtime))
+        .filter(candidate => usageLimitFor(candidate.provider));
+      const note = skipped.length
+        ? `_${skipped.map(runtimeLabel).join(' and ')} ${skipped.length === 1 ? 'is' : 'are'} at ${skipped.length === 1 ? 'its' : 'their'} usage limit, so this answer came from ${runtimeLabel(runtime)} (${runtime.modelName})._\n\n`
+        : '';
+
+      return {
         ...base,
-        content:
-          `I could not reach the ${runtime.provider} CLI, so I have no answer for you.
-
-` +
-          `Reason: ${turn.failureDetail}
-
-` +
-          `Check that \`${cli}\` is installed and signed in — the Runtimes page shows its status.`,
-        thinkingProcess: turn.thinking
+        content: note + turn.content.trim(),
+        thinkingProcess: turn.thinking,
+        toolsExecuted: turn.tools
       };
-      this.failedDefaultReplies.add(failed);
-      return failed;
     }
 
-    return {
+    // Every signed-in runtime said its plan is used up.
+    const limited: ChatMessage = {
       ...base,
-      content: turn.content.trim(),
-      thinkingProcess: turn.thinking,
-      toolsExecuted: turn.tools
+      senderType: 'system',
+      content: [
+        'Every signed-in AI runtime on this machine is at its usage limit, so I cannot answer right now.',
+        '',
+        ...candidates.map(candidate => `- ${runtimeLabel(candidate)}: ${usageLimitFor(candidate.provider) ?? 'usage limit reached'}`),
+        '',
+        'Pick a model on another runtime for the Orchestrator in the chat header, or wait for a limit to reset.'
+      ].join('\n')
     };
+    this.failedDefaultReplies.add(limited);
+    return limited;
   }
 
 
@@ -1041,7 +1145,8 @@ export class ChatService extends EventEmitter {
     threadId: string,
     priorTurn?: string,
     activityCallId?: string,
-    runId = activityCallId ?? `chat-${randomUUID()}`
+    runId = activityCallId ?? `chat-${randomUUID()}`,
+    approvalMode?: ChatApprovalMode
   ): Promise<{ content: string; thinking?: string; tools: any[]; activityCallId?: string; failed?: boolean }> {
     /**
      * Resume the CLI's own session so the agent remembers this thread.
@@ -1052,6 +1157,8 @@ export class ChatService extends EventEmitter {
      * sqliteService.migrate() for why all three parts are required.
      */
     const priorSession = sqliteService.getThreadSession(threadId, agent.id);
+    const activeProject = threadProject(threadId);
+    const localProjectRoots = activeProject ? projectReadRoots(activeProject).roots : [];
 
     /**
      * Chat turns run in the managed workspace root, not `path.resolve('..')`.
@@ -1075,6 +1182,10 @@ export class ChatService extends EventEmitter {
      */
     const persona = resolveAgentLogged(agent, {
       includeToolPolicy: true,
+      ...(approvalMode ? {
+        skillsOverride: skillsForChatApproval(approvalMode, localProjectRoots.length > 0),
+        ...(approvalMode === 'full' ? { autonomyOverride: 'Full Autonomy' as const } : {})
+      } : {}),
       // Alpha's own roster. Without it the agent answers "what agents exist"
       // with whatever its underlying CLI defines, which is not Alpha's answer.
       roster: sqliteService
@@ -1128,6 +1239,7 @@ export class ChatService extends EventEmitter {
       runId,
       cwd,
       provider: persona.modelProvider,
+      approvalMode,
       modelName: persona.modelName,
       codexBaseUrl: runtimes.find(runtime =>
         runtime.provider === persona.modelProvider && runtime.models.includes(persona.modelName)
@@ -1151,6 +1263,7 @@ ${priorTurn}` : prompt,
       // rather than the raw row so a persona file's `skills:` overlay counts,
       // the same way it does for every other field.
       skills: persona.skills,
+      projectRoots: localProjectRoots,
       autonomyLevel: persona.autonomyLevel,
       env,
       customCliArgs: agent.customCliArgs,
@@ -1168,7 +1281,12 @@ ${priorTurn}` : prompt,
     }
 
     let content = turn.content;
-    if (turn.failureKind === 'empty') {
+    if (turn.failureKind === 'limit') {
+      content =
+        `${persona.modelProvider} is at its usage limit, so ${persona.name} cannot answer right now.\n\n` +
+        `${turn.failureDetail}\n\n` +
+        'Choose a model on another runtime for this agent (click it in the chat header), or wait for the limit to reset.';
+    } else if (turn.failureKind === 'empty') {
       content =
         `I could not reach the ${persona.modelProvider} CLI, so I have no answer for you.\n\n` +
         `Reason: ${turn.failureDetail}\n\n` +
