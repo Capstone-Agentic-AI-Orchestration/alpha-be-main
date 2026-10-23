@@ -16,6 +16,7 @@ let tmp: string;
 let opened: { close(): void }[] = [];
 let cliReply: { content: string; failureKind?: string };
 let systemPrompts: string[];
+let turnInputs: Array<{ mcpServers?: string[]; systemPrompt?: string }>;
 const startProjectBuildBatch = vi.fn();
 const cancelRun = vi.fn();
 
@@ -26,8 +27,9 @@ async function load() {
   vi.resetModules();
   vi.doMock('./cliRunner.js', () => ({
     providerResumesSessions: (provider: string) => provider !== 'OpenAI',
-    runCliTurn: vi.fn(async (input: { systemPrompt?: string }) => {
+    runCliTurn: vi.fn(async (input: { systemPrompt?: string; mcpServers?: string[] }) => {
       systemPrompts.push(input.systemPrompt ?? '');
+      turnInputs.push(input);
       return {
         content: cliReply.content,
         failureKind: cliReply.failureKind,
@@ -64,6 +66,7 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-chat-routing-'));
   opened = [];
   systemPrompts = [];
+  turnInputs = [];
   startProjectBuildBatch.mockReset();
   cancelRun.mockReset();
   startProjectBuildBatch.mockResolvedValue([{
@@ -83,6 +86,16 @@ afterEach(() => {
 });
 
 describe('Alpha routes unaddressed chat messages', () => {
+  it('gives the Orchestrator read-only GitHub tools and tells it changes go to specialist agents', async () => {
+    const { chatService } = await load();
+    cliReply = { content: 'The dev branch has two open pull requests.' };
+    await send(chatService, 'What is open on GitHub for this project?', { projectId: 'project-1' });
+    expect(turnInputs[0].mcpServers).toEqual(['alpha-github']);
+    expect(systemPrompts[0]).toContain('## GitHub access (read only)');
+    expect(systemPrompts[0]).toContain('Do not push, open pull requests, post reviews');
+    expect(systemPrompts[0]).toContain('On GitHub you have read access only.');
+  });
+
   it('answers a question without starting a build, even when it begins with "add"', async () => {
     const { chatService } = await load();
     cliReply = { content: 'Login stores a session cookie and refreshes it on each request.' };

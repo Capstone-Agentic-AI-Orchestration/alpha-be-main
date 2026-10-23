@@ -212,6 +212,28 @@ function chatWorkspace(threadId: string): string {
 }
 
 /**
+ * What the Orchestrator may do with GitHub in this conversation: read only.
+ *
+ * Alpha's chat turn is the Orchestrator talking. It gets the built-in
+ * alpha-github tools in read mode, so it can look at the project's repositories,
+ * branches, pull requests and workflow runs even when this machine has no
+ * checkout. Pushing, opening pull requests and posting reviews are refused by the
+ * server itself; changes are made by specialist agents in a build.
+ */
+export function describeOrchestratorGitHubAccess(repos: string[]): string {
+  return [
+    '## GitHub access (read only)',
+    '',
+    repos.length
+      ? 'This conversation’s project lives on GitHub in: ' + repos.join(', ') + '.'
+      : 'No project is selected, so no repository is assigned; you can still read any repository the signed-in account can see.',
+    'Read GitHub with the alpha-github tools: github_repo_tree and github_read_file for code, github_list_branches and github_compare_branches for branches, github_list_pull_requests for pull requests, and github_workflow_runs and github_failed_run_logs for CI.',
+    'Your GitHub access is read only. Do not push, open pull requests, post reviews or change anything on GitHub; those tools are refused for you.',
+    'When the user wants code changed, plan it as an Orchestrator build so the specialist agents make the change.'
+  ].join('\n');
+}
+
+/**
  * The agents Alpha can speak about.
  *
  * An agent reply already gets a roster — see `resolveAgentLogged` — and Alpha,
@@ -941,6 +963,8 @@ export class ChatService extends EventEmitter {
 
     const priorSession = sqliteService.getThreadSession(threadId, DEFAULT_ASSISTANT.id);
     const cwd = chatWorkspace(threadId);
+    const assistantProject = threadProject(threadId);
+    const projectRepos = assistantProject ? reposForProject(assistantProject) : [];
     // A routed turn on a runtime that starts fresh each turn sees no earlier
     // messages, so "yes, go ahead" would mean nothing. Give it the recent ones.
     const recentConversation = routingPrompt && !providerResumesSessions(runtime.provider)
@@ -956,7 +980,8 @@ export class ChatService extends EventEmitter {
       modelName: runtime.modelName,
       codexBaseUrl: runtime.endpoint,
       // The tool policy still applies: a chat inspects, it does not mutate.
-      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), describeChatToolPolicy()]
+      systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId),
+        describeOrchestratorGitHubAccess(projectRepos), describeChatToolPolicy(['alpha-github'])]
         .filter(Boolean)
         .join(`
 
@@ -966,6 +991,8 @@ export class ChatService extends EventEmitter {
       personaName: DEFAULT_ASSISTANT.name,
       prompt,
       priorSession: priorSession?.cliSessionId ?? null,
+      // Read-only GitHub tools: a chat turn without the sk-git skill gets 'read' access from mcpAccessFor.
+      mcpServers: ['alpha-github'],
       onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
     });
 
