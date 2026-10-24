@@ -47,6 +47,25 @@ function snapshot(input: {
 }
 
 describe('orchestration recovery chat milestones', () => {
+  it('does not let an old report finding hide a newer audit execution blocker', () => {
+    const state = snapshot({ status: 'blocked', taskStatus: 'failed', correctionAttempts: 1 });
+    state.tasks[0].kind = 'audit';
+    const latest = state.attempts.at(-1)!;
+    latest.failureReason = 'The dependency scanner could not reach the registry because of a network connection error.';
+    latest.result = { rejectionReason: latest.failureReason };
+    state.findings.push({ id: 'old-format', runId: 'run-1', taskId: state.tasks[0].id, sourceTaskId: state.tasks[0].id,
+      severity: 'blocking', status: 'open', createdAt: state.attempts[0].createdAt, evidence: { check: 'agent_report' } });
+    const store = {
+      getOrchestrationChatBinding: () => ({ threadId: 'thread-1', ownerId: 'owner-1' }),
+      getOpenOrchestrationRecoveryEpisode: () => undefined,
+      listOrchestrationEvents: () => [], listOrchestrationRecoveryEpisodes: () => [],
+      saveOrchestrationRecoveryEpisode: (input: { episode: OrchestrationRecoveryEpisode }) => ({ episode: input.episode, changed: true })
+    } as unknown as SQLiteService;
+    const episode = new OrchestrationRecoveryService(store).reconcileSnapshot(state)!;
+    expect(episode.category).toBe('provider');
+    expect(episode.summary).toContain('registry');
+  });
+
   it('closes the recovery once when a build is cancelled and never reopens it for the failed task', () => {
     const opened: OrchestrationRecoveryEpisode = {
       id: 'recovery-1', workspaceId: 'workspace-1', projectId: 'project-1', runId: 'run-1', issueId: 'issue-1',

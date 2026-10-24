@@ -45,6 +45,24 @@ describe('orchestration plan contract', () => {
       { id: 'test', kind: 'validation', ownerAgentId: 'qa', dependsOn: ['verify'] }
     ].map(task => ({ ...task, title: task.id, description: 'Perform assigned work.', repository: 'acme/api', requirementIds: ['SEC'], acceptanceCriteria: ['Evidence is recorded.'] })) });
   const auditAgents = [...eligibleAgents, { id: 'security', role: 'Security / Code Quality Agent' }] as const;
+  it('allows one independent Security review per repository while rejecting duplicate or dependent reviewers', () => {
+    const backend = auditPlan();
+    const frontend = auditPlan();
+    frontend.tasks = frontend.tasks.map(task => ({ ...task, id: `fe-${task.id}`, repository: 'acme/client',
+      kind: task.kind === 'backend' ? 'frontend' : task.kind,
+      ownerAgentId: task.ownerAgentId === 'backend' ? 'frontend' : task.ownerAgentId,
+      dependsOn: task.dependsOn.map(id => `fe-${id}`) }));
+    const candidate = { ...backend, tasks: [...backend.tasks, ...frontend.tasks] };
+    const roster = [...auditAgents, { id: 'frontend', role: 'Frontend Agent' }] as const;
+    const options = { initialPlan: true, repositories: ['acme/api', 'acme/client'] };
+    expect(validateOrchestrationPlan(candidate, roster, options)).toEqual([]);
+    const duplicate = { ...candidate, tasks: [...candidate.tasks, { ...candidate.tasks[2], id: 'duplicate-review' }] };
+    expect(validateOrchestrationPlan(duplicate, roster, options).some(issue => issue.code === 'missing_independent_review')).toBe(true);
+    const selfReview = { ...candidate, tasks: candidate.tasks.map(task => task.id === 'verify' ? { ...task, ownerAgentId: 'backend' } : task) };
+    expect(validateOrchestrationPlan(selfReview, roster, options).some(issue => issue.code === 'review_not_independent')).toBe(true);
+    const missingReview = { ...candidate, tasks: candidate.tasks.filter(task => task.id !== 'fe-verify' && task.id !== 'fe-test') };
+    expect(validateOrchestrationPlan(missingReview, roster, options).some(issue => issue.code === 'review_dependency_missing' && issue.taskId === 'fe-fix')).toBe(true);
+  });
   it('requires Security evidence before fixes and independent verification before functional validation', () => {
     const candidate = auditPlan();
     expect(validateOrchestrationPlan(candidate, auditAgents, { initialPlan: true, repositories: ['acme/api'] })).toEqual([]);

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { OrchestrationPlanner } from './orchestrationPlanner.js';
 
@@ -37,6 +40,29 @@ function response(content: string): CliTurnResult {
 }
 
 describe('read-only orchestration planner', () => {
+  it('plans a scoped lockfile owner before final Security verification when the checkout has no lockfile', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-lockfile-plan-'));
+    try {
+      fs.writeFileSync(path.join(directory, 'package.json'), '{"name":"fixture"}');
+      const requirements = [{ id: 'SEC', description: 'Verify reproducible dependency versions.' }];
+      const verify = { id: 'verify', title: 'Verify dependencies', description: 'Run the final Security scan.', kind: 'audit', ownerAgentId: 'security',
+        repository: 'acme/api', dependsOn: [], requirementIds: ['SEC'], acceptanceCriteria: ['Current dependencies are verified.'], dependencyAudit: { scanner: 'npm', purpose: 'verification' } };
+      const proposed = { schemaVersion: 1, goal: 'Verify reproducible dependency versions.', requirements, tasks: [verify] };
+      const corrected = { ...proposed, tasks: [{ id: 'lock', title: 'Create dependency lockfile', description: 'Generate the npm lockfile without unrelated changes.',
+        kind: 'backend', ownerAgentId: 'backend-agent', repository: 'acme/api', requirementIds: ['SEC'], acceptanceCriteria: ['The lockfile is committed.'],
+        requiredChecks: ['test'], scope: { includePaths: ['package-lock.json'] } }, { ...verify, kind: 'review', dependsOn: ['lock'] }] };
+      let calls = 0;
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(++calls === 1 ? proposed : corrected)));
+      const result = await new OrchestrationPlanner(turn).createPlan({ ...input, cwd: directory, goal: proposed.goal, buildSteps: [], approvedRequirements: requirements,
+        milestoneContext: { id: 'verify', title: 'Verify', objective: proposed.goal },
+        repositories: [{ repository: 'acme/api', repositoryContext: 'No lockfile is present.', availableScripts: ['test'] }],
+        repositoryRoots: [{ name: 'api', repo: 'acme/api', dir: directory }],
+        eligibleAgents: [...input.eligibleAgents, { id: 'security', role: 'Security / Code Quality Agent' }] });
+      expect(turn).toHaveBeenCalledTimes(2);
+      expect(turn.mock.calls[1][0].prompt).toContain('committed npm lockfile');
+      expect(result.plan.tasks.find(task => task.id === 'verify')?.dependsOn).toContain('lock');
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
   it('uses a dedicated planner contract even when a fallback specialist has conflicting instructions', async () => {
     const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(plan)));
     const result = await new OrchestrationPlanner(turn).createPlan({ ...input,

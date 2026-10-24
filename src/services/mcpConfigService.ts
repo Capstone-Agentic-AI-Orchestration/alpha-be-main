@@ -542,15 +542,18 @@ export function expandEnvRefs(
   return { spec: expanded, missing: [...missing] };
 }
 
-/** Best-effort cleanup of a run's config directory. */
+/** Revoke tool access and remove transient configuration, preserving durable task evidence. */
 export function cleanupRunMcpConfig(runId: string): void {
   // The run is over, so is everything its tools were allowed to do.
   revokeRunGrant(runId);
-  try {
-    fs.rmSync(path.join(RUNS_DIR, runId), { recursive: true, force: true });
-  } catch {
-    // A leftover config file is harmless; failing the turn over it is not.
+  const dir = path.resolve(RUNS_DIR, runId);
+  if (path.dirname(dir) !== path.resolve(RUNS_DIR)) return;
+  // Audits and task context are consumed after CLI exit, including on recovery.
+  // Only these turn files may contain transient tool credentials/instructions.
+  for (const name of ['mcp.json', 'agy-system-settings.json', 'persona.md']) {
+    try { fs.unlinkSync(path.join(dir, name)); } catch { /* best effort, including an already-cleaned turn */ }
   }
+  try { fs.rmdirSync(dir); } catch { /* retain any evidence, context or logs */ }
 }
 
 /**

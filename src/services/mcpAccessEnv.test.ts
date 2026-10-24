@@ -82,6 +82,40 @@ describe('the access band in the written config', () => {
 });
 
 describe('the project files server in the written config', () => {
+  it('revokes tool access without deleting audit evidence needed by acceptance and report correction', async () => {
+    const mcp = await startDaemon();
+    const { runDependencyAudit } = await import('./dependencyAuditService.js');
+    const { taskAuditEvidence } = await import('./orchestrationAuditEvidence.js');
+    const { mintRunGrant, grantForToken } = await import('./runBridge.js');
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    fs.writeFileSync(path.join(repo, 'package.json'), '{"name":"fixture"}');
+    const runId = 'audit-lifecycle';
+    const runDir = path.join(tmp, 'runs', runId);
+    const spec = { scanner: 'npm', purpose: 'baseline', level: 'high' } as const;
+    const config = mcp.writeRunMcpConfig(runId, ['alpha-github'], {}, repo);
+    fs.writeFileSync(path.join(runDir, 'persona.md'), 'Temporary turn instructions');
+    const token = mintRunGrant({ runId, agentId: 'security', workspaceId: null, repos: {}, access: 'read' });
+    const evidence = await runDependencyAudit({ directory: repo, evidenceDirectory: path.join(runDir, 'audits'), taskId: 'audit-one', repository: 'owner/repo', spec }, async (bin, args, cwd) => {
+      if (bin === 'git') return { code: 0, stdout: 'a'.repeat(40), stderr: '' };
+      if (args[0] === '--version') return { code: 0, stdout: '11.0.0', stderr: '' };
+      if (args[0] === 'install') fs.writeFileSync(path.join(cwd, 'package-lock.json'), '{"lockfileVersion":3,"packages":{"":{}}}');
+      return { code: 0, stdout: JSON.stringify({ vulnerabilities: {}, metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } } }), stderr: '' };
+    });
+    const task = { id: 'audit-one', repository: 'owner/repo', dependencyAudit: spec };
+    const original = { id: 'original', taskId: task.id, agentId: 'security', prototypeRunId: runId, createdAt: '2026-10-24T00:00:00Z' };
+    const correction = { ...original, id: 'correction', prototypeRunId: 'report-correction', createdAt: '2026-10-24T00:01:00Z' };
+    const snapshot = { run: { repository: task.repository }, attempts: [original, correction] } as any;
+    mcp.cleanupRunMcpConfig(runId);
+    mcp.cleanupRunMcpConfig(runId);
+    expect(grantForToken(token)).toBeNull();
+    for (const file of [config.configPath!, config.antigravitySettingsPath!, path.join(runDir, 'persona.md')]) expect(fs.existsSync(file)).toBe(false);
+    expect(taskAuditEvidence(snapshot, task as any, correction as any, repo, [evidence.id])[0].id).toBe(evidence.id);
+    expect(() => taskAuditEvidence(snapshot, { ...task, id: 'different-task' } as any, correction as any, repo, [evidence.id])).toThrow(/not produced/);
+    fs.appendFileSync(path.join(repo, 'package.json'), '\n');
+    expect(() => taskAuditEvidence(snapshot, task as any, correction as any, repo, [evidence.id])).toThrow(/stale/);
+  });
+
   it('passes internal task scope and withholds the task server when authority is absent', async () => {
     const mcp = await startDaemon();
     const roots = [{ name: 'app', repo: 'test/app', dir: tmp }];

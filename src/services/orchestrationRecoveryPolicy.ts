@@ -99,6 +99,7 @@ export function classifyRecoveryCategory(input: {
   const text = input.reason.toLowerCase();
   if (/usage budget|token budget|cost budget|build age limit|elapsed.?time budget/i.test(text)) return 'budget';
   if (input.finalValidation) return 'final_validation';
+  if (/audit evidence.{0,80}(?:not produced|missing|stale|failed)|audit report must reference completed tool evidence/i.test(text)) return 'alpha';
   // A review can first produce an invalid report, then a valid report that
   // identifies a real input blocker. Older open report findings must not hide
   // that newer blocker or strand the build in the report-correction path.

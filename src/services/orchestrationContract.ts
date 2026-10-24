@@ -390,7 +390,16 @@ export function validateOrchestrationPlan(
     });
   }
   if (options.initialPlan && codeTasks.length && availableIndependentReviewers.length && requiredReviewTasks.length > 1) {
-    issues.push({ code: 'missing_independent_review', detail: 'Use one initial independent review task; Alpha will create bounded follow-up reviews when corrections are needed.' });
+    const reviewScopes = new Set<string>();
+    for (const review of requiredReviewTasks) {
+      const scope = plan.roleContractVersion === 2 ? JSON.stringify([review.milestoneId ?? 'direct', repositoryOf(review)]) : 'legacy';
+      if (reviewScopes.has(scope)) {
+        issues.push({ code: 'missing_independent_review', taskId: review.id,
+          detail: 'Use one initial independent review task per repository and milestone; Alpha will create bounded follow-up reviews when corrections are needed.' });
+        break;
+      }
+      reviewScopes.add(scope);
+    }
   }
 
   for (const reviewTask of requiredReviewTasks) {

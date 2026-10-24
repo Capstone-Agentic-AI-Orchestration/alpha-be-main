@@ -86,6 +86,14 @@ describe('structured specialist report parsing', () => {
     }]);
   });
 
+  it('normalizes a check label without inventing a result and rejects conflicting labels', () => {
+    const parse = (check: Record<string, unknown>) => parseAgentReport(JSON.stringify({ ...validReviewReport([]), reportedChecks: [check] }));
+    const original = { check: 'npm audit', result: 'passed', evidence: 'Observed the assigned audit tool complete.' };
+    expect(parse(original).report?.reportedChecks).toEqual([{ script: 'npm audit', result: 'passed', evidence: original.evidence }]);
+    expect(parse({ ...original, script: 'npm test' }).report).toBeUndefined();
+    expect(parse({ check: 'npm audit', evidence: 'No result was observed.' }).report).toBeUndefined();
+  });
+
   it('binds a report to the version expected by its task and preserves the received version on rejection', () => {
     const parsed = parseAgentReport(JSON.stringify({ ...validReviewReport([]), schemaVersion: 2 }), 1);
 

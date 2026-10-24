@@ -16,6 +16,9 @@ function blockedReviewSnapshot(reportOnlyRetries: number): OrchestrationSnapshot
 }
 
 describe('orchestration recovery classification and report retry', () => {
+  it('does not ask for report-only repair when completed audit evidence is missing', () => {
+    expect(classifyRecoveryCategory({ reason: 'The audit evidence was not produced by this task.', taskKind: 'audit', hasTask: true, hasReportError: true, finalValidation: false })).toBe('alpha');
+  });
   it('routes a reviewer that could not read its assigned material to review-input recovery', () => {
     expect(classifyRecoveryCategory({
       reason: 'The reviewer could not inspect the supplied source because repository reads were blocked.',

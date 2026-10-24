@@ -7,6 +7,7 @@ import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
 import { SQLiteService } from './sqliteService.js';
 import { OrchestrationService } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { initialTaskRecords } from './orchestrationStateMachine.js';
 import type { MilestoneExpansion, PlanNextMilestone } from './orchestrationMilestonePlanner.js';
 
 const agents = [{ id: 'architect', role: 'Architecture Agent' }] as const;
@@ -24,6 +25,39 @@ describe('adaptive milestone boundaries', () => {
   let directory = '';
   let store: SQLiteService | undefined;
   afterEach(() => { vi.restoreAllMocks(); store?.close(); store = undefined; if (directory) fs.rmSync(directory, { recursive: true, force: true }); directory = ''; });
+
+  it('preserves the current role contract when saving reviews for two repositories in the next milestone', () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-milestones-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    vi.spyOn(store, 'getAgents').mockReturnValue([...agents, { id: 'backend', role: 'Backend Agent' },
+      { id: 'frontend', role: 'Frontend Agent' }, { id: 'security', role: 'Security / Code Quality Agent' }] as any);
+    const roadmap = parseOrchestrationPlan({ ...plan, roleContractVersion: 2,
+      milestones: plan.milestones!.map(item => item.id === 'second' ? { ...item, repositories: ['acme/service', 'acme/client'] } : item) });
+    const now = new Date().toISOString();
+    store.addAllowedPath(directory, 'Milestone contract fixture');
+    const initial = store.createOrchestrationSnapshot({ id: 'scoped-milestone', workspaceId: 'ws-default', projectId: 'p', issueId: 'i',
+      repository: 'acme/service', requestKey: 'scoped-milestone', requestFingerprint: 'scoped-milestone', createdBy: 'user', executorId: 'test',
+      ownershipEpoch: 1, workflowVersion: 2, planVersion: 1, plan: roadmap, status: 'planning', revision: 0,
+      baseCommit: 'a'.repeat(40), createdAt: now, updatedAt: now,
+      repositoryWorkspaces: ['acme/service', 'acme/client'].map(repository => ({ repository, baseCommit: 'a'.repeat(40),
+        baseRef: 'main', branchName: 'alpha/orchestration/milestone-test', worktreePath: path.join(directory, repository) }))
+    }, initialTaskRecords(roadmap).map(task => ({ ...task, status: 'accepted' })), 'template');
+    const snapshot = store.transitionOrchestrationRun({ runId: initial.run.id, expectedRevision: initial.run.revision,
+      nextStatus: 'executing', actorId: 'test' });
+    const stage = parseOrchestrationPlan({ schemaVersion: 1, roleContractVersion: 2, goal: 'Implement both codebases.',
+      requirements: roadmap.requirements.filter(item => item.id === 'client'), tasks: ['backend', 'frontend'].flatMap((kind, index) => [
+        { id: `fix-${kind}`, title: `Fix ${kind}`, description: 'Implement scoped changes.', kind, ownerAgentId: kind, repository: index ? 'acme/client' : 'acme/service',
+          requirementIds: ['client'], acceptanceCriteria: ['Requested behavior is implemented.'], scope: { includePaths: ['src/**'] } },
+        { id: `review-${kind}`, title: `Review ${kind}`, description: 'Independently inspect the accepted changes.', kind: 'review', ownerAgentId: 'security',
+          repository: index ? 'acme/client' : 'acme/service', dependsOn: [`fix-${kind}`], requirementIds: ['client'], acceptanceCriteria: ['Accepted changes are reviewed.'] }
+      ]) });
+    const saved = store.appendOrchestrationMilestone({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision, expectedPlanVersion: 1,
+      milestoneId: 'second', actorId: 'orchestrator', tasks: stage.tasks.map(task => ({ ...task, milestoneId: 'second' })),
+      checkpoints: ['acme/service', 'acme/client'].map(repository => ({ repository, commit: 'a'.repeat(40) })) });
+    expect(saved.run.planVersion).toBe(2);
+    expect(saved.run.plan.roleContractVersion).toBe(2);
+    expect(saved.tasks.filter(task => task.kind === 'review')).toHaveLength(2);
+  });
 
   it('allows deferred coverage only through a complete ordered roadmap', () => {
     const options = { initialPlan: true, repositories: ['acme/service'] };

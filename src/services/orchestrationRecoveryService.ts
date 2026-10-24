@@ -362,6 +362,7 @@ export class OrchestrationRecoveryService {
     ]);
     const hasReportFinding = Boolean(episodeTask && snapshot.findings.some(finding =>
       finding.taskId === episodeTask.id && finding.status === 'open' &&
+      (!evidenceAttempt || finding.createdAt >= evidenceAttempt.createdAt) &&
       typeof finding.evidence.check === 'string' && reportFindingChecks.has(finding.evidence.check)
     ));
     const validationReason = typeof latestBlockedEvent?.payload.reason === 'string' ? latestBlockedEvent.payload.reason
