@@ -112,6 +112,7 @@ export class StreamParser {
   private antigravityStreamKey = 'assistant';
   /** Accumulates Codex deltas until the matching item/turn completes. */
   private readonly codexStreamText = new Map<string, string>();
+  private readonly codexMcpCalls = new Set<string>();
   /** Event types seen that no branch handled — surfaced by tests, not swallowed. */
   private readonly unhandled = new Set<string>();
 
@@ -609,6 +610,7 @@ export class StreamParser {
         return [];
 
       case 'item.started':
+        if (json.item?.type === 'mcp_tool_call') return this.handleCodexItem(json.item, false);
         // Tool and assistant items are announced before their content. The
         // completed event is the authoritative tool/message record; keeping
         // this branch explicit prevents harmless lifecycle events becoming
@@ -752,8 +754,29 @@ export class StreamParser {
     return events;
   }
 
-  private handleCodexItem(item: any): ParsedEvent[] {
+  private handleCodexItem(item: any, completed = true): ParsedEvent[] {
     const kind = String(item.type ?? '');
+
+    if (kind === 'mcp_tool_call') {
+      const toolName = `mcp__${item.server ?? 'server'}__${item.tool ?? 'tool'}`;
+      let input = item.arguments ?? {};
+      if (typeof input === 'string') { try { input = JSON.parse(input); } catch { input = {}; } }
+      const id = String(item.id ?? toolName);
+      const events: ParsedEvent[] = [];
+      const stage = this.mapToolToStage(toolName, input);
+      if (stage && stage !== this.currentStage) { this.currentStage = stage; events.push({ type: 'stage_transition', stage }); }
+      if (!this.codexMcpCalls.has(id)) {
+        events.push({ type: 'tool_call', stage: this.currentStage, toolName, toolInput: input });
+        this.codexMcpCalls.add(id);
+      }
+      if (completed) {
+        this.codexMcpCalls.delete(id);
+        const output = item.result ?? item.error ?? {};
+        events.push({ type: 'tool_result', stage: this.currentStage, toolName, toolOutput: output,
+          message: JSON.stringify(output).slice(0, 2000) });
+      }
+      return events;
+    }
 
     if (kind === 'agent_message' || kind === 'assistant_message') {
       const streamKey = String(item.id ?? 'assistant');
@@ -850,6 +873,8 @@ export class StreamParser {
 
   private mapToolToStage(toolName: string, input: any): StageId | null {
     const name = toolName.toLowerCase();
+    if (name.endsWith('project_run_check')) return 'tests';
+    if (name.endsWith('project_generate_lockfile')) return 'implementation';
 
     if (name.includes('read') || name.includes('grep') || name.includes('glob') ||
         name.includes('list') || name.includes('search')) {

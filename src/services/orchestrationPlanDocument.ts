@@ -28,6 +28,7 @@ export function orchestrationPlanDocument(plan: OrchestrationPlan, version: numb
     `Requirements: ${task.requirementIds.map(prose).join(', ')} · ${task.required ? 'Required' : 'Optional'}`, '',
     'Acceptance criteria:', '', ...task.acceptanceCriteria.map(value => `- ${prose(value)}`), '',
     `Checks: ${task.requiredChecks.join(', ') || 'None declared'}`, '',
+    ...(task.dependencyAudit ? [`Dependency audit: ${task.dependencyAudit.scanner} · ${task.dependencyAudit.purpose} · fail at ${task.dependencyAudit.level} severity or above. ${task.dependencyAudit.purpose === 'self-check' ? 'Supporting evidence; does not replace independent Security assessment.' : 'Independent Security assessment.'}`, ''] : []),
     `Included paths: ${task.scope.includePaths.map(prose).join(', ') || 'No code paths declared'}`, '',
     `Excluded paths: ${task.scope.excludePaths.map(prose).join(', ') || 'None'}`, '');
   const content = lines.join('\n') + '\n';

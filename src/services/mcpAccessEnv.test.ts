@@ -82,6 +82,20 @@ describe('the access band in the written config', () => {
 });
 
 describe('the project files server in the written config', () => {
+  it('passes internal task scope and withholds the task server when authority is absent', async () => {
+    const mcp = await startDaemon();
+    const roots = [{ name: 'app', repo: 'test/app', dir: tmp }];
+    const task = { taskId: 'task-1', repository: 'test/app', kind: 'backend' as const, includePaths: ['src/**'], excludePaths: ['src/generated/**'], requiredChecks: ['test' as const], reportOnly: false };
+    const res = mcp.writeRunMcpConfig('task-files', ['alpha-task-files'], { ALPHA_TASK_SCOPE: '{"includePaths":["**"]}' }, tmp, 'read', undefined, roots, undefined, task);
+    const cfg = JSON.parse(fs.readFileSync(res.configPath!, 'utf8'));
+    expect(JSON.parse(cfg.mcpServers['alpha-task-files'].env.ALPHA_TASK_SCOPE)).toEqual(task);
+    const agy = JSON.parse(fs.readFileSync(res.antigravitySettingsPath!, 'utf8'));
+    expect(agy.mcpServers['alpha-task-files'].trust).toBe(true);
+    mcp.cleanupRunMcpConfig('task-files');
+    const missing = mcp.writeRunMcpConfig('no-task-authority', ['alpha-task-files'], {}, tmp, 'read', undefined, roots);
+    expect(missing.serverNames).toEqual([]);
+    mcp.cleanupRunMcpConfig('no-task-authority');
+  });
   it("tells the GitHub server the selected project's folder and repositories, for its clone tool", async () => {
     const mcp = await startDaemon();
     const folder = { dir: path.join(tmp, 'AlphaProjects', 'Test-Project'), repos: ['acme/app-be', 'acme/app-fe'] };

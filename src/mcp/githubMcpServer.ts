@@ -45,6 +45,7 @@
  * that `mcpConfigService` writes.
  */
 import { createInterface } from 'node:readline';
+import { githubToolWithinScope } from '../services/githubTaskScope.js';
 
 import { githubService } from '../services/githubService.js';
 import { cloneIntoProjectFolder, cloneToWorkspace } from '../services/repoCloneService.js';
@@ -193,6 +194,9 @@ const PROJECT_REPOS: string[] = (() => {
   }
 })();
 const inProject = (repo: string) => PROJECT_FOLDER !== '' && PROJECT_REPOS.some(item => item.toLowerCase() === repo.trim().toLowerCase());
+const SCOPED_REPOS: string[] | undefined = process.env.ALPHA_SCOPED_REPOS === undefined ? undefined : (() => {
+  try { const value: unknown = JSON.parse(process.env.ALPHA_SCOPED_REPOS!); return Array.isArray(value) && value.every(repo => typeof repo === 'string') ? value : []; } catch { return []; }
+})();
 
 const str = (description: string) => ({ type: 'string', description });
 const int = (description: string, min: number, max: number) => ({
@@ -569,7 +573,7 @@ async function handle(msg: any): Promise<void> {
        */
       return reply(id, {
         tools: Object.entries(TOOLS)
-          .filter(([, t]) => permitted(t))
+          .filter(([name, t]) => permitted(t) && githubToolWithinScope(name, SCOPED_REPOS))
           .map(([name, t]) => ({
             name,
             description: t.description,
@@ -587,6 +591,9 @@ async function handle(msg: any): Promise<void> {
       const tool = TOOLS[name];
       if (!tool) {
         return reply(id, toolResult(`Unknown tool: ${name}`, true));
+      }
+      if (!githubToolWithinScope(name, SCOPED_REPOS, params?.arguments ?? {})) {
+        return reply(id, toolResult('This tool or repository is outside the selected project’s read-only GitHub scope.', true));
       }
       /*
        * Checked again here. The list above is advice to a client that may have

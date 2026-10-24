@@ -1,8 +1,9 @@
+import { roleCanPlan } from './agentRoleContracts.js';
 import { createHash } from 'node:crypto';
 import type { SQLiteService } from './sqliteService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner } from './orchestrationPlanner.js';
-import { roleCanOwnOrchestrationTask, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
+import { type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
 import { agentReadiness } from './agentReadiness.js';
 import { resolveAgent } from './personaService.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
@@ -27,7 +28,7 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
       if (agent.isArchived || agentReadiness(agent, runtimes).status !== 'ready' || !await workspaceRegistry.canAccessProjectAgentRun(context, run.projectId, agent.id)) continue;
       eligible.push({ agent, persona: resolveAgent(agent, { projectKey: project.key, includeMemory: false, includeToolPolicy: false }) });
     }
-    const candidates = eligible.filter(item => roleCanOwnOrchestrationTask('requirements', item.persona.role) && plannerModelName(item.persona.modelProvider, item.persona.modelName, runtimes));
+    const candidates = eligible.filter(item => roleCanPlan(item.persona.role) && plannerModelName(item.persona.modelProvider, item.persona.modelName, runtimes));
     const identity = candidates.find(item => item.persona.role.toLowerCase() === 'orchestrator agent') ?? candidates[0];
     if (!identity) throw new Error('No authorized planning agent with an available model is ready.');
     const workspaces = run.repositoryWorkspaces?.length ? run.repositoryWorkspaces : [{ repository: run.repository, worktreePath: run.worktreePath!, baseCommit: run.baseCommit! }];
@@ -56,15 +57,18 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
     const requirements = run.plan.requirements.filter(item => milestone.requirementIds.includes(item.id));
     const acceptedReports = snapshot.attempts.filter(attempt => attempt.status === 'accepted').slice(-12).map(attempt => ({
       taskId: attempt.taskId, resultCommit: attempt.resultCommit,
+      dependencyAudits: attempt.result?.acceptanceEvidence && (attempt.result.acceptanceEvidence as Record<string, unknown>).dependencyAudits,
       summary: typeof attempt.result?.summary === 'string' ? attempt.result.summary.slice(0, 2_000) : '',
       report: attempt.result?.agentReport ? JSON.stringify(attempt.result.agentReport).slice(0, 2_000) : undefined
     }));
+    const acceptedEvidence = JSON.stringify({ repositories: evidence, acceptedReports });
+    if (acceptedEvidence.length > 32_000) throw new Error('Accepted source and audit evidence exceed the planning context. Narrow the milestone scope before planning; findings were preserved.');
     const result = await planner.createPlan({
       runId: `${run.id}-milestone-${run.planVersion + 1}`, cwd: workspaces[0].worktreePath,
       repositoryRoots: workspaces.map(workspace => ({ name: workspace.repository, repo: workspace.repository, dir: workspace.worktreePath })),
       goal: run.plan.goal,
       milestoneContext: { id: milestone.id, title: milestone.title, objective: milestone.objective },
-      acceptedEvidence: JSON.stringify({ repositories: evidence, acceptedReports }).slice(0, 32_000),
+      acceptedEvidence,
       projectContext: run.plan.projectContext, exclusions: run.plan.exclusions,
       approvedRequirements: requirements, repositoryContext: repositories[0]?.repositoryContext ?? '',
       availableScripts: repositories[0]?.availableScripts ?? [], repositories,
@@ -77,7 +81,7 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
     const refreshed = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
     if (!refreshed || !workspaceRegistry.can(refreshed.role, 'squad.run') || !workspaceRegistry.canAccessLiveBuildRoom(refreshed, run.projectId)) throw new Error('Project execution access changed during milestone planning.');
     for (const task of result.plan.tasks) if (!await workspaceRegistry.canAccessProjectAgentRun(refreshed, run.projectId, task.ownerAgentId)) throw new Error('A planned specialist is no longer authorized for this project.');
-    const ids = new Map(result.plan.tasks.map(task => [task.id, `m${run.plan.milestones!.findIndex(item => item.id === milestone.id) + 1}-${createHash('sha256').update(task.id).digest('hex').slice(0, 16)}`]));
+    const ids = new Map(result.plan.tasks.map(task => [task.id, `m${(run.plan.milestones?.findIndex(item => item.id === milestone.id) ?? -1) + 1}-${createHash('sha256').update(task.id).digest('hex').slice(0, 16)}`]));
     return { checkpoints, tasks: result.plan.tasks.map(task => ({ ...task, id: ids.get(task.id)!, milestoneId: milestone.id, dependsOn: task.dependsOn.map(id => ids.get(id)!) })) };
   };
 }

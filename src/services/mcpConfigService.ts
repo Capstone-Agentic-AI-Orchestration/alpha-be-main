@@ -11,6 +11,7 @@ import { reposForProject } from './githubIssueMapping.js';
 import { hostingHintsFor } from './hosting/hostingService.js';
 import type { Project } from '../models/index.js';
 import type { ProjectRoot as ProjectFolderRoot } from './projectFiles.js';
+import type { TaskFileScope } from './taskFileAccess.js';
 
 /**
  * One MCP server as the CLIs expect it.
@@ -189,7 +190,10 @@ export function codexMcpOverrides(mcp: RunMcpConfig): string[] {
     args.push('-c', `mcp_servers.${name}.args=${toml([...(launcher.args ?? []), mcp.configPath, name])}`);
     // Alpha MCP servers mark read tools explicitly. Let those reads run in
     // unattended Codex turns while leaving every unmarked/write tool gated.
-    args.push('-c', `mcp_servers.${name}.default_tools_approval_mode=${toml('writes')}`);
+    args.push('-c', `mcp_servers.${name}.default_tools_approval_mode=${toml(name === 'alpha-task-files' ? 'approve' : 'writes')}`);
+    // Only the reserved task server receives internal, already-approved path authority.
+    // Native tools and arbitrary MCP servers keep their existing approval boundary.
+    if (name === 'alpha-task-files') args.push('-c', `mcp_servers.${name}.required=true`, '-c', `mcp_servers.${name}.tool_timeout_sec=180`);
     if (launcher.env && Object.keys(launcher.env).length) args.push('-c', `mcp_servers.${name}.env=${toml(launcher.env)}`);
   }
   return args;
@@ -310,11 +314,14 @@ export function writeRunMcpConfig(
    * `github_clone_repository` puts that project's code where the developer
    * keeps it.
    */
-  projectFolder?: { dir: string; repos: string[] }
+  projectFolder?: { dir: string; repos: string[] },
+  /** Internal task authority, never accepted from a tool call or agent environment. */
+  taskScope?: TaskFileScope
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
 
-  const available = availableServers();
+  const available: Record<string, McpServerSpec> = { ...availableServers(), 'alpha-task-files': builtinServer('projectFilesMcpServer'),
+    ...(projectRoots !== undefined ? { 'alpha-project-files': BUILTIN_SERVERS['alpha-project-files'], 'alpha-github': BUILTIN_SERVERS['alpha-github'] } : {}) };
   const mcpServers: Record<string, McpServerSpec> = {};
 
   /**
@@ -374,12 +381,14 @@ export function writeRunMcpConfig(
       continue;
     }
 
-    if (name === 'alpha-project-files') {
+    if (name === 'alpha-project-files' || name === 'alpha-task-files') {
       if (!projectRoots?.length || isHttpSpec(resolved)) {
         logError(`MCP server "alpha-project-files" has no project folders for ${runId} — skipping.`);
         continue;
       }
-      mcpServers[name] = { ...resolved, env: { ...resolved.env, ALPHA_PROJECT_ROOTS: JSON.stringify(projectRoots) } };
+      if (name === 'alpha-task-files' && !taskScope) continue;
+      mcpServers[name] = { ...resolved, env: { ...resolved.env, ALPHA_PROJECT_ROOTS: JSON.stringify(projectRoots),
+        ALPHA_TASK_SCOPE: name === 'alpha-task-files' ? JSON.stringify(taskScope) : '' } };
       continue;
     }
 
@@ -396,6 +405,7 @@ export function writeRunMcpConfig(
               ALPHA_WORKSPACE: workspace,
               ALPHA_RUN_ID: runId,
               ALPHA_MCP_ACCESS: access,
+              ...(projectRoots !== undefined ? { ALPHA_SCOPED_REPOS: JSON.stringify(taskScope ? [taskScope.repository] : projectFolder?.repos ?? projectRoots.map(root => root.repo)) } : {}),
               ...(projectFolder
                 ? { ALPHA_PROJECT_FOLDER: projectFolder.dir, ALPHA_PROJECT_REPOS: JSON.stringify(projectFolder.repos) }
                 : {}),
@@ -425,7 +435,7 @@ export function writeRunMcpConfig(
       // These Alpha servers enforce their own read/write boundary. Trusting
       // only them lets headless agy use the same safe reads without granting
       // blanket approval to arbitrary third-party MCP servers.
-      { ...spec, ...(name === 'alpha-github' || name === 'alpha-project-files' ? { trust: true } : {}) }
+      { ...spec, ...(name === 'alpha-github' || name === 'alpha-project-files' || name === 'alpha-task-files' ? { trust: true } : {}) }
     ]));
     fs.writeFileSync(antigravitySettingsPath, JSON.stringify({ mcp: { allowed: Object.keys(mcpServers) }, mcpServers: agyServers }, null, 2), 'utf8');
   } catch (err: any) {

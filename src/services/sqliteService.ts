@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { DB_PATH, ALPHA_DIR, MEMORY_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
+import { MEMORY_LIMITS } from '../config/constants.js';
 import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
 import {
   Project,
@@ -13,6 +14,7 @@ import {
   Squad,
   PrototypeRun,
   ChatThread,
+  ChatThreadMemory,
   ChatMessage,
   Skill,
   RuntimeEngine,
@@ -252,6 +254,7 @@ function orchestrationTaskFromRow(row: any, definition?: OrchestrationTaskDefini
     repository: definition?.repository,
     ...(definition?.milestoneId ? { milestoneId: definition.milestoneId } : {}),
     assignmentReason: definition?.assignmentReason,
+    ...(definition?.dependencyAudit ? { dependencyAudit: definition.dependencyAudit } : {}),
     ownerAgentId: row.owner_agent_id,
     dependsOn: parseJson(row.depends_on_json, []),
     requirementIds: parseJson(row.requirement_ids_json, []),
@@ -1172,6 +1175,17 @@ export class SQLiteService {
         updated_at     TEXT NOT NULL,
         PRIMARY KEY (thread_id, machine_id, agent_id)
       );
+
+      CREATE TABLE IF NOT EXISTS chat_thread_memories (
+        workspace_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+        owner_id TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        content TEXT NOT NULL DEFAULT '',
+        revision INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, thread_id)
+      );
     `);
 
     const additions: Array<[string, string]> = [
@@ -1766,9 +1780,10 @@ export class SQLiteService {
       .replace(new RegExp('^\\s*#\\s*' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\n'), '')
       .replace(/\s+/g, ' ')
       .trim();
-    const rows = this.db.prepare(`SELECT id, name, template_key, template_version, system_prompt FROM agents
+    const rows = this.db.prepare(`SELECT id, name, template_key, template_version, system_prompt, skills, autonomy_level, mcp_servers, phase FROM agents
       WHERE workspace_id = ? AND template_key IS NOT NULL`).all(workspaceId) as Array<{
         id: string; name: string; template_key: string; template_version: number | null; system_prompt: string | null;
+        skills: string; autonomy_level: string; mcp_servers: string; phase: string;
       }>;
     for (const row of rows) {
       const template = OFFICIAL_AGENT_TEMPLATES.find(item => item.key === row.template_key);
@@ -1778,8 +1793,19 @@ export class SQLiteService {
       const untouched = earlier.has(normalize(row.system_prompt ?? '', row.name)) &&
         (fromFile === undefined || earlier.has(normalize(fromFile, row.name)));
       if (!untouched) continue;
-      this.db.prepare(`UPDATE agents SET system_prompt = ?, description = ?, template_version = ?
-        WHERE id = ? AND workspace_id = ?`).run(template.systemPrompt, template.description, template.version, row.id, workspaceId);
+      // Update only metadata that still matches the old official default. Keep custom grants.
+      const oldSkills = ['research', 'architecture'].includes(template.key) ? ['sk-fs', 'sk-browser'] :
+        ['manager', 'orchestrator'].includes(template.key) ? ['sk-fs'] :
+        template.key === 'security' ? ['sk-fs', 'sk-git'] : template.key === 'validation' ? ['sk-fs', 'sk-bash'] : ['sk-fs', 'sk-bash', 'sk-git'];
+      const oldAutonomy = ['database', 'backend', 'frontend', 'mobile', 'github-finalization'].includes(template.key) ? 'Semi-Autonomous (Requires Approval)' : 'Supervised';
+      const oldMcp = template.key === 'github-finalization' ? ['alpha-github', 'alpha-hosting'] : [];
+      const oldPhase = ['research', 'architecture'].includes(template.key) ? 'Planning' : template.key === 'validation' ? 'Validation' : template.key === 'github-finalization' ? 'Finalization' : 'Development';
+      this.db.prepare(`UPDATE agents SET system_prompt = ?, description = ?, template_version = ?, skills = ?, autonomy_level = ?, mcp_servers = ?, phase = ?
+        WHERE id = ? AND workspace_id = ?`).run(template.systemPrompt, template.description, template.version,
+          row.skills === JSON.stringify(oldSkills) ? JSON.stringify(template.skills) : row.skills,
+          row.autonomy_level === oldAutonomy ? template.autonomyLevel : row.autonomy_level,
+          row.mcp_servers === JSON.stringify(oldMcp) ? JSON.stringify(template.key === 'github-finalization' ? ['alpha-github'] : []) : row.mcp_servers,
+          row.phase === oldPhase ? template.phase : row.phase, row.id, workspaceId);
       const agent = runWithWorkspace(workspaceId, () => this.getAgents().find(item => item.id === row.id));
       if (agent) syncAgentFile(agent, 'replace');
     }
@@ -2073,6 +2099,11 @@ export class SQLiteService {
   getAllowedPaths(): string[] {
     const rows = this.db.prepare('SELECT path FROM allowed_paths').all() as { path: string }[];
     return rows.map(r => r.path);
+  }
+
+  /** Revoke an internal disposable execution folder after its process has exited. */
+  removeAllowedPath(filePath: string): void {
+    this.db.prepare('DELETE FROM allowed_paths WHERE path = ?').run(path.resolve(filePath));
   }
 
   isPathAllowed(targetPath: string): boolean {
@@ -3211,6 +3242,47 @@ export class SQLiteService {
     return this.getOrchestrationSnapshot(input.runId)!;
   }
 
+  /** Preserve history and checkpoints; replacement work cannot start before a new plan approval. */
+  replaceBlockedAuditPlan(input: { runId: string; expectedRevision: number; plan: OrchestrationPlan; actorId: string }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId || snapshot.run.revision !== input.expectedRevision ||
+          snapshot.attempts.some(attempt => ['starting', 'running', 'submitted'].includes(attempt.status))) throw new Error('The blocked build changed or still has active work. Refresh before replanning.');
+      const plan = parseOrchestrationPlan(input.plan);
+      const additions = plan.tasks.filter(task => !snapshot.tasks.some(old => old.id === task.id));
+      const issues = validateOrchestrationPlan({ ...plan, tasks: additions }, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true,
+        repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository] });
+      if (issues.length) throw new Error('The revised audit plan is invalid: ' + issues.map(issue => issue.detail).join(' '));
+      if (snapshot.tasks.some(task => !plan.tasks.some(definition => definition.id === task.id && !definition.required))) throw new Error('A revised plan must retain the old task history as optional work.');
+      if (!additions.some(task => task.kind === 'audit' && task.dependencyAudit?.purpose === 'baseline')) throw new Error('The revised plan needs a Security baseline audit.');
+      const version = snapshot.run.planVersion + 1;
+      this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(workspaceId, input.runId, version, plan.schemaVersion, JSON.stringify(plan), 'model', now, now);
+      this.db.prepare("UPDATE orchestration_tasks SET plan_version = ?, required = 0, status = CASE WHEN status = 'accepted' THEN status ELSE 'superseded' END, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND run_id = ?")
+        .run(version, now, workspaceId, input.runId);
+      const insert = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const task of additions) insert.run(workspaceId, input.runId, version, task.id, task.title, task.description, task.kind, task.ownerAgentId,
+        JSON.stringify(task.dependsOn), JSON.stringify(task.requirementIds), JSON.stringify(task.acceptanceCriteria), JSON.stringify(task.requiredChecks), JSON.stringify(task.scope), task.required ? 1 : 0,
+        task.dependsOn.length ? 'pending' : 'ready', 0, 0, now);
+      // Keep the original blocker open until its replacement audit produces accepted evidence.
+      for (const finding of snapshot.findings.filter(item => item.status === 'open' && item.evidence.origin !== 'independent_review' &&
+        ['agent_blocker', 'dependency_audit'].includes(String(item.evidence.check)))) {
+        const oldTask = snapshot.tasks.find(task => task.id === finding.taskId);
+        const repository = (oldTask?.repository ?? snapshot.run.repository).toLowerCase();
+        const audit = additions.find(task => task.required && task.dependencyAudit?.purpose === 'baseline' && task.repository?.toLowerCase() === repository);
+        if (audit) this.db.prepare('UPDATE orchestration_findings SET correction_task_id = ? WHERE workspace_id = ? AND run_id = ? AND id = ?')
+          .run(audit.id, workspaceId, input.runId, finding.id);
+      }
+      this.db.prepare("UPDATE orchestration_runs SET plan_version = ?, workflow_version = ?, status = 'awaiting_plan_approval', revision = revision + 1, stopped_reason = NULL, current_task_id = NULL, pause_requested_at = NULL, pause_requested_by = NULL, updated_at = ? WHERE workspace_id = ? AND id = ?")
+        .run(version, plan.schemaVersion, now, workspaceId, input.runId);
+      this.ensureOrchestrationPlanDocuments(input.runId);
+      this.appendOrchestrationEvent(input.runId, 'plan_amended', { planVersion: version, reason: 'Security audit evidence and capability', requiresApproval: true, addedTaskIds: additions.map(task => task.id) }, input.actorId, now);
+    })();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
   appendOrchestrationMilestone(input: {
     runId: string; expectedRevision: number; expectedPlanVersion: number;
     milestoneId: string; tasks: OrchestrationTaskDefinition[];
@@ -3228,7 +3300,7 @@ export class SQLiteService {
       const stage = parseOrchestrationPlan({ schemaVersion: 1, goal: next.objective,
         requirements: snapshot.run.plan.requirements.filter(item => next.requirementIds.includes(item.id)),
         tasks: input.tasks.map(({ milestoneId: _milestoneId, ...task }) => task) });
-      const stageIssues = validateOrchestrationPlan(stage, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true, maxTaskCount: 12, repositories: next.repositories });
+      const stageIssues = validateOrchestrationPlan(stage, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true, maxTaskCount: 12, repositories: next.repositories, auditMilestone: true });
       if (stageIssues.length) throw new Error(`Invalid milestone tasks: ${stageIssues.map(issue => issue.detail).join(' ')}`);
       const plan = parseOrchestrationPlan({ ...snapshot.run.plan, tasks: [...snapshot.run.plan.tasks, ...input.tasks] });
       const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), {
@@ -3734,9 +3806,12 @@ export class SQLiteService {
     });
   }
 
-  getLatestOrchestrationSnapshot(projectId: string): OrchestrationSnapshot | undefined {
-    const row = this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 1')
-      .get(this.workspaceId(), projectId) as { id: string } | undefined;
+  getLatestOrchestrationSnapshot(projectId: string, originChatThreadId?: string): OrchestrationSnapshot | undefined {
+    const row = originChatThreadId
+      ? this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND origin_chat_thread_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(this.workspaceId(), projectId, originChatThreadId) as { id: string } | undefined
+      : this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(this.workspaceId(), projectId) as { id: string } | undefined;
     return row ? this.getOrchestrationSnapshot(row.id) : undefined;
   }
 
@@ -5639,6 +5714,63 @@ export class SQLiteService {
     }));
   }
 
+  /** Read only this owner's notes for a thread in the active workspace. */
+  getChatThreadMemory(threadId: string, ownerId: string): ChatThreadMemory | null {
+    const workspaceId = this.workspaceId();
+    const thread = this.db.prepare(`
+      SELECT 1 FROM chat_threads WHERE workspace_id = ? AND id = ? AND owner_id = ?
+    `).get(workspaceId, threadId, ownerId);
+    if (!thread) return null;
+
+    const row = this.db.prepare(`
+      SELECT content, revision, updated_at FROM chat_thread_memories
+      WHERE workspace_id = ? AND thread_id = ? AND owner_id = ?
+    `).get(workspaceId, threadId, ownerId) as
+      | { content: string; revision: number; updated_at: string }
+      | undefined;
+    return row
+      ? { threadId, content: row.content, revision: row.revision, updatedAt: row.updated_at }
+      : { threadId, content: '', revision: 0 };
+  }
+
+  /** Save bounded, user-curated context after verifying thread ownership. */
+  setChatThreadMemory(threadId: string, ownerId: string, content: string): ChatThreadMemory | null {
+    const text = content.trim();
+    if (text.length > MEMORY_LIMITS.MAX_CHARS_PER_THREAD) {
+      throw new Error(`Session memory must be ${MEMORY_LIMITS.MAX_CHARS_PER_THREAD} characters or fewer.`);
+    }
+    const workspaceId = this.workspaceId();
+    const thread = this.db.prepare(`
+      SELECT 1 FROM chat_threads WHERE workspace_id = ? AND id = ? AND owner_id = ?
+    `).get(workspaceId, threadId, ownerId);
+    if (!thread) return null;
+
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO chat_thread_memories (workspace_id, thread_id, owner_id, version, content, revision, updated_at)
+      VALUES (?, ?, ?, 1, ?, 1, ?)
+      ON CONFLICT(workspace_id, thread_id) DO UPDATE SET
+        content = excluded.content,
+        revision = chat_thread_memories.revision + 1,
+        updated_at = excluded.updated_at
+      WHERE chat_thread_memories.owner_id = excluded.owner_id
+    `).run(workspaceId, threadId, ownerId, text, now);
+    return this.getChatThreadMemory(threadId, ownerId);
+  }
+
+  /** Clear one thread's notes without touching another thread or shared memory. */
+  clearChatThreadMemory(threadId: string, ownerId: string): boolean {
+    const workspaceId = this.workspaceId();
+    const thread = this.db.prepare(`
+      SELECT 1 FROM chat_threads WHERE workspace_id = ? AND id = ? AND owner_id = ?
+    `).get(workspaceId, threadId, ownerId);
+    if (!thread) return false;
+    this.db.prepare(`
+      DELETE FROM chat_thread_memories WHERE workspace_id = ? AND thread_id = ? AND owner_id = ?
+    `).run(workspaceId, threadId, ownerId);
+    return true;
+  }
+
   /** Queue one owner-scoped chat publication with its workspace captured now. */
   enqueueChatSync(input: {
     ownerId: string;
@@ -5945,6 +6077,8 @@ export class SQLiteService {
     const removed = this.db.prepare('DELETE FROM chat_threads WHERE id = ? AND workspace_id = ?').run(threadId, this.workspaceId()).changes > 0;
     if (removed) {
       this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
+      this.db.prepare('DELETE FROM chat_thread_memories WHERE workspace_id = ? AND thread_id = ?')
+        .run(this.workspaceId(), threadId);
     }
     return removed;
   }
@@ -5963,6 +6097,8 @@ export class SQLiteService {
 
     const removed = this.db.prepare('DELETE FROM chat_messages WHERE thread_id = ?').run(threadId).changes;
     this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
+    this.db.prepare('DELETE FROM chat_thread_memories WHERE workspace_id = ? AND thread_id = ?')
+      .run(this.workspaceId(), threadId);
     this.db.prepare("UPDATE chat_threads SET last_message_snippet = '' WHERE id = ? AND workspace_id = ?").run(threadId, this.workspaceId());
     return removed;
   }

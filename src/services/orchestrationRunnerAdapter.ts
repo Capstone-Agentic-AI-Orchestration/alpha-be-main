@@ -10,7 +10,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { SQLiteService, sqliteService } from './sqliteService.js';
 import { runnerService, type StartRunParams } from './runnerService.js';
 import { addBranchWorktree, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
-import { roleCanOwnOrchestrationTask } from './orchestrationContract.js';
+import { roleCanOwnSavedTask } from './orchestrationContract.js';
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { preserveAndRestoreWorktree, type PreservedWorktreeChanges } from './orchestrationWorktreeRecovery.js';
@@ -95,7 +95,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         throw new Error(`${agent.name} is not ready: ${readiness.detail}${readiness.command ? ` Run “${readiness.command}” and retry.` : ''}`);
       }
       const persona = this.resolvePersona(agent, { projectKey: project.key, includeToolPolicy: false });
-      if (!roleCanOwnOrchestrationTask(request.taskKind, persona.role)) {
+      const roleVersion = this.store.getOrchestrationSnapshot(request.runId)?.run.plan?.roleContractVersion;
+      if (!roleCanOwnSavedTask(request.taskKind, persona.role, roleVersion)) {
         throw new Error(`${persona.role} in the current persona file cannot own the assigned ${request.taskKind} task. Update the plan or persona before retrying.`);
       }
       const snapshot = this.store.getOrchestrationSnapshot(request.runId);

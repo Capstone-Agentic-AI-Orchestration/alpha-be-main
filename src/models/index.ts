@@ -541,6 +541,14 @@ export interface ChatThread {
   createdAt: string;
 }
 
+/** User-curated notes that belong to one private conversation. */
+export interface ChatThreadMemory {
+  threadId: string;
+  content: string;
+  revision: number;
+  updatedAt?: string;
+}
+
 export type AgentCallMode = 'ask' | 'review' | 'revise' | 'implement';
 export type AgentCallStatus =
   | 'draft'

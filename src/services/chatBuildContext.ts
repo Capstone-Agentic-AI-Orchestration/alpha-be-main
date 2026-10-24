@@ -19,9 +19,10 @@ const clip = (text: string, length: number) => {
  */
 export function describeProjectBuild(
   snapshot: OrchestrationSnapshot | undefined,
-  agentName: (agentId: string) => string
+  agentName: (agentId: string) => string,
+  threadId?: string
 ): string | undefined {
-  if (!snapshot) return undefined;
+  if (!snapshot || (threadId && snapshot.run.originChatThreadId !== threadId)) return undefined;
   const { run, tasks, attempts, findings } = snapshot;
   const lines = [
     '## This project\'s latest Orchestrator build (live state; answer questions about "the build" or "this problem" from it)',

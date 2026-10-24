@@ -18,5 +18,14 @@ describe('the build the chat agent is told about', () => {
   it('says nothing when the project has no build', () => {
     expect(describeProjectBuild(undefined, id => id)).toBeUndefined();
   });
+
+  it('does not expose another conversation\'s build, even when passed a snapshot directly', () => {
+    const snapshot = {
+      run: { originChatThreadId: 'thread-a', plan: { goal: 'Private build A' }, status: 'executing' },
+      tasks: [], attempts: [], findings: []
+    } as any;
+    expect(describeProjectBuild(snapshot, id => id, 'thread-b')).toBeUndefined();
+    expect(describeProjectBuild(snapshot, id => id, 'thread-a')).toContain('Private build A');
+  });
 });
 

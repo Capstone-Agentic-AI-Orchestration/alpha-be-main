@@ -326,6 +326,18 @@ orchestrationRouter.post('/projects/:projectId/planning-recoveries/:runId/retain
   }
 }));
 
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/audit-plan', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!ALPHA_ORCHESTRATION_ENABLED) return res.status(409).json({ error: 'Task orchestration is disabled.' });
+  if (!authorizedProject(req, res) || !scopedSnapshot(req, res)) return;
+  const expectedRevision = req.body?.expectedRevision;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return res.status(400).json({ error: 'expectedRevision must be a non-negative integer.' });
+  try {
+    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
+    const next = await orchestrationService.proposeAuditReplan({ workspaceId: req.workspace!.workspaceId, runId: req.params.runId, expectedRevision, actorId: req.workspace!.userId });
+    res.json({ runId: next.run.id, status: next.run.status, revision: next.run.revision, planVersion: next.run.planVersion });
+  } catch (error) { errorResponse(res, error); }
+}));
+
 orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/tasks/:taskId/retry', desktopOnly, route(async (req: Request, res: Response) => {
   if (!authorizedProject(req, res)) return;
   const snapshot = scopedSnapshot(req, res);

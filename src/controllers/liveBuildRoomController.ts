@@ -8,6 +8,7 @@ import { orchestrationRecoveryService } from '../services/orchestrationRecoveryS
 import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
+import { dependencyAuditEvidenceSchema } from '../services/dependencyAuditContract.js';
 import type { OrchestrationRunStatus } from '../services/orchestrationStateMachine.js';
 import {
   requireProjectWorkspace,
@@ -266,6 +267,7 @@ function safeOrchestrationProjection(
   return {
     run: {
       id: snapshot.run.id,
+      originChatThreadId: snapshot.run.originChatThreadId,
       status: snapshot.run.status,
       revision: snapshot.run.revision,
       planVersion: snapshot.run.planVersion,
@@ -324,6 +326,7 @@ function safeOrchestrationProjection(
         requirementIds: task.requirementIds,
         acceptanceCriteria: task.acceptanceCriteria.map(item => safeOperationalText(item, 280) ?? ''),
         requiredChecks: task.requiredChecks,
+        dependencyAudit: task.dependencyAudit,
         assignmentReason: safeOperationalText(planTasksById.get(task.id)?.assignmentReason, 500) ??
           `This task needs a ${safeAgentName(task.ownerAgentId)} specialist for ${task.kind} work.`,
         scope: {
@@ -372,6 +375,15 @@ function safeOrchestrationProjection(
         agentId: safeAgentId(attempt.agentId),
         agentName: safeAgentName(attempt.agentId),
         status: attempt.status,
+        dependencyAudits: (Array.isArray(acceptance?.dependencyAudits) ? acceptance.dependencyAudits : []).flatMap(raw => {
+          const parsed = dependencyAuditEvidenceSchema.safeParse(raw);
+          if (!parsed.success) return [];
+          const audit = parsed.data;
+          return [{ id: audit.id, repository: audit.repository, purpose: audit.purpose, level: audit.level, scanner: audit.scanner,
+            status: audit.status, passesPolicy: audit.passesPolicy, counts: audit.counts, createdAt: audit.createdAt,
+            findings: audit.findings.map(item => ({ package: safeOperationalText(item.package, 200) ?? '', severity: item.severity,
+              range: safeOperationalText(item.range, 240) ?? '', advisories: item.advisories.map(value => safeOperationalText(value, 350) ?? '') })) }];
+        }),
         startedAt: attempt.startedAt,
         completedAt: attempt.completedAt,
         resultCommit: attempt.resultCommit,
@@ -656,6 +668,10 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       .filter(thread => thread.projectId === project.id)
       .map(thread => [thread.id, thread] as const)
   );
+  const requestedThreadId = typeof req.query.threadId === 'string' ? req.query.threadId : undefined;
+  if (requestedThreadId && !ownerThreads.has(requestedThreadId)) {
+    return res.status(404).json({ error: 'This conversation is not available in this project.' });
+  }
   const squads = workspaceRegistry
     .scopeSquads(await squadStore().list(workspaceId), req.workspace!)
     .filter(squad => projectSquadIds.has(squad.id))
@@ -711,14 +727,17 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const requestedOrchestration = !IS_CLOUD && requestedOrchestrationId
     ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(requestedOrchestrationId))
     : undefined;
-  const activeOrchestrationRef = !IS_CLOUD
+  if (requestedThreadId && requestedOrchestrationId && requestedOrchestration?.run.originChatThreadId !== requestedThreadId) {
+    return res.status(404).json({ error: 'This build is not part of the selected conversation.' });
+  }
+  const activeOrchestrationRef = !IS_CLOUD && !requestedThreadId
     ? runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id))
     : undefined;
   const activeOrchestration = activeOrchestrationRef
     ? runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationSnapshot(activeOrchestrationRef.runId))
     : undefined;
   const latestOrchestration = !IS_CLOUD
-    ? runWithWorkspace(workspaceId, () => sqliteService.getLatestOrchestrationSnapshot(project.id))
+    ? runWithWorkspace(workspaceId, () => sqliteService.getLatestOrchestrationSnapshot(project.id, requestedThreadId))
     : undefined;
   const selectedOrchestration = !explicitlySelectedLegacyRun
     ? [requestedOrchestration, activeOrchestration, latestOrchestration].find(item => item?.run.projectId === project.id)
@@ -1261,7 +1280,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     : undefined;
   const activePlanningWasInterrupted = Boolean(activePlanningReservation &&
     (activePlanningRecovery || activePlanningReservation.ownerSessionId !== orchestrationSessionId));
-  const selectedPlanningReservation = !explicitlySelectedLegacyRun && !selectedOrchestration && !activePlanningWasInterrupted
+  const selectedPlanningReservation = !requestedThreadId && !explicitlySelectedLegacyRun && !selectedOrchestration && !activePlanningWasInterrupted
     ? activePlanningReservation
     : undefined;
   const orchestrationRunOptions = [requestedOrchestration, activeOrchestration, latestOrchestration]
@@ -1292,6 +1311,11 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       branchName: candidate.run.branchName ?? '',
       updatedAt: candidate.run.updatedAt
     });
+  }
+  if (requestedThreadId) {
+    for (let index = buildRuns.length - 1; index >= 0; index -= 1) {
+      if (buildRuns[index].id !== selectedOrchestration?.run.id) buildRuns.splice(index, 1);
+    }
   }
   buildRuns.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   const recoveryState = selectedOrchestration

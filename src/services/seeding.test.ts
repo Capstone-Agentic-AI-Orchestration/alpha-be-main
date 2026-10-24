@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { OFFICIAL_AGENT_TEMPLATES, PREVIOUS_TEMPLATE_PROMPTS } from './officialAgentTemplates.js';
+import { OFFICIAL_AGENT_TEMPLATE_V4 } from './officialAgentTemplateV4.js';
 
 /**
  * Seeding must happen exactly once, and must not be inferred.
@@ -190,6 +191,37 @@ describe('seeding runs once', () => {
 });
 
 describe('official agent instruction upgrades', () => {
+  it('upgrades untouched v4 audit instructions while retaining custom personas and model settings', async () => {
+    const first = await startDaemon(); first.close();
+    const db = new Database(dbPath());
+    for (const key of ['security', 'backend'] as const) {
+      db.prepare('UPDATE agents SET template_version = 4, system_prompt = ?, model_name = ? WHERE template_key = ?').run(
+        OFFICIAL_AGENT_TEMPLATE_V4[key] + (key === 'backend' ? '\nUse the project logger.' : ''), 'chosen-model', key);
+      const { id } = db.prepare('SELECT id FROM agents WHERE template_key = ?').get(key) as { id: string };
+      fs.rmSync(path.join(tmp, 'agents', id + '.md'), { force: true });
+    }
+    db.close();
+    const upgraded = await startDaemon();
+    expect(upgraded.getAgents().find(agent => agent.templateKey === 'security')).toMatchObject({ templateVersion: 5, modelName: 'chosen-model', systemPrompt: expect.stringContaining('lead independent') });
+    expect(upgraded.getAgents().find(agent => agent.templateKey === 'backend')).toMatchObject({ templateVersion: 4, modelName: 'chosen-model', systemPrompt: expect.stringContaining('Use the project logger.') });
+  });
+  it('upgrades untouched v3 roles and default permission metadata while keeping Manager and custom grants', async () => {
+    const first = await startDaemon(); first.close();
+    const db = new Database(dbPath());
+    for (const key of ['manager', 'github-finalization'] as const) {
+      db.prepare('UPDATE agents SET template_version = 3, system_prompt = ? WHERE template_key = ?').run(PREVIOUS_TEMPLATE_PROMPTS[key].at(-1), key);
+      const { id } = db.prepare('SELECT id FROM agents WHERE template_key = ?').get(key) as { id: string };
+      fs.rmSync(path.join(tmp, 'agents', id + '.md'), { force: true });
+    }
+    db.prepare("UPDATE agents SET phase = 'Development', skills = ? WHERE template_key = 'manager'").run(JSON.stringify(['sk-browser']));
+    db.prepare("UPDATE agents SET autonomy_level = ?, skills = ?, mcp_servers = ? WHERE template_key = 'github-finalization'")
+      .run('Semi-Autonomous (Requires Approval)', JSON.stringify(['sk-fs', 'sk-bash', 'sk-git']), JSON.stringify(['alpha-github', 'alpha-hosting']));
+    db.close();
+    const svc = await startDaemon();
+    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: 5, phase: 'Planning', skills: ['sk-browser'] });
+    expect(svc.getAgents().find(agent => agent.templateKey === 'github-finalization')).toMatchObject({ templateVersion: 5, autonomyLevel: 'Supervised', skills: [], mcpServers: ['alpha-github'] });
+    expect(svc.getAgents()).toHaveLength(11);
+  });
   /** Put three official agents back on version 1, the way an older install left them. */
   async function installWithV1Agents(edit: (agentsDir: string) => void) {
     const first = await startDaemon();
@@ -269,7 +301,7 @@ describe('official agent instruction upgrades', () => {
     fs.rmSync(path.join(tmp, 'agents', id + '.md'), { force: true });
     const svc = await startDaemon();
     const validation = svc.getAgents().find(agent => agent.templateKey === 'validation')!;
-    expect(validation.systemPrompt).toContain('A check that cannot run in your sandbox is not a blocker');
+    expect(validation.systemPrompt).toContain('A check you could not run is not_run with the reason');
     expect(validation.templateVersion).toBe(OFFICIAL_AGENT_TEMPLATES[0].version);
   });
 

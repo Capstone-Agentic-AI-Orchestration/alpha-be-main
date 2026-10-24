@@ -15,6 +15,17 @@ vi.mock('./runtimeService.js', () => ({
 
 const noMcp = { configPath: null as string | null, serverNames: [] as string[] };
 
+describe('scoped task native permissions', () => {
+  it.each(['OpenAI', 'Anthropic', 'Antigravity', 'Google Gemini', 'OpenCode'])('keeps %s native writes and commands disabled while exposing only task MCP', provider => {
+    const invocation = buildTurnInvocation(options({ provider, mode: 'chat', approvalMode: 'ask', skills: [],
+      projectRoots: [{ name: 'task', repo: 'test/repo', dir: '/task/repo' }] }),
+      { configPath: '/task/mcp.json', serverNames: ['alpha-task-files'] });
+    expect(invocation.args.join(' ')).not.toMatch(/dangerously|acceptEdits|accept-edits|workspace-write|approve-for-me/);
+    if (provider === 'OpenAI') expect(invocation.args.join(' ')).toContain('features.shell_tool=false');
+    if (provider === 'Anthropic') expect(invocation.args.slice(invocation.args.indexOf('--disallowedTools') + 1)).toContain('Write');
+  });
+});
+
 const options = (over: Partial<CliTurnOptions> = {}): CliTurnOptions => ({
   runId: 'chat-1',
   cwd: '/workspaces',
