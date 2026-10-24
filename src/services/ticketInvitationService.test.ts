@@ -62,6 +62,18 @@ function fixture(options: {
 }
 
 describe('PM client-invitation application service', () => {
+  it('allows a project organization link without authorizing work or granting client access', async () => {
+    const f = fixture({ state: { ...newTicketWorkflow(target.ticketId, target.workspaceId),
+      status: 'under_review', projectId: 'organized-project' } });
+    await expect(f.service.issue(target, pm)).resolves.toMatchObject({ invitationId: 'invitation-new' });
+    expect(f.signals).toHaveLength(1);
+  });
+  it('still refuses an inquiry with authorized work', async () => {
+    const f = fixture({ state: { ...newTicketWorkflow(target.ticketId, target.workspaceId),
+      status: 'under_review', projectId: 'organized-project', authorizedScopeVersionId: 'scope' } });
+    await expect(f.service.issue(target, pm)).rejects.toMatchObject({ code: 'ticket_invitation_unavailable' });
+    expect(f.signals).toHaveLength(0);
+  });
   it('rejects a restricted recipient before creating an invitation, audit or outbox signal', async () => {
     const allowed = vi.fn(() => false);
     const f = fixture({ recipientAllowed: allowed });

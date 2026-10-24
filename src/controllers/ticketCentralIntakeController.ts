@@ -6,7 +6,7 @@ import { route } from './asyncRoute.js';
 import { pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 
 export interface TicketCentralIntakeApplication {
-  listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown }): Promise<unknown>;
+  listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown; filter?: unknown }): Promise<unknown>;
   accept(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
   decline(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
 }
@@ -21,6 +21,9 @@ function safePage(value: unknown) {
   const items = page.items.map(item => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TicketReadInvariantError();
     const row = item as Record<string, unknown>;
+    if ((row.status !== undefined && !['pending','accepted','declined'].includes(String(row.status)))
+      || (row.handledAt != null && (typeof row.handledAt !== 'string' || !Number.isFinite(Date.parse(row.handledAt))))
+      || (row.outcomeEmailStatus != null && !['pending','retry','leased','delivered','dead'].includes(String(row.outcomeEmailStatus)))) throw new TicketReadInvariantError();
     if (typeof row.id !== 'string' || !row.id.trim() || row.id.length > 200
       || typeof row.publicReference !== 'string' || !/^INQ-[A-F0-9]{32}$/.test(row.publicReference)
       || typeof row.fullName !== 'string' || !row.fullName.trim() || row.fullName.length > 160
@@ -36,7 +39,8 @@ function safePage(value: unknown) {
     // Explicit client-data allowlist for the PM-only intake response.
     return { id: row.id, publicReference: row.publicReference, fullName: row.fullName, email: row.email, company: row.company,
       title: row.title, description: row.description, requestedDeadline: row.requestedDeadline,
-      submittedAt: row.submittedAt };
+      submittedAt: row.submittedAt,
+      status: row.status ?? 'pending', handledAt: row.handledAt ?? null, outcomeEmailStatus: row.outcomeEmailStatus ?? null };
   });
   return { items, nextCursor: page.nextCursor };
 }
@@ -62,13 +66,13 @@ function safeDecline(value: unknown, intakeId: string, operationId: string) {
   return { intakeId, operationId, status: 'declined' as const };
 }
 
-function pageInput(req: Request): { after?: unknown; limit?: unknown } {
+function pageInput(req: Request): { after?: unknown; limit?: unknown; filter?: unknown } {
   const query = req.query as Record<string, unknown>;
   const keys = Object.keys(query);
-  if (keys.some(key => key !== 'after' && key !== 'limit')) {
+  if (keys.some(key => key !== 'after' && key !== 'limit' && key !== 'filter')) {
     throw new TicketWorkflowError(400, 'central_intake_page_invalid', 'The inquiry page is invalid.');
   }
-  return { after: query.after, limit: query.limit };
+  return { after: query.after, limit: query.limit, filter: query.filter };
 }
 
 /** PM-only view of pre-ticket inquiries. Workspace selection comes from the

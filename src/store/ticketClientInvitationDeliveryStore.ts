@@ -103,7 +103,7 @@ export class PostgresTicketClientInvitationDeliveryStore implements TicketClient
       }
       const valid = row.workspace_status === 'active' && row.write_mode === 'enabled'
         && row.ticket_source === 'public_inquiry' && row.ticket_status === 'under_review'
-        && row.ticket_client_user_id === null && row.project_id === null
+        && row.ticket_client_user_id === null
         && workflow.scopeVersionId === null && workflow.agreedScopeVersionId === null
         && workflow.authorizedScopeVersionId === null && workflow.requiredIssueIds.length === 0
         && row.request_source === 'public_inquiry' && row.contact_email_verified === false

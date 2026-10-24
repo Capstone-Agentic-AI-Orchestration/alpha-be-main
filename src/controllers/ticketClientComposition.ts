@@ -43,7 +43,7 @@ const CLIENT_SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 export interface TicketClientComposition {
   router: Router;
   pmInvitation: {
-    enabled: true;
+    enabled: boolean;
     policy: TicketInvitationPolicy;
     secretProtector: TicketInvitationSecretProtector;
   };
@@ -64,23 +64,19 @@ export function createTicketClientComposition(input: {
   sessionSecret: string;
   webOrigin: string;
   /** Resend: PM invitations, client activation, and password recovery. */
-  emailProvider: TicketInvitationContentEmailProvider;
+  emailProvider: TicketInvitationContentEmailProvider | null;
   /** Optional Resend route for PM/client conversation notices. */
   notificationEmailProvider?: TicketInvitationContentEmailProvider | null;
   onSignInDeliveryUnavailable?: () => void;
   workflow?: TicketLifecycleRuntime;
 }): TicketClientComposition {
-  if (typeof input.emailProvider.sendContent !== 'function') {
-    throw new Error('Client email delivery is not configured.');
-  }
-
   const identityProvider = new TicketClientIdentityProvider(
     input.supabaseUrl, input.supabaseAnonKey, input.supabaseServiceRoleKey,
   );
   const secrets = createClientTicketInvitationSecretProtector(input.sessionSecret);
   const invitationPolicy: TicketInvitationPolicy = {
     lifetimeMs: INVITATION_LIFETIME_MS,
-    ...(input.emailProvider.canSendTo ? { recipientAllowed: (email: string) => input.emailProvider.canSendTo!(email) } : {}),
+    ...(input.emailProvider?.canSendTo ? { recipientAllowed: input.emailProvider.canSendTo } : {}),
   };
   const rateStore = new PostgresTicketClientAuthRateLimitStore(input.database);
   const activationAdmission = createTicketClientAuthAdmission({
@@ -120,20 +116,20 @@ export function createTicketClientComposition(input: {
     workflow: input.workflow,
   });
 
-  const delivery = createTicketClientInvitationDeliveryService(
+  const delivery = input.emailProvider ? createTicketClientInvitationDeliveryService(
     new PostgresTicketClientInvitationDeliveryStore(input.database), identityProvider, input.emailProvider,
     secrets.invitation, secrets.providerLink,
     { webOrigin: input.webOrigin, leaseDurationMs: 60_000, retryBaseDelayMs: 30_000,
       retryMaxDelayMs: 5 * 60_000, maxAttempts: 5 },
-  );
+  ) : null;
 
   return {
     router, documents,
-    pmInvitation: { enabled: true, policy: invitationPolicy, secretProtector: secrets.invitation },
+    pmInvitation: { enabled: Boolean(input.emailProvider), policy: invitationPolicy, secretProtector: secrets.invitation },
     startDeliveryWorker(onUnavailable, onActionNoticesUnavailable) {
-      const stopInvitations = startTicketClientInvitationDeliveryWorker({
+      const stopInvitations = delivery ? startTicketClientInvitationDeliveryWorker({
         isCloud: true, enabled: true, delivery, onUnavailable,
-      });
+      }) : () => undefined;
       const stopCommunications = communicationDelivery ? startTicketCommunicationNotificationWorker({
         isCloud: true, enabled: true, delivery: communicationDelivery, onUnavailable, onActionNoticesUnavailable,
       }) : () => undefined;

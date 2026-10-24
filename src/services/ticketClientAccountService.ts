@@ -34,7 +34,7 @@ export function createTicketClientAccountService(input: {
   provider: TicketClientIdentityProvider;
   sessions: ReturnType<typeof createTicketClientSessionService>;
   activate: (input: unknown) => Promise<unknown>;
-  emailProvider: TicketInvitationContentEmailProvider;
+  emailProvider: TicketInvitationContentEmailProvider | null;
   webOrigin: string;
   secret: string;
   onDeliveryUnavailable?: () => void;
@@ -175,6 +175,7 @@ export function createTicketClientAccountService(input: {
       const parsed = z.object({ email }).strict().safeParse(body);
       if (!parsed.success) return { accepted: true as const };
       try {
+        if (!input.emailProvider) throw unavailable();
         const userId = await input.signInStore.findActiveClientUserId(parsed.data.email);
         if (!userId || (input.emailProvider.canSendTo && !input.emailProvider.canSendTo(parsed.data.email))) return { accepted: true as const };
         const generated = await input.provider.generateRecoveryLink(parsed.data.email);

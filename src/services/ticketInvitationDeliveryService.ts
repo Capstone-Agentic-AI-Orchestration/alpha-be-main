@@ -102,7 +102,7 @@ function ineligibleReason(claim: TicketInvitationDeliveryClaim, nowMs: number): 
   if (Date.parse(invitation.expiresAt) <= nowMs) return 'expired';
   if (ticket.status !== 'under_review' || ticket.clientId !== null || ticket.scopeVersionId !== null
     || ticket.agreedScopeVersionId !== null || ticket.authorizedScopeVersionId !== null
-    || ticket.projectId !== null || ticket.requiredIssueIds.length !== 0) return 'ticket_ineligible';
+    || ticket.requiredIssueIds.length !== 0) return 'ticket_ineligible';
   if (contact.source !== 'public_inquiry' || contact.bindingId !== invitation.contactBindingId
     || !canonicalEmail(contact.email)) return 'contact_changed';
   return null;

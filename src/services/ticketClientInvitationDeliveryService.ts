@@ -116,7 +116,7 @@ export function createTicketClientInvitationDeliveryService(
         : claim.ticket.status !== 'under_review' || claim.ticket.source !== 'public_inquiry'
           || claim.ticket.clientId !== null || claim.ticket.scopeVersionId !== null
           || claim.ticket.agreedScopeVersionId !== null || claim.ticket.authorizedScopeVersionId !== null
-          || claim.ticket.projectId !== null || claim.ticket.requiredIssueIds.length !== 0
+          || claim.ticket.requiredIssueIds.length !== 0
           ? 'ticket_ineligible'
           : claim.contact.bindingId !== claim.invitation.contactBindingId
             || claim.contact.source !== 'public_inquiry' || claim.contact.emailVerified !== false

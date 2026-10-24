@@ -8,6 +8,18 @@ const gmailConfiguration = { clientId: 'client-id', clientSecret: 'client-secret
   senderEmail: 'sender@example.invalid', senderName: 'Alpha test' };
 const id = '00000000-0000-4000-8000-000000000001';
 
+it('sends a general decline outcome with a reference and no internal PM note', async () => {
+  const send = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id }), { status: 200 }));
+  const provider = createResendTicketAcknowledgmentProvider(configuration, send)!;
+  const reference = `INQ-${'A'.repeat(32)}`;
+  await provider.send('client@example.test', id, reference, 'declined');
+  const body = JSON.parse(String(send.mock.calls[0][1]?.body));
+  expect(body.subject).toContain('update');
+  expect(body.text).toContain('will not be proceeding');
+  expect(body.text).toContain(reference);
+  expect(body.text).not.toContain('has been received');
+});
+
 describe('provider selection', () => {
   it('selects Gmail explicitly and has no silent fallback when Gmail OAuth is missing', () => {
     const selected = createTicketAcknowledgmentEmailProvider({ providerName: ' Gmail ', brevo: configuration, gmail: gmailConfiguration });

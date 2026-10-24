@@ -73,13 +73,13 @@ const ticketClient = (() => {
     webOrigin: clientWebOrigin, originAllowed: Boolean(clientWebOrigin && isAllowedOrigin(clientWebOrigin)),
     supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
     supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
-    emailConfigured: typeof resendTicketEmailProvider?.sendContent === 'function',
   });
-  if (missing.length || !clientWebOrigin || !resendTicketEmailProvider) {
+  if (missing.length || !clientWebOrigin) {
     // Setting names only: never log credentials, client details or provider bodies.
     logError(`Client portal unavailable: configure ${missing.join(', ')}.`);
     return null;
   }
+  if (!resendTicketEmailProvider) logError('Client email delivery is unavailable. Existing client sign-in and ticket access remain available; configure the server-side email sender to send invitations and recovery emails.');
   try {
     return createTicketClientComposition({
       database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
@@ -205,7 +205,8 @@ app.use(
 );
 
 // Mount the browser-only client surface only when the cloud, ticketing gate,
-// exact web origin, server-side Supabase settings, and Resend API configuration are valid.
+// exact web origin and server-side identity/session settings are valid.
+// Email configuration controls sending, not existing password/session access.
 // Keep it ahead of internal token/workspace middleware; it never relays to desktop.
 app.use('/api/client', ticketClient?.router ?? createTicketClientUnavailableRouter());
 
@@ -520,7 +521,7 @@ function onListening(): void {
           testRecipient: RESEND_TEST_RECIPIENT },
         brevo: { apiKey: BREVO_API_KEY, senderEmail: BREVO_SENDER_EMAIL, senderName: BREVO_SENDER_NAME },
       }), database,
-      onUnavailable: () => logError('Ticket acknowledgment email is unavailable; inquiries remain saved. Check hosted email configuration and outbox status.'),
+      onUnavailable: () => logError('Inquiry receipt/outcome email is unavailable; inquiries and decisions remain saved. Check hosted email configuration and outbox status.'),
     });
     server.once('close', stopAcknowledgments);
     const stopInvitationEmails = startTicketInvitationEmailDelivery({
