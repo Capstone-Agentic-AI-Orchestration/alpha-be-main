@@ -2096,6 +2096,10 @@ export class SQLiteService {
     stmt.run(normalized, name, new Date().toISOString());
   }
 
+  removeAllowedPath(filePath: string) {
+    this.db.prepare('DELETE FROM allowed_paths WHERE path = ?').run(path.resolve(filePath));
+  }
+
   getAllowedPaths(): string[] {
     const rows = this.db.prepare('SELECT path FROM allowed_paths').all() as { path: string }[];
     return rows.map(r => r.path);

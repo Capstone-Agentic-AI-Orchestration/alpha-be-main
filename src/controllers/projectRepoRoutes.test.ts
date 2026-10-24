@@ -138,6 +138,15 @@ describe('a project’s repositories', () => {
     expect(calls).toEqual(['architecture acme/shop-be']);
   });
 
+  it.each(['client', 'pm', 'admin'])('keeps architecture diagrams limited to developers (%s)', async role => {
+    const { app, calls } = await startApi({ role });
+
+    const res = await call(app, 'GET', '/api/projects/p1/repos/acme/shop-be/architecture');
+
+    expect(res).toEqual({ status: 403, body: { error: 'Architecture diagrams are available to developers only.' } });
+    expect(calls).toEqual([]);
+  });
+
   /** The caller's token could read it; a project page is still not a general GitHub browser. */
   it('refuses a repository that is not the project’s, without asking GitHub', async () => {
     const { app, calls } = await startApi();
