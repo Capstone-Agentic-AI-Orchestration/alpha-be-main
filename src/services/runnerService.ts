@@ -123,6 +123,9 @@ export function appendOrchestrationTaskPolicy(
     `Task description: ${task.description}`,
     `Acceptance criteria:\n${task.acceptanceCriteria.map(item => `- ${item}`).join('\n')}`,
     `Return the exact shared Alpha task-report schema version ${orchestration.taskPackage.reportSchemaVersion}.`,
+    task.dependencyAudit && !orchestration.taskPackage.reportCorrection
+      ? 'This approved task requires dependency audit evidence. Invoke project_audit_dependencies for the assigned repository without asking the user whether to run npm audit. Reference its returned evidence IDs in auditEvidenceIds; findings are assessment results, while tool/registry failures are concrete setup blockers. Do not request unrestricted terminal permissions or another agent’s scope.'
+      : '',
     `Required checks: ${orchestration.taskPackage.reportCorrection ? 'None for this report-format correction; do not run commands.' : orchestration.taskPackage.task.requiredChecks.length ? orchestration.taskPackage.task.requiredChecks.join(', ') : 'No task-specific scripts; the repository’s configured conventional checks will be discovered.'}`,
     `Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'none configured; do not broaden the task and expect scope review before acceptance.'}`,
     orchestration.taskPackage.task.scope.excludePaths.length
@@ -143,7 +146,7 @@ export function appendOrchestrationTaskPolicy(
     orchestration.taskPackage.findingIds.length
       ? `For every targeted finding ID below, include one findingCoverage entry with concrete evidence that it is fixed. A correction is not complete merely because its checks pass.\n${orchestration.taskPackage.findingIds.map(id => `- ${id}`).join('\n')}`
       : '',
-    'For reportedChecks, use only passed, failed, or not_run. Use not_run when a check did not execute, including when your sandbox blocked it, and explain why in evidence; a check that cannot run is not a task blocker, because Alpha runs the required checks itself. Put only problems that stop the task itself, such as a missing requirement or file, in blockers so Alpha can escalate them clearly.',
+    'For reportedChecks, use objects with script, result and evidence; result must be passed, failed, or not_run. Use not_run when a check did not execute, including when your sandbox blocked it, and explain why in evidence; a check that cannot run is not a task blocker, because Alpha runs the required checks itself. Put only problems that stop the task itself, such as a missing requirement or file, in blockers so Alpha can escalate them clearly.',
     'Use alpha-task-files for all source reads and scoped edits: project_list_files, project_read_file, project_search, project_write_file, project_edit_file and project_delete_file. Native file tools and terminal commands are disabled. project_generate_lockfile performs the bounded npm lockfile operation when that path is approved. project_run_check runs only an assigned requiredChecks name in a disposable source copy. Alpha also runs required verification after the report. Analysis/review/delivery output belongs in report deliverables, never repository edits.',
     'Follow your persona and role boundaries. Do not implement another planned task, broaden the scope, or rework an accepted dependency. If the assigned work conflicts with your role or cannot be completed safely, explain the conflict and stop.',
     orchestration.taskPackage.reportCorrection || task.kind === 'review'

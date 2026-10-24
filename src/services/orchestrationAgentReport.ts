@@ -80,11 +80,13 @@ function normalizeVersion1Report(value: unknown): unknown {
     normalized.reportedChecks = report.reportedChecks.map(item => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
       const check = { ...(item as Record<string, unknown>) };
-      if (check.script === undefined && typeof check.name === 'string') {
-        check.script = check.name;
-        delete check.name;
-      } else if (check.script === check.name) {
-        delete check.name;
+      for (const alias of ['name', 'check']) {
+        if (check.script === undefined && typeof check[alias] === 'string') {
+          check.script = check[alias];
+          delete check[alias];
+        } else if (check.script === check[alias]) {
+          delete check[alias];
+        }
       }
 
       const rawResult = check.result !== undefined ? check.result : check.status;

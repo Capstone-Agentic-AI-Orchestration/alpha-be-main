@@ -232,7 +232,7 @@ export function usageLimitDetail(input: {
  * Claude takes `--append-system-prompt-file`, and using it is what keeps a
  * multi-line persona out of a command line that cmd.exe would truncate. Lives
  * beside the run's MCP config under `~/.alpha/runs/<runId>/`, so
- * `cleanupRunMcpConfig` removes it with the rest of the directory.
+ * `cleanupRunMcpConfig` removes this transient file but retains task evidence.
  *
  * Returns null when there is no persona, or when the write fails — the caller
  * then falls back to the inline flag rather than losing the turn.
@@ -1125,8 +1125,8 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
         cancelled: false
     };
   } finally {
-    // The config exists only for the duration of the spawn. Leaving it would
-    // accumulate a directory per turn under ~/.alpha/runs.
+    // Remove transient tool credentials after the spawn, retaining audit evidence
+    // that the Orchestrator must validate after this turn returns.
     cleanupRunMcpConfig(runId);
   }
 }

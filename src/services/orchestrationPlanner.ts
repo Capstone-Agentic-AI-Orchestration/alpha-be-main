@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathMatchesScope } from '../utils/pathScope.js';
 import { agentRoleContract, roleCanPlan } from './agentRoleContracts.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { runCliTurn } from './cliRunner.js';
@@ -148,6 +151,7 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
     'When a frontend or mobile task calls an API that a backend task in this build creates or changes, write the contract into the plan: the exact method, path, request fields, and response fields, in both the backend task and the frontend task descriptions. Make the frontend task depend on that backend task. Specialists cannot see other repositories, so the contract in their task is all they know. If the build has no backend task and the frontend has no documented API, keep the frontend work to local state or a typed client for a contract you define in the task, and say which.',
     `Allowed enum values (these are schema rules, not plan fields): task.kind = ${orchestrationTaskKindSchema.options.join(', ')}; task.requiredChecks = ${orchestrationRequiredCheckSchema.options.join(', ')}. For each repository, choose requiredChecks only from that repository’s availableScripts list.`,
     'Optional task.dependencyAudit is {scanner:"npm",purpose:"baseline"|"verification"|"self-check",level:"low"|"moderate"|"high"|"critical"}. Independent baseline/verification belongs to Security audit/review tasks. Self-check belongs only to an implementation or validation task and cannot satisfy final Security assessment. The server starts with low severity; do not weaken it to evade findings.',
+    'Every final Security dependency verification needs a committed npm lockfile. If its repository has no package-lock.json or npm-shrinkwrap.json, assign its implementation specialist to generate one and make verification depend on that task, even when the baseline found no vulnerabilities. Security must stay read-only.',
     'Return the plan JSON now.',
     JSON.stringify(context, null, 2),
     'Plan schema shape:',
@@ -304,6 +308,17 @@ function validatePlan(
   const issues = validateOrchestrationPlan(plan, eligible, { maxTaskCount: MAX_INITIAL_PLAN_TASKS, initialPlan: true, repositories: selectedRepositories, auditMilestone: Boolean(input.milestoneContext) });
   if (issues.length) {
     throw new OrchestrationPlanningError(issues.map(issue => issue.detail).join(' '), 'invalid_plan');
+  }
+  const lockfiles = ['package-lock.json', 'npm-shrinkwrap.json'];
+  const roots = planningRoots(input);
+  for (const audit of plan.tasks.filter(task => task.required && task.dependencyAudit?.purpose === 'verification')) {
+    const repository = (audit.repository ?? roots[0]?.repo ?? '').toLowerCase();
+    const root = roots.find(item => item.repo.toLowerCase() === repository);
+    if (!root || lockfiles.some(file => fs.existsSync(path.join(root.dir, file)))) continue;
+    const owner = plan.tasks.some(task => task.required && CODE_TASK_KINDS.has(task.kind) &&
+      (task.repository ?? roots[0]?.repo ?? '').toLowerCase() === repository && lockfiles.some(file =>
+        task.scope.includePaths.some(pattern => pathMatchesScope(file, pattern)) && !task.scope.excludePaths.some(pattern => pathMatchesScope(file, pattern))));
+    if (!owner) throw new OrchestrationPlanningError(`Final Security verification for ${repository} requires a committed npm lockfile. Assign its implementation specialist a required scoped lockfile task before verification, including when its baseline is clean.`, 'invalid_plan');
   }
   const repositoryScripts = new Map((input.repositories ?? []).map(repository => [repository.repository.toLowerCase(), new Set(repository.availableScripts)]));
   const knownScripts = new Set(input.availableScripts);

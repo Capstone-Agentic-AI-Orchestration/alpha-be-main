@@ -3297,7 +3297,7 @@ export class SQLiteService {
       if (snapshot.tasks.some(task => task.required && task.status !== 'accepted')) throw new Error('Accept all required work before planning the next milestone.');
       const next = snapshot.run.plan.milestones?.find(milestone => !snapshot.run.plan.tasks.some(task => task.milestoneId === milestone.id));
       if (!next || next.id !== input.milestoneId || !input.tasks.length || input.tasks.some(task => task.milestoneId !== next.id)) throw new Error('Only the next approved milestone may be expanded.');
-      const stage = parseOrchestrationPlan({ schemaVersion: 1, goal: next.objective,
+      const stage = parseOrchestrationPlan({ schemaVersion: 1, roleContractVersion: snapshot.run.plan.roleContractVersion, goal: next.objective,
         requirements: snapshot.run.plan.requirements.filter(item => next.requirementIds.includes(item.id)),
         tasks: input.tasks.map(({ milestoneId: _milestoneId, ...task }) => task) });
       const stageIssues = validateOrchestrationPlan(stage, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true, maxTaskCount: 12, repositories: next.repositories, auditMilestone: true });
