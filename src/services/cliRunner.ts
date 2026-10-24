@@ -8,6 +8,7 @@ import { cliHomeEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import type { ProjectRoot } from './projectFiles.js';
+import type { TaskFileScope } from './taskFileAccess.js';
 import { codexModelConfigArgs } from './codexModelConfig.js';
 import { sqliteService } from './sqliteService.js';
 import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig } from './mcpConfigService.js';
@@ -144,6 +145,8 @@ export interface CliTurnOptions {
    * on the disk. See projectFiles.
    */
   projectRoots?: ProjectRoot[];
+  /** Internal assignment authority for alpha-task-files; not a user-supplied approval override. */
+  taskScope?: TaskFileScope;
   /** The selected project's folder and repositories, where the clone tool puts that project's code. */
   projectFolder?: { dir: string; repos: string[] };
   /**
@@ -972,7 +975,8 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
     mcpAccessFor(options.autonomyLevel, options.mode ?? 'chat', options.skills),
     undefined,
     options.projectRoots,
-    options.projectFolder
+    options.projectFolder,
+    options.taskScope
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);

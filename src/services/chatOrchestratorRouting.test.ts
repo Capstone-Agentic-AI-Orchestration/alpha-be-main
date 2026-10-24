@@ -103,6 +103,33 @@ async function specialistFixture() {
 }
 
 describe('specialist analysis handoffs', () => {
+  it.each(['ask', 'approve', 'full'])('keeps a directly selected specialist read-only with %s access', async approvalMode => {
+    const { chatService, sqlite } = await specialistFixture();
+    sqlite.createChatThread({ id: 'thread-1', title: 'Specialist', projectId: 'project-1' } as any);
+    sqlite.setThreadSession('thread-1', 'backend-specialist', 'old-privileged-session', 'old-persona');
+    cliReply = { content: 'The API uses explicit input validation.' };
+    await send(chatService, 'Explain the API', { projectId: 'project-1', targetAgentId: 'backend-specialist', approvalMode });
+    expect(turnInputs).toHaveLength(1);
+    expect(turnInputs[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', skills: [], priorSession: null,
+      autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github'] });
+    expect(turnInputs[0].systemPrompt).toContain('approved scoped build flow');
+  });
+
+  it('routes a directly selected specialist code request into plan approval', async () => {
+    const { chatService } = await specialistFixture();
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add API request validation.","repositories":[]}' };
+    await send(chatService, 'Add API request validation', { projectId: 'project-1', targetAgentId: 'backend-specialist', approvalMode: 'full' });
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
+    expect(turnInputs[0].approvalMode).toBe('ask');
+  });
+  it('rechecks direct specialist project access before starting its CLI', async () => {
+    const { chatService, access } = await specialistFixture();
+    access.mockResolvedValue(false);
+    cliReply = { content: 'Should not run' };
+    const result = await send(chatService, 'Explain the API', { projectId: 'project-1', targetAgentId: 'backend-specialist', approvalMode: 'full' });
+    expect(turnInputs).toHaveLength(0);
+    expect(result.agentMessage.content).toContain('could not start');
+  });
   const assignment = { agentId: 'backend-specialist', kind: 'backend', instruction: 'Inspect the API error handling and report evidence.', reason: 'Server-side expertise.' };
   const route = (assignments = [assignment]) => 'ALPHA_ROUTE ' + JSON.stringify({ route: 'delegate', goal: 'Review the project', assignments });
 

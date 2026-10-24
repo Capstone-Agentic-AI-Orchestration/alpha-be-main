@@ -10,6 +10,7 @@
  * Entry point only -- nothing imports this.
  */
 import { createInterface } from 'node:readline';
+import { auditTaskDependencies, taskCanAudit, deleteTaskFile, editTaskFile, generateTaskLockfile, parseTaskFileScope, runTaskCheck, stopTaskOperations, writeTaskFile } from '../services/taskFileAccess.js';
 
 import {
   listFiles,
@@ -24,6 +25,7 @@ const PROTOCOL_VERSION = '2025-06-18';
 const SUPPORTED_PROTOCOLS = new Set([PROTOCOL_VERSION, '2025-03-26', '2024-11-05']);
 
 const ROOTS = parseRoots(process.env.ALPHA_PROJECT_ROOTS);
+const TASK = parseTaskFileScope(process.env.ALPHA_TASK_SCOPE);
 
 interface ToolDef {
   description: string;
@@ -92,6 +94,42 @@ const TOOLS: Record<string, ToolDef> = {
   }
 };
 
+if (TASK) {
+  if (TASK.reportOnly) for (const name of Object.keys(TOOLS)) delete TOOLS[name];
+  if (taskCanAudit(TASK)) TOOLS.project_audit_dependencies = {
+    description: 'Run the assigned npm vulnerability audit read-only in a disposable metadata copy. Returns immutable audit evidence, findings, policy result or scanner error. Never updates product files. Include the returned evidence id in auditEvidenceIds in your report.',
+    inputSchema: schema({}), run: () => auditTaskDependencies(ROOTS, TASK)
+  };
+  if (!TASK.reportOnly && ['database', 'backend', 'frontend', 'mobile'].includes(TASK.kind)) {
+    TOOLS.project_write_file = {
+      description: 'Create a source file inside this task’s approved path scope. To replace an existing file, include exact expected_content; otherwise use project_edit_file.',
+      inputSchema: schema({ path: str('Repository-relative path.'), content: str('Full UTF-8 content.'), expected_content: str('Current exact content when replacing an existing file.') }, ['path', 'content']),
+      run: args => writeTaskFile(ROOTS, TASK, args as any)
+    };
+    TOOLS.project_edit_file = {
+      description: 'Replace exactly one occurrence of old_text in an approved file. Refuses ambiguous/stale text and out-of-scope paths.',
+      inputSchema: schema({ path: str('Repository-relative path.'), old_text: str('Exact nonempty text matching once.'), new_text: str('Replacement text.') }, ['path', 'old_text', 'new_text']),
+      run: args => editTaskFile(ROOTS, TASK, args as any)
+    };
+    TOOLS.project_delete_file = {
+      description: 'Delete an approved source file only when its current content matches expected_content.',
+      inputSchema: schema({ path: str('Repository-relative path.'), expected_content: str('Exact current file content.') }, ['path', 'expected_content']),
+      run: args => deleteTaskFile(ROOTS, TASK, args as any)
+    };
+    TOOLS.project_generate_lockfile = {
+      description: 'Generate package-lock.json for an npm project with lifecycle scripts disabled in a disposable folder. Requires package-lock.json in the assigned write scope.',
+      inputSchema: schema({}), run: () => generateTaskLockfile(ROOTS, TASK)
+    };
+  }
+  if (!TASK.reportOnly && (TASK.kind === 'validation' || ['database', 'backend', 'frontend', 'mobile'].includes(TASK.kind))) {
+    TOOLS.project_run_check = {
+      description: 'Run one task-authorized repository check in a disposable source copy; return exact results without changing project files.',
+      inputSchema: schema({ script: str('One requiredChecks name from this task.') }, ['script']),
+      run: args => runTaskCheck(ROOTS, TASK, args.script)
+    };
+  }
+}
+
 type Id = string | number | null;
 
 /** stdout is the transport; anything logged goes to stderr. */
@@ -128,7 +166,7 @@ async function handle(msg: any): Promise<void> {
           name,
           description: t.description,
           inputSchema: t.inputSchema,
-          annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+          annotations: { readOnlyHint: !['project_write_file', 'project_edit_file', 'project_delete_file', 'project_generate_lockfile'].includes(name), destructiveHint: name === 'project_delete_file', openWorldHint: ['project_generate_lockfile', 'project_run_check', 'project_audit_dependencies'].includes(name) }
         }))
       });
     case 'tools/call': {
@@ -159,5 +197,5 @@ rl.on('line', line => {
   }
   handle(msg).catch(err => replyError(msg?.id ?? null, -32603, err?.message ?? String(err)));
 });
-rl.on('close', () => process.exit(0));
+rl.on('close', () => { void stopTaskOperations().finally(() => process.exit(0)); });
 

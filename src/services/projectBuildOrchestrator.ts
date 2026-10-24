@@ -1,3 +1,4 @@
+import { roleCanPlan } from './agentRoleContracts.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,7 +22,7 @@ import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity } from './orchestrationPlanner.js';
 import { composeProjectContext } from './projectPlaybook.js';
-import { MAX_PROJECT_CONTEXT_CHARS, roleCanOwnOrchestrationTask } from './orchestrationContract.js';
+import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
@@ -337,7 +338,7 @@ async function startOrchestratedProjectBuild(input: {
     return { agent, readiness, persona: resolveAgent(agent, { projectKey: project.key, includeMemory: false, includeToolPolicy: false }) };
   }).filter((item): item is { agent: Agent; readiness: ReturnType<typeof agentReadiness>; persona: ReturnType<typeof resolveAgent> } => Boolean(item.persona));
 
-  const canPlan = (item: typeof eligible[number]) => roleCanOwnOrchestrationTask('requirements', item.persona.role);
+  const canPlan = (item: typeof eligible[number]) => roleCanPlan(item.persona.role);
   const hasPlannerModel = (item: typeof eligible[number]) => Boolean(
     plannerModelName(item.persona.modelProvider, item.persona.modelName, runtimes)
   );

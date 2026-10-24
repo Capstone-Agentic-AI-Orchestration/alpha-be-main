@@ -138,10 +138,13 @@ async function main() {
 
     const started = Date.now();
     const result = await runCliTurn({
-      runId: 'eval-' + randomUUID(), cwd, mode: codeTask ? 'run' : 'review',
+      runId: 'eval-' + randomUUID(), cwd: fs.mkdtempSync(path.join(workRoot, 'turn-')), mode: 'chat', approvalMode: 'ask',
+      projectRoots: [{ name: 'fixture', repo: 'eval/money-tracker', dir: cwd }],
+      mcpServers: ['alpha-task-files'],
+      taskScope: { taskId: item.id, repository: 'eval/money-tracker', kind: item.kind, includePaths: item.includePaths, excludePaths: item.excludePaths ?? [], requiredChecks: item.requiredChecks, reportOnly: false },
       provider: 'OpenAI', modelName: model, systemPrompt, personaName: template.name, prompt, priorSession: null,
-      skills: codeTask ? template.skills : [], autonomyLevel: template.autonomyLevel,
-      ...(approveForMe === undefined ? {} : { codexApproveForMe: codeTask && approveForMe })
+      skills: [], autonomyLevel: 'Supervised',
+
     } as any);
     const seconds = Math.round((Date.now() - started) / 1000);
 
@@ -243,7 +246,8 @@ async function main() {
   for (const dir of [evalHome, workRoot]) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may still hold a file; the OS temp folder clears it later */ }
   }
+  return results.length === jobs.length && results.every(record => record.pass);
 }
 
-main().then(() => process.exit(0), error => { console.error(error); process.exit(1); });
+main().then(passed => process.exit(passed ? 0 : 1), error => { console.error(error); process.exit(1); });
 

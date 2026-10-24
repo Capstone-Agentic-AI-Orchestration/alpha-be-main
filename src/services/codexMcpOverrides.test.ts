@@ -25,6 +25,13 @@ function config(mcpServers: Record<string, unknown>): string {
 }
 
 describe('MCP servers for a Codex turn', () => {
+  it('preauthorizes only the internal scope-enforcing task server in headless turns', () => {
+    const file = config({ 'alpha-task-files': { command: 'node', args: ['projectFilesMcpServer.js'] }, other: { command: 'node' } });
+    const args = codexMcpOverrides({ configPath: file, serverNames: ['alpha-task-files', 'other'] }).join(' ');
+    expect(args).toContain('mcp_servers.alpha-task-files.default_tools_approval_mode="approve"');
+    expect(args).toContain('mcp_servers.other.default_tools_approval_mode="writes"');
+    expect(args).toContain('mcp_servers.alpha-task-files.required=true');
+  });
   it('starts each stdio server through the launcher, naming only the config and the server', () => {
     const file = config({
       'alpha-hosting': { command: 'node', args: ['hostingMcpServer.js'], env: { ALPHA_RUN_TOKEN: 'f'.repeat(64) } },

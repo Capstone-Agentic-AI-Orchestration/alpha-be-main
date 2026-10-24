@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import type { Agent } from '../models/index.js';
+import { roleCanOwnTask } from './agentRoleContracts.js';
+import { dependencyAuditSpecSchema } from './dependencyAuditContract.js';
 
 /**
  * Versioned, provider-independent contract for a task-driven build plan.
@@ -23,6 +25,7 @@ export const orchestrationTaskKindSchema = z.enum([
   'backend',
   'frontend',
   'mobile',
+  'audit',
   'review',
   'validation',
   'delivery'
@@ -48,6 +51,8 @@ const scopePattern = z.string().trim().min(1).max(240).refine(value =>
 
 export const orchestrationPlanSchema = z.object({
   schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  /** Alpha stamps new plans; absent only on saved plans predating role separation. */
+  roleContractVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   milestones: z.array(z.object({
     id: identifier,
     title: shortText,
@@ -70,6 +75,7 @@ export const orchestrationPlanSchema = z.object({
     title: shortText,
     description: detailText,
     kind: orchestrationTaskKindSchema,
+    dependencyAudit: dependencyAuditSpecSchema.optional(),
     /** Selected project repository this task changes. Omitted only for older single-repository plans. */
     repository: z.string().trim().min(1).max(200).optional(),
     ownerAgentId: identifier,
@@ -132,6 +138,7 @@ export const orchestrationAgentReportSchema = z.object({
     findingId: identifier,
     evidence: detailText
   }).strict()).max(20).optional(),
+  auditEvidenceIds: z.array(z.string().regex(/^audit-[a-f0-9-]{36}$/)).max(10).optional(),
   blockers: z.array(shortText).max(10).default([])
 }).strict();
 
@@ -141,25 +148,21 @@ export interface PlanValidationIssue {
   code: 'duplicate_id' | 'duplicate_requirement_id' | 'no_required_tasks' | 'unknown_owner' | 'role_mismatch' | 'unknown_dependency'
     | 'self_dependency' | 'dependency_cycle' | 'unknown_requirement' | 'uncovered_requirement' | 'too_many_tasks'
     | 'missing_independent_review' | 'review_not_independent' | 'review_dependency_missing' | 'validation_after_review_missing'
-    | 'unknown_repository' | 'unassigned_repository' | 'invalid_milestone';
+    | 'unknown_repository' | 'unassigned_repository' | 'invalid_milestone'
+    | 'duplicate_requirements_brief' | 'requirements_dependency_missing'
+    | 'audit_authority' | 'audit_dependency_missing' | 'audit_verification_missing';
   taskId?: string;
   detail: string;
 }
 
-const ROLE_CAPABILITIES: Record<OrchestrationTaskKind, ReadonlySet<string>> = {
-  requirements: new Set(['researcher', 'research agent', 'triager', 'manager agent', 'orchestrator agent', 'architect', 'architecture agent']),
-  architecture: new Set(['architect', 'architecture agent']),
-  database: new Set(['database agent', 'coder']),
-  backend: new Set(['backend agent', 'coder']),
-  frontend: new Set(['frontend agent', 'coder']),
-  mobile: new Set(['mobile agent', 'coder']),
-  review: new Set(['reviewer', 'security / code quality agent']),
-  validation: new Set(['qa tester', 'validation / checking agent']),
-  delivery: new Set(['devops', 'devops engineer', 'github finalization agent'])
-};
-
 export function roleCanOwnOrchestrationTask(kind: OrchestrationTaskKind, role: string): boolean {
-  return ROLE_CAPABILITIES[kind].has(role.trim().toLowerCase());
+  return roleCanOwnTask(kind, role);
+}
+
+/** Compatibility is confined to persisted old plans, never new routing or planning. */
+export function roleCanOwnSavedTask(kind: OrchestrationTaskKind, role: string, version?: number): boolean {
+  return roleCanOwnTask(kind, role) || (version === undefined && kind === 'requirements' &&
+    ['orchestrator agent', 'architect', 'architecture agent'].includes(role.trim().toLowerCase()));
 }
 
 /**
@@ -169,7 +172,7 @@ export function roleCanOwnOrchestrationTask(kind: OrchestrationTaskKind, role: s
 export function validateOrchestrationPlan(
   plan: OrchestrationPlan,
   eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[],
-  options: { maxTaskCount?: number; initialPlan?: boolean; repositories?: readonly string[] } = {}
+  options: { maxTaskCount?: number; initialPlan?: boolean; repositories?: readonly string[]; auditMilestone?: boolean } = {}
 ): PlanValidationIssue[] {
   const issues: PlanValidationIssue[] = [];
   const maxTaskCount = options.maxTaskCount ?? MAX_PLAN_TASKS;
@@ -244,7 +247,7 @@ export function validateOrchestrationPlan(
     const owner = agents.get(task.ownerAgentId);
     if (!owner) {
       issues.push({ code: 'unknown_owner', taskId: task.id, detail: `Task owner "${task.ownerAgentId}" is not an eligible project specialist.` });
-    } else if (!roleCanOwnOrchestrationTask(task.kind, owner.role)) {
+    } else if (!roleCanOwnSavedTask(task.kind, owner.role, plan.roleContractVersion)) {
       issues.push({ code: 'role_mismatch', taskId: task.id, detail: `${owner.role} is not an approved owner role for ${task.kind} tasks.` });
     }
 
@@ -321,6 +324,65 @@ export function validateOrchestrationPlan(
     return ancestors;
   };
 
+  const audits = plan.tasks.filter(task => task.dependencyAudit);
+  const repositoryOf = (task: OrchestrationTaskDefinition) => (task.repository ?? options.repositories?.[0] ?? '').toLowerCase();
+  const milestoneIndex = (task: OrchestrationTaskDefinition) => task.milestoneId ? plan.milestones?.findIndex(item => item.id === task.milestoneId) ?? -1 : -1;
+  const follows = (task: OrchestrationTaskDefinition, dependency: OrchestrationTaskDefinition) => ancestorsOf(task.id).has(dependency.id) ||
+    (milestoneIndex(dependency) >= 0 && milestoneIndex(task) > milestoneIndex(dependency));
+  for (const task of plan.tasks) {
+    const spec = task.dependencyAudit;
+    const role = agents.get(task.ownerAgentId)?.role ?? '';
+    if ((task.kind === 'audit' && (!spec || spec.purpose === 'self-check')) ||
+        (spec && (spec.purpose === 'self-check'
+          ? !['database', 'backend', 'frontend', 'mobile', 'validation'].includes(task.kind)
+          : !['audit', 'review'].includes(task.kind) || !roleCanOwnTask('audit', role)))) {
+      issues.push({ code: 'audit_authority', taskId: task.id, detail: 'Independent audits require a Security audit/review owner; specialists may self-check only their assigned implementation/validation work.' });
+    }
+    if (spec && !task.repository) issues.push({ code: 'audit_authority', taskId: task.id, detail: 'An audit capability must name exactly one selected repository.' });
+  }
+  for (const baseline of audits.filter(task => task.required && task.dependencyAudit?.purpose === 'baseline')) {
+    const fixes = codeTasks.filter(task => repositoryOf(task) === repositoryOf(baseline));
+    for (const fix of fixes.filter(fix => milestoneIndex(fix) < 0 || milestoneIndex(fix) >= milestoneIndex(baseline))) if (!follows(fix, baseline)) {
+      issues.push({ code: 'audit_dependency_missing', taskId: fix.id, detail: 'Dependency remediation must wait for its repository’s required baseline Security audit.' });
+    }
+    // A baseline-only adaptive milestone is valid; final acceptance checks the whole roadmap.
+    if (!plan.milestones && !options.auditMilestone && !audits.some(task => task.required && task.dependencyAudit?.purpose === 'verification' &&
+        repositoryOf(task) === repositoryOf(baseline) && ancestorsOf(task.id).has(baseline.id) && fixes.every(fix => ancestorsOf(task.id).has(fix.id)))) {
+      issues.push({ code: 'audit_verification_missing', taskId: baseline.id, detail: 'A direct dependency-audit plan needs a required Security re-audit after the repository’s remediation (or baseline when no fix is needed).' });
+    }
+  }
+  for (const verification of audits.filter(task => task.required && task.dependencyAudit?.purpose === 'verification')) {
+    const levels = ['low', 'moderate', 'high', 'critical'];
+    if (audits.some(baseline => baseline.required && baseline.dependencyAudit?.purpose === 'baseline' && repositoryOf(baseline) === repositoryOf(verification) &&
+        levels.indexOf(verification.dependencyAudit!.level) > levels.indexOf(baseline.dependencyAudit!.level))) {
+      issues.push({ code: 'audit_authority', taskId: verification.id, detail: 'Security verification cannot weaken the baseline vulnerability threshold.' });
+    }
+    const fixes = codeTasks.filter(task => repositoryOf(task) === repositoryOf(verification) && !ancestorsOf(task.id).has(verification.id) &&
+      (milestoneIndex(task) < 0 || milestoneIndex(task) <= milestoneIndex(verification)));
+    if (fixes.some(fix => fix.ownerAgentId === verification.ownerAgentId || !follows(verification, fix))) {
+      issues.push({ code: 'audit_dependency_missing', taskId: verification.id, detail: 'Security verification must be independent and follow all implementation in its repository.' });
+    }
+    if (fixes.length && verification.kind !== 'review' && !requiredReviewTasks.some(review => follows(verification, review) && fixes.every(fix => follows(review, fix)))) {
+      issues.push({ code: 'audit_dependency_missing', taskId: verification.id, detail: 'Security re-audit must follow independent review of the relevant implementation.' });
+    }
+    for (const validation of requiredValidationTasks.filter(task => repositoryOf(task) === repositoryOf(verification) && (milestoneIndex(task) < 0 || milestoneIndex(task) >= milestoneIndex(verification)))) {
+      if (!follows(validation, verification)) issues.push({ code: 'audit_dependency_missing', taskId: validation.id, detail: 'Functional validation must follow its repository’s final Security audit.' });
+    }
+  }
+
+  if (plan.roleContractVersion !== undefined) {
+    const briefs = plan.tasks.filter(task => task.kind === 'requirements' && agents.get(task.ownerAgentId)?.role.trim().toLowerCase() === 'manager agent');
+    const groups = new Map<string, number>();
+    for (const brief of briefs) {
+      const key = brief.milestoneId ?? 'direct';
+      groups.set(key, (groups.get(key) ?? 0) + 1);
+      if (groups.get(key)! > 1) issues.push({ code: 'duplicate_requirements_brief', taskId: brief.id, detail: 'Assign Manager at most once per milestone; do not duplicate requirements analysis.' });
+      for (const implementation of codeTasks.filter(task => task.milestoneId === brief.milestoneId)) {
+        if (!brief.required || !ancestorsOf(implementation.id).has(brief.id)) issues.push({ code: 'requirements_dependency_missing', taskId: implementation.id, detail: 'Implementation must wait for the required Manager brief; unresolved requirements must block work.' });
+      }
+    }
+  }
+
   if (options.initialPlan && codeTasks.length && availableIndependentReviewers.length && !requiredReviewTasks.length) {
     issues.push({
       code: 'missing_independent_review',
@@ -339,9 +401,8 @@ export function validateOrchestrationPlan(
     }
   }
   if (options.initialPlan && codeTasks.length && availableIndependentReviewers.length) {
-    const reviewTask = requiredReviewTasks[0];
-    if (reviewTask && codeTasks.some(task => !ancestorsOf(reviewTask.id).has(task.id))) {
-      issues.push({ code: 'review_dependency_missing', taskId: reviewTask.id, detail: 'The independent review must depend on every required code task so it sees the complete implementation.' });
+    for (const task of codeTasks) if (!requiredReviewTasks.some(review => (plan.roleContractVersion !== 2 || repositoryOf(review) === repositoryOf(task)) && follows(review, task))) {
+      issues.push({ code: 'review_dependency_missing', taskId: task.id, detail: 'Every required code task needs a downstream independent review in its repository.' });
     }
   }
   if (codeTasks.length && requiredReviewTasks.length) {

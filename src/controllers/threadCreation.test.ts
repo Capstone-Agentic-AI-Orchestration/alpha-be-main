@@ -79,7 +79,7 @@ async function startApi() {
 
 async function call(
   app: express.Express,
-  method: 'POST' | 'PUT' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   url: string,
   body?: unknown
 ) {
@@ -233,6 +233,41 @@ describe('a thread that has been created', () => {
     expect(cleared.status).toBe(200);
     expect(cleared.body.targetAgentId).toBeUndefined();
     expect(cleared.body.targetSquadId).toBeUndefined();
+  });
+
+  it('stores, reads, updates, and clears memory through the owning thread route', async () => {
+    const { app } = await startApi();
+    const payload = threadPayload();
+    await call(app, 'POST', '/api/chat/threads', payload);
+
+    const initial = await call(app, 'GET', `/api/chat/threads/${payload.id}/memory`);
+    expect(initial.status).toBe(200);
+    expect(initial.body).toMatchObject({ threadId: payload.id, content: '', revision: 0 });
+
+    const saved = await call(app, 'PUT', `/api/chat/threads/${payload.id}/memory`, { content: 'Use the existing API conventions.' });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({ threadId: payload.id, content: 'Use the existing API conventions.', revision: 1 });
+
+    const readBack = await call(app, 'GET', `/api/chat/threads/${payload.id}/memory`);
+    expect(readBack.body.content).toBe('Use the existing API conventions.');
+
+    const cleared = await call(app, 'DELETE', `/api/chat/threads/${payload.id}/memory`);
+    expect(cleared.status).toBe(200);
+    expect(cleared.body).toEqual({ success: true });
+    expect((await call(app, 'GET', `/api/chat/threads/${payload.id}/memory`)).body.content).toBe('');
+  });
+
+  it('rejects oversized memory and unknown threads without creating records', async () => {
+    const { app, svc } = await startApi();
+    const payload = threadPayload();
+    await call(app, 'POST', '/api/chat/threads', payload);
+
+    const oversized = await call(app, 'PUT', `/api/chat/threads/${payload.id}/memory`, { content: 'x'.repeat(6001) });
+    expect(oversized.status).toBe(400);
+
+    const unknown = await call(app, 'PUT', '/api/chat/threads/th-never-existed/memory', { content: 'should not persist' });
+    expect(unknown.status).toBe(404);
+    expect(svc.getChatThreadMemory(payload.id, 'octocat').content).toBe('');
   });
 });
 

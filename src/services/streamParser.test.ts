@@ -3,6 +3,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { StreamParser, ParsedEvent } from './streamParser.js';
 
+describe('Codex scoped MCP activity', () => {
+  it('reports live edits once at start and their result at completion', () => {
+    const parser = new StreamParser('codex');
+    const item = { id: 'mcp-1', type: 'mcp_tool_call', server: 'alpha-task-files', tool: 'project_edit_file',
+      arguments: { path: 'src/api.ts', old_text: 'before', new_text: 'after' } };
+    const start = parser.parseLine(JSON.stringify({ type: 'item.started', item }));
+    expect(start).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'tool_call', toolName: 'mcp__alpha-task-files__project_edit_file', toolInput: item.arguments })]));
+    const end = parser.parseLine(JSON.stringify({ type: 'item.completed', item: { ...item, result: { content: [{ type: 'text', text: 'Updated src/api.ts' }] } } }));
+    expect(end.filter(event => event.type === 'tool_call')).toHaveLength(0);
+    expect(end.filter(event => event.type === 'tool_result')).toHaveLength(1);
+    expect(parser.getCurrentStage()).toBe('implementation');
+  });
+  it('marks approved check calls as verification', () => {
+    const parser = new StreamParser('codex');
+    parser.parseLine(JSON.stringify({ type: 'item.started', item: { id: 'check', type: 'mcp_tool_call', server: 'alpha-task-files', tool: 'project_run_check', arguments: { script: 'test' } } }));
+    expect(parser.getCurrentStage()).toBe('tests');
+  });
+});
+
 // Resolved from the package root — vitest runs there. Avoids `import.meta`,
 // which tsc rejects while the build still targets CommonJS.
 const FIXTURE = path.resolve(process.cwd(), 'fixtures/claude-stream-sample.jsonl');

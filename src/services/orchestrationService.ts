@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { DependencyAuditSpec, DependencyAuditEvidence } from './dependencyAuditContract.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Agent, PrototypeRun } from '../models/index.js';
@@ -145,6 +146,7 @@ export interface OrchestrationTaskPackage {
     id: string;
     title: string;
     kind: OrchestrationTaskKind;
+    dependencyAudit?: DependencyAuditSpec;
     repository: string;
     description: string;
     acceptanceCriteria: string[];
@@ -166,6 +168,7 @@ export interface OrchestrationTaskPackage {
     missingScripts: string[];
     observedChecks: Array<{ script: string; result: 'passed' | 'failed' | 'not_run' }>;
     changedPaths: string[];
+    dependencyAudits?: DependencyAuditEvidence[];
   }>;
   reviewInputs: Array<{
     taskId: string;
@@ -426,6 +429,38 @@ export class OrchestrationService {
   }
 
   /** Recheck the saved assignments and start only after an authorized user reviews the plan. */
+  /** The Orchestrator proposes a replacement; a human still approves before dispatch. */
+  async proposeAuditReplan(input: { workspaceId: string; runId: string; expectedRevision: number; actorId: string }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId || snapshot.run.revision !== input.expectedRevision ||
+          snapshot.attempts.some(attempt => ['starting', 'running', 'submitted'].includes(attempt.status))) throw new Error('The build changed or still has active work. Refresh before replanning.');
+      if (!/audit|vulnerab/i.test(snapshot.run.stoppedReason ?? '')) throw new Error('This blocker needs its existing recovery path, not an audit plan replacement.');
+      if (snapshot.tasks.some(task => task.required && task.dependencyAudit?.purpose === 'baseline')) throw new Error('This build already has an audit plan. Use its existing task recovery and Security verification.');
+      if (!this.planNextMilestone) throw new Error('The Orchestrator planning runtime is unavailable.');
+      const repositories = snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository];
+      const baseline = {
+        id: 'audit-baseline-v' + (snapshot.run.planVersion + 1), title: 'Security dependency evidence',
+        objective: 'Gather baseline npm dependency-audit evidence in each selected repository. This milestone contains ONLY required Security kind:audit tasks with dependencyAudit purpose:baseline, one per repository. Do not plan implementation, review or functional validation yet: those tasks will be planned from the accepted findings in the next milestone. Cover all approved requirement IDs across these evidence tasks.',
+        requirementIds: snapshot.run.plan.requirements.map(item => item.id), repositories
+      };
+      const expansion = await this.planNextMilestone(snapshot, baseline);
+      if (expansion.tasks.some(task => task.kind !== 'audit' || !task.required || task.dependencyAudit?.purpose !== 'baseline')) throw new Error('The recovery evidence milestone must contain only required Security baseline audits.');
+      const prefix = 'audit-v' + (snapshot.run.planVersion + 1) + '-';
+      const ids = new Map(expansion.tasks.map(task => [task.id, prefix + task.id]));
+      const plan = parseOrchestrationPlan({ ...snapshot.run.plan, schemaVersion: 2, roleContractVersion: 2,
+        milestones: [baseline, { id: 'audit-remediation-v' + (snapshot.run.planVersion + 1), title: 'Remediation and independent verification',
+          objective: 'Use accepted Security dependency findings to assign only necessary repository-scoped fixes to the appropriate implementation owners. Require current committed lockfiles, independent Security code review and dependency re-audit in each repository, then functional validation. The Orchestrator decides concrete fixes and next actions from the accepted evidence; unresolved scanner/access failures remain explicit blockers.',
+          requirementIds: baseline.requirementIds, repositories }],
+        tasks: [
+          ...snapshot.run.plan.tasks.map(task => ({ ...task, milestoneId: baseline.id, required: false })),
+          ...expansion.tasks.map(task => ({ ...task, milestoneId: baseline.id, id: ids.get(task.id), dependsOn: task.dependsOn.map(id => ids.get(id)) }))
+        ] });
+      // The normal planner rechecks project access/readiness/checkpoints before returning.
+      return this.store.replaceBlockedAuditPlan({ runId: input.runId, expectedRevision: input.expectedRevision, plan, actorId: input.actorId });
+    }));
+  }
+
   async startPlannedWork(input: {
     workspaceId: string;
     runId: string;
@@ -447,7 +482,15 @@ export class OrchestrationService {
       }
       const eligibleAgents = this.store.getAgents().filter(agent => !agent.isArchived);
       if (eligibleAgents.length) {
-        const issues = validateOrchestrationPlan(snapshot.run.plan, eligibleAgents, {
+        // Historical optional tasks remain visible but cannot hold a replacement plan hostage.
+        const executableIds = new Set<string>();
+        const include = (id: string) => {
+          if (executableIds.has(id)) return;
+          executableIds.add(id);
+          snapshot.run.plan.tasks.find(task => task.id === id)?.dependsOn.forEach(include);
+        };
+        snapshot.run.plan.tasks.filter(task => task.required).forEach(task => include(task.id));
+        const issues = validateOrchestrationPlan({ ...snapshot.run.plan, tasks: snapshot.run.plan.tasks.filter(task => executableIds.has(task.id)) }, eligibleAgents, {
           maxTaskCount: MAX_INITIAL_PLAN_TASKS,
           initialPlan: true,
           repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository]
@@ -1503,6 +1546,7 @@ export class OrchestrationService {
         return {
           taskId: item.id,
           taskKind: item.kind,
+          dependencyAudits: Array.isArray(acceptanceEvidence.dependencyAudits) ? acceptanceEvidence.dependencyAudits as DependencyAuditEvidence[] : undefined,
           ownerAgentId: item.ownerAgentId,
           acceptedRevision: item.acceptedRevision ?? item.revision,
           summary,
@@ -1557,6 +1601,7 @@ export class OrchestrationService {
         id: task.id,
         title: task.title,
         kind: task.kind,
+        ...(task.dependencyAudit ? { dependencyAudit: task.dependencyAudit } : {}),
         repository: task.repository ?? snapshot.run.repository,
         description: task.description,
         acceptanceCriteria: task.acceptanceCriteria,

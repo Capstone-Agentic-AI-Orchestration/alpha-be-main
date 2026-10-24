@@ -45,6 +45,7 @@ beforeEach(async () => {
     systemPrompt: 'You are the Frontend Agent. Implement assigned UI work only.', avatar: '', autonomyLevel: 'supervised'
   };
   const sql = {
+    isPathAllowed: () => true, addAllowedPath: vi.fn(),
     getPrototypeRuns: () => [...rows.values()].map(value => structuredClone(value)),
     savePrototypeRun: (value: any) => rows.set(value.id, structuredClone(value)),
     getIssues: () => issues.map(value => structuredClone(value)), getProjects: () => projects,
@@ -77,13 +78,14 @@ beforeEach(async () => {
     updateIssueAndPush: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes) }));
   vi.doMock('./workspaceService.js', () => ({ resolveProjectWorkspace: (project: any) => ({ dir: project.cwd }), allowAttachedWorkspace: vi.fn() }));
   vi.doMock('../utils/gitUtils.js', () => ({ createBranch, createBranchFrom: createBranch, checkoutBranch: createBranch,
+    getCurrentBranch: async () => 'alpha/orchestration/fixture', isGitWorkingTreeClean: async () => true,
     remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => true }));
   vi.doMock('./githubService.js', () => ({ githubService: {} }));
   vi.doMock('./verificationService.js', () => ({ runVerification: verify }));
   vi.doMock('./agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready' }) }));
   vi.doMock('./personaService.js', () => ({
     resolveAgent: (input: any) => ({ systemPrompt: input.systemPrompt || '' }),
-    resolveAgentLogged: (input: any) => ({ name: input.name, autonomyLevel: 'supervised',
+    resolveAgentLogged: (input: any) => ({ name: input.name, role: input.role, personaHash: 'fixture-hash', autonomyLevel: 'supervised',
     modelProvider: 'Anthropic', modelName: 'fixture-model', systemPrompt: input.systemPrompt, mcpServers: [] }) }));
   vi.doMock('./cliRunner.js', () => ({ writeTurnPersona: () => undefined, codexGatewayArgs: () => [], buildTurnInvocation: (options: any) => {
     invocations.push(options);
@@ -121,6 +123,23 @@ async function exit(index: number, code = 0, reason?: Parameters<NonNullable<Spa
 }
 
 describe('RunnerService workspace ownership lifetime', () => {
+  it('launches an orchestrated task from an empty context with native tools disabled', async () => {
+    const fixture = work('scoped');
+    await runner.startRun({ issueId: 'scoped', agentId: 'agent-fixture', plan: [], workingDir: fixture.cwd,
+      orchestration: { orchestrationRunId: 'workflow-1', taskId: 'brief', attemptId: 'attempt-1',
+        branchName: 'alpha/orchestration/fixture', planVersion: 1, personaHash: 'fixture-hash', modelProvider: 'Anthropic', modelName: 'fixture-model',
+        taskPackage: { packageVersion: 6, reportSchemaVersion: 1, goal: 'Clarify requirements', projectContext: '', exclusions: [],
+          task: { id: 'brief', title: 'Requirements brief', kind: 'requirements', repository: 'test/repo', description: 'Clarify observable behavior.',
+            acceptanceCriteria: ['Cites behavior'], requiredChecks: [], scope: { includePaths: [], excludePaths: [] } },
+          requirements: [{ id: 'REQ-1', description: 'Explain behavior' }], acceptedDependencies: [], reviewInputs: [], corrections: [], findingIds: [] } as any } });
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    expect(invocations[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', skills: [],
+      projectRoots: [{ name: path.basename(fixture.cwd), repo: 'test/repo', dir: fixture.cwd }] });
+    expect(processes[0].options.cwd).not.toBe(fixture.cwd);
+    expect(path.basename(processes[0].options.cwd)).toBe('context');
+    expect(invocations[0].systemPrompt).toContain('Native file tools and terminal commands are disabled');
+    await exit(0, 1);
+  });
   it('does not let a second run switch the checkout while the first agent is working', async () => {
     const a = work('a'); const b = work('b'); await a.start(); await b.start();
     await vi.waitFor(() => expect(processes).toHaveLength(1));

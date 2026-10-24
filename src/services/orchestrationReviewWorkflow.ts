@@ -142,6 +142,7 @@ export function buildOrchestrationReviewAmendment(
       title: `Resolve review findings: ${root.title}`.slice(0, 240),
       description: `Correct the accepted ${root.kind} deliverable from task ${root.id}. Follow the linked review findings and keep all changes inside this task’s original scope.`,
       kind: root.kind,
+      ...(root.dependencyAudit ? { dependencyAudit: root.dependencyAudit } : {}),
       ...(root.milestoneId ? { milestoneId: root.milestoneId } : {}),
       repository: root.repository ?? snapshot.run.repository,
       ownerAgentId: root.ownerAgentId,
@@ -187,7 +188,9 @@ export function buildOrchestrationReviewAmendment(
   }
 
   const existingTasks = snapshot.run.plan.tasks.map(task => ({ ...task }));
-  const validationTemplates = existingTasks.filter(task => task.kind === 'validation' && (!reviewTask.milestoneId || task.milestoneId === reviewTask.milestoneId));
+  const validationTemplates = existingTasks.filter(task => task.kind === 'validation' &&
+    (task.repository ?? snapshot.run.repository).toLowerCase() === (reviewTask.repository ?? snapshot.run.repository).toLowerCase() &&
+    (!reviewTask.milestoneId || task.milestoneId === reviewTask.milestoneId));
   const requiredValidators = validationTemplates.filter(task => task.required);
   if (requiredValidators.length > 1) {
     throw new OrchestrationReviewPlanError('The plan has multiple required validation gates; review correction needs a reviewed plan amendment before it can continue.');

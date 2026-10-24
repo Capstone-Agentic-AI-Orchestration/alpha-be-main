@@ -55,6 +55,27 @@ describe('chat thread ownership', () => {
     expect(svc.getChatThreads('Lloyd1020')[0].ownerId).toBe('Lloyd1020');
   });
 
+  it('stores editable memory only for its owning chat and deletes it when that chat is cleared', async () => {
+    const svc = await freshService();
+    svc.createChatThread({ id: 'memory-a', title: 'A', ownerId: 'Lloyd1020' });
+    svc.createChatThread({ id: 'memory-b', title: 'B', ownerId: 'Lloyd1020' });
+
+    expect(svc.getChatThreadMemory('memory-a', 'Lloyd1020')).toMatchObject({ content: '', revision: 0 });
+    expect(svc.getChatThreadMemory('memory-a', 'ZaneZamoraC1Cs')).toBeNull();
+    expect(svc.setChatThreadMemory('memory-a', 'ZaneZamoraC1Cs', 'must not save')).toBeNull();
+
+    const first = svc.setChatThreadMemory('memory-a', 'Lloyd1020', 'Decision: keep the API backward compatible.');
+    const second = svc.setChatThreadMemory('memory-a', 'Lloyd1020', 'Decision: keep the API backward compatible.\nNext: add migration tests.');
+    expect(first?.revision).toBe(1);
+    expect(second?.revision).toBe(2);
+    expect(svc.getChatThreadMemory('memory-b', 'Lloyd1020')?.content).toBe('');
+    expect(() => svc.setChatThreadMemory('memory-a', 'Lloyd1020', 'x'.repeat(6001))).toThrow(/6000 characters/);
+
+    svc.clearChatMessages('memory-a');
+    expect(svc.getChatThreadMemory('memory-a', 'Lloyd1020')?.content).toBe('');
+    expect(svc.getChatThreadMemory('memory-b', 'Lloyd1020')?.content).toBe('');
+  });
+
   it('gives a stranger nothing', async () => {
     const svc = await freshService();
     svc.createChatThread({ id: 't1', title: 'Mine', ownerId: 'Lloyd1020' });

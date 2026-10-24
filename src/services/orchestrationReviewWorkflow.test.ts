@@ -44,6 +44,20 @@ function snapshot(): OrchestrationSnapshot {
 }
 
 describe('independent review correction planning', () => {
+  it('routes failed dependency re-audits back to the code owner and retains the final audit capability', () => {
+    const current = snapshot();
+    const baseline = { ...current.run.plan.tasks[1], id: 'baseline', kind: 'audit' as const, repository: 'acme/tasks', dependsOn: [], dependencyAudit: { scanner: 'npm' as const, purpose: 'baseline' as const, level: 'low' as const } };
+    current.run.plan = parseOrchestrationPlan({ ...current.run.plan, tasks: [baseline, ...current.run.plan.tasks.map(task => ({ ...task, repository: 'acme/tasks',
+      ...(task.id === 'backend-create' ? { dependsOn: ['baseline'] } : {}),
+      ...(task.id === 'review-1' ? { dependencyAudit: { scanner: 'npm', purpose: 'verification', level: 'low' } } : {}) }))] });
+    current.tasks = initialTaskRecords(current.run.plan).map(task => ({ ...task, status: task.kind === 'audit' || task.kind === 'backend' ? 'accepted' : task.kind === 'review' ? 'submitted' : 'pending' }));
+    const result = buildOrchestrationReviewAmendment(current, current.tasks.find(task => task.kind === 'review')!, [{
+      targetTaskId: 'backend-create', severity: 'blocking', path: 'src/package.json', title: 'Vulnerable dependency remains', evidence: 'The current audit still identifies a high severity dependency.', instruction: 'Update the assigned dependency and regenerate its lockfile.'
+    }], eligibleAgents);
+    expect(result.addedTasks[0]).toMatchObject({ kind: 'backend', ownerAgentId: 'backend' });
+    expect(result.addedTasks.find(task => task.kind === 'review')).toMatchObject({ ownerAgentId: 'reviewer', dependencyAudit: { purpose: 'verification' } });
+    expect(result.findings[0].correctionTaskId).toBe(result.addedTasks[0].id);
+  });
   it('keeps earlier milestone validation gates intact when correcting a later milestone', () => {
     const current = snapshot();
     const priorTasks = current.run.plan.tasks.map(task => ({ ...task, id: `old-${task.id}`, milestoneId: 'first', repository: 'acme/tasks', dependsOn: task.dependsOn.map(id => `old-${id}`) }));

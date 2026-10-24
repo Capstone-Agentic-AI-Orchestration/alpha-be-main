@@ -18,6 +18,7 @@ import { IS_CLOUD } from '../config/env.js';
 import { supabaseService } from '../services/supabaseService.js';
 import { retryChatSync } from '../services/chatSyncService.js';
 import { chatAttachmentService, MAX_CHAT_ATTACHMENT_BYTES } from '../services/chatAttachmentService.js';
+import { MEMORY_LIMITS } from '../config/constants.js';
 
 export const chatRouter = Router();
 
@@ -232,6 +233,35 @@ chatRouter.get('/chat/threads/:id/messages', route(async (req: Request, res: Res
   const messages = await chatStore().messages(req.workspace!.workspaceId, req.params.id, req.workspace!.userId);
   if (!messages) return res.status(404).json({ error: 'Thread not found' });
   res.json(messages);
+}));
+
+/** Private, local notes that are included only in this conversation's context. */
+chatRouter.get('/chat/threads/:id/memory', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
+  const memory = sqliteService.getChatThreadMemory(req.params.id, req.workspace!.userId);
+  if (!memory) return res.status(404).json({ error: 'Thread not found' });
+  res.json(memory);
+}));
+
+chatRouter.put('/chat/threads/:id/memory', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
+  if (typeof req.body?.content !== 'string') return res.status(400).json({ error: 'content must be a string' });
+  if (req.body.content.length > MEMORY_LIMITS.MAX_CHARS_PER_THREAD) {
+    return res.status(400).json({ error: `Session memory must be ${MEMORY_LIMITS.MAX_CHARS_PER_THREAD} characters or fewer.` });
+  }
+  const memory = sqliteService.setChatThreadMemory(req.params.id, req.workspace!.userId, req.body.content);
+  if (!memory) return res.status(404).json({ error: 'Thread not found' });
+  res.json(memory);
+}));
+
+chatRouter.delete('/chat/threads/:id/memory', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
+  const removed = sqliteService.clearChatThreadMemory(req.params.id, req.workspace!.userId);
+  if (!removed) return res.status(404).json({ error: 'Thread not found' });
+  res.json({ success: true });
 }));
 
 /** Store one chat attachment in the desktop's private local data directory. */

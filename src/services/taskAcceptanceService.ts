@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { taskAuditEvidence, finalDependencyAuditProblem } from './orchestrationAuditEvidence.js';
 import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
 import { normalizeAndValidateAgentReport } from './orchestrationAgentReport.js';
 import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
@@ -595,6 +596,10 @@ export class TaskAcceptanceService {
     }
 
     const worktreePath = path.resolve(authorizedWorkspace.worktreePath);
+    if (task.dependencyAudit) {
+      try { taskAuditEvidence(snapshot, task, attempt, worktreePath, report.auditEvidenceIds); }
+      catch (error) { return fail(error instanceof Error ? error.message : 'Dependency audit evidence could not be checked.', { check: 'dependency_audit' }); }
+    }
     if (!authorizedWorkspace.branchName || !this.store.isPathAllowed(worktreePath)) {
       return fail('The orchestration branch or approved local worktree is missing.', { check: 'workspace_authority' });
     }
@@ -769,7 +774,9 @@ export class TaskAcceptanceService {
       scope: { includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths, passed: true },
       requiredChecks: task.requiredChecks,
       verification: attempt.result?.verification,
-      semanticReviewRequired: CODE_TASK_KINDS.has(task.kind)
+      semanticReviewRequired: CODE_TASK_KINDS.has(task.kind),
+      ...(task.dependencyAudit ? { dependencyAudits: taskAuditEvidence(snapshot, task, attempt, worktree,
+        validateAttemptReport(attempt).success ? (attempt.result?.agentReport as { auditEvidenceIds?: string[] }).auditEvidenceIds : undefined) } : {})
     };
   }
 
@@ -788,6 +795,12 @@ export class TaskAcceptanceService {
       ? current.run.repositoryWorkspaces
       : [repositoryWorkspaceForRun(current.run, current.run.repository)].filter((item): item is NonNullable<typeof item> => Boolean(item))) {
       const worktree = path.resolve(workspace.worktreePath);
+      const auditProblem = finalDependencyAuditProblem(current, workspace.repository, worktree, this.store.getAgents());
+      if (auditProblem) {
+        const evidence = { validationVersion: 1, check: 'dependency_audit', repository: workspace.repository };
+        const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason: auditProblem, evidence, now });
+        return { decision: 'blocked', snapshot: blocked, reason: auditProblem, evidence };
+      }
       const [branchName, currentCommit, clean] = await Promise.all([
         this.dependencies.getCurrentBranch(worktree), this.dependencies.getHeadCommit(worktree), this.dependencies.isGitWorkingTreeClean(worktree)
       ]);
