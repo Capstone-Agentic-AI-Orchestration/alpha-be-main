@@ -100,7 +100,12 @@ projectRepoRouter.get(
 
 projectRepoRouter.get(
   '/projects/:id/repos/:owner/:name/architecture',
-  withProjectRepo(async (_req, res, repo) => res.json(await getRepoArchitecture(repo)))
+  withProjectRepo(async (req, res, repo) => {
+    if (req.workspace?.role !== 'dev') {
+      return res.status(403).json({ error: 'Architecture diagrams are available to developers only.' });
+    }
+    return res.json(await getRepoArchitecture(repo));
+  })
 );
 
 projectRepoRouter.get(
