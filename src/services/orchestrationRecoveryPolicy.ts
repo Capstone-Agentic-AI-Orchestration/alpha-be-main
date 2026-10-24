@@ -48,9 +48,24 @@ export function hasRepeatedRecoveryFailure(
 
 const SPECIALIST_BLOCKER_PREFIX = 'The specialist reported a blocker:';
 
+/**
+ * A blocker that only says the agent's own git staging or commit was refused. The build
+ * worktree's git metadata sits outside the agent's sandbox, and Alpha commits the work as
+ * a checkpoint after the run, so this never stops a task.
+ */
+export function isAlphaOwnedGitBlocker(blocker: string): boolean {
+  return /\bgit\s+(?:add|commit|stage)\b[\s\S]*\b(?:refused|denied|permission|unable|fatal|not permitted)\b|index\.lock/i.test(blocker);
+}
+
+/** A specialist blocker that is only a refused git write, which Alpha handles itself. */
+export function isAlphaOwnedGitFailure(reason: string | undefined): boolean {
+  const text = reason?.trim() ?? '';
+  return text.startsWith(SPECIALIST_BLOCKER_PREFIX) && isAlphaOwnedGitBlocker(text.slice(SPECIALIST_BLOCKER_PREFIX.length));
+}
+
 /** The specialist stopped because it lacks information, not because its code failed a check. */
 export function isSpecialistBlocker(reason: string | undefined): boolean {
-  return Boolean(reason?.trim().startsWith(SPECIALIST_BLOCKER_PREFIX));
+  return Boolean(reason?.trim().startsWith(SPECIALIST_BLOCKER_PREFIX)) && !isAlphaOwnedGitFailure(reason);
 }
 
 /** "continue", "go ahead", "fix it" and similar carry no new information for a blocked specialist. */
@@ -65,8 +80,13 @@ export function specialistBlockerDirectionMessage(reason: string): string {
 }
 
 export function workAttemptCount(snapshot: OrchestrationSnapshot, taskId: string): number {
+  // An attempt that ended without ever reaching a specialist (preparation refused it, or
+  // Alpha restarted before the launch) did no work, so it does not spend the repair budget.
+  // Without this, a stalled launch and a refused preparation used the last retries and
+  // left the build with no way forward.
   return snapshot.attempts.filter(attempt => attempt.taskId === taskId &&
-    attempt.contextManifest.reportOnlyReportRetry !== true).length;
+    attempt.contextManifest.reportOnlyReportRetry !== true &&
+    !(!attempt.prototypeRunId && ['failed', 'cancelled'].includes(attempt.status))).length;
 }
 
 export function classifyRecoveryCategory(input: {
@@ -125,14 +145,23 @@ export function recoveryAvailableActions(input: {
   const failedDuringAcceptanceInfrastructure = task && snapshot.findings.some(finding =>
     finding.taskId === task.id && finding.status === 'open' && finding.evidence.check === 'acceptance_system');
   const preparationFailureReason = latestFailedAttempt?.failureReason ?? '';
-  const preparationCheckpointIsUncertain = /checkpoint|unexpected head|branch changed|dirty working|process.*(?:uncertain|active|stopped)|outside the run.scoped|not authorized/i.test(preparationFailureReason);
+  // "uncheckpointed changes" is a stopped attempt's leftovers, which the next preparation
+  // saves aside; only a checkpoint mismatch itself keeps the build waiting for inspection.
+  const preparationCheckpointIsUncertain = /\bcheckpoint|unexpected head|branch changed|dirty working|process.*(?:uncertain|active|stopped)|outside the run.scoped|not authorized/i.test(preparationFailureReason);
   const canAct = canControl && !['completed', 'failed', 'cancelled'].includes(snapshot.run.status);
   if (!canControl) actionReasons.provide_guidance = 'Your project role can inspect this build but cannot change it.';
   // Recovery episodes are durable. Their age alone does not invalidate a saved
   // checkpoint; retryTask and the runner adapter revalidate workspace identity.
   void episodeAgeMs;
-  if (canAct && task && ['failed', 'blocked'].includes(task.status)) {
-    if (category === 'project_code' && isSpecialistBlocker(latestFailedAttempt?.failureReason)) {
+  if (canAct && task && ['failed', 'blocked'].includes(task.status) && isAlphaOwnedGitFailure(latestFailedAttempt?.failureReason)) {
+    // The agent tried to commit, which Alpha does for it; the work itself can simply be retried.
+    if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
+    else if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
+  } else if (canAct && task && ['failed', 'blocked'].includes(task.status)) {
+    // A blocker the specialist reported itself is answered with direction whatever its wording
+    // classifies as ("permission denied" reads as a workspace problem), so the person can
+    // always tell the agent how to proceed or simply retry.
+    if (isSpecialistBlocker(latestFailedAttempt?.failureReason) && !['budget', 'final_validation', 'report'].includes(category)) {
       // A retry without new information meets the same blocker, so ask for the missing detail.
       if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) {
         availableActions.push('provide_guidance');

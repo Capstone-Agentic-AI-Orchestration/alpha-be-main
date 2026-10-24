@@ -12,7 +12,8 @@ import { runnerService, type StartRunParams } from './runnerService.js';
 import { addBranchWorktree, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { roleCanOwnOrchestrationTask } from './orchestrationContract.js';
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
-import { logError } from '../utils/logger.js';
+import { logError, logInfo } from '../utils/logger.js';
+import { preserveAndRestoreWorktree, type PreservedWorktreeChanges } from './orchestrationWorktreeRecovery.js';
 
 export interface RunnerEvents {
   on(event: 'run_completed' | 'run_failed' | 'run_cancelled', listener: (run: PrototypeRun) => void): unknown;
@@ -123,6 +124,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         throw new Error('The task workspace does not match its selected codebase.');
       }
       let baseRef = request.baseRef ?? repositoryWorkspace.baseRef ?? 'HEAD';
+      let preserved: PreservedWorktreeChanges | undefined;
       if (fs.existsSync(workingDir)) {
         if (!(await isGitRepo(workingDir))) {
           throw new Error('The orchestration worktree path exists but is not a Git worktree. Preserve it for recovery and inspect it before retrying.');
@@ -132,7 +134,13 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           throw new Error(`The existing orchestration worktree is on ${currentBranch}; expected ${branchName}. Preserve it for recovery.`);
         }
         if (!(await isGitWorkingTreeClean(workingDir))) {
-          throw new Error('The previous task left uncheckpointed changes. Preserve the worktree and reconcile those changes before dispatching another task.');
+          // Dispatch happens only while no specialist is active, so these changes are the
+          // leftovers of a stopped attempt: save them aside and start from the checkpoint.
+          if (snapshot!.run.currentTaskId || snapshot!.attempts.some(attempt => ['starting', 'running', 'submitted'].includes(attempt.status))) {
+            throw new Error('The previous task left uncheckpointed changes. Preserve the worktree and reconcile those changes before dispatching another task.');
+          }
+          preserved = await preserveAndRestoreWorktree({ worktree: workingDir, runId: request.runId, label: request.taskId });
+          if (preserved) logInfo(`${request.runId}: saved a stopped attempt's leftover changes to ${preserved.folder} before ${request.taskId} starts`);
         }
         if (request.attemptNumber === 1) {
           // Attempt numbers belong to tasks, not the build. A new specialist
@@ -192,7 +200,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           baseRef,
           baseCommit: repositoryWorkspace.baseCommit ?? request.baseCommit ?? startingCommit,
           startingCommit,
-          workspacePathHash: crypto.createHash('sha256').update(path.resolve(workingDir)).digest('hex')
+          workspacePathHash: crypto.createHash('sha256').update(path.resolve(workingDir)).digest('hex'),
+          ...(preserved ? { preservedLeftovers: { folder: preserved.folder, trackedChanges: Boolean(preserved.patchFile), movedPaths: preserved.movedPaths.slice(0, 20) } } : {})
         }
       };
     });

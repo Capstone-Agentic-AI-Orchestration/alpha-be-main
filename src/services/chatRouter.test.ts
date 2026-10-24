@@ -30,6 +30,14 @@ describe('continuing a stopped build', () => {
 });
 
 describe('parseAlphaRoute', () => {
+  it('validates bounded specialist assignments before dispatch', () => {
+    const assignment = { agentId: 'backend-1', kind: 'backend', instruction: 'Inspect the API', reason: 'API expertise' };
+    const parse = (assignments: unknown[]) => parseAlphaRoute('ALPHA_ROUTE ' + JSON.stringify({ route: 'delegate', assignments }));
+    expect(parse([assignment]).decision?.assignments).toEqual([assignment]);
+    for (const assignments of [[], [assignment, assignment], [{ ...assignment, kind: 'administrator' }], [{ ...assignment, instruction: '' }], Array(5).fill(assignment)]) {
+      expect(parse(assignments).malformed).toBe(true);
+    }
+  });
   it('reads a build decision and removes the line from the visible reply', () => {
     const parsed = parseAlphaRoute(`${ALPHA_ROUTE_MARKER} {"route":"build","goal":"Add a dark mode toggle","repositories":["org/app-fe"]}`);
     expect(parsed.malformed).toBe(false);
@@ -124,10 +132,11 @@ describe('orchestratorRoutingPrompt', () => {
     expect(prompt).toMatch(/is a question/);
   });
 
-  it('forbids the decision line when the user cannot build', () => {
+  it('permits read-only handoffs but forbids builds when the user cannot build', () => {
     const prompt = orchestratorRoutingPrompt({ repositories: [], canBuild: false });
-    expect(prompt).toMatch(/cannot start them/);
-    expect(prompt).toMatch(/Never write the/);
+    expect(prompt).toContain('cannot start builds');
+    expect(prompt).toContain('Never write a build or confirm_build decision');
+    expect(prompt).toContain('Read-only delegation');
   });
 
   it('forbids the decision line for an answer-only message', () => {

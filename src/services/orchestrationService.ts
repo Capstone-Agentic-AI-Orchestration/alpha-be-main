@@ -17,11 +17,13 @@ import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import type { OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
-import { getCurrentBranch, getGitChangedPaths, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import type { PlanNextMilestone } from './orchestrationMilestonePlanner.js';
+import { getCurrentBranch, getGitChangedPaths, getGitDiffNumstat, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { preserveAndRestoreWorktree } from './orchestrationWorktreeRecovery.js';
 import {
   ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS,
   ALPHA_ORCHESTRATION_MAX_COST_USD,
@@ -33,6 +35,46 @@ import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVER
 // stopped a first feature build on a starter project (72 KB of real code), so the
 // budget allows about 64k tokens, well inside the context of the review models.
 const MAX_REVIEW_CONTEXT_BYTES = 256 * 1024;
+/**
+ * Package-manager lockfiles: generated, often hundreds of kilobytes, and checked by Alpha's
+ * own clean install before acceptance. A review reads their line counts, not their text;
+ * otherwise one dependency change filled the review budget and stopped the build.
+ */
+const GENERATED_LOCKFILES = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb'];
+const isGeneratedLockfile = (file: string) => GENERATED_LOCKFILES.includes(file.split(/[\\/]/).pop() ?? '');
+
+/**
+ * What a reviewer needs from an npm lockfile instead of its full text: each direct
+ * dependency's declared range beside the exact version the lockfile resolved, so the
+ * manifest and lockfile can be compared. Undefined for other lockfile formats.
+ */
+export function summarizeNpmLockfile(text: string): string | undefined {
+  let lock: any;
+  try { lock = JSON.parse(text); } catch { return undefined; }
+  const root = lock?.packages?.[''];
+  if (!root || typeof root !== 'object') return undefined;
+  const rows: string[] = [];
+  for (const group of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const) {
+    for (const [name, range] of Object.entries((root[group] ?? {}) as Record<string, string>)) {
+      const resolved = lock.packages?.[`node_modules/${name}`]?.version ?? 'not resolved';
+      rows.push(`${group} ${name}: declared ${range}, locked ${resolved}`);
+    }
+  }
+  return [`lockfileVersion ${lock.lockfileVersion ?? 'unknown'}; root ${root.name ?? lock.name ?? '?'}@${root.version ?? lock.version ?? '?'}; ${Object.keys(lock.packages ?? {}).length - 1} locked packages`, ...rows].join('\n').slice(0, 6_000);
+}
+
+/**
+ * How long a specialist launch may take before Alpha stops waiting for it.
+ *
+ * A launch only checks the worktree, records the process id and queues the run, so
+ * it normally finishes in well under a second. Without a limit, a launch that never
+ * returned held the build's lock and left its attempt at "starting" for good: the
+ * chat showed the agent working while nothing ran, and every later action queued.
+ */
+function launchDeadlineMs(): number {
+  const configured = Number(process.env.ALPHA_ORCHESTRATION_LAUNCH_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 120_000;
+}
 const MAX_REVIEW_SOURCE_CONTEXT_BYTES = 16 * 1024;
 const MAX_REVIEW_SOURCE_FILES = 12;
 const MAX_REVIEW_SOURCE_FILE_BYTES = 16 * 1024;
@@ -40,6 +82,33 @@ const REVIEW_SOURCE_EXTENSIONS = /\.(?:[cm]?[jt]sx?|vue|svelte|html?|css|scss|le
 const SENSITIVE_REVIEW_PATH = /(?:^|\/)(?:\.env(?:\.|$)|secrets?(?:\/|\.|$)|credentials?(?:\/|\.|$)|private[-_]?key|id_rsa|id_ed25519)/i;
 const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', 'frontend', 'mobile']);
 const NON_REPAIRABLE_AGENT_FAILURE = /\b(?:provider|429|rate.?limit|quota|network|connection|timed? ?out|credential|authentication|permission|access denied|eacces|eperm|enoent|eio|worktree|working tree|branch|checkpoint|workspace|runtime|not ready|executable|spawn|disk full|enospc|read.only file system|no such file or directory)\b/i;
+
+/**
+ * Why a specialist run ended without a result, in words a person can act on.
+ *
+ * The reason used to be the last 4,000 characters of the run log, which on a long run is
+ * the middle of a tool call: the chat showed "ool Call] Bash: {"command":…" and nothing
+ * about what went wrong. The reason now leads with what happened and the agent's own last
+ * update, then keeps a short, readable tail of the log for the repair attempt.
+ */
+export function describeRunnerFailure(run: Pick<PrototypeRun, 'activities' | 'testSummary'>, logs: readonly string[]): string {
+  const activities = run.activities ?? [];
+  const errors = activities.filter(item => item.kind === 'error').map(item => item.message ?? '');
+  const ranOutOfTime = [...errors, ...logs.slice(-10)].some(line => /timed? ?out/i.test(line));
+  const lastUpdate = [...activities].reverse().find(item => item.kind === 'assistant' && item.message?.trim() && !item.message.trim().startsWith('{'))?.message?.trim();
+  const readable = logs.slice(-30)
+    .filter(line => line.trim() && !/(?:^|\[)T?ool Call\]|^\s*[{[]"|^\s*@'|"command"\s*:/.test(line))
+    .map(line => line.length > 300 ? line.slice(0, 300) + '…' : line);
+  const tail = readable.slice(-8).join('\n').slice(-1_200);
+  const headline = ranOutOfTime
+    ? 'The agent ran out of time before it submitted a result, so Alpha stopped it.'
+    : errors.at(-1)?.replace(/^Run failed:\s*/i, 'The agent stopped before it submitted a result: ') ?? 'The agent stopped before it submitted a result.';
+  return [
+    headline,
+    lastUpdate ? `Agent's last update: ${lastUpdate.length > 600 ? lastUpdate.slice(0, 600) + '…' : lastUpdate}` : '',
+    tail ? `Recent output:\n${tail}` : run.testSummary ?? ''
+  ].filter(Boolean).join('\n\n');
+}
 
 export interface OrchestrationLaunchRequest {
   runId: string;
@@ -108,6 +177,8 @@ export interface OrchestrationTaskPackage {
     changedPaths: string[];
     diff: string;
     diffHash: string;
+    /** Lockfiles changed by the task, summarized by line counts and left out of `diff`. */
+    generatedFiles?: Array<{ path: string; additions: number; deletions: number; summary?: string }>;
     sourceFiles?: Array<{ path: string; content: string; contentHash: string }>;
     relatedFindings: Array<{
       findingId: string;
@@ -133,6 +204,15 @@ export interface OrchestrationTaskPackage {
 
 function taskExecutionAttemptCount(snapshot: OrchestrationSnapshot, taskId: string): number {
   return workAttemptCount(snapshot, taskId);
+}
+
+function contextDependencyIds(snapshot: OrchestrationSnapshot, taskId: string): Set<string> {
+  const task = snapshot.tasks.find(item => item.id === taskId)!;
+  const milestones = snapshot.run.plan.milestones ?? [];
+  const index = milestones.findIndex(item => item.id === task.milestoneId);
+  const previous = index > 0 ? milestones[index - 1].id : undefined;
+  const checkpointTasks = previous ? snapshot.tasks.filter(item => item.milestoneId === previous && item.status === 'accepted').slice(-12) : [];
+  return new Set([...task.dependsOn, ...checkpointTasks.map(item => item.id)]);
 }
 
 export interface PreparedOrchestrationTask {
@@ -199,12 +279,14 @@ export class OrchestrationPlanError extends Error {
  */
 export class OrchestrationService {
   private readonly transitionQueues = new Map<string, Promise<unknown>>();
+  private readonly planningMilestones = new Set<string>();
   private readonly publication: OrchestrationPublicationService;
 
   constructor(
     private readonly store: SQLiteService,
     private readonly executor: OrchestrationExecutor,
-    publication?: OrchestrationPublicationService
+    publication?: OrchestrationPublicationService,
+    private readonly planNextMilestone?: PlanNextMilestone
   ) {
     this.publication = publication ?? new OrchestrationPublicationService({ store });
   }
@@ -313,7 +395,7 @@ export class OrchestrationService {
         createdBy: input.createdBy,
         executorId: input.executorId,
         ownershipEpoch: 1,
-        workflowVersion: 1,
+        workflowVersion: plan.schemaVersion,
         planVersion: 1,
         plan,
         status: 'planning',
@@ -326,6 +408,12 @@ export class OrchestrationService {
         createdAt: now,
         updatedAt: now
       }, initialTaskRecords(plan), input.planSource ?? 'template', input.planningOwnerSessionId);
+      try {
+        this.store.ensureOrchestrationPlanDocuments(run.run.id);
+      } catch (error) {
+        return this.store.transitionOrchestrationRun({ runId: run.run.id, expectedRevision: run.run.revision, nextStatus: 'failed', actorId: input.createdBy,
+          reason: `The initial plan document could not be saved: ${error instanceof Error ? error.message : 'Storage unavailable'}`, now });
+      }
       return this.store.transitionOrchestrationRun({
         runId: run.run.id,
         expectedRevision: run.run.revision,
@@ -362,7 +450,7 @@ export class OrchestrationService {
         const issues = validateOrchestrationPlan(snapshot.run.plan, eligibleAgents, {
           maxTaskCount: MAX_INITIAL_PLAN_TASKS,
           initialPlan: true,
-          repositories: snapshot.run.repositoryWorkspaces?.map(item => item.repository)
+          repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository]
         });
         if (issues.length) throw new OrchestrationPlanError(issues);
       }
@@ -572,14 +660,22 @@ export class OrchestrationService {
     const interruptedAttempt = interruptedTask && [...snapshot.attempts].reverse().find(attempt =>
       attempt.taskId === interruptedTask.id && attempt.status === 'recovery_required');
     if (interruptedAttempt) {
-      if (!interruptedAttempt.prototypeRunId) {
+      // The executor records the process id before it starts any process, so an attempt
+      // without one never reached a specialist. A run recorded for the attempt anyway
+      // (an older executor) means Alpha cannot be sure, and the attempt stays held.
+      const recordedRun = !interruptedAttempt.prototypeRunId
+        ? this.store.getPrototypeRuns().find(run => run.orchestrationAttemptId === interruptedAttempt.id)
+        : undefined;
+      if (!interruptedAttempt.prototypeRunId && recordedRun) {
         throw new Error('Alpha cannot confirm whether the interrupted specialist started. Review the saved work and process state before resuming.');
       }
-      const prototypeRun = this.store.getPrototypeRuns().find(run => run.id === interruptedAttempt.prototypeRunId);
-      if (!prototypeRun || ['queued', 'running', 'validating'].includes(prototypeRun.status)) {
+      const prototypeRun = interruptedAttempt.prototypeRunId
+        ? this.store.getPrototypeRuns().find(run => run.id === interruptedAttempt.prototypeRunId)
+        : undefined;
+      if (interruptedAttempt.prototypeRunId && (!prototypeRun || ['queued', 'running', 'validating'].includes(prototypeRun.status))) {
         throw new Error('The previous specialist may still be active. Alpha will not start another writer until that process is confirmed stopped.');
       }
-      if (prototypeRun.status === 'completed') {
+      if (prototypeRun?.status === 'completed') {
         throw new Error('The interrupted specialist has a completed run that still needs result reconciliation. Refresh the build before retrying.');
       }
     }
@@ -602,7 +698,9 @@ export class OrchestrationService {
         throw new Error(`The saved ${workspace.repository} worktree is on branch ${branch}, but this build owns ${workspace.branchName}. Review the branch before resuming.`);
       }
       if (!clean) {
-        throw new Error(`The saved ${workspace.repository} worktree contains uncheckpointed changes. Review or preserve them before resuming.`);
+        // The checks above proved the interrupted specialist is no longer running, so its
+        // leftovers are saved aside and the worktree returns to the checkpoint.
+        await preserveAndRestoreWorktree({ worktree, runId: snapshot.run.id, label: interruptedTask?.id ?? 'resume' });
       }
       const latestAccepted = [...snapshot.attempts].reverse().find(attempt => {
         const task = snapshot.tasks.find(item => item.id === attempt.taskId);
@@ -641,6 +739,9 @@ export class OrchestrationService {
     actorId: string;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
+    if (this.planningMilestones.has(`${input.workspaceId}/${input.runId}`)) {
+      return runWithWorkspace(input.workspaceId, () => this.store.requestOrchestrationPause(input));
+    }
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () =>
       this.store.requestOrchestrationPause({
         runId: input.runId,
@@ -659,6 +760,13 @@ export class OrchestrationService {
     reason?: string;
     now?: string;
   }): Promise<OrchestrationSnapshot> {
+    if (this.planningMilestones.has(`${input.workspaceId}/${input.runId}`)) {
+      return runWithWorkspace(input.workspaceId, () => {
+        const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+        if (!snapshot || (input.expectedRevision !== undefined && snapshot.run.revision !== input.expectedRevision)) throw new Error('The build changed before cancellation. Refresh and try again.');
+        return this.store.cancelOrchestrationRun(input);
+      });
+    }
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
       let snapshot = this.store.getOrchestrationSnapshot(input.runId);
       if (!snapshot) throw new Error('Orchestration run not found.');
@@ -860,9 +968,7 @@ export class OrchestrationService {
       const verificationOutput = failedStage?.logs.slice(-30).join('\n').slice(-4_000);
       const reason = isVerificationFailure
         ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
-        : failedStage?.logs.slice(-30).join('\n').slice(-4_000)
-          || run.testSummary
-          || 'The specialist runner failed before submitting a result.';
+        : describeRunnerFailure(run, failedStage?.logs ?? []);
       return this.failActiveAttempt(snapshot, task.id, attempt.id, reason,
         (isVerificationFailure || isRepairableImplementationFailure) && CODE_TASK_KINDS.has(task.kind));
     }));
@@ -985,6 +1091,12 @@ export class OrchestrationService {
     developerGuidance?: string
   ): Promise<OrchestrationSnapshot> {
     if (snapshot.run.status !== 'executing' || snapshot.run.currentTaskId) return snapshot;
+    try {
+      this.store.ensureOrchestrationPlanDocuments(snapshot.run.id);
+    } catch (error) {
+      return this.store.transitionOrchestrationRun({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision, nextStatus: 'blocked', actorId,
+        reason: `Plan document could not be saved before dispatch: ${error instanceof Error ? error.message : 'Storage unavailable'}`, now });
+    }
     if (snapshot.run.pauseRequestedAt) {
       return this.store.transitionOrchestrationRun({
         runId: snapshot.run.id,
@@ -1152,7 +1264,24 @@ export class OrchestrationService {
       modelName: prepared.modelName
     };
     try {
-      const receipt = await this.executor.launch(launch);
+      const deadline = launchDeadlineMs();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      const launching = this.executor.launch(launch);
+      const receipt = await Promise.race([
+        launching,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error(`The specialist did not start within ${Math.round(deadline / 1000)} seconds, so Alpha stopped waiting. Nothing was changed; if the process starts late, Alpha stops it. Retry the task when ready.`));
+          }, deadline);
+          timer.unref?.();
+        })
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+        // A launch that returns after Alpha gave up must not leave a writer behind.
+        if (timedOut) void launching.then(late => this.executor.cancel?.(late.prototypeRunId)).catch(() => undefined);
+      });
       return runWithWorkspace(started.run.workspaceId, () => {
         return this.store.bindOrchestrationAttempt({
           runId: started.run.id,
@@ -1248,7 +1377,7 @@ export class OrchestrationService {
     return undefined;
   }
 
-  private closeSchedulingWindow(snapshot: OrchestrationSnapshot, actorId: string, now?: string): OrchestrationSnapshot {
+  private async closeSchedulingWindow(snapshot: OrchestrationSnapshot, actorId: string, now?: string): Promise<OrchestrationSnapshot> {
     if (!allRequiredTasksAccepted(snapshot.tasks)) {
       return this.store.transitionOrchestrationRun({
         runId: snapshot.run.id,
@@ -1258,6 +1387,29 @@ export class OrchestrationService {
         reason: 'No eligible task can run, but required work remains unresolved.',
         now
       });
+    }
+
+    const milestone = snapshot.run.plan.milestones?.find(item => !snapshot.run.plan.tasks.some(task => task.milestoneId === item.id));
+    if (milestone) {
+      const planningKey = `${snapshot.run.workspaceId}/${snapshot.run.id}`;
+      try {
+        const budgetStop = this.recoveryBudgetStop(snapshot);
+        if (budgetStop) throw new Error(budgetStop.reason);
+        if (!this.planNextMilestone) throw new Error('Milestone planning is unavailable in this executor.');
+        this.planningMilestones.add(planningKey);
+        const expansion = await this.planNextMilestone(snapshot, milestone);
+        this.planningMilestones.delete(planningKey);
+        const expanded = this.store.appendOrchestrationMilestone({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision,
+          expectedPlanVersion: snapshot.run.planVersion, milestoneId: milestone.id, ...expansion, actorId });
+        return await this.dispatchNextUnlocked(expanded, actorId);
+      } catch (error) {
+        const latest = this.store.getOrchestrationSnapshot(snapshot.run.id)!;
+        if (latest.run.status !== 'executing' || latest.run.currentTaskId) return latest;
+        return this.store.transitionOrchestrationRun({ runId: latest.run.id, expectedRevision: latest.run.revision, nextStatus: 'blocked', actorId,
+          reason: `Milestone planning stopped before dispatch: ${error instanceof Error ? error.message : 'Planning failed.'}`, now });
+      } finally {
+        this.planningMilestones.delete(planningKey);
+      }
     }
 
     let current = snapshot;
@@ -1284,8 +1436,9 @@ export class OrchestrationService {
 
   private createFixtureManifest(snapshot: OrchestrationSnapshot, taskId: string): Record<string, unknown> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
+    const dependencyIds = contextDependencyIds(snapshot, taskId);
     const acceptedDependencies = snapshot.tasks
-      .filter(item => task.dependsOn.includes(item.id) && item.status === 'accepted')
+      .filter(item => dependencyIds.has(item.id) && item.status === 'accepted')
       .map(item => ({ taskId: item.id, revision: item.acceptedRevision ?? item.revision }));
     return {
       manifestVersion: 1,
@@ -1307,8 +1460,9 @@ export class OrchestrationService {
   ): Promise<OrchestrationTaskPackage> {
     const task = snapshot.tasks.find(item => item.id === taskId)!;
     const requirementIds = new Set(task.requirementIds);
+    const dependencyIds = contextDependencyIds(snapshot, taskId);
     const acceptedDependencies = snapshot.tasks
-      .filter(item => task.dependsOn.includes(item.id) && item.status === 'accepted')
+      .filter(item => dependencyIds.has(item.id) && item.status === 'accepted')
       .map(item => {
         const acceptedAttempt = [...snapshot.attempts]
           .reverse()
@@ -1499,9 +1653,10 @@ export class OrchestrationService {
       if (!diffStartingCommit || !attempt?.resultCommit) {
         throw new Error(`Accepted task ${codeTask.id} is missing its immutable diff commits. Preserve the build and use human review.`);
       }
-      const [diff, changedPaths] = await Promise.all([
-        getGitDiffPatch(worktree, diffStartingCommit, attempt.resultCommit),
-        getGitChangedPaths(worktree, diffStartingCommit, attempt.resultCommit)
+      const [diff, changedPaths, generatedFiles] = await Promise.all([
+        getGitDiffPatch(worktree, diffStartingCommit, attempt.resultCommit, GENERATED_LOCKFILES),
+        getGitChangedPaths(worktree, diffStartingCommit, attempt.resultCommit),
+        getGitDiffNumstat(worktree, diffStartingCommit, attempt.resultCommit, GENERATED_LOCKFILES)
       ]);
       totalBytes += Buffer.byteLength(diff, 'utf8');
       if (totalBytes > MAX_REVIEW_CONTEXT_BYTES) {
@@ -1520,7 +1675,7 @@ export class OrchestrationService {
       const diffHash = createHash('sha256').update(diff).digest('hex');
       const sourceBudget = Math.min(MAX_REVIEW_SOURCE_CONTEXT_BYTES, MAX_REVIEW_CONTEXT_BYTES - totalBytes);
       const sourceFiles = await this.readReviewSourceContext(
-        worktree, codeTask, attempt, changedPaths, sourceBudget, !diff.trim()
+        worktree, codeTask, attempt, changedPaths.filter(file => !isGeneratedLockfile(file)), sourceBudget, !diff.trim() && !generatedFiles.length
       );
       results.push({
         taskId: codeTask.id,
@@ -1532,6 +1687,14 @@ export class OrchestrationService {
         changedPaths,
         diff,
         diffHash,
+        ...(generatedFiles.length ? { generatedFiles: await Promise.all(generatedFiles.map(async file => {
+          const name = file.path.split('/').pop();
+          const text = name === 'package-lock.json' || name === 'npm-shrinkwrap.json'
+            ? await getGitFileAtCommit(worktree, attempt.resultCommit!, file.path, 8 * 1024 * 1024).catch(() => undefined)
+            : undefined;
+          const summary = text ? summarizeNpmLockfile(text) : undefined;
+          return summary ? { ...file, summary } : file;
+        })) } : {}),
         ...(sourceFiles.length ? { sourceFiles } : {}),
         relatedFindings
       });

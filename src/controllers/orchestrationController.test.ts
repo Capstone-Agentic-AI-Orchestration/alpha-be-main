@@ -25,6 +25,7 @@ async function startApi() {
     publication: { branchName: 'alpha/orchestration/approved1', baseBranch: 'main', resultCommit: 'b'.repeat(40),
       pullRequestUrl: 'https://github.com/acme/shop/pull/42', publishedAt: '2026-10-20T00:02:00.000Z' } } };
   const calls = {
+    documents: vi.fn(() => [{ version: 1, fileName: 'build-plan-v1.md', content: '# Approved plan\n', contentHash: 'hash' }]),
     getRecovery: vi.fn((): any => recovery),
     inspect: vi.fn(async () => ({ state: 'changed', safeToRetire: false, canPreview: true, changed: true })),
     remove: vi.fn(async () => false),
@@ -54,6 +55,7 @@ async function startApi() {
     retainOrchestrationPlanningRecovery: calls.retain,
     cleanOrchestrationPlanningReservation: calls.clean,
     getOrchestrationSnapshot: calls.getSnapshot,
+    ensureOrchestrationPlanDocuments: calls.documents,
     listOrchestrationEvents: calls.listEvents
   } }));
   vi.doMock('../services/orchestrationReviewService.js', () => ({
@@ -110,6 +112,17 @@ afterEach(() => {
 });
 
 describe('task workflow project routes', () => {
+  it('serves plan Markdown only for a matching project and workspace', async () => {
+    const { app, calls, awaitingSnapshot } = await startApi();
+    const url = `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/plans`;
+    expect(await call(app, 'GET', url)).toMatchObject({ status: 200, body: { documents: [{ fileName: 'build-plan-v1.md', content: '# Approved plan\n' }] } });
+    expect(calls.documents).toHaveBeenCalledTimes(1);
+    calls.getSnapshot.mockReturnValue({ ...awaitingSnapshot, run: { ...awaitingSnapshot.run, projectId: 'other-project' } });
+    expect((await call(app, 'GET', url)).status).toBe(404);
+    calls.getSnapshot.mockReturnValue({ ...awaitingSnapshot, run: { ...awaitingSnapshot.run, workspaceId: 'other-workspace' } });
+    expect((await call(app, 'GET', url)).status).toBe(404);
+    expect(calls.documents).toHaveBeenCalledTimes(1);
+  });
   it('serves a bounded project-scoped event cursor without exposing event payloads', async () => {
     const { app, calls, approvedSnapshot } = await startApi();
 

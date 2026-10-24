@@ -119,6 +119,59 @@ describe('task acceptance and targeted correction', () => {
     directory = '';
   });
 
+  it('allows scoped evolution of an accepted file in a persisted later milestone', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-milestone-evolution-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'api.ts'), 'export const version = 0;\n');
+    commit(repository, 'Initial fixture');
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'milestone fixture'));
+    const eligibleAgents = [{ id: 'backend-agent', role: 'Backend Agent' }] as const;
+    vi.spyOn(store, 'getAgents').mockReturnValue(eligibleAgents as any);
+    const plan = parseOrchestrationPlan({ schemaVersion: 2, goal: 'Create then extend the API.',
+      requirements: [{ id: 'CREATE', description: 'Create API.' }, { id: 'EXTEND', description: 'Extend the accepted API.' }],
+      milestones: [
+        { id: 'first', title: 'Create', objective: 'Create API.', requirementIds: ['CREATE'], repositories: ['acme/api'] },
+        { id: 'second', title: 'Extend', objective: 'Extend API.', requirementIds: ['EXTEND'], repositories: ['acme/api'] }
+      ], tasks: [{ id: 'create', milestoneId: 'first', title: 'Create API', description: 'Implement API.', kind: 'backend', repository: 'acme/api', ownerAgentId: 'backend-agent',
+        requirementIds: ['CREATE'], acceptanceCriteria: ['API works.'], requiredChecks: ['test'], scope: { includePaths: ['src/api.ts'], excludePaths: [] } }] });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        const branchName = `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    }, undefined, async () => ({ checkpoints: [{ repository: 'acme/api', commit: await getHeadCommit(repository) }],
+      tasks: [{ ...plan.tasks[0], id: 'extend', milestoneId: 'second', requirementIds: ['EXTEND'], title: 'Extend API' }] }));
+    let current = await startAndApprove(orchestration, { workspaceId, projectId, issueId, repository: 'acme/api',
+      requestKey: 'milestone-evolution', requestFingerprint: 'milestone-evolution', createdBy: 'user-test', executorId: 'desktop-test', eligibleAgents, plan, baseRef: 'main' });
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({ status: 'passed', missingScripts: [], summary: 'Tests passed.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }] })
+    });
+    for (const [index, taskId] of ['create', 'extend'].entries()) {
+      const request = launches[index];
+      expect(request.taskId).toBe(taskId);
+      if (index === 1) expect(request.taskPackage.acceptedDependencies.map(item => item.taskId)).toContain('create');
+      fs.writeFileSync(path.join(repository, 'src', 'api.ts'), `export const version = ${index + 1};\n`);
+      const resultCommit = commit(repository, `Implement ${taskId}`);
+      current = (await orchestration.handleRunnerCompleted(completedRun(request, resultCommit, ['src/api.ts'])))!;
+      const result = await acceptance.evaluateAndAccept({ workspaceId, runId: current.run.id, taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator' });
+      expect(result.decision).toBe(index === 0 ? 'accepted' : 'awaiting_approval');
+      current = result.snapshot;
+    }
+    expect(current.run.planVersion).toBe(2);
+    expect(current.tasks.every(task => task.status === 'accepted')).toBe(true);
+    expect(current.findings.filter(finding => finding.status === 'open')).toEqual([]);
+  });
+
   it('revalidates legacy report aliases at acceptance and gives the next agent canonical prerequisite evidence', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });

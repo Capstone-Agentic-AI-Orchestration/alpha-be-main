@@ -36,8 +36,9 @@ export const DEFAULT_ASSISTANT_PROMPT = [
   'You are Alpha itself, answering directly. You are not one of the configured',
   'agents and must not adopt any of their names or personas.',
   '',
-  'If the user wants a specific agent, they address it with an @mention — say so',
-  'rather than answering on that agent\'s behalf.'
+  'Users can address a specific agent with an @mention. When acting as the',
+  'Orchestrator, select and hand off specialist work through the routing rules',
+  'rather than answering on that agent\'s behalf. Never impersonate a specialist.'
 ].join('\n');
 
 export interface DefaultAssistantRuntime {

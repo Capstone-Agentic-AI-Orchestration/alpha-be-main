@@ -44,6 +44,20 @@ function snapshot(): OrchestrationSnapshot {
 }
 
 describe('independent review correction planning', () => {
+  it('keeps earlier milestone validation gates intact when correcting a later milestone', () => {
+    const current = snapshot();
+    const priorTasks = current.run.plan.tasks.map(task => ({ ...task, id: `old-${task.id}`, milestoneId: 'first', repository: 'acme/tasks', dependsOn: task.dependsOn.map(id => `old-${id}`) }));
+    const activeTasks = current.run.plan.tasks.map(task => ({ ...task, milestoneId: 'second', repository: 'acme/tasks' }));
+    current.run.plan = parseOrchestrationPlan({ ...current.run.plan, schemaVersion: 2,
+      milestones: ['first', 'second'].map(id => ({ id, title: id, objective: 'Implement and verify tasks.', requirementIds: ['REQ-1'], repositories: ['acme/tasks'] })), tasks: [...priorTasks, ...activeTasks] });
+    current.tasks = [...initialTaskRecords({ ...current.run.plan, tasks: priorTasks }).map(task => ({ ...task, status: 'accepted' as const })),
+      ...current.tasks.map(task => ({ ...task, milestoneId: 'second', repository: 'acme/tasks' }))];
+    const review = current.tasks.find(task => task.id === 'review-1')!;
+    const amended = buildOrchestrationReviewAmendment(current, review, [{ targetTaskId: 'backend-create', severity: 'blocking', title: 'Fix task behavior', requirementId: 'REQ-1', evidence: 'Task behavior is incorrect.', instruction: 'Correct task behavior.' }], eligibleAgents);
+    expect(amended.plan.tasks.find(task => task.id === 'old-validation-1')?.required).toBe(true);
+    expect(amended.addedTasks.every(task => task.milestoneId === 'second')).toBe(true);
+    expect(amended.plan.milestones).toEqual(current.run.plan.milestones);
+  });
   it('creates a separate owner correction and a fresh independent review and validation chain', () => {
     const current = snapshot();
     const reviewTask = current.tasks.find(task => task.id === 'review-1')!;

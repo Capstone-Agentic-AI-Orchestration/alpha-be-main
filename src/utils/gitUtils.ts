@@ -125,14 +125,31 @@ export async function getGitFileAtCommit(
   return stdout;
 }
 
-/** Read an exact, color-free patch between two immutable task commits. */
-export async function getGitDiffPatch(cwd: string, baseCommit: string, resultCommit: string): Promise<string> {
+/** Git pathspecs that leave out the given file names wherever they sit in the tree. */
+export function excludeFileNamesPathspecs(fileNames: readonly string[]): string[] {
+  return fileNames.length ? ['.', ...fileNames.map(name => `:(exclude,glob)**/${name}`)] : [];
+}
+
+/** Added and removed line counts for the given file names, wherever they sit in the tree. */
+export async function getGitDiffNumstat(cwd: string, baseCommit: string, resultCommit: string, fileNames: readonly string[]): Promise<Array<{ path: string; additions: number; deletions: number }>> {
+  if (!fileNames.length || !/^[a-f0-9]{40,64}$/i.test(baseCommit) || !/^[a-f0-9]{40,64}$/i.test(resultCommit)) return [];
+  const { stdout } = await execFileAsync('git', [
+    'diff', '--numstat', '--no-renames', baseCommit, resultCommit, '--', ...fileNames.map(name => `:(glob)**/${name}`)
+  ], { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true });
+  return stdout.split('\n').filter(Boolean).map(line => {
+    const [added, removed, ...rest] = line.split('\t');
+    return { path: rest.join('\t'), additions: Number(added) || 0, deletions: Number(removed) || 0 };
+  });
+}
+
+/** Read an exact, color-free patch between two immutable task commits, optionally without the named generated files. */
+export async function getGitDiffPatch(cwd: string, baseCommit: string, resultCommit: string, excludeFileNames: readonly string[] = []): Promise<string> {
   if (!/^[a-f0-9]{40,64}$/i.test(baseCommit) || !/^[a-f0-9]{40,64}$/i.test(resultCommit)) {
     throw new Error('A review patch requires two valid commit IDs.');
   }
   try {
     const { stdout } = await execFileAsync('git', [
-      'diff', '--no-ext-diff', '--no-color', '--unified=3', baseCommit, resultCommit, '--'
+      'diff', '--no-ext-diff', '--no-color', '--unified=3', baseCommit, resultCommit, '--', ...excludeFileNamesPathspecs(excludeFileNames)
     ], { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 512 * 1024, windowsHide: true });
     return stdout;
   } catch (error) {
