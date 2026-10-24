@@ -53,7 +53,7 @@ export interface TicketClientComposition {
 
 /**
  * Compose client-only auth/read routes from the same Postgres pool and the
- * server-only Supabase Auth/Gmail OAuth credentials. Call only after validating the
+ * server-only Supabase Auth and email-provider credentials. Call only after validating the
  * rollout gates and exact HTTPS web origin; no browser receives service keys.
  */
 export function createTicketClientComposition(input: {
@@ -63,9 +63,9 @@ export function createTicketClientComposition(input: {
   supabaseServiceRoleKey: string;
   sessionSecret: string;
   webOrigin: string;
-  /** Gmail: PM invitations, client activation, and password recovery only. */
+  /** Resend: PM invitations, client activation, and password recovery. */
   emailProvider: TicketInvitationContentEmailProvider;
-  /** Optional legacy Resend route for PM/client conversation notices; never Gmail. */
+  /** Optional Resend route for PM/client conversation notices. */
   notificationEmailProvider?: TicketInvitationContentEmailProvider | null;
   onSignInDeliveryUnavailable?: () => void;
   workflow?: TicketLifecycleRuntime;

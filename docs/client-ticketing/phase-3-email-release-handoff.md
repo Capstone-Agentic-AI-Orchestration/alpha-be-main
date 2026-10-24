@@ -1,5 +1,18 @@
 # Phase 3 of 9: inquiry acknowledgment email
 
+## Current client portal email setup (2026-10-24)
+
+Client invitations, account activation, password recovery, and optional conversation notices use the Resend HTTPS API
+with `RESEND_API_KEY`, `RESEND_SENDER_EMAIL`, and `RESEND_SENDER_NAME`. These routes do not use SMTP or Gmail OAuth.
+When using `onboarding@resend.dev`, set `RESEND_TEST_RECIPIENT` to the exact email address verified by Resend. Use a
+verified sender domain to send to other client addresses. Password sign-in itself is password-based; email delivery is
+needed for invitation setup and password recovery.
+
+The Gmail OAuth instructions below apply only to optional inquiry receipts. `ALPHA_TICKETING_ACK_EMAIL_ENABLED=0`
+keeps that separate feature disabled. Previously attempted invitation emails retain their provider identity and are
+not automatically replayed through a different provider; issue a fresh invitation or password-recovery email after
+the Resend configuration is active.
+
 ## What this adds
 
 Gmail's HTTPS API, authenticated with server-side OAuth, sends a generic inquiry receipt after the
@@ -7,17 +20,15 @@ existing PostgreSQL inquiry transaction commits. The public response stays
 `{ received: true }`: it does not reveal private ticket identifiers, create a
 client account, or claim that work has been approved.
 
-The same Gmail sender also delivers PM-issued client invitations and password
-recovery links through their existing, separate account-access queue. Conversation
-message notices are not sent through Gmail; the existing optional Resend route
-remains separate for those notices.
+Client invitations, account activation, and password recovery use the Resend API
+through their existing account-access queues. Conversation message notices use
+the same optional Resend provider. Gmail OAuth is only used for inquiry receipts.
 
-The Gmail transport is in the existing backend `src/services` structure. The
-client UI removes the separate passwordless sign-in-link option; invitation
-verification, password setup, password recovery and password sign-in remain.
-No desktop source, GitHub App, runner, package dependency, or database schema is
-changed. Automated tests reuse the existing test harness; no new dependency or
-Supabase migration is needed.
+The Gmail transport handles optional inquiry receipts; the Resend provider sends
+client-account email. The client UI removes the separate passwordless sign-in-link
+option; invitation verification, password setup, password recovery and password
+sign-in remain. No desktop source, GitHub App, runner, package dependency, or
+database schema is changed. No new Supabase migration is needed.
 
 ## Durable delivery and safety
 
@@ -75,12 +86,12 @@ must already be ready. No Turnstile configuration is required.
      address.
    - `GMAIL_SENDER_NAME`: for example, `Alphaexplora`.
    Keep all OAuth credentials out of Vite, the desktop app, source control and
-   chat. `RESEND_*` remains only for the separately configured optional
-   conversation-notice route; Gmail does not send those notices.
+   chat. These Gmail settings are only needed when enabling inquiry receipts.
+   Client access uses the Resend settings described at the top of this handoff.
 5. Keep `ALPHA_TICKETING_ACK_EMAIL_ENABLED=0` while setting up and checking the
-   provider. The cloud code selects Gmail directly; the old
-   `TICKET_ACK_EMAIL_PROVIDER` selector does not switch it back to Resend.
-   Client-access routes also require a configured Gmail provider.
+   receipt provider. The cloud code selects Gmail only for receipts; the old
+   `TICKET_ACK_EMAIL_PROVIDER` selector does not switch those receipts to Resend.
+   Client-access routes require the Resend configuration described above.
 6. Keep the existing Phase 2 intake settings unchanged. Once credentials and
    consent are verified, enable
    `ALPHA_TICKETING_ACK_EMAIL_ENABLED=1` on the hosted backend. Do not change
@@ -101,17 +112,16 @@ first to avoid duplicates.
 
 ## Provider boundaries
 
-The cloud composition uses Gmail for inquiry receipts and client-access email:
-PM invitations, account activation and password recovery. It does not fall back
-to Resend if Gmail credentials or delivery fail. Resend's optional conversation-
-notice route is separate and is not used for inquiry or account-access email.
-The client no longer has a standalone passwordless sign-in-link request; access
-uses invitation/password setup, password sign-in or password recovery.
+The cloud composition uses Gmail for optional inquiry receipts and Resend for
+client-access email: PM invitations, account activation, and password recovery.
+It does not fall back between providers. The client no longer has a standalone
+passwordless sign-in-link request; access uses invitation/password setup,
+password sign-in, or password recovery.
 
-Gmail does not provide an idempotency key for sends. Alpha reuses its stable
-delivery key in the RFC Message-ID for correlation, but an ambiguous timeout can
-still cause a duplicate on retry. Do not clear dispatch metadata or automatically
-fail over an uncertain delivery. The provider-identity guard blocks retrying an
+Gmail does not provide an idempotency key for inquiry-receipt sends. Alpha reuses
+its stable delivery key in the RFC Message-ID for correlation, but an ambiguous
+timeout can still cause a duplicate on retry. Do not clear dispatch metadata or
+automatically fail over an uncertain delivery. The provider-identity guard blocks retrying an
 attempted invitation through a different provider or sender; a PM can issue a
 fresh invitation after checking the previous send status.
 
