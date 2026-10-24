@@ -55,6 +55,6 @@ export function clientAccessConfigurationProblems(config: {
   if (!config.supabaseAnonKey.trim()) problems.push('SUPABASE_ANON_KEY');
   if (!config.supabaseServiceRoleKey.trim()) problems.push('server-only SUPABASE_SERVICE_ROLE_KEY');
   if (config.sessionSecret.length < 32) problems.push('existing ALPHA_SESSION_SECRET of at least 32 characters (do not rotate it to troubleshoot)');
-  if (!config.emailConfigured) problems.push('valid server-side Gmail OAuth sender settings');
+  if (!config.emailConfigured) problems.push('valid server-side Resend API sender settings');
   return problems;
 }

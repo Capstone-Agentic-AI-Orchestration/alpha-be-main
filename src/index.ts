@@ -50,7 +50,7 @@ import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, BREVO_API_KEY, BREVO_SENDER_EMAIL, B
 import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
 import { startTicketAcknowledgmentDelivery } from './services/ticketAcknowledgmentDeliveryService.js';
 import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknowledgmentEmailProvider.js';
-import { createGmailTicketInvitationEmailProvider, createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
+import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
 import { createTicketClientComposition } from './controllers/ticketClientComposition.js';
 import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './ticketing/clientWebOrigin.js';
@@ -58,11 +58,7 @@ import { createTicketLifecycleRuntime } from './services/ticketLifecycleRuntime.
 import { createTicketExecutionRouter } from './controllers/ticketExecutionController.js';
 import { createTicketIssueCompletionRouter } from './controllers/ticketIssueCompletionController.js';
 
-const gmailTicketEmailProvider = createGmailTicketInvitationEmailProvider({
-  clientId: GMAIL_OAUTH_CLIENT_ID, clientSecret: GMAIL_OAUTH_CLIENT_SECRET,
-  refreshToken: GMAIL_OAUTH_REFRESH_TOKEN, senderEmail: GMAIL_SENDER_EMAIL, senderName: GMAIL_SENDER_NAME,
-});
-const resendCommunicationEmailProvider = createTicketInvitationEmailProvider({
+const resendTicketEmailProvider = createTicketInvitationEmailProvider({
   apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
   testRecipient: RESEND_TEST_RECIPIENT,
 });
@@ -77,9 +73,9 @@ const ticketClient = (() => {
     webOrigin: clientWebOrigin, originAllowed: Boolean(clientWebOrigin && isAllowedOrigin(clientWebOrigin)),
     supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
     supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
-    emailConfigured: typeof gmailTicketEmailProvider?.sendContent === 'function',
+    emailConfigured: typeof resendTicketEmailProvider?.sendContent === 'function',
   });
-  if (missing.length || !clientWebOrigin || !gmailTicketEmailProvider) {
+  if (missing.length || !clientWebOrigin || !resendTicketEmailProvider) {
     // Setting names only: never log credentials, client details or provider bodies.
     logError(`Client portal unavailable: configure ${missing.join(', ')}.`);
     return null;
@@ -88,10 +84,10 @@ const ticketClient = (() => {
     return createTicketClientComposition({
       database: database(), supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY,
       supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY, sessionSecret: ALPHA_SESSION_SECRET,
-      webOrigin: clientWebOrigin, emailProvider: gmailTicketEmailProvider,
-      notificationEmailProvider: resendCommunicationEmailProvider,
+      webOrigin: clientWebOrigin, emailProvider: resendTicketEmailProvider,
+      notificationEmailProvider: resendTicketEmailProvider,
       workflow: ticketLifecycle ?? undefined,
-      onSignInDeliveryUnavailable: () => logError('Client account-access email delivery failed. Check server-side Supabase Auth and Gmail OAuth configuration.'),
+      onSignInDeliveryUnavailable: () => logError('Client account-access email delivery failed. Check server-side Supabase Auth and Resend configuration.'),
     });
   } catch {
     // Missing or invalid optional auth configuration keeps all client routes
@@ -209,7 +205,7 @@ app.use(
 );
 
 // Mount the browser-only client surface only when the cloud, ticketing gate,
-// exact web origin, and server-side Supabase/Gmail OAuth configuration are valid.
+// exact web origin, server-side Supabase settings, and Resend API configuration are valid.
 // Keep it ahead of internal token/workspace middleware; it never relays to desktop.
 app.use('/api/client', ticketClient?.router ?? createTicketClientUnavailableRouter());
 
@@ -515,8 +511,8 @@ function onListening(): void {
     const stopAcknowledgments = startTicketAcknowledgmentDelivery({
       isCloud: IS_CLOUD, enabled: ALPHA_TICKETING_ACK_EMAIL_ENABLED && ALPHA_TICKETING_TRIAGE_ENABLED,
       providerFactory: () => createTicketAcknowledgmentEmailProvider({
-        // Gmail is the inquiry/access sender; the legacy selector is ignored.
-        // Resend remains isolated to optional conversation-notice delivery.
+        // Gmail is retained for optional inquiry receipts; client access and
+        // conversation notices use Resend.
         providerName: 'gmail',
         gmail: { clientId: GMAIL_OAUTH_CLIENT_ID, clientSecret: GMAIL_OAUTH_CLIENT_SECRET,
           refreshToken: GMAIL_OAUTH_REFRESH_TOKEN, senderEmail: GMAIL_SENDER_EMAIL, senderName: GMAIL_SENDER_NAME },
@@ -529,12 +525,12 @@ function onListening(): void {
     server.once('close', stopAcknowledgments);
     const stopInvitationEmails = startTicketInvitationEmailDelivery({
       isCloud: IS_CLOUD, enabled: ALPHA_TICKETING_TRIAGE_ENABLED,
-      providerFactory: () => gmailTicketEmailProvider, database,
-      onUnavailable: () => logError('Ticket invitation email delivery is unavailable. Check hosted Gmail OAuth settings.'),
+      providerFactory: () => resendTicketEmailProvider, database,
+      onUnavailable: () => logError('Ticket invitation email delivery is unavailable. Check RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME and provider delivery status.'),
     });
     server.once('close', stopInvitationEmails);
     const stopClientActivationEmails = ticketClient?.startDeliveryWorker(
-      () => logError('Client activation email delivery is unavailable; no client access was granted. Check server-side Supabase Auth and Gmail OAuth configuration.'),
+      () => logError('Client activation email delivery is unavailable; no client access was granted. Check server-side Supabase Auth and Resend configuration.'),
       () => logError('Client action reminders are unavailable; messages and documents still send. Apply the latest database migration (ticket_client_action_notices).'),
     ) ?? (() => undefined);
     server.once('close', stopClientActivationEmails);

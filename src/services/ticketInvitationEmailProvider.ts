@@ -32,7 +32,7 @@ export interface TicketInvitationContentEmailProvider extends TicketInvitationEm
   sendContent(recipient: string, subject: string, text: string, idempotencyKey: string): Promise<void>;
 }
 
-/** Gmail OAuth sender for inquiry invitations and client account-access emails. */
+/** Legacy Gmail OAuth sender; the production client-access composition uses Resend. */
 export function createGmailTicketInvitationEmailProvider(config: {
   clientId: string; clientSecret: string; refreshToken: string; senderEmail: string; senderName: string;
 }, send: typeof fetch = fetch): TicketInvitationContentEmailProvider | null {
@@ -66,7 +66,7 @@ export function createGmailTicketInvitationEmailProvider(config: {
   };
 }
 
-/** Legacy Resend sender, retained only for the optional conversation-notice route. */
+/** Resend API sender for client access and optional conversation notices. */
 export function createTicketInvitationEmailProvider(config: {
   apiKey: string; senderEmail: string; senderName: string; testRecipient?: string;
 }, send: typeof fetch = fetch): TicketInvitationContentEmailProvider | null {
