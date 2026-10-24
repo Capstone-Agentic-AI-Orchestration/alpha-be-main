@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { ALPHA_DIR } from '../config/env.js';
+import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import { defaultAssistantCandidates } from './defaultAssistant.js';
 import { getFile, getTree, RepoWorkspaceError } from './githubRepoWorkspace.js';
 import { githubApi, type GitHubApi } from './githubApi.js';
 import { cleanupRunMcpConfig } from './mcpConfigService.js';
 import { machineRuntimes } from './machineRuntimes.js';
 import { runCliTurn } from './cliRunner.js';
+import { sqliteService } from './sqliteService.js';
 
 export type ArchitectureNodeKind = 'web' | 'api' | 'auth' | 'database' | 'jobs' | 'integration' | 'application' | 'module';
 
@@ -295,8 +295,10 @@ async function generateWithAlphaRuntime(repo: string, files: SourceFile[]): Prom
   const failures: string[] = [];
   for (const runtime of candidates) {
     const runId = 'architecture-' + randomUUID();
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-architecture-'));
+    fs.mkdirSync(RUNS_DIR, { recursive: true });
+    const cwd = fs.mkdtempSync(path.join(RUNS_DIR, 'architecture-'));
     try {
+      sqliteService.addAllowedPath(cwd, 'Temporary architecture diagram analysis workspace');
       const turn = await runCliTurn({
         runId,
         cwd,
@@ -316,18 +318,37 @@ async function generateWithAlphaRuntime(repo: string, files: SourceFile[]): Prom
         autonomyLevel: 'Supervised'
       });
       if (!turn.failureKind && turn.content.trim()) return turn.content;
-      failures.push(runtime.name ?? runtime.provider);
-    } catch {
-      failures.push(runtime.name ?? runtime.provider);
+      const wasBlockedByWorkspaceGuard = turn.failureDetail?.includes('Security Violation: Working directory') ?? false;
+      failures.push(wasBlockedByWorkspaceGuard
+        ? `${runtime.name ?? runtime.provider} was blocked by Alpha's workspace security check`
+        : turn.failureKind === 'spawn'
+        ? `${runtime.name ?? runtime.provider} could not start its CLI process`
+        : `${runtime.name ?? runtime.provider} returned no usable diagram`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      failures.push(detail.includes('Security Violation: Working directory')
+        ? `${runtime.name ?? runtime.provider} was blocked by Alpha's workspace security check`
+        : `${runtime.name ?? runtime.provider} could not complete the request`);
     } finally {
-      cleanupRunMcpConfig(runId);
-      fs.rmSync(cwd, { recursive: true, force: true });
+      try {
+        cleanupRunMcpConfig(runId);
+      } finally {
+        try {
+          sqliteService.removeAllowedPath(cwd);
+        } finally {
+          fs.rmSync(cwd, { recursive: true, force: true });
+        }
+      }
     }
   }
 
+  const workspaceGuardBlocked = failures.some(failure => failure.includes('Alpha\'s workspace security check'));
+  const detail = failures.length ? ' (' + failures.join('; ') + ')' : '';
+  const nextStep = workspaceGuardBlocked
+    ? ' Restart Alpha after updating it, then try again.'
+    : ' Check the Runtimes page and try again.';
   throw new RepoWorkspaceError(
-    'Alpha could not generate the architecture diagram with its connected AI runtimes' +
-      (failures.length ? ' (' + failures.join(', ') + '). Check the Runtimes page and try again.' : '. Try again.'),
+    'Alpha could not generate the architecture diagram with its connected AI runtimes' + detail + '.' + nextStep,
     502
   );
 }
