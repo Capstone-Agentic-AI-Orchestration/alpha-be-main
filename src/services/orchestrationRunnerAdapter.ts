@@ -251,6 +251,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           taskId: request.taskId,
           attemptId: request.attemptId,
           branchName: expectedBranch,
+          baseRef: repositoryWorkspace.baseRef,
+          baseCommit: repositoryWorkspace.baseCommit,
           planVersion: request.planVersion,
           taskPackage: request.taskPackage,
           personaHash: request.personaHash ?? '',

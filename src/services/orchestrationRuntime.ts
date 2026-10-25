@@ -2,7 +2,7 @@ import { sqliteService } from './sqliteService.js';
 import { OrchestrationService } from './orchestrationService.js';
 import { OrchestrationRunnerAdapter } from './orchestrationRunnerAdapter.js';
 import { TaskAcceptanceService } from './taskAcceptanceService.js';
-import { replayPublishedOrchestrationIssueEffects } from './orchestrationFinalization.js';
+import { replayPublishedOrchestrationIssueEffects, synchronizePublishedOrchestrationIssue } from './orchestrationFinalization.js';
 import { startOrchestrationEventOutboxWorker, type OrchestrationEventNotification } from './orchestrationEventDelivery.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -45,6 +45,10 @@ orchestrationRunnerAdapter.attachResultHandlers({
     }
     const latest = runWithWorkspace(submitted.run.workspaceId, () => sqliteService.getOrchestrationSnapshot(submitted.run.id));
     if (latest) {
+      if (latest.run.status === 'completed' && !latest.run.publication) {
+        try { await synchronizePublishedOrchestrationIssue(latest); }
+        catch (error) { logError(`Could not synchronize completed report ${latest.run.id}:`, error); }
+      }
       orchestrationRecoveryService.reconcileSnapshot(latest);
       await orchestrationRecoveryService.flushPendingMilestones();
     }

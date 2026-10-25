@@ -192,7 +192,7 @@ export const RUN_TRANSITIONS: Readonly<Record<OrchestrationRunStatus, ReadonlySe
   awaiting_plan_approval: new Set(['executing', 'blocked', 'cancelling', 'cancelled']),
   executing: new Set(['validating', 'paused', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
   paused: new Set(['executing', 'cancelling', 'cancelled']),
-  validating: new Set(['executing', 'awaiting_approval', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
+  validating: new Set(['executing', 'awaiting_approval', 'completed', 'blocked', 'recovery_required', 'failed', 'cancelling', 'cancelled']),
   awaiting_approval: new Set(['publishing', 'cancelling', 'cancelled']),
   publishing: new Set(['completed']),
   completed: new Set(),

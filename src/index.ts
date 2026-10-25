@@ -1,4 +1,5 @@
 import express from 'express';
+import { localPreviewRouter } from './controllers/localPreviewController.js';
 import cors from 'cors';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -293,6 +294,7 @@ app.use('/api', runRouter);
 app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
 app.use('/api', chatRouter);
+app.use('/api', localPreviewRouter);
 app.use('/api', mcpRouter);
 app.use('/api', workspaceRouter);
 

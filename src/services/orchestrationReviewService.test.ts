@@ -35,7 +35,7 @@ describe('orchestration review checkpoint', () => {
     directory = '';
   });
 
-  async function prepareAwaitingApproval() {
+  async function prepareAwaitingApproval(tryReportShortcut = false) {
     directory = fs.mkdtempSync(path.join(process.cwd(), '.tmp-orchestration-review-'));
     const repository = path.join(directory, 'repo');
     fs.mkdirSync(repository);
@@ -64,6 +64,12 @@ describe('orchestration review checkpoint', () => {
       }, initialTaskRecords(plan));
       let snapshot = store!.transitionOrchestrationRun({ runId: 'orchestration-review', expectedRevision: 0, nextStatus: 'executing', now });
       snapshot = store!.transitionOrchestrationRun({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision, nextStatus: 'validating', now });
+      if (tryReportShortcut) {
+        expect(() => store!.transitionOrchestrationRun({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision, nextStatus: 'completed',
+          evidence: { completionType: 'report_only', noOpenBlockingFindings: true, repositories: [{ repository: 'acme/review', branchName: 'main', baseCommit, resultCommit,
+            cumulativeChangedPaths: [], checks: { status: 'passed', missingScripts: [], observed: [] } }] }
+        })).toThrow('Only verified read-only reports');
+      }
       snapshot = store!.transitionOrchestrationRun({
         runId: snapshot.run.id, expectedRevision: snapshot.run.revision, nextStatus: 'awaiting_approval', now,
         evidence: {
@@ -75,6 +81,11 @@ describe('orchestration review checkpoint', () => {
 
     return runWithWorkspace('workspace-review', () => store!.getOrchestrationSnapshot('orchestration-review'))!;
   }
+
+  it('does not allow a code plan to bypass publication approval by claiming to be report-only', async () => {
+    const snapshot = await prepareAwaitingApproval(true);
+    expect(snapshot.run.status).toBe('awaiting_approval');
+  });
 
   it('shows the exact validated commit and its changed files in a bounded text diff', async () => {
     const snapshot = await prepareAwaitingApproval();

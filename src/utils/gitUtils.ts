@@ -57,9 +57,10 @@ export async function addBranchWorktree(
   });
 }
 
-/** Return the immutable commit currently checked out in a task worktree. */
-export async function getHeadCommit(cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd });
+/** Resolve an immutable commit without switching the checkout's branch. */
+export async function getHeadCommit(cwd: string, ref = 'HEAD'): Promise<string> {
+  assertSafeBranchName(ref);
+  const { stdout } = await execFileAsync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd });
   const commit = stdout.trim();
   if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error('Git returned an invalid HEAD commit.');
   return commit;

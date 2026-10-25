@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { startUsage } from './chatUsage.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -63,6 +64,9 @@ export interface StartRunParams {
     taskId: string;
     attemptId: string;
     branchName: string;
+    baseRef?: string;
+    baseCommit?: string;
+    startingCommit?: string;
     planVersion: number;
     taskPackage: OrchestrationTaskPackage;
     personaHash: string;
@@ -121,6 +125,7 @@ export function appendOrchestrationTaskPolicy(
     `You are ${agent.name}, role: ${agent.role}. Workflow plan version ${orchestration.planVersion}; task ${task.id} (${task.kind}).`,
     `Assigned task: ${task.title}.`,
     `Task description: ${task.description}`,
+    `Alpha-managed Git workspace (verified by the runner before execution): branch ${orchestration.branchName}; base ${orchestration.baseRef ?? 'recorded base'}; base commit ${orchestration.baseCommit ?? 'recorded checkpoint'}; attempt starts at ${orchestration.startingCommit ?? 'recorded checkpoint'}. Branch setup is already complete. Use this evidence for branch requirements; do not switch/create branches or report missing Git tools as a product-work blocker. Report an actual mismatch with this evidence instead.`,
     `Acceptance criteria:\n${task.acceptanceCriteria.map(item => `- ${item}`).join('\n')}`,
     `Return the exact shared Alpha task-report schema version ${orchestration.taskPackage.reportSchemaVersion}.`,
     task.dependencyAudit && !orchestration.taskPackage.reportCorrection
@@ -552,6 +557,7 @@ export class RunnerService extends EventEmitter {
         if (!(await isGitWorkingTreeClean(cwd))) {
           throw new Error('Task worktree contains uncheckpointed changes. Reconcile the previous attempt before dispatching another task.');
         }
+        ctx.orchestration.startingCommit = await getHeadCommit(cwd);
         this.appendLog(runId, 'workspace', `Continuing on orchestration branch ${branchName}`);
       } else if (!ctx.squad || ctx.squad.order === 0) {
         // A pipeline repository (dev -> uat -> main): start from what the team
@@ -734,6 +740,8 @@ export class RunnerService extends EventEmitter {
       const processFinished = new Promise<{ code: number | null; signal: string | null; terminationReason?: ProcessTerminationReason }>(resolve => {
         finishProcess = resolve;
       });
+      const usage = startUsage({ prototypeRunId: runId, orchestrationRunId: ctx.orchestration?.orchestrationRunId, agentId: agent.id }, family, persona.modelName);
+      try {
       const child = processManager.spawnProcess({
         runId,
         bin,
@@ -754,6 +762,7 @@ export class RunnerService extends EventEmitter {
       createLineBuffer(child.stdout, (line) => {
         const parsedEvents = parser.parseLine(line);
         for (const ev of parsedEvents) {
+          usage?.accept(ev);
           if (ev.type === 'stage_transition' && ev.stage) {
             this.advanceStage(runId, ev.stage, 'running');
           } else if (ev.type === 'text_delta' && ev.message) {
@@ -841,6 +850,10 @@ export class RunnerService extends EventEmitter {
       }
       await this.handleProcessExit(runId, cwd, branchName, issue, result.code, result.signal, result.terminationReason, ctx.orchestration);
       break;
+      } finally {
+        const status = sqliteService.getPrototypeRuns().find(run => run.id === runId)?.status;
+        usage?.finish(status === 'cancelled' ? 'stopped' : status === 'failed' ? 'failed' : 'completed');
+      }
     }
   }
 

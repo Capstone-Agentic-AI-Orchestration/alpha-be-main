@@ -14,7 +14,7 @@ import { agentRoleContract } from './agentRoleContracts.js';
 
 export const ALPHA_ROUTE_MARKER = 'ALPHA_ROUTE';
 
-export type AlphaRoute = 'build' | 'confirm_build' | 'need_project' | 'delegate';
+export type AlphaRoute = 'build' | 'confirm_build' | 'need_project' | 'delegate' | 'preview' | 'stop_preview';
 
 export interface SpecialistHandoff {
   agentId: string;
@@ -40,7 +40,7 @@ export interface ParsedAlphaReply {
   malformed: boolean;
 }
 
-const ROUTES = new Set<AlphaRoute>(['build', 'confirm_build', 'need_project', 'delegate']);
+const ROUTES = new Set<AlphaRoute>(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview']);
 const MAX_GOAL_CHARS = 4_000;
 const MARKER_LINE = new RegExp(`^\\s*\`?\\s*${ALPHA_ROUTE_MARKER}\\b\\s*(.*?)\\s*\`?\\s*$`);
 
@@ -196,6 +196,10 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     '   Use one to four specialists, with no duplicate IDs. These handoffs are read-only. Code changes still use route 2 and its plan approval. Never claim an agent ran before the application dispatches it. If no suitable specialist is eligible, explain the missing expertise and availability instead of taking the specialist task yourself. Without a selected project, ask the user to select one.',
     '',
     'Rules:',
+    `- To stop the local website/dev server/preview, use ${ALPHA_ROUTE_MARKER} {"route":"stop_preview","repositories":[]}. This stops only this user's preview in this conversation, not chat or the product build. Do not tell the user it stopped before the application confirms it.`,
+    '- For local website/runtime errors, give the relevant specialist the supplied preview process/browser evidence and its exact repository and commit. Never claim the ordinary checkout matches the preview without evidence. A ready server can still have browser errors. Read-only diagnostics do not need a new build or terminal permissions; actual repairs still require the approved build flow.',
+    `- When the user asks to run/show/preview the existing website locally, use ${ALPHA_ROUTE_MARKER} {"route":"preview","goal":"Show the local website","repositories":["<one connected web repository if known>"]}. This launches an existing supported script from a saved commit in an isolated local preview, without changing code or starting a build. Do not invent a URL or shell command. Actual preview setup/code changes still require a build plan. Do not use this route for production deployment or when the user only asks how previews work.`,
+    '- Repository commit history, branch comparisons and status investigations are read-only specialist analysis (route 5). Do not create a code build or a pull request approval for a report-only question.',
     '- Decide routine diagnostics from the request and existing evidence. Do not ask whether to run npm audit when a dependency/security investigation or fix already requires it. Select Security as the lead; when live scanning is needed, use route 2 to prepare its scoped audit plan for the existing plan review. Within an approved task, the specialist runs its authorized audit without another confirmation. Ask only for a genuinely missing requirement, access/setup, expanded scope, or policy decision.',
     '- Do not write or edit the code yourself for a build. The Orchestrator plans the work, the user approves the plan, and specialists make the change.',
     '- "Use/deploy my agents for that" means hand off the concrete work discussed in the conversation; it does not mean deploy software. Restate the work in the instruction. Use route 5 for analysis and route 2 for requested code changes.',
@@ -209,6 +213,15 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     '',
     scope
   ].join('\n');
+}
+
+/** Only an explicit, standalone preview stop command bypasses the model. No generic "stop". */
+export function isStopPreviewRequest(content: string): boolean {
+  return /^(?:(?:now|please)[, ]+)?(?:(?:can|could|would) you )?(?:please )?stop (?:the |my |this )?(?:local (?:run|preview|server|website|dev server)|preview|dev server|npm run dev)(?: please)?[.!?]*$/i.test(content.trim());
+}
+
+export function isPreviewInvestigationRequest(content: string): boolean {
+  return /\b(?:preview|browser|white screen|blank (?:page|screen)|npm run dev|local (?:run|server|website|dev))\b/i.test(content);
 }
 
 /**

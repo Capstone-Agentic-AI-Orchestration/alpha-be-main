@@ -45,6 +45,7 @@ beforeEach(async () => {
     systemPrompt: 'You are the Frontend Agent. Implement assigned UI work only.', avatar: '', autonomyLevel: 'supervised'
   };
   const sql = {
+    saveChatUsage: vi.fn(),
     isPathAllowed: () => true, addAllowedPath: vi.fn(),
     getPrototypeRuns: () => [...rows.values()].map(value => structuredClone(value)),
     savePrototypeRun: (value: any) => rows.set(value.id, structuredClone(value)),
@@ -79,6 +80,7 @@ beforeEach(async () => {
   vi.doMock('./workspaceService.js', () => ({ resolveProjectWorkspace: (project: any) => ({ dir: project.cwd }), allowAttachedWorkspace: vi.fn() }));
   vi.doMock('../utils/gitUtils.js', () => ({ createBranch, createBranchFrom: createBranch, checkoutBranch: createBranch,
     getCurrentBranch: async () => 'alpha/orchestration/fixture', isGitWorkingTreeClean: async () => true,
+    getHeadCommit: async () => 'a'.repeat(40),
     remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => true }));
   vi.doMock('./githubService.js', () => ({ githubService: {} }));
   vi.doMock('./verificationService.js', () => ({ runVerification: verify }));
@@ -138,6 +140,8 @@ describe('RunnerService workspace ownership lifetime', () => {
     expect(processes[0].options.cwd).not.toBe(fixture.cwd);
     expect(path.basename(processes[0].options.cwd)).toBe('context');
     expect(invocations[0].systemPrompt).toContain('Native file tools and terminal commands are disabled');
+    expect(invocations[0].systemPrompt).toContain('Alpha-managed Git workspace (verified by the runner before execution)');
+    expect(invocations[0].systemPrompt).toContain('attempt starts at ' + 'a'.repeat(40));
     await exit(0, 1);
   });
   it('does not let a second run switch the checkout while the first agent is working', async () => {

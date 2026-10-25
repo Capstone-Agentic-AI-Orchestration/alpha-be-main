@@ -7,7 +7,7 @@ import type { Agent, Project, ProjectBuildStep, RuntimeEngine } from '../models/
 import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { issueStore, projectStore } from '../store/stores.js';
-import { addBranchWorktree, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { addBranchWorktree, assertSafeBranchName, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { agentReadiness } from './agentReadiness.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { cloneAndBindProject } from './projectBindings.js';
@@ -58,6 +58,16 @@ interface StartProjectBuildInput {
 
 interface SelectedProjectRepository { repository: string; checkoutDir: string }
 
+/** A requested branch base is runner setup, never a specialist's Git task. */
+export function requestedBuildBase(goal: string): string | undefined {
+  const bases = [...goal.matchAll(/\b(?:branch(?:\s+(?:out|off))?\s+from|branch\s+(?:off|based\s+on)|base\s+branch\s*(?:is|:|=)?)\s+[`"']?(?:origin\/)?([a-zA-Z0-9][a-zA-Z0-9._\/-]*)/gi)]
+    .map(match => match[1].replace(/[.,;]+$/, ''));
+  const unique = [...new Set(bases)];
+  if (unique.length > 1) throw new Error('The request names conflicting base branches. Specify one base before planning.');
+  if (unique[0]) assertSafeBranchName(unique[0]);
+  return unique[0];
+}
+
 const inFlightBuilds = new Map<string, Promise<ProjectBuildStartResult>>();
 // Desktop supplies a fresh ID for every daemon launch; source runs use a
 // process-scoped fallback so interrupted planning can be recognized as stale.
@@ -77,14 +87,14 @@ function blocked(reason: string, project?: Project, repository?: string): Projec
 /** Says what is holding the repository, so the user knows whether to approve, wait, or stop it. */
 function activeBuildReason(status: string, repository: string): string {
   if (status === 'awaiting_plan_approval') {
-    return `A build plan for ${repository} is waiting for your approval, so Alpha did not start another one. Review it in the Live Build Room and choose Start planned work, or stop it to plan this request instead.`;
+    return `A build plan for ${repository} is waiting for your approval, so Alpha did not start another one. Review it in its conversation’s Build review tab and type start there, or stop it to plan this request instead.`;
   }
   if (status === 'planning') return `The Orchestrator is still planning a build for ${repository}. Wait for the plan, or stop it to plan this request instead.`;
-  if (status === 'awaiting_approval') return `The last build for ${repository} is finished and waiting for your review. Accept or stop it in the Live Build Room before starting another one.`;
+  if (status === 'awaiting_approval') return `The last build for ${repository} is finished and waiting for your review. Review or stop it in its conversation’s Build review tab before starting another one.`;
   if (status === 'blocked' || status === 'recovery_required' || status === 'paused') {
-    return `A build for ${repository} is paused and needs you. Open the Live Build Room to continue or stop it before starting another one.`;
+    return `A build for ${repository} is paused and needs you. Use its conversation’s Build review tab to continue or stop it before starting another one.`;
   }
-  return `A build is already underway for ${repository}. Open the Live Build Room to see its plan and current progress.`;
+  return `A build is already underway for ${repository}. Use its conversation’s Build review tab to see its plan and current progress.`;
 }
 
 /** Resolve an intentionally unpinned role to the first model in its live runtime catalog. */
@@ -288,7 +298,7 @@ async function startOrchestratedProjectBuild(input: {
       reservation.ownerSessionId === orchestrationOwnerSessionId;
     if (activeWorkflow?.status === 'planning' && reservation && !ownsReservation && reservation.ownerSessionId !== orchestrationOwnerSessionId) {
       const recovery = await reconcilePlanningReservation({ workspaceId, repositoryDir: selected.checkoutDir, projectId: project.id, reservation });
-      if (recovery === 'workspace_preserved') return blocked(`Alpha preserved a changed planning workspace for ${selected.repository}. Review the saved work in the Live Build Room before starting another build.`, project, selected.repository);
+      if (recovery === 'workspace_preserved') return blocked(`Alpha preserved a changed planning workspace for ${selected.repository}. Review the saved work in the Build review tab before starting another build.`, project, selected.repository);
       if (recovery === 'reservation_changed') return blocked(`The saved planning record for ${selected.repository} changed during recovery. Refresh the project and try again.`, project, selected.repository);
       activeWorkflow = runWithWorkspace(workspaceId, () => sqliteService.getActiveOrchestrationForProject(project.id, selected.repository));
       reservation = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationPlanningReservation(project.id, selected.repository));
@@ -390,10 +400,19 @@ async function startOrchestratedProjectBuild(input: {
 
   const proposedRunId = `orchestration-${crypto.randomUUID()}`;
   const reservations: PlanningReservation[] = [];
+  const baseRefs = new Map<string, string>();
   const branchName = orchestrationBranchName(proposedRunId);
   try {
     for (const [index, target] of repositories.entries()) {
-      const baseCommit = await getHeadCommit(target.checkoutDir);
+      const requestedBase = requestedBuildBase(cleanGoal);
+      const base = requestedBase ?? (await remoteHasDevBranch(target.checkoutDir) ? 'dev' : undefined);
+      let baseRef = 'HEAD';
+      if (base) {
+        try { baseRef = await fetchRemoteBranch(target.checkoutDir, base); }
+        catch { throw new Error(`Cannot prepare ${target.repository} from origin/${base}. Check that the branch exists and GitHub access is available. No specialist was started.`); }
+      }
+      const baseCommit = await getHeadCommit(target.checkoutDir, baseRef);
+      baseRefs.set(target.repository, baseRef);
       const worktreePath = index === 0
         ? projectRunWorkspacePath(project.id, proposedRunId)
         : projectRunWorkspacePath(project.id, `${proposedRunId}-${crypto.createHash('sha256').update(target.repository.toLowerCase()).digest('hex').slice(0, 12)}`);
@@ -445,8 +464,10 @@ async function startOrchestratedProjectBuild(input: {
   try {
     planned = await planner.createPlan({
       runId: reservation.runId,
+      usageContext: { threadId: input.threadId, messageId: input.messageId },
       cwd: reservation.worktreePath,
       repositoryRoots: reservations.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })),
+      branchContext: reservations.map(item => ({ repository: item.repository, branchName: item.branchName, baseRef: baseRefs.get(item.repository) ?? item.baseCommit, baseCommit: item.baseCommit })),
       goal: cleanGoal,
       // The team's playbook and the detected stack, read from the planning checkouts.
       projectContext: composeProjectContext({
@@ -509,7 +530,7 @@ async function startOrchestratedProjectBuild(input: {
       addCommentAndShare({
         id: `comm-${issue.id}-build-${requestKey}`, issueId: issue.id,
         authorType: 'system', authorName: 'Alpha Orchestrator',
-        content: `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it in project chat or the Live Build Room.`,
+        content: `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it in project chat and its Build review tab.`,
         createdAt: new Date().toISOString()
       });
     }
@@ -533,7 +554,7 @@ async function startOrchestratedProjectBuild(input: {
 
   try {
     const repositoryWorkspaces = reservations.map(item => ({
-      repository: item.repository, branchName: item.branchName, baseRef: item.baseCommit,
+      repository: item.repository, branchName: item.branchName, baseRef: baseRefs.get(item.repository) ?? item.baseCommit,
       baseCommit: item.baseCommit, worktreePath: item.worktreePath
     }));
     const { orchestrationService } = await import('./orchestrationRuntime.js');
@@ -544,7 +565,7 @@ async function startOrchestratedProjectBuild(input: {
       runId: reservation.runId,
       planningOwnerSessionId: orchestrationOwnerSessionId,
       branchName: reservation.branchName,
-      baseRef: reservation.baseCommit,
+      baseRef: baseRefs.get(reservation.repository) ?? reservation.baseCommit,
       baseCommit: reservation.baseCommit,
       worktreePath: reservation.worktreePath,
       repositoryWorkspaces,

@@ -162,6 +162,9 @@ async function load(
     isGitRepo: vi.fn(async () => true),
     getCurrentBranch: vi.fn(async () => staleReservation?.branchName ?? 'main'),
     getHeadCommit: vi.fn(async () => 'a'.repeat(40)),
+    assertSafeBranchName: vi.fn(),
+    remoteHasDevBranch: vi.fn(async () => false),
+    fetchRemoteBranch: vi.fn(async (_cwd: string, branch: string) => `origin/${branch}`),
     isGitWorkingTreeClean: vi.fn(async (directory: string) => directory !== staleReservation?.worktreePath || staleReservation?.clean !== false),
     addBranchWorktree: vi.fn(async (_repositoryDir: string, worktreePath: string) => fs.mkdirSync(worktreePath, { recursive: true })),
     removeDetachedWorktree: removeWorktree
@@ -241,6 +244,46 @@ afterEach(() => {
 });
 
 describe('project builds triggered from chat', () => {
+  it('resolves the requested dev base before creating a planning worktree and supplies its evidence', async () => {
+    const service = await load();
+    const git = await import('../utils/gitUtils.js');
+    vi.mocked(git.getHeadCommit).mockImplementation(async (_cwd, ref) => ref === 'origin/dev' ? 'b'.repeat(40) : 'a'.repeat(40));
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'branch-thread', messageId: crypto.randomUUID(),
+      content: 'Build a landing page. Branch out from dev and create a new branch.', requestedRepository: selectedRepo
+    });
+    expect(result.status).toBe('plan_ready');
+    expect(git.fetchRemoteBranch).toHaveBeenCalledWith(checkoutDir, 'dev');
+    expect(git.addBranchWorktree).toHaveBeenCalledWith(checkoutDir, expect.any(String), expect.stringContaining('alpha/orchestration/'), 'b'.repeat(40));
+    expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({ branchContext: [expect.objectContaining({ baseRef: 'origin/dev', baseCommit: 'b'.repeat(40) })] }));
+    expect(startOrchestration).toHaveBeenCalledWith(expect.objectContaining({ baseRef: 'origin/dev', baseCommit: 'b'.repeat(40) }));
+  });
+
+  it('blocks an unavailable requested base before planning instead of silently falling back to HEAD', async () => {
+    const service = await load();
+    const git = await import('../utils/gitUtils.js');
+    vi.mocked(git.fetchRemoteBranch).mockRejectedValue(new Error('not found'));
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'missing-base', messageId: crypto.randomUUID(),
+      content: 'Build the page on a new branch from dev.', requestedRepository: selectedRepo
+    });
+    expect(result.status).toBe('blocked');
+    expect(result.reason).toContain('origin/dev');
+    expect(plannerCreatePlan).not.toHaveBeenCalled();
+    expect(reservePlanning).not.toHaveBeenCalled();
+  });
+
+  it('recognizes explicit branch instructions and rejects conflicting bases', async () => {
+    const service = await load();
+    expect(service.requestedBuildBase('Branch out from `dev`')).toBe('dev');
+    expect(service.requestedBuildBase('Use a new branch from origin/release/next.')).toBe('release/next');
+    expect(service.requestedBuildBase('Build a page.')).toBeUndefined();
+    expect(service.requestedBuildBase('Build a page based on the supplied requirements.')).toBeUndefined();
+    expect(() => service.requestedBuildBase('Branch from dev, branch based on main')).toThrow('conflicting');
+  });
+
   it('routes project builds through the Orchestrator without a squad despite an old disabled setting', async () => {
     const service = await load();
     const input = {

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import type { UsageEntry } from './chatUsage.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -404,6 +405,19 @@ export class SQLiteService {
     this.db.close();
   }
 
+  saveLocalPreview(value: { id: string; workspaceId: string; ownerId: string; threadId: string; createdAt?: string }): void {
+    const thread = this.db.prepare('SELECT usage_cleared_at FROM chat_threads WHERE id = ? AND workspace_id = ? AND owner_id = ?')
+      .get(value.threadId, value.workspaceId, value.ownerId) as { usage_cleared_at?: string } | undefined;
+    if (!thread || (thread.usage_cleared_at && (!value.createdAt || value.createdAt <= thread.usage_cleared_at))) return;
+    this.db.prepare(`INSERT INTO local_previews VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET data = excluded.data`).run(value.id, value.workspaceId, value.ownerId, value.threadId, JSON.stringify(value));
+  }
+
+  listLocalPreviews<T>(workspaceId: string, ownerId: string, threadId: string): T[] {
+    return (this.db.prepare('SELECT data FROM local_previews WHERE workspace_id = ? AND owner_id = ? AND thread_id = ?')
+      .all(workspaceId, ownerId, threadId) as Array<{ data: string }>).map(row => JSON.parse(row.data));
+  }
+
   private initPragmas() {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('busy_timeout = 5000');
@@ -411,8 +425,49 @@ export class SQLiteService {
     this.db.pragma('foreign_keys = ON');
   }
 
+  saveChatUsage(entry: UsageEntry): void {
+    const linked = entry.threadId ?? (entry.orchestrationRunId ? (this.db.prepare(
+      'SELECT origin_chat_thread_id FROM orchestration_runs WHERE id = ? AND workspace_id = ?')
+      .get(entry.orchestrationRunId, this.workspaceId()) as { origin_chat_thread_id?: string } | undefined)?.origin_chat_thread_id : undefined);
+    if (linked) {
+      const thread = this.db.prepare('SELECT usage_cleared_at FROM chat_threads WHERE id = ? AND workspace_id = ?')
+        .get(linked, this.workspaceId()) as { usage_cleared_at?: string } | undefined;
+      // Late output from an old process cannot resurrect cleared/deleted private usage.
+      if (!thread || (thread.usage_cleared_at && entry.startedAt <= thread.usage_cleared_at)) return;
+    }
+    this.db.prepare(`INSERT INTO chat_usage (id, workspace_id, thread_id, orchestration_run_id, prototype_run_id, data)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`).run(
+      entry.id, this.workspaceId(), entry.threadId ?? null, entry.orchestrationRunId ?? null,
+      entry.prototypeRunId ?? null, JSON.stringify(entry));
+  }
+
+  getChatUsage(threadId: string, ownerId: string): UsageEntry[] {
+    // A workspace role never grants access to someone else's private usage.
+    const own = this.db.prepare('SELECT 1 FROM chat_threads WHERE id = ? AND workspace_id = ? AND owner_id = ?')
+      .get(threadId, this.workspaceId(), ownerId);
+    if (!own) return [];
+    return (this.db.prepare(`SELECT u.data FROM chat_usage u
+      WHERE u.workspace_id = ? AND (u.thread_id = ? OR u.orchestration_run_id IN
+        (SELECT id FROM orchestration_runs WHERE workspace_id = ? AND origin_chat_thread_id = ?))
+      ORDER BY json_extract(u.data, '$.startedAt'), u.id`)
+      .all(this.workspaceId(), threadId, this.workspaceId(), threadId) as Array<{data: string}>)
+      .map(row => JSON.parse(row.data));
+  }
+
   private initTables() {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS local_previews (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL, data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_previews_scope ON local_previews(workspace_id, owner_id, thread_id);
+      CREATE TABLE IF NOT EXISTS chat_usage (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, thread_id TEXT,
+        orchestration_run_id TEXT, prototype_run_id TEXT, data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_usage_thread ON chat_usage(workspace_id, thread_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_usage_run ON chat_usage(workspace_id, orchestration_run_id);
+
       CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -1348,6 +1403,7 @@ export class SQLiteService {
        * cloud database has no legacy rows to claim.
        */
       ['chat_threads', 'owner_id TEXT'],
+      ['chat_threads', 'usage_cleared_at TEXT'],
       /**
        * The squad assigned to an issue.
        *
@@ -3783,7 +3839,7 @@ export class SQLiteService {
     });
   }
 
-  /** Published workflows whose project-issue effects may need replay. */
+  /** Completed workflows whose project-issue effects may need replay. */
   listAllPublishedOrchestrationSnapshots(): OrchestrationSnapshot[] {
     const rows = this.db.prepare(`SELECT DISTINCT runs.workspace_id, runs.id, events.payload_json
       FROM orchestration_runs AS runs
@@ -3794,15 +3850,16 @@ export class SQLiteService {
       .all() as Array<{ workspace_id: string; id: string; payload_json: string }>;
     const approved = rows.filter(row => {
       try {
-        const payload = JSON.parse(row.payload_json) as { evidence?: { decision?: unknown; publication?: unknown } };
-        return payload.evidence?.decision === 'approved' && Boolean(payload.evidence.publication);
+        const payload = JSON.parse(row.payload_json) as { evidence?: { decision?: unknown; publication?: unknown; completionType?: unknown } };
+        return payload.evidence?.completionType === 'report_only' || (payload.evidence?.decision === 'approved' && Boolean(payload.evidence.publication));
       } catch {
         return false;
       }
     });
     return approved.flatMap(row => {
       const snapshot = runWithWorkspace(row.workspace_id, () => this.getOrchestrationSnapshot(row.id));
-      return snapshot?.run.publication ? [snapshot] : [];
+      const reportOnly = JSON.parse(row.payload_json).evidence?.completionType === 'report_only';
+      return snapshot && (snapshot.run.publication || reportOnly) ? [snapshot] : [];
     });
   }
 
@@ -4207,6 +4264,30 @@ export class SQLiteService {
       }
       if (input.nextStatus === 'awaiting_approval' && !input.evidence) {
         throw new Error('Final validation evidence is required before requesting human approval.');
+      }
+      if (input.nextStatus === 'completed' && snapshot.run.status === 'validating') {
+        const evidence = input.evidence;
+        const workspaces = snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces : [{
+          repository: snapshot.run.repository, branchName: snapshot.run.branchName, baseCommit: snapshot.run.baseCommit
+        }];
+        const repositories = Array.isArray(evidence?.repositories) ? evidence.repositories as Array<Record<string, unknown>> : [];
+        if (evidence?.completionType !== 'report_only' || evidence.noOpenBlockingFindings !== true ||
+            snapshot.tasks.some(task => ['database', 'backend', 'frontend', 'mobile'].includes(task.kind)) ||
+            snapshot.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity)) ||
+            snapshot.run.plan.milestones?.some(milestone => !snapshot.run.plan.tasks.some(task => task.milestoneId === milestone.id)) ||
+            repositories.length !== workspaces.length || !workspaces.every(workspace => {
+              const item = repositories.find(candidate => candidate.repository === workspace.repository);
+              if (!item) return false;
+              const checks = item?.checks as Record<string, unknown> | undefined;
+              return item?.branchName === workspace.branchName && item.baseCommit === workspace.baseCommit &&
+                typeof item.resultCommit === 'string' && /^[a-f0-9]{40,64}$/i.test(item.resultCommit) &&
+                Array.isArray(item.cumulativeChangedPaths) && item.cumulativeChangedPaths.length === 0 &&
+                checks?.status === 'passed' && Array.isArray(checks.missingScripts) && checks.missingScripts.length === 0 &&
+                Array.isArray(checks.observed) && checks.observed.every(command => command && typeof command === 'object' &&
+                  (command as Record<string, unknown>).exitCode === 0 && (command as Record<string, unknown>).signal === null);
+            })) {
+          throw new Error('Only verified read-only reports without source changes can complete without publication approval.');
+        }
       }
       if (input.nextStatus === 'awaiting_approval' && (snapshot.run.repositoryWorkspaces?.length ?? 0) > 1) {
         const repositoryEvidence = Array.isArray(input.evidence?.repositories)
@@ -6073,7 +6154,17 @@ export class SQLiteService {
    * deleting a conversation here is not a mandate to reach into another tool's
    * storage.
    */
+  private clearChatUsage(threadId: string): void {
+    this.db.prepare('DELETE FROM local_previews WHERE workspace_id = ? AND thread_id = ?').run(this.workspaceId(), threadId);
+    this.db.prepare('UPDATE chat_threads SET usage_cleared_at = ? WHERE id = ? AND workspace_id = ?')
+      .run(new Date().toISOString(), threadId, this.workspaceId());
+    this.db.prepare(`DELETE FROM chat_usage WHERE workspace_id = ? AND (thread_id = ? OR orchestration_run_id IN
+      (SELECT id FROM orchestration_runs WHERE workspace_id = ? AND origin_chat_thread_id = ?))`)
+      .run(this.workspaceId(), threadId, this.workspaceId(), threadId);
+  }
+
   deleteChatThread(threadId: string): boolean {
+    if (this.getChatThreads().some(thread => thread.id === threadId)) this.clearChatUsage(threadId);
     const removed = this.db.prepare('DELETE FROM chat_threads WHERE id = ? AND workspace_id = ?').run(threadId, this.workspaceId()).changes > 0;
     if (removed) {
       this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
@@ -6095,6 +6186,7 @@ export class SQLiteService {
     const exists = this.getChatThreads().some(t => t.id === threadId);
     if (!exists) return -1;
 
+    this.clearChatUsage(threadId);
     const removed = this.db.prepare('DELETE FROM chat_messages WHERE thread_id = ?').run(threadId).changes;
     this.db.prepare('DELETE FROM thread_sessions WHERE thread_id = ?').run(threadId);
     this.db.prepare('DELETE FROM chat_thread_memories WHERE workspace_id = ? AND thread_id = ?')
