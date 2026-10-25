@@ -67,6 +67,26 @@ beforeEach(async () => {
 afterEach(async () => { await pg?.close(); });
 
 describe('central PM inquiry intake on PostgreSQL', () => {
+  it('paginates accepted and declined history and keeps it PM-only and private', async () => {
+    const request = { origin: 'https://alpha.example.test', remoteAddress: '192.0.2.10' };
+    await app.submit(inquiry, request);
+    await app.submit({ ...inquiry, operationId: '00000000-0000-4000-8000-000000000008', title: 'Another inquiry' }, request);
+    const pending = await app.listPending(workspaceA, pmA, {});
+    await app.accept(pending.items[0].id, workspaceA, pmA, { schemaVersion: 1, operationId: '00000000-0000-4000-8000-000000000009' });
+    await app.decline(pending.items[1].id, workspaceA, pmA, { schemaVersion: 1, operationId: '00000000-0000-4000-8000-000000000010', reason: 'PRIVATE_INTERNAL_REASON' });
+    const first = await app.listPending(workspaceA, pmA, { filter: 'handled', limit: 1 });
+    expect(first.items).toHaveLength(1); expect(first.nextCursor).not.toBeNull();
+    const second = await app.listPending(workspaceA, pmA, { filter: 'handled', limit: 1, after: first.nextCursor });
+    expect(second.items).toHaveLength(1); expect(second.nextCursor).toBeNull();
+    expect(first.items[0].id).not.toBe(second.items[0].id);
+    expect(new Set([first.items[0].status, second.items[0].status])).toEqual(new Set(['accepted', 'declined']));
+    expect(JSON.stringify([first, second])).not.toContain('PRIVATE_INTERNAL_REASON');
+    await expect(app.listPending(workspaceA, developer, { filter: 'handled' })).rejects.toMatchObject({ status: 403 });
+    const security = await db.query<{ relrowsecurity: boolean; anon_read: boolean }>(`select c.relrowsecurity,
+      has_table_privilege('anon','alpha_private.ticket_central_intake_outcomes','select') as anon_read
+      from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='alpha_private' and c.relname='ticket_central_intake_outcomes'`);
+    expect(security.rows[0]).toEqual({ relrowsecurity: true, anon_read: false });
+  });
   it('stores a pre-ticket inquiry centrally and creates a workspace ticket only after PM acceptance', async () => {
     const request = { origin: 'https://alpha.example.test', remoteAddress: '192.0.2.10' };
     await expect(app.submit(inquiry, request)).resolves.toMatchObject({ received: true, publicReference: expect.stringMatching(/^INQ-[A-F0-9]{32}$/) });
@@ -154,6 +174,21 @@ describe('central PM inquiry intake on PostgreSQL', () => {
       schemaVersion: 1, operationId: '00000000-0000-4000-8000-000000000006',
     })).rejects.toMatchObject({ status: 409 });
     expect((await app.listPending(workspaceA, pmA, {})).items).toEqual([]);
+    const handled = await app.listPending(workspaceA, pmA, { filter: 'handled' });
+    expect(handled.items[0]).toMatchObject({ id: page.items[0].id, status: 'declined', handledAt: submittedAt.toISOString(), outcomeEmailStatus: 'pending' });
+    expect(JSON.stringify(handled)).not.toContain(declineInput.reason);
+    await expect(app.listPending(workspaceA, developer, { filter: 'handled' })).rejects.toMatchObject({ status: 403 });
+    await expect(app.listPending(workspaceA, pmA, { filter: 'invalid' })).rejects.toMatchObject({ status: 400 });
+    expect((await db.query('select * from alpha_private.ticket_central_intake_outcomes')).rows).toHaveLength(1);
+    const sends: unknown[][] = [];
+    const delivery = createTicketAcknowledgmentDeliveryService(new PostgresTicketAcknowledgmentStore(db, true), {
+      identity: 'test-outcome-provider', async send(...args) { sends.push(args); },
+    });
+    expect(await delivery.deliverNext()).toBe(true);
+    expect(await delivery.deliverNext()).toBe(false);
+    expect(sends).toEqual([[inquiry.email, expect.any(String), page.items[0].publicReference, 'declined']]);
+    expect(JSON.stringify(sends)).not.toContain(declineInput.reason);
+    expect((await app.listPending(workspaceA, pmA, { filter: 'handled' })).items[0].outcomeEmailStatus).toBe('delivered');
     expect((await db.query<{ status: string; decline_reason: string }>(
       'select status,decline_reason from alpha_private.ticket_central_intakes where id=$1', [page.items[0].id])).rows)
       .toEqual([{ status: 'declined', decline_reason: 'Outside our current service scope.' }]);

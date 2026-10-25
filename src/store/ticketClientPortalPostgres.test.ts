@@ -7,6 +7,8 @@ import { createTicketClientInvitationDeliveryService } from '../services/ticketC
 import { createTicketClientSessionService } from '../services/ticketClientSessionService.js';
 import { createTicketClientWorkspaceService } from '../services/ticketClientWorkspaceService.js';
 import { createTicketInvitationService } from '../services/ticketInvitationService.js';
+import { createTicketProjectManagementService } from '../services/ticketProjectManagementService.js';
+import { PostgresTicketProjectManagementStore } from './ticketProjectManagementPostgresStore.js';
 import { createTicketPublicIntakeService } from '../services/ticketPublicIntakeService.js';
 import { createTicketQueueService } from '../services/ticketQueueService.js';
 import { createTicketReadService } from '../services/ticketReadService.js';
@@ -117,6 +119,11 @@ function invokeClientRoute(router: Router, method: string, routePath: string, in
       is: (type: string) => type === 'application/json' };
     const res = {
       setHeader(name: string, value: string | string[]) { headers[name.toLowerCase()] = value; return this; },
+      append(name: string, value: string | string[]) {
+        const key = name.toLowerCase();
+        headers[key] = [...(Array.isArray(headers[key]) ? headers[key] : headers[key] ? [headers[key]] : []), ...(Array.isArray(value) ? value : [value])] as string[];
+        return this;
+      },
       status(value: number) { status = value; return this; },
       json(body: unknown) { resolve({ status, headers, body }); return this; },
       end() { resolve({ status, headers, body: undefined }); return this; },
@@ -130,6 +137,12 @@ describe('Client invitation-to-ticket flow on PostgreSQL', () => {
     await submitInquiry(firstTarget, clientEmail, 'd15921fb-f001-4b9b-94c3-8f2b8f431001');
     await submitInquiry(secondTarget, 'another-contact@example.test', 'd15921fb-f001-4b9b-94c3-8f2b8f431002');
     await reviewInquiry(firstTarget);
+
+    // A PM may organize the inquiry before inviting; that does not authorize work.
+    await db.query(`insert into public.projects(id,workspace_id,name,key,status) values('pre-invite-project',$1,'Client project','PRE','active')`, [workspaceId]);
+    await createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db), () => now)
+      .linkProject(firstTarget, pm, { schemaVersion: 1, operationId: 'organize-before-invite', expectedVersion: 1,
+        projectId: 'pre-invite-project', clientVisible: false, projectPreview: null });
 
     const readContactVerification = async (target: TicketTarget) => {
       const detail = await createTicketReadService(new PostgresTicketReadStore(db)).detail(target, pm);
@@ -378,6 +391,20 @@ describe('Client invitation-to-ticket flow on PostgreSQL', () => {
     expect((queue.body as { items: Array<{ id: string }> }).items.map(item => item.id)).toEqual([firstTarget.ticketId]);
     const detail = await invokeClientRoute(composition.router, 'GET', '/workspaces/:workspaceId/tickets/:ticketId', { cookie, params: { ...firstTarget } });
     expect(detail.status).toBe(200);
+    const withoutEmail = compose({ database: db, supabaseUrl: 'https://synthetic.supabase.co',
+      supabaseAnonKey: 'synthetic-anon-key', supabaseServiceRoleKey: 'synthetic-service-role-key',
+      sessionSecret, webOrigin, emailProvider: null });
+    expect(withoutEmail.pmInvitation.enabled).toBe(false);
+    expect(await invokeClientRoute(withoutEmail.router, 'GET', '/session', { cookie }))
+      .toMatchObject({ status: 200, body: { authenticated: true } });
+    expect((await invokeClientRoute(withoutEmail.router, 'GET', '/workspaces/:workspaceId/tickets', { cookie, params: { workspaceId } })).status).toBe(200);
+    vi.spyOn(Provider.prototype, 'signInWithPassword').mockResolvedValue({ identity: verifiedIdentity, credential: providerCredential });
+    expect(await invokeClientRoute(withoutEmail.router, 'POST', '/auth/sign-in', { body: { email: clientEmail, password: 'existing-password' } }))
+      .toMatchObject({ status: 200, body: { authenticated: true } });
+    const sendCount = sendContent.mock.calls.length;
+    expect(await invokeClientRoute(withoutEmail.router, 'POST', '/auth/recovery', { body: { email: clientEmail } }))
+      .toMatchObject({ status: 202, body: { accepted: true } });
+    expect(sendContent).toHaveBeenCalledTimes(sendCount);
     expect(JSON.stringify(detail.body)).not.toMatch(/internal|contact|email_verified|protectedToken|providerCredential/);
     await expect(invokeClientRoute(composition.router, 'GET', '/workspaces/:workspaceId/tickets/:ticketId', { cookie, params: { ...secondTarget } }))
       .rejects.toMatchObject({ status: 404 });

@@ -23,7 +23,8 @@ export function createTicketAcknowledgmentDeliveryService(
       let failure: unknown;
       let accepted = false;
       try {
-        if (claim.kind === 'central') await provider.send(claim.recipient, claim.id, claim.publicReference);
+        if (claim.kind === 'central' && claim.outcome) await provider.send(claim.recipient, claim.id, claim.publicReference, claim.outcome);
+        else if (claim.kind === 'central') await provider.send(claim.recipient, claim.id, claim.publicReference);
         else await provider.send(claim.recipient, claim.id);
         accepted = true;
       }
@@ -48,6 +49,7 @@ export function startTicketAcknowledgmentDelivery(config: {
   const provider = config.providerFactory();
   if (!provider) { config.onUnavailable(); return () => undefined; }
   const delivery = createTicketAcknowledgmentDeliveryService(new PostgresTicketAcknowledgmentStore(config.database()), provider);
+  const outcomes = createTicketAcknowledgmentDeliveryService(new PostgresTicketAcknowledgmentStore(config.database(), true), provider);
   let stopped = false;
   let busy = false;
   async function tick() {
@@ -55,7 +57,11 @@ export function startTicketAcknowledgmentDelivery(config: {
     busy = true;
     try {
       // Bound DB/network work per tick; other application requests keep the pool.
-      for (let i = 0; i < 5 && !stopped; i++) if (!await delivery.deliverNext()) break;
+      for (let i = 0; i < 5 && !stopped; i++) {
+        const receipt = await delivery.deliverNext();
+        const outcome = !stopped && await outcomes.deliverNext();
+        if (!receipt && !outcome) break;
+      }
     } catch { config.onUnavailable(); }
     finally { busy = false; }
   }

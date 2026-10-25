@@ -12,6 +12,8 @@ import { decodeTicketWorkflow } from './ticketPostgresCodec.js';
 interface CentralIntakeDbRow {
   id: string; public_reference: string; full_name: string; email: string; company: string | null; title: string;
   description: string; requested_deadline: string | null; submitted_at: Date | string;
+  status: 'pending' | 'accepted' | 'declined'; handled_at: Date | string | null;
+  outcome_email_status: CentralIntakeItem['outcomeEmailStatus'];
 }
 interface SavedOperationDbRow {
   id: string; fingerprint: string; fingerprint_key_id: string; status: string;
@@ -38,7 +40,8 @@ function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
     throw new Error('Central inquiry row is invalid.');
   }
   return { id: row.id, publicReference: row.public_reference, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
-    description: row.description, requestedDeadline: row.requested_deadline, submittedAt: iso(row.submitted_at) };
+    description: row.description, requestedDeadline: row.requested_deadline, submittedAt: iso(row.submitted_at),
+    status: row.status, handledAt: row.handled_at ? iso(row.handled_at) : null, outcomeEmailStatus: row.outcome_email_status ?? null };
 }
 
 /** Server-only global intake persistence. Ticket rows are created only when a PM accepts. */
@@ -136,18 +139,20 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
   }
 
   async listPending(organizationKey: string, workspaceId: string, subject: TicketSubject,
-    cursor: CentralIntakeCursor | null, limit: number): Promise<CentralIntakePage | 'forbidden'> {
+    cursor: CentralIntakeCursor | null, limit: number, filter: 'pending' | 'handled' = 'pending'): Promise<CentralIntakePage | 'forbidden'> {
     if (!text(organizationKey) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Central inquiry page is invalid.');
     return this.db.transaction(async tx => {
       const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(workspaceId, subject);
       if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
       const { rows } = await tx.query<CentralIntakeDbRow>(
-        `select id,public_reference,full_name,email,company,title,description,requested_deadline,submitted_at
-           from alpha_private.ticket_central_intakes
-          where organization_key=$1 and status='pending'
-            and ($2::timestamptz is null or (submitted_at,id collate "C")<($2::timestamptz,$3::text collate "C"))
-          order by submitted_at desc,id collate "C" desc limit $4`,
-        [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1]);
+        `select i.id,i.public_reference,i.full_name,i.email,i.company,i.title,i.description,i.requested_deadline,i.submitted_at,
+                i.status,coalesce(i.accepted_at,i.declined_at) as handled_at,o.status as outcome_email_status
+           from alpha_private.ticket_central_intakes i
+           left join alpha_private.ticket_central_intake_outcomes o on o.organization_key=i.organization_key and o.intake_id=i.id
+          where i.organization_key=$1 and (($5='pending' and i.status='pending') or ($5='handled' and i.status in ('accepted','declined')))
+            and ($2::timestamptz is null or (i.submitted_at,i.id collate "C")<($2::timestamptz,$3::text collate "C"))
+          order by i.submitted_at desc,i.id collate "C" desc limit $4`,
+        [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1, filter]);
       const hasMore = rows.length > limit;
       const items = rows.slice(0, limit).map(mapItem);
       const last = items.at(-1);
@@ -288,6 +293,9 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         [input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
           input.operationId, input.occurredAt, input.reason]);
       if (updated.length !== 1) throw new Error('Central inquiry could not be atomically declined.');
+      await tx.query(`insert into alpha_private.ticket_central_intake_outcomes
+        (organization_key,intake_id,idempotency_key,status,available_at,created_at)
+        values($1,$2,$3,'pending',$4,$4)`, [input.organizationKey,input.intakeId,randomUUID(),input.occurredAt]);
       await tx.query(
         `insert into alpha_private.ticket_central_intake_events
            (id,organization_key,intake_id,event_type,actor_kind,actor_id,workspace_id,ticket_id,occurred_at,metadata)

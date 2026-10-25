@@ -16,6 +16,7 @@ export type TicketAcknowledgmentClaim = {
 } | {
   kind: 'central'; id: string; organizationKey: string; intakeId: string;
   publicReference: string; recipient: string; leaseHash: string;
+  outcome?: 'declined';
   attempt: number; firstAttemptAt: string; identityMatches: boolean;
 };
 
@@ -30,10 +31,15 @@ interface CentralClaimRow {
 
 /** Uses the existing private outbox and cloud PG connection, never SQLite. */
 export class PostgresTicketAcknowledgmentStore {
-  constructor(private readonly db: TransactionalSql) {}
+  constructor(private readonly db: TransactionalSql, private readonly declinedOnly = false) {}
+
+  private get centralTable(): string {
+    return this.declinedOnly ? 'alpha_private.ticket_central_intake_outcomes' : 'alpha_private.ticket_central_intake_acknowledgments';
+  }
 
   async claim(providerIdentity: string): Promise<TicketAcknowledgmentClaim | null> {
     return this.db.transaction(async sql => {
+      if (!this.declinedOnly) {
       const { rows } = await sql.query<ClaimRow>(
         `select o.id, o.workspace_id, o.ticket_id, o.attempt, o.payload, c.email
          from alpha_private.ticket_outbox_events o
@@ -79,22 +85,25 @@ export class PostgresTicketAcknowledgmentStore {
           recipient: row.email, leaseHash, attempt: row.attempt + 1, firstAttemptAt, identityMatches };
       }
 
-      // Central intake receipts have no workspace or regular ticket yet.
+      }
+      // Both pre-ticket email kinds use leases and the original inquiry contact.
       const { rows: centralRows } = await sql.query<CentralClaimRow>(
         `select a.organization_key, a.intake_id, a.idempotency_key, a.attempt,
                 a.dispatch_identity, a.first_attempt_at::text as first_attempt_at,
                 i.public_reference, i.email
-         from alpha_private.ticket_central_intake_acknowledgments a
+         from ${this.centralTable} a
          join alpha_private.ticket_central_intakes i
            on i.organization_key=a.organization_key and i.id=a.intake_id
          where a.status in ('pending','retry','leased') and a.available_at <= now()
+           and ($1::boolean=false or i.status='declined')
            and (a.status <> 'leased' or a.lease_until <= now())
          order by a.available_at, a.created_at, a.intake_id collate "C"
          limit 1 for update of a skip locked`,
+        [this.declinedOnly],
       );
       const central = centralRows[0];
       if (!central) return null;
-      const identity = createHash('sha256').update(`${providerIdentity}\0${central.email}`).digest('hex');
+      const identity = createHash('sha256').update(`${providerIdentity}${this.declinedOnly ? ':declined-v1' : ''}\0${central.email}`).digest('hex');
       const identityMatches = central.dispatch_identity
         ? central.dispatch_identity === identity
         : central.attempt === 0 && central.first_attempt_at === null;
@@ -102,7 +111,7 @@ export class PostgresTicketAcknowledgmentStore {
       const firstAttemptAt = central.first_attempt_at ?? timestamps[0].now;
       const leaseHash = createHash('sha256').update(randomUUID()).digest('hex');
       const { rows: updated } = await sql.query<{ first_attempt_at: string }>(
-        `update alpha_private.ticket_central_intake_acknowledgments
+        `update ${this.centralTable}
          set status='leased', lease_token_hash=$3, lease_until=now()+interval '2 minutes',
              attempt=attempt+1, dispatch_identity=coalesce(dispatch_identity,$4),
              first_attempt_at=coalesce(first_attempt_at,now())
@@ -112,6 +121,7 @@ export class PostgresTicketAcknowledgmentStore {
       );
       const startedAt = updated[0]?.first_attempt_at ?? firstAttemptAt;
       return { kind: 'central', id: central.idempotency_key, organizationKey: central.organization_key,
+        ...(this.declinedOnly ? { outcome: 'declined' as const } : {}),
         intakeId: central.intake_id, publicReference: central.public_reference, recipient: central.email,
         leaseHash, attempt: central.attempt + 1,
         firstAttemptAt: Number.isFinite(Date.parse(startedAt)) ? startedAt : '', identityMatches };
@@ -122,13 +132,14 @@ export class PostgresTicketAcknowledgmentStore {
   async canDispatch(claim: TicketAcknowledgmentClaim): Promise<boolean> {
     if (claim.kind === 'central') {
       const { rows } = await this.db.query(
-        `select a.intake_id from alpha_private.ticket_central_intake_acknowledgments a
+        `select a.intake_id from ${this.centralTable} a
          join alpha_private.ticket_central_intakes i
            on i.organization_key=a.organization_key and i.id=a.intake_id
          where a.organization_key=$1 and a.intake_id=$2 and a.idempotency_key=$3
            and i.public_reference=$4 and a.status='leased' and a.lease_token_hash=$5 and a.lease_until>now()
+           and i.email=$6 and ($7::boolean=false or i.status='declined')
            and a.first_attempt_at <= now() and a.first_attempt_at + interval '10 minutes' > now()`,
-        [claim.organizationKey, claim.intakeId, claim.id, claim.publicReference, claim.leaseHash],
+        [claim.organizationKey, claim.intakeId, claim.id, claim.publicReference, claim.leaseHash, claim.recipient, this.declinedOnly],
       );
       return rows.length === 1;
     }
@@ -150,7 +161,7 @@ export class PostgresTicketAcknowledgmentStore {
     const delay = Math.min(240, 30 * 2 ** Math.max(0, claim.attempt - 1));
     if (claim.kind === 'central') {
       await this.db.query(
-        `update alpha_private.ticket_central_intake_acknowledgments
+        `update ${this.centralTable}
          set status=$4, failure_code=$5, lease_token_hash=null, lease_until=null,
              delivered_at=case when $4='delivered' then now() else delivered_at end,
              available_at=case when $4='retry' then now()+$6*interval '1 second' else available_at end

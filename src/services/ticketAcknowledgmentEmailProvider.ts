@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { createGmailEmailTransport, GmailEmailTransportError } from './gmailApiEmailTransport.js';
 
 export const ACKNOWLEDGMENT_SUBJECT = 'Alpha has received your inquiry';
+export const DECLINE_SUBJECT = 'An update on your Alphaexplora inquiry';
+const DECLINE_TEXT = 'A project manager reviewed your inquiry and will not be proceeding with it. This inquiry has not created an account or granted project access. Any client access you already have is unchanged. If you have questions, contact the team you inquired with.';
 export const ACKNOWLEDGMENT_TEXT = [
   'Your inquiry has been received. A project manager will review it.',
   'This acknowledgment does not approve the requested work, create an account, or grant project access.',
@@ -24,7 +26,7 @@ export interface TicketAcknowledgmentEmailProvider {
   readonly identity: string;
   // Reuse the same key on retries. Providers without native deduplication may
   // send a duplicate if a network failure hides an accepted request.
-  send(recipient: string, idempotencyKey: string, publicReference?: string): Promise<void>;
+  send(recipient: string, idempotencyKey: string, publicReference?: string, outcome?: 'declined'): Promise<void>;
 }
 
 export interface TicketAcknowledgmentProviderConfiguration {
@@ -50,10 +52,12 @@ const email = z.string().email().max(254);
 const uuid = z.string().uuid();
 const inquiryReference = z.string().regex(/^INQ-[A-F0-9]{32}$/);
 
-function acknowledgmentText(publicReference?: string): string {
-  if (publicReference === undefined) return ACKNOWLEDGMENT_TEXT;
+function acknowledgmentText(publicReference?: string, outcome?: 'declined'): string {
+  const text = outcome === 'declined' ? DECLINE_TEXT : ACKNOWLEDGMENT_TEXT;
+  if (outcome !== undefined && outcome !== 'declined') throw new TicketAcknowledgmentEmailError(false);
+  if (publicReference === undefined) return text;
   if (!inquiryReference.safeParse(publicReference).success) throw new TicketAcknowledgmentEmailError(false);
-  return `${ACKNOWLEDGMENT_TEXT}\n\nYour inquiry reference: ${publicReference}`;
+  return `${text}\n\nYour inquiry reference: ${publicReference}`;
 }
 
 /** Gmail OAuth sender for inquiry receipts. Requires only the gmail.send scope. */
@@ -66,13 +70,13 @@ export function createGmailTicketAcknowledgmentProvider(config: {
     identity: createHash('sha256').update(JSON.stringify([
       'gmail-ack-v1', transport.identity, ACKNOWLEDGMENT_SUBJECT, ACKNOWLEDGMENT_TEXT,
     ])).digest('hex'),
-    async send(recipient, idempotencyKey, publicReference) {
+    async send(recipient, idempotencyKey, publicReference, outcome) {
       if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success
         || (publicReference !== undefined && !inquiryReference.safeParse(publicReference).success)) {
         throw new TicketAcknowledgmentEmailError(false);
       }
       try {
-        await transport.send(recipient, ACKNOWLEDGMENT_SUBJECT, acknowledgmentText(publicReference), idempotencyKey);
+        await transport.send(recipient, outcome ? DECLINE_SUBJECT : ACKNOWLEDGMENT_SUBJECT, acknowledgmentText(publicReference, outcome), idempotencyKey);
       } catch (error) {
         throw new TicketAcknowledgmentEmailError(error instanceof GmailEmailTransportError ? error.retryable : true);
       }
@@ -97,7 +101,7 @@ export function createResendTicketAcknowledgmentProvider(config: {
     identity: createHash('sha256').update(JSON.stringify([
       'resend-ack-v1', from, restrictedRecipient, ACKNOWLEDGMENT_SUBJECT, ACKNOWLEDGMENT_TEXT,
     ])).digest('hex'),
-    async send(recipient, idempotencyKey, publicReference) {
+    async send(recipient, idempotencyKey, publicReference, outcome) {
       // Never redirect somebody else's inquiry receipt to the account owner's inbox.
       if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success
         || (publicReference !== undefined && !inquiryReference.safeParse(publicReference).success)
@@ -109,7 +113,7 @@ export function createResendTicketAcknowledgmentProvider(config: {
           method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
           headers: { accept: 'application/json', 'content-type': 'application/json',
             Authorization: `Bearer ${config.apiKey}`, 'Idempotency-Key': idempotencyKey },
-          body: JSON.stringify({ from, to: [recipient], subject: ACKNOWLEDGMENT_SUBJECT, text: acknowledgmentText(publicReference) }),
+          body: JSON.stringify({ from, to: [recipient], subject: outcome ? DECLINE_SUBJECT : ACKNOWLEDGMENT_SUBJECT, text: acknowledgmentText(publicReference, outcome) }),
         });
         if (response.ok) {
           const body: unknown = await response.json();
@@ -146,7 +150,7 @@ export function createBrevoTicketAcknowledgmentProvider(config: {
     identity: createHash('sha256').update(JSON.stringify([
       'brevo-ack-v1', config.senderEmail, config.senderName, ACKNOWLEDGMENT_SUBJECT, ACKNOWLEDGMENT_TEXT,
     ])).digest('hex'),
-    async send(recipient, idempotencyKey, publicReference) {
+    async send(recipient, idempotencyKey, publicReference, outcome) {
       if (!email.safeParse(recipient).success || !uuid.safeParse(idempotencyKey).success
         || (publicReference !== undefined && !inquiryReference.safeParse(publicReference).success)) {
         throw new TicketAcknowledgmentEmailError(false);
@@ -157,8 +161,8 @@ export function createBrevoTicketAcknowledgmentProvider(config: {
           headers: { accept: 'application/json', 'content-type': 'application/json', 'api-key': config.apiKey },
           body: JSON.stringify({
             sender: { email: config.senderEmail, name: config.senderName },
-            to: [{ email: recipient }], subject: ACKNOWLEDGMENT_SUBJECT,
-            textContent: acknowledgmentText(publicReference), headers: { idempotencyKey },
+            to: [{ email: recipient }], subject: outcome ? DECLINE_SUBJECT : ACKNOWLEDGMENT_SUBJECT,
+            textContent: acknowledgmentText(publicReference, outcome), headers: { idempotencyKey },
           }),
         });
         if (response.status === 201) return; // Accepted by Brevo, not proof of inbox delivery.

@@ -70,7 +70,7 @@ export function createTicketInvitationService(
         if ((ticket.mode ?? 'disabled') !== 'enabled') workflowError(503, 'ticket_writes_disabled', 'Ticket changes are unavailable right now.');
         if (ticket.state.status !== 'under_review') workflowError(409, 'invalid_ticket_transition', 'Review the inquiry before inviting its client.');
         if (ticket.state.clientId !== null || ticket.state.scopeVersionId !== null || ticket.state.agreedScopeVersionId !== null
-          || ticket.state.authorizedScopeVersionId !== null || ticket.state.projectId !== null || ticket.state.requiredIssueIds.length > 0) {
+          || ticket.state.authorizedScopeVersionId !== null || ticket.state.requiredIssueIds.length > 0) {
           workflowError(409, 'ticket_invitation_unavailable', 'This inquiry is not eligible for client activation.');
         }
 

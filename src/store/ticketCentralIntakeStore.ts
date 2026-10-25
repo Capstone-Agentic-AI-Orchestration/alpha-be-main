@@ -5,6 +5,9 @@ export interface CentralIntakeCursor { submittedAt: string; id: string }
 export interface CentralIntakeItem {
   id: string; publicReference: string; fullName: string; email: string; company: string | null; title: string;
   description: string; requestedDeadline: string | null; submittedAt: string;
+  status?: 'pending' | 'accepted' | 'declined';
+  handledAt?: string | null;
+  outcomeEmailStatus?: 'pending' | 'retry' | 'leased' | 'delivered' | 'dead' | null;
 }
 /** Store cursor stays structured; the service encodes it at the HTTP boundary. */
 export interface CentralIntakePage { items: CentralIntakeItem[]; nextCursor: CentralIntakeCursor | null }
@@ -23,7 +26,7 @@ export interface TicketCentralIntakeStore {
   submit(organizationKey: string, id: string, publicReference: string, input: PublicTicketInquiryInput,
     fingerprints: readonly CentralIntakeFingerprint[], occurredAt: string): Promise<{ kind: 'received'; publicReference: string } | { kind: 'conflict' }>;
   listPending(organizationKey: string, workspaceId: string, subject: TicketSubject,
-    cursor: CentralIntakeCursor | null, limit: number): Promise<CentralIntakePage | 'forbidden'>;
+    cursor: CentralIntakeCursor | null, limit: number, filter?: 'pending' | 'handled'): Promise<CentralIntakePage | 'forbidden'>;
   accept(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; ticketId: string; reference: string; occurredAt: string;

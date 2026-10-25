@@ -47,7 +47,7 @@ export interface TicketClientPortalRouteDependencies {
     lookup(target: TicketTarget, subject: TicketSubject, operationId: string): Promise<TicketOperationReceipt | null>;
   };
   documents?: TicketDocumentsApplication;
-  emailProvider: TicketInvitationContentEmailProvider;
+  emailProvider: TicketInvitationContentEmailProvider | null;
   webOrigin: string;
   sessionPolicy: TicketClientSessionPolicy;
   cookiePolicy: TicketClientSessionCookiePolicy;
