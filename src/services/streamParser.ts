@@ -58,7 +58,8 @@ export interface ParsedEvent {
     | 'rate_limit'
     | 'status'
     | 'session'
-    | 'result';
+    | 'result'
+    | 'usage';
   stage?: StageId;
   message?: string;
   toolName?: string;
@@ -107,6 +108,7 @@ export class StreamParser {
   private sawAssistantText = false;
   /** Message id shared by Claude partial deltas and the completed assistant event. */
   private claudeStreamKey = 'assistant';
+  private codexUsageTurn = 0;
   /** Accumulates Antigravity's `text_delta` fragments until its step completes. */
   private antigravityText = '';
   private antigravityStreamKey = 'assistant';
@@ -146,7 +148,7 @@ export class StreamParser {
         return this.handleSystem(json);
       case 'assistant':
         if (json?.message?.id) this.claudeStreamKey = String(json.message.id);
-        return this.handleContentBlocks(json?.message?.content, 'assistant', json?.message?.id);
+        return [...this.claudeUsage(json?.message?.usage, this.claudeStreamKey), ...this.handleContentBlocks(json?.message?.content, 'assistant', json?.message?.id)];
       case 'user':
         return this.handleContentBlocks(json?.message?.content, 'user');
       case 'rate_limit_event':
@@ -168,8 +170,9 @@ export class StreamParser {
           const delta = event?.delta ?? {};
           if (event?.type === 'message_start' && event?.message?.id) {
             this.claudeStreamKey = String(event.message.id);
-            return [];
+            return this.claudeUsage(event.message.usage, this.claudeStreamKey);
           }
+          if (event?.type === 'message_delta') return this.claudeUsage(event.usage, this.claudeStreamKey);
           if (event?.type === 'content_block_delta' && delta?.type === 'text_delta') {
             const text = String(delta.text ?? '');
             if (!text) return [];
@@ -187,6 +190,16 @@ export class StreamParser {
         if (json?.type) this.unhandled.add(String(json.type));
         return [];
     }
+  }
+
+  private claudeUsage(usage: any, streamKey: string): ParsedEvent[] {
+    if (!usage || !streamKey || streamKey === 'assistant') return [];
+    const telemetry: RunTelemetry = {};
+    for (const [source, target] of Object.entries({ input_tokens: 'inputTokens', output_tokens: 'outputTokens',
+      cache_read_input_tokens: 'cacheReadTokens', cache_creation_input_tokens: 'cacheCreationTokens' })) {
+      if (typeof usage[source] === 'number') (telemetry as Record<string, unknown>)[target] = usage[source];
+    }
+    return Object.keys(telemetry).length ? [{ type: 'usage', streamKey, telemetry }] : [];
   }
 
   private handleSystem(json: any): ParsedEvent[] {
@@ -603,6 +616,7 @@ export class StreamParser {
         }];
 
       case 'turn.started':
+        this.codexUsageTurn += 1;
         // A new turn must not inherit a partial response from an interrupted
         // one. A completed turn flushes this map below, but a failed process
         // can end without a final provider event.
@@ -653,6 +667,7 @@ export class StreamParser {
             type: 'result',
             stage: this.currentStage,
             message: 'Run completed',
+            streamKey: `turn:${this.codexUsageTurn}`,
             telemetry: {
               sessionId: this.sessionId,
               inputTokens: json.usage?.input_tokens,

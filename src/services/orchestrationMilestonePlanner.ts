@@ -64,6 +64,7 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
     const acceptedEvidence = JSON.stringify({ repositories: evidence, acceptedReports });
     if (acceptedEvidence.length > 32_000) throw new Error('Accepted source and audit evidence exceed the planning context. Narrow the milestone scope before planning; findings were preserved.');
     const result = await planner.createPlan({
+      usageContext: { orchestrationRunId: run.id, threadId: run.originChatThreadId, messageId: run.originBuildMessageId?.replace(/-build$/, '') },
       runId: `${run.id}-milestone-${run.planVersion + 1}`, cwd: workspaces[0].worktreePath,
       repositoryRoots: workspaces.map(workspace => ({ name: workspace.repository, repo: workspace.repository, dir: workspace.worktreePath })),
       goal: run.plan.goal,

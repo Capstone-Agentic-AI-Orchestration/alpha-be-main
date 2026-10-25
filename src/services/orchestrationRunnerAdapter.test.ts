@@ -139,6 +139,7 @@ describe('orchestration runner adapter', () => {
     expect(await getCurrentBranch(worktree)).toBe(prepared.branchName);
     expect(await isGitWorkingTreeClean(worktree)).toBe(true);
 
+    baseCommit = prepared.startingCommit;
     await adapter.launch({ ...request, ...prepared });
 
     expect(bindAttempt).toHaveBeenCalledWith(expect.objectContaining({
@@ -149,7 +150,8 @@ describe('orchestration runner adapter', () => {
       workingDir: worktree,
       orchestration: expect.objectContaining({
         orchestrationRunId: request.runId, taskId: 'create-endpoint', attemptId: 'attempt-1',
-        branchName: prepared.branchName, taskPackage: request.taskPackage
+        branchName: prepared.branchName, taskPackage: request.taskPackage,
+        baseRef: expect.any(String), baseCommit: expect.stringMatching(/^[a-f0-9]{40}$/)
       })
     }));
   });

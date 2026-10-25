@@ -119,6 +119,46 @@ describe('task acceptance and targeted correction', () => {
     directory = '';
   });
 
+  it('completes an accepted read-only report without a publication stage', async () => {
+    directory = fs.mkdtempSync(path.join(process.cwd(), '..', '.tmp-tests', 'report-completion-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(repository);
+    git(repository, ['init', '-b', 'main']);
+    fs.writeFileSync(path.join(repository, 'README.md'), 'Report-only fixture\n');
+    const baseCommit = commit(repository, 'Base');
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'read-only fixture'));
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        const branchName = `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: baseCommit, branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({ schemaVersion: 1, goal: 'Inspect repository status',
+      requirements: [{ id: 'R1', description: 'Report the repository state.' }],
+      tasks: [{ id: 'inspect', title: 'Inspect repository', description: 'Read and report.', kind: 'requirements', ownerAgentId: 'manager',
+        dependsOn: [], requirementIds: ['R1'], acceptanceCriteria: ['Repository state is reported.'], requiredChecks: [],
+        scope: { includePaths: [], excludePaths: [] } }] });
+    let current = await startAndApprove(orchestration, { workspaceId, projectId, issueId, repository: 'acme/report',
+      requestKey: 'report', requestFingerprint: 'report', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents: [{ id: 'manager', role: 'Manager Agent' }], plan, baseRef: 'main' });
+    const request = launches[0];
+    current = (await orchestration.handleRunnerCompleted(completedRun(request, baseCommit, [], { summary: 'Repository inspected.', deliverables: [{ summary: 'No unpushed changes.', paths: [] }] })))!;
+    const runVerification = vi.fn();
+    const acceptance = new TaskAcceptanceService(store, orchestration, { worktreePathFor: () => repository, runVerification });
+    const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId: current.run.id, taskId: request.taskId, attemptId: request.attemptId, acceptedBy: 'orchestrator' });
+    expect(outcome.decision, outcome.reason).toBe('completed');
+    expect(outcome.snapshot.run.status).toBe('completed');
+    expect(runVerification).not.toHaveBeenCalled();
+    const events = runWithWorkspace(workspaceId, () => store!.listOrchestrationEvents(current.run.id));
+    expect(events.some(event => event.type === 'run_awaiting_approval')).toBe(false);
+    expect(events.at(-1)?.payload.evidence).toMatchObject({ completionType: 'report_only', noOpenBlockingFindings: true });
+    expect(store.listAllPublishedOrchestrationSnapshots().some(snapshot => snapshot.run.id === current.run.id)).toBe(true);
+  });
+
   it('allows scoped evolution of an accepted file in a persisted later milestone', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });

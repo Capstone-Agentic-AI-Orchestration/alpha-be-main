@@ -62,6 +62,18 @@ function issueStoreFixture(initial = issueFixture()) {
 }
 
 describe('orchestration publication finalization', () => {
+  it('finishes a read-only issue without a PR and replays its completion idempotently', async () => {
+    const snapshot = publishedSnapshot();
+    delete snapshot.run.publication;
+    snapshot.tasks = [{ id: 'report', kind: 'requirements', required: true, status: 'accepted' }] as any;
+    const fixture = issueStoreFixture(issueFixture('agent_running'));
+    await synchronizePublishedOrchestrationIssue(snapshot, fixture.store);
+    await replayPublishedOrchestrationIssueEffects([snapshot], fixture.store);
+    expect(fixture.issue.status).toBe('done');
+    expect(fixture.issue.prUrl).toBeUndefined();
+    expect(fixture.issue.comments).toHaveLength(1);
+    expect(fixture.updateCount).toBe(1);
+  });
   it('synchronizes a published PR idempotently to the project issue', async () => {
     const fixture = issueStoreFixture();
 

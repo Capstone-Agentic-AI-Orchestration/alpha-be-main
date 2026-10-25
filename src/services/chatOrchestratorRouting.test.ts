@@ -103,6 +103,35 @@ async function specialistFixture() {
 }
 
 describe('specialist analysis handoffs', () => {
+  it('stops the preview directly without calling a model or changing the build, and is idempotent', async () => {
+    const { chatService } = await specialistFixture();
+    const { localPreviewService } = await import('./localPreviewService.js');
+    const stop = vi.spyOn(localPreviewService, 'stopForThread').mockResolvedValue(1);
+    const result = await send(chatService, 'now stop the local run', { projectId: 'project-1', clientMessageId: 'stop-preview-message' });
+    expect(result.agentMessage.content).toContain('preview has stopped');
+    expect(stop).toHaveBeenCalledWith(context, 'thread-1');
+    await send(chatService, 'now stop the local run', { projectId: 'project-1', clientMessageId: 'stop-preview-message' });
+    expect(stop).toHaveBeenCalledTimes(1); expect(turnInputs).toHaveLength(0);
+    expect(startProjectBuildBatch).not.toHaveBeenCalled(); expect(cancelRun).not.toHaveBeenCalled();
+  });
+  it('reports a preview shutdown failure instead of claiming success', async () => {
+    const { chatService } = await specialistFixture();
+    const { localPreviewService } = await import('./localPreviewService.js');
+    vi.spyOn(localPreviewService, 'stopForThread').mockRejectedValue(new Error('shutdown not confirmed'));
+    const result = await send(chatService, 'stop the preview', { projectId: 'project-1' });
+    expect(result.agentMessage.content).toContain('could not be stopped: shutdown not confirmed'); expect(turnInputs).toHaveLength(0);
+  });
+  it('hands runtime evidence and the preview source to a read-only specialist rather than the ordinary checkout', async () => {
+    const { chatService } = await specialistFixture();
+    const { localPreviewService } = await import('./localPreviewService.js');
+    const root = { name: 'site', repo: 'acme/site', dir: path.join(tmp, 'preview-source') };
+    vi.spyOn(localPreviewService, 'chatEvidence').mockResolvedValue({ roots: [root], text: 'Preview commit abc: browser runtime error', sourceKey: 'preview:abc' });
+    cliReply = { content: 'The preview evidence identifies a browser error.' };
+    await send(chatService, 'Check the local website browser error', { projectId: 'project-1', targetAgentId: 'frontend-specialist' });
+    expect(turnInputs[0].projectRoots).toEqual([root]);
+    expect(turnInputs[0].prompt).toContain('Preview commit abc: browser runtime error');
+    expect(turnInputs[0]).toMatchObject({ approvalMode: 'ask', skills: [], priorSession: null });
+  });
   it.each(['ask', 'approve', 'full'])('keeps a directly selected specialist read-only with %s access', async approvalMode => {
     const { chatService, sqlite } = await specialistFixture();
     sqlite.createChatThread({ id: 'thread-1', title: 'Specialist', projectId: 'project-1' } as any);

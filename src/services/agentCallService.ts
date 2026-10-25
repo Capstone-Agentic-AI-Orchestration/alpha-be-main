@@ -525,6 +525,7 @@ export class AgentCallService extends EventEmitter {
       const prompt = this.buildPrompt(current, project, effectiveAgent);
       const turn = await runCliTurn({
         runId: `agent-call-${id}`,
+        usageContext: { threadId: current.threadId, agentId: current.agentId, callId: id, messageId: current.messageId },
         mode: 'chat',
         cwd: workspace.dir,
         provider: persona.modelProvider,

@@ -19,7 +19,7 @@ const project = {
   ]
 };
 
-async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown } = {}) {
+async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; actionsAnswer?: (path: string) => unknown } = {}) {
   vi.resetModules();
   const calls: string[] = [];
   vi.doMock('../store/stores.js', () => ({
@@ -73,6 +73,10 @@ async function startApi(options: { role?: string; canSeeProject?: boolean; promo
   });
 
   const { projectRepoRouter } = await import('./projectRepoController.js');
+  if (options.actionsAnswer) {
+    const { useGitHubApi } = await import('../services/githubApi.js');
+    useGitHubApi({ get: async (path: string) => { calls.push(path); return options.actionsAnswer!(path); } } as any);
+  }
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -108,6 +112,30 @@ afterEach(() => {
 });
 
 describe('a project’s repositories', () => {
+  it('reads paginated Actions without requiring a local checkout', async () => {
+    const { app, calls } = await startApi({ actionsAnswer: () => ({ total_count: 65, workflow_runs: [] }) });
+    const res = await call(app, 'GET', '/api/projects/p1/repos/acme/shop-be/runs?page=2&status=failure');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ page: 2, totalCount: 65, runs: [] });
+    expect(calls[0]).toContain('/actions/runs?page=2&per_page=30&status=failure');
+  });
+  it.each(['runs', 'workflows', 'runs/11', 'runs/11/jobs', 'runs/11/jobs/7/logs', 'runs/11/artifacts', 'runs/11/artifacts/8/download'])(
+    'refuses unattached repositories for Actions %s', async route => {
+      const { app, calls } = await startApi();
+      expect((await call(app, 'GET', `/api/projects/p1/repos/acme/other/${route}`)).status).toBe(404);
+      expect(calls).toEqual([]);
+    });
+  it.each(['runs', 'workflows', 'runs/11', 'runs/11/jobs', 'runs/11/jobs/7/logs', 'runs/11/artifacts', 'runs/11/artifacts/8/download'])(
+    'refuses inaccessible projects for Actions %s', async route => {
+      const { app, calls } = await startApi({ canSeeProject: false });
+      expect((await call(app, 'GET', `/api/projects/p1/repos/acme/shop-be/${route}`)).status).toBe(404);
+      expect(calls).toEqual([]);
+    });
+  it('rejects repeated or object-shaped Actions filters without asking GitHub', async () => {
+    const { app, calls } = await startApi({ actionsAnswer: () => ({}) });
+    expect((await call(app, 'GET', '/api/projects/p1/repos/acme/shop-be/runs?page[]=1')).status).toBe(400);
+    expect(calls).toEqual([]);
+  });
   it('lists the GitHub repositories attached to the project', async () => {
     const { app } = await startApi();
 

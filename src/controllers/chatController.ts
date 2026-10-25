@@ -18,9 +18,20 @@ import { IS_CLOUD } from '../config/env.js';
 import { supabaseService } from '../services/supabaseService.js';
 import { retryChatSync } from '../services/chatSyncService.js';
 import { chatAttachmentService, MAX_CHAT_ATTACHMENT_BYTES } from '../services/chatAttachmentService.js';
+import { currentUsageEntries } from '../services/chatUsage.js';
 import { MEMORY_LIMITS } from '../config/constants.js';
 
 export const chatRouter = Router();
+
+/** Durable usage is local to the desktop executing the models; cloud does not invent totals. */
+chatRouter.get('/chat/threads/:id/usage', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
+  const own = (await chatStore().listThreads(req.workspace!.workspaceId, req.workspace!.userId))
+    .some(thread => thread.id === req.params.id);
+  if (!own) return res.status(404).json({ error: 'Thread not found' });
+  if (IS_CLOUD) return res.json({ available: false, reason: 'Usage is recorded on the desktop that executes this conversation.', entries: [] });
+  res.json({ available: true, entries: currentUsageEntries(sqliteService.getChatUsage(req.params.id, req.workspace!.userId)) });
+}));
 
 /** Sync health for the current owner's local chat outbox. */
 chatRouter.get('/chat/sync/status', route(async (req: Request, res: Response) => {

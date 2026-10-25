@@ -9,11 +9,12 @@ import {
   getTree,
   listBranches,
   listPullRequests,
-  listWorkflowRuns,
   promote,
   RepoWorkspaceError
 } from '../services/githubRepoWorkspace.js';
 import { getRepoArchitecture } from '../services/githubRepoArchitecture.js';
+import { actionsRuns, actionsWorkflows, actionsRun, actionsJobs, actionsJobLogs, actionsArtifacts,
+  actionsArtifactDownload, type ActionsOptions } from '../services/projectActionsService.js';
 import { deleteProjectRepository, RepoDeletionError } from '../services/repoDeletionService.js';
 import type { Project } from '../models/index.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -66,8 +67,9 @@ function sendKnownError(res: Response, err: unknown): boolean {
   }
   if (err instanceof GitHubApiError) {
     // GitHub's own status says what happened: 404 unknown ref, 401 signed out.
-    const status = [401, 403, 404, 409, 422].includes(err.status) ? err.status : 502;
-    res.status(status).json({ error: err.message });
+    const status = [401, 403, 404, 409, 410, 422, 429].includes(err.status) ? err.status : 502;
+    if (err.retryAfterSeconds) res.setHeader('Retry-After', String(err.retryAfterSeconds));
+    res.status(status).json({ error: err.message, ...(err.retryAfterSeconds ? { retryAfterSeconds: err.retryAfterSeconds } : {}) });
     return true;
   }
   return false;
@@ -140,8 +142,35 @@ projectRepoRouter.get(
 
 projectRepoRouter.get(
   '/projects/:id/repos/:owner/:name/runs',
-  withProjectRepo(async (req, res, repo) => res.json({ runs: await listWorkflowRuns(repo, query(req, 'branch')) }))
+  withProjectRepo(async (req, res, repo) => res.json(await actionsRuns(repo, actionsOptions(req))))
 );
+
+function actionsOptions(req: Request): ActionsOptions {
+  const options: ActionsOptions = {};
+  for (const key of ['page', 'perPage', 'branch', 'workflow', 'status', 'event', 'from', 'to', 'attempt'] as const) {
+    const value = req.query[key];
+    if (value !== undefined && typeof value !== 'string') throw new RepoWorkspaceError(`Invalid ${key} filter.`, 400);
+    if (value) options[key] = value;
+  }
+  return options;
+}
+projectRepoRouter.get('/projects/:id/repos/:owner/:name/workflows',
+  withProjectRepo(async (req, res, repo) => res.json(await actionsWorkflows(repo, actionsOptions(req)))));
+projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId',
+  withProjectRepo(async (req, res, repo) => res.json(await actionsRun(repo, req.params.runId))));
+projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId/jobs',
+  withProjectRepo(async (req, res, repo) => res.json(await actionsJobs(repo, req.params.runId, actionsOptions(req)))));
+projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId/jobs/:jobId/logs',
+  withProjectRepo(async (req, res, repo) => res.json(await actionsJobLogs(repo, req.params.runId, req.params.jobId))));
+projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId/artifacts',
+  withProjectRepo(async (req, res, repo) => res.json(await actionsArtifacts(repo, req.params.runId, actionsOptions(req)))));
+projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId/artifacts/:artifactId/download',
+  withProjectRepo(async (req, res, repo) => {
+    const result = await actionsArtifactDownload(repo, req.params.runId, req.params.artifactId);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.name}"`);
+    res.type('application/zip').send(result.bytes);
+  }));
 
 /**
  * Open the next promotion PR: `{ from: 'dev', to: 'uat' }` or `{ from: 'uat', to: 'main' }`.

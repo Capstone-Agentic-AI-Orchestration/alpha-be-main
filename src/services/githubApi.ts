@@ -43,7 +43,8 @@ export interface GitHubApi {
 export class GitHubApiError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    readonly retryAfterSeconds?: number
   ) {
     super(message);
     this.name = 'GitHubApiError';
@@ -114,6 +115,7 @@ async function call(method: string, url: string, body?: unknown, explicitToken?:
   const token = explicitToken ?? (await tokenForThisRequest());
   const res = await fetch(url.startsWith('http') ? url : `${API}${url}`, {
     method,
+    signal: AbortSignal.timeout(30000),
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: 'application/vnd.github+json',
@@ -134,7 +136,10 @@ async function call(method: string, url: string, body?: unknown, explicitToken?:
     } catch {
       /* not JSON */
     }
-    throw new GitHubApiError(`GitHub ${res.status} on ${method} ${url}: ${message}`, res.status);
+    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    const retry = Number(res.headers.get('retry-after')) ||
+      (res.headers.get('x-ratelimit-remaining') === '0' && reset ? Math.max(1, reset - Math.floor(Date.now() / 1000)) : undefined);
+    throw new GitHubApiError(`GitHub ${res.status} on ${method} ${url}: ${message}`, res.status, retry);
   }
   return res;
 }

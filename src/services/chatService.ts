@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { localPreviewService } from './localPreviewService.js';
+import { previewChatContext } from './previewChatContext.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
@@ -36,6 +38,7 @@ import { chatAttachmentService } from './chatAttachmentService.js';
 import {
   chooseBuildRepositories,
   isBareContinueRequest,
+  isStopPreviewRequest,
   orchestratorRoutingPrompt,
   parseAlphaRoute,
   parseChatOverride,
@@ -459,6 +462,21 @@ export class ChatService extends EventEmitter {
       saveChatMessageAndShare(userMessage);
     }
 
+    // Preview control is not a model turn or a build. Never queue it behind an agent.
+    if (params.routing && !params.routing.answerOnly && !attachmentIds.length && isStopPreviewRequest(content)) {
+      const id = `${messageId}-preview-stop`;
+      const saved = sqliteService.getChatMessages(threadId).find(message => message.id === id);
+      if (saved) return { userMessage, agentMessage: saved, agentMessages: [saved] };
+      let result: string;
+      try {
+        const count = await localPreviewService.stopForThread(params.routing.context, threadId);
+        result = count ? 'The local preview has stopped. You can keep chatting.' : 'No Alpha-managed local preview is running in this conversation.';
+      } catch (error) { result = `The local preview could not be stopped: ${(error as Error).message}`; }
+      const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha', content: result, timestamp: new Date().toISOString() };
+      saveChatMessageAndShare(reply); this.emit('chat_message', reply);
+      return { userMessage, agentMessage: reply, agentMessages: [reply] };
+    }
+
     if (params.buildRequest) {
       return this.startChatBuild({
         threadId, thread, userMessage,
@@ -526,7 +544,7 @@ export class ChatService extends EventEmitter {
       turn.currentAgentName = DEFAULT_ASSISTANT.name;
       const routingPrompt = params.routing ? await this.routingPromptFor(params.routing, thread) : undefined;
       const reply = await this.runWithSteering(turn, requestContent, prompt =>
-        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId, routingPrompt, params.userId)
+        this.generateDefaultReply(prompt, threadId, workspaceId, runId, activityCallId, routingPrompt, params.userId, params.routing?.context)
       );
       if (!reply || turn.stopRequested) {
         if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -648,7 +666,7 @@ export class ChatService extends EventEmitter {
         const steeredReply = await this.runWithSteering(turn, agentRequest, async prompt =>
           this.generateAgentReply(agent, prompt, threadId, priorTurn, activityCallId, runId,
             'ask', handoff ? handoffRepositories : undefined, params.userId,
-            params.routing && !handoff ? await this.routingPromptFor(params.routing, thread) : undefined)
+            params.routing && !handoff ? await this.routingPromptFor(params.routing, thread) : undefined, params.routing?.context)
         );
         if (!steeredReply || turn.stopRequested) {
           if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -783,7 +801,7 @@ export class ChatService extends EventEmitter {
       ? [
           '**Build not started for any repository.**',
           ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
-          'No specialist was started, so no files were changed in this run. Open the Live Build Room to review each reason, then retry when the required correction is clear.'
+          'No specialist was started, so no files were changed in this run. Open the Build review tab to review each reason, then retry when the required correction is clear.'
         ].join('\n\n')
       : builds.length > 1
       ? [
@@ -793,7 +811,7 @@ export class ChatService extends EventEmitter {
             result.reason,
             result.branchName ? `Working branch: ${result.branchName}` : undefined
           ].filter(Boolean).join(' · ')),
-          'Open the Live Build Room and choose a build to follow its agents, handoffs, changed files, and verification.'
+          'Use the Build review tab beside this conversation to inspect the saved builds, agents, changes and checks.'
         ].join('\n\n')
       : build.status === 'blocked'
         ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
@@ -802,12 +820,12 @@ export class ChatService extends EventEmitter {
               `**${statusText(build)}**`,
               build.repositories && build.repositories.length > 1 ? `**One shared build across:** ${build.repositories.join(', ')}` : undefined,
               build.status === 'plan_ready'
-                ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Live Build Room, then choose **Start planned work**.`
+                ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Build review tab, then type **start** there when you approve the plan.`
                 : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
               build.reason,
               build.repository ? `**Repository:** ${build.repository}` : undefined,
               build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-              build.status === 'plan_ready' ? undefined : 'The next specialist starts only after the current result passes its checks. Open the Live Build Room to review task evidence and findings.'
+              build.status === 'plan_ready' ? undefined : 'The next specialist starts only after the current result passes its checks. Open the Build review tab to review task evidence and findings.'
             ].filter(Boolean).join('\n\n')
         : [
             `**${statusText(build)}**`,
@@ -815,7 +833,7 @@ export class ChatService extends EventEmitter {
             build.projectName ? `**Project:** ${build.projectName}` : undefined,
             build.repository ? `**Repository:** ${build.repository}` : undefined,
             build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-            'Open the Live Build Room to follow each agent, handoff, changed file, and verification result.'
+            'Open the Build review tab to follow each agent, handoff, changed file, and verification result.'
           ].filter(Boolean).join('\n\n');
     const reply: ChatMessage = {
       id: `${messageId}-build`,
@@ -931,6 +949,24 @@ export class ChatService extends EventEmitter {
     const goal = decision.goal || request;
     const repositories = chooseBuildRepositories(routing.repositories, decision.repositories);
 
+    if (decision.route === 'stop_preview') {
+      try {
+        const count = await localPreviewService.stopForThread(routing.context, thread.id);
+        reply.content = count ? 'The local preview has stopped. You can keep chatting.' : 'No Alpha-managed local preview is running in this conversation.';
+      } catch (error) { reply.content = `The local preview could not be stopped: ${(error as Error).message}`; }
+      return null;
+    }
+    if (decision.route === 'preview') {
+      try {
+        if (decision.repositories.length > 1) throw new Error('Choose one website codebase to preview.');
+        const repository = decision.repositories[0];
+        if (repository && routing.repositories?.length && !routing.repositories.some(repo => repo.toLowerCase() === repository.toLowerCase())) throw new Error('The preview codebase is outside your selected scope.');
+        const preview = await localPreviewService.start(routing.context, thread.id, repository ?? (routing.repositories?.length === 1 ? routing.repositories[0] : undefined), reply.id);
+        reply.content = preview.state === 'ready' ? 'The local Web preview is ready in the preview tab.' : 'Starting the local Web preview from a saved commit. Its status and startup output are available in the preview tab.';
+      } catch (error) { reply.content = `The local preview could not start: ${(error as Error).message}`; }
+      return null;
+    }
+
     // "continue" after a build stopped: plan that build's own goal again. A goal that points at
     // the stopped build ("continue MON-104 from the saved plan") gives specialists nothing they can open.
     const restartGoal = projectId && (decision.route === 'build' || decision.route === 'confirm_build') && isBareContinueRequest(request)
@@ -1035,7 +1071,8 @@ export class ChatService extends EventEmitter {
       `chat-${randomUUID()}`,
       undefined,
       await this.routingPromptFor({ ...input.routing, answerOnly: true }, thread),
-      input.routing.context.userId
+      input.routing.context.userId,
+      input.routing.context
     );
     reply.content = parseAlphaRoute(reply.content).message || reply.content;
     saveChatMessageAndShare(reply);
@@ -1069,7 +1106,8 @@ export class ChatService extends EventEmitter {
     activityCallId?: string,
     /** Orchestrator instructions for this turn, when Alpha may route it. */
     routingPrompt?: string,
-    ownerId?: string
+    ownerId?: string,
+    previewContext?: WorkspaceContext
   ): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
@@ -1114,6 +1152,8 @@ export class ChatService extends EventEmitter {
     const assistantProject = threadProject(threadId);
     const projectRepos = assistantProject ? reposForProject(assistantProject) : [];
     const localCode = assistantProject ? projectReadRoots(assistantProject) : { roots: [] as ProjectRoot[], missing: [] as string[] };
+    const preview = await previewChatContext(previewContext, threadId, prompt, localCode.roots);
+    localCode.roots = preview.roots;
     const assistantServers = localCode.roots.length ? ['alpha-github', 'alpha-project-files'] : ['alpha-github'];
     const cwd = chatScratchFolder(threadId, assistantProject?.name ?? 'Alpha');
     // The coordinator never implements a task itself, even if the composer grants Full access.
@@ -1140,6 +1180,7 @@ export class ChatService extends EventEmitter {
       logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}: ${runtime.reason}`);
 
       const turn = await runCliTurn({
+        usageContext: { threadId, agentId: DEFAULT_ASSISTANT.id, callId: activityCallId },
         runId,
         cwd,
         provider: runtime.provider,
@@ -1149,7 +1190,7 @@ export class ChatService extends EventEmitter {
         codexBaseUrl: runtime.endpoint,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         // The tool policy still applies: a chat inspects, it does not mutate.
-        systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId),
+        systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
           describeOrchestratorGitHubAccess(projectRepos),
           describeLocalProjectFiles(assistantProject?.name ?? null, localCode.roots, localCode.missing),
           assistantProject ? describeProjectBuild(sqliteService.getLatestOrchestrationSnapshot(assistantProject.id, threadId),
@@ -1248,7 +1289,8 @@ export class ChatService extends EventEmitter {
     /** Present only for automatic read-only handoffs; never resumes a privileged chat session. */
     handoffRepositories?: string[],
     ownerId?: string,
-    routingInstructions?: string
+    routingInstructions?: string,
+    previewContext?: WorkspaceContext
   ): Promise<{ content: string; thinking?: string; tools: any[]; activityCallId?: string; failed?: boolean }> {
     /**
      * Resume the CLI's own session so the agent remembers this thread.
@@ -1261,8 +1303,10 @@ export class ChatService extends EventEmitter {
     const delegated = handoffRepositories !== undefined;
     const storedSession = delegated ? null : sqliteService.getThreadSession(threadId, agent.id);
     const activeProject = threadProject(threadId);
-    const localProjectRoots = (activeProject ? projectReadRoots(activeProject).roots : [])
+    const ordinaryRoots = (activeProject ? projectReadRoots(activeProject).roots : [])
       .filter(root => !delegated || handoffRepositories.some(repo => repo.toLowerCase() === root.repo.toLowerCase()));
+    const preview = await previewChatContext(previewContext, threadId, prompt, ordinaryRoots, handoffRepositories);
+    const localProjectRoots = preview.roots;
 
     /**
      * Chat turns run in the managed workspace root, not `path.resolve('..')`.
@@ -1296,7 +1340,7 @@ export class ChatService extends EventEmitter {
     });
 
     // Never resume a session that previously held broader chat/tool authority.
-    const policyHash = createHash('sha256').update(`${persona.personaHash}:scoped-chat-v1`).digest('hex');
+    const policyHash = createHash('sha256').update(`${persona.personaHash}:scoped-chat-v2:${preview.sourceKey}`).digest('hex');
     const priorSession = storedSession?.personaHash === policyHash ? storedSession : null;
 
     /**
@@ -1341,6 +1385,7 @@ export class ChatService extends EventEmitter {
 
     const cwd = chatScratchFolder(threadId, activeProject?.name ?? 'Alpha');
     const turn = await runCliTurn({
+      usageContext: { threadId, agentId: agent.id, callId: activityCallId },
       runId,
       cwd,
       mode: 'chat',
@@ -1357,6 +1402,7 @@ export class ChatService extends EventEmitter {
       // prompt: it is true of this turn only, and putting it in the persona
       // would break the stable cacheable prefix a resumed session depends on.
       prompt: [
+        preview.text,
         delegated ? undefined : sessionMemoryPrompt(threadId, ownerId),
         priorTurn ? `${prompt}
 

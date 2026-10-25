@@ -28,7 +28,7 @@ export { pathMatchesScope } from '../utils/pathScope.js';
 export { isAlphaOwnedGitBlocker } from './orchestrationRecoveryPolicy.js';
 
 export interface TaskAcceptanceOutcome {
-  decision: 'accepted' | 'rejected' | 'blocked' | 'retrying' | 'awaiting_approval';
+  decision: 'accepted' | 'rejected' | 'blocked' | 'retrying' | 'awaiting_approval' | 'completed';
   snapshot: OrchestrationSnapshot;
   reason?: string;
   evidence?: Record<string, unknown>;
@@ -790,6 +790,7 @@ export class TaskAcceptanceService {
     if (current.run.plan.milestones?.some(milestone => !current.run.plan.tasks.some(task => task.milestoneId === milestone.id))) {
       throw new Error('The approved milestone roadmap is incomplete; plan and accept its remaining work before final validation.');
     }
+    const reportOnly = !current.tasks.some(task => CODE_TASK_KINDS.has(task.kind));
     const repositoryResults: Array<Record<string, unknown> & { repository: string; worktree: string; branchName: string; resultCommit: string; baseCommit: string; cumulativeChangedPaths: string[]; verification: VerificationResult }> = [];
     for (const workspace of current.run.repositoryWorkspaces?.length
       ? current.run.repositoryWorkspaces
@@ -832,7 +833,9 @@ export class TaskAcceptanceService {
         (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase()).flatMap(task => task.requiredChecks))];
       let verification: VerificationResult;
       try {
-        verification = await this.dependencies.runVerification({
+        verification = reportOnly && !requiredScripts.length ? {
+          status: 'passed', missingScripts: [], commands: [], summary: 'Accepted read-only reports; no source changes or assigned repository checks.'
+        } : await this.dependencies.runVerification({
           runId: `orchestration-final-${current.run.id}-${Buffer.from(workspace.repository).toString('hex').slice(0, 16)}`,
           cwd: worktree,
           requiredScripts: requiredScripts.length ? requiredScripts : undefined
@@ -891,7 +894,8 @@ export class TaskAcceptanceService {
       },
       noOpenBlockingFindings: !current.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity))
     };
-    if (verification.status !== 'passed' || verification.missingScripts.length || !verification.commands.length || !evidence.noOpenBlockingFindings) {
+    const reportNeedsNoChecks = reportOnly && current.tasks.every(task => !task.requiredChecks.length);
+    if (verification.status !== 'passed' || verification.missingScripts.length || (!verification.commands.length && !reportNeedsNoChecks) || !evidence.noOpenBlockingFindings) {
       const reason = verification.summary.startsWith('Alpha could not start final validation:')
         ? verification.summary
         : verification.missingScripts.length
@@ -940,14 +944,15 @@ export class TaskAcceptanceService {
       }
       return { decision: 'blocked', snapshot: blocked, reason, evidence };
     }
+    const completedReport = reportOnly && repositoryResults.every(item => item.cumulativeChangedPaths.length === 0);
     const awaitingApproval = this.store.transitionOrchestrationRun({
       runId: current.run.id,
       expectedRevision: current.run.revision,
-      nextStatus: 'awaiting_approval',
+      nextStatus: completedReport ? 'completed' : 'awaiting_approval',
       actorId,
-      evidence,
+      evidence: completedReport ? { ...evidence, completionType: 'report_only' } : evidence,
       now
     });
-    return { decision: 'awaiting_approval', snapshot: awaitingApproval, evidence };
+    return { decision: completedReport ? 'completed' : 'awaiting_approval', snapshot: awaitingApproval, evidence };
   }
 }

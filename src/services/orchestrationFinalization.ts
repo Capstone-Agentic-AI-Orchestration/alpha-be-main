@@ -4,12 +4,26 @@ import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 
 const PUBLISHED_COMMENT_SUFFIX = 'orchestration-published';
 
-/** Synchronize a durable approval and reconciled PR to the project issue board. */
+/** Synchronize durable completion (a published change or a read-only report) to the board. */
 export async function synchronizePublishedOrchestrationIssue(
   snapshot: OrchestrationSnapshot,
   store: Pick<IssueStore, 'get' | 'update' | 'addComment'> = issueStore()
 ): Promise<void> {
   const publication = snapshot.run.publication;
+  const reportOnly = snapshot.run.status === 'completed' && !publication && snapshot.tasks?.length > 0 &&
+    snapshot.tasks.every(task => !['database', 'backend', 'frontend', 'mobile'].includes(task.kind)) &&
+    snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted');
+  if (reportOnly) {
+    const issue = await store.get(snapshot.run.workspaceId, snapshot.run.issueId);
+    if (!issue || issue.projectId !== snapshot.run.projectId) throw new Error('The project task for this completed report is unavailable. Retry to synchronize it.');
+    const commentId = `comm-${snapshot.run.id}-orchestration-report-completed`;
+    if (!issue.comments.some(comment => comment.id === commentId)) await store.addComment(snapshot.run.workspaceId, {
+      id: commentId, issueId: issue.id, authorType: 'system', authorName: 'Alpha Task Workflow',
+      content: 'Read-only investigation completed. No repository files changed. Review the specialist reports in this conversation.', createdAt: snapshot.run.updatedAt
+    });
+    if (issue.status !== 'done' && !await store.update(snapshot.run.workspaceId, issue.id, { status: 'done' })) throw new Error('The report is complete, but its project task could not be synchronized.');
+    return;
+  }
   if (snapshot.run.status !== 'completed' || !publication) {
     throw new Error('A reconciled pull request is required before the project task can move to review.');
   }

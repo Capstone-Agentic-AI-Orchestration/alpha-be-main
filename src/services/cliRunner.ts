@@ -1,3 +1,4 @@
+import { startUsage, type UsageContext } from './chatUsage.js';
 import { processManager } from './processManager.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
 import { StreamParser, StreamFamily, ParsedEvent } from './streamParser.js';
@@ -72,6 +73,7 @@ export type { CliToolRecord } from './turnAccumulator.js';
 export type TurnMode = 'chat' | 'review' | 'run';
 
 export interface CliTurnOptions {
+  usageContext?: UsageContext;
   runId: string;
   cwd: string;
   /** Defaults to 'chat', so existing callers keep today's read-only behaviour. */
@@ -952,6 +954,9 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
   // Defaults so the catch block can still report something useful if argv
   // construction itself fails — RuntimeService.agyPath() throws when the
   // Antigravity install cannot be located.
+  let usage: ReturnType<typeof startUsage>;
+  let usageOutcome: 'completed' | 'stopped' | 'failed' = 'failed';
+  let usageErrored = false;
   let family: StreamFamily = 'claude';
   let bin = process.platform === 'win32' ? 'claude.cmd' : 'claude';
 
@@ -1004,6 +1009,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
     let cancelled = false;
     let exitCode: number | null = null;
 
+    usage = startUsage(options.usageContext, family, modelName);
     await new Promise<void>((resolve) => {
       const child = processManager.spawnProcess({
         runId,
@@ -1033,6 +1039,8 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       if (child.stdout) {
         createLineBuffer(child.stdout, (line) => {
           for (const ev of parser.parseLine(line)) {
+            usage?.accept(ev);
+            if (ev.fatal || ev.telemetry?.isError) usageErrored = true;
             turn.accept(ev);
             if (options.onEvent && ['tool_call', 'tool_result', 'stage_transition', 'error', 'status'].includes(ev.type)) {
               try { options.onEvent(ev); } catch { /* activity reporting must never stop an agent turn */ }
@@ -1048,6 +1056,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       }
     });
 
+    usageOutcome = cancelled ? 'stopped' : exitCode !== 0 || usageErrored ? 'failed' : 'completed';
     const unhandled = parser.getUnhandledTypes();
     if (unhandled.length) {
       logError('CLI stream had unhandled event types', unhandled.join(', '));
@@ -1125,6 +1134,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
         cancelled: false
     };
   } finally {
+    usage?.finish(usageOutcome);
     // Remove transient tool credentials after the spawn, retaining audit evidence
     // that the Orchestrator must validate after this turn returns.
     cleanupRunMcpConfig(runId);
