@@ -21,6 +21,7 @@ import type { OrchestrationReviewAmendment } from './orchestrationReviewWorkflow
 import type { PlanNextMilestone } from './orchestrationMilestonePlanner.js';
 import { getCurrentBranch, getGitChangedPaths, getGitDiffNumstat, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
+import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
@@ -1775,39 +1776,43 @@ export class OrchestrationService {
       included(filePath) && REVIEW_SOURCE_EXTENSIONS.test(filePath) && !SENSITIVE_REVIEW_PATH.test(filePath)
     );
     const acceptedReportedPaths = [...new Set(reportedPaths)].filter(filePath => candidates.includes(filePath));
-    const words = `${task.title} ${task.description} ${task.acceptanceCriteria.join(' ')}`
-      .toLowerCase().match(/[a-z0-9_]{4,}/g) ?? [];
-    const keywords = [...new Set(words.filter(word => !new Set([
-      'with', 'from', 'that', 'this', 'should', 'must', 'when', 'then', 'including', 'provide', 'support', 'complete', 'changes'
-    ]).has(word)))];
-    const keywordScore = (filePath: string) => {
-      const normalized = filePath.toLowerCase();
-      return keywords.reduce((score, word) => score + (normalized.includes(word) ? 1 : 0), 0);
-    };
-    const ordered = [
+    const anchorPaths = [
       ...acceptedReportedPaths,
-      ...changedPaths.filter(filePath => candidates.includes(filePath) && !acceptedReportedPaths.includes(filePath)),
-      ...candidates.filter(filePath => !acceptedReportedPaths.includes(filePath) && !changedPaths.includes(filePath))
-        .sort((left, right) => keywordScore(right) - keywordScore(left) || left.localeCompare(right))
+      ...changedPaths.filter(filePath => candidates.includes(filePath) && !acceptedReportedPaths.includes(filePath))
+    ];
+    const contents = new Map<string, string | undefined>();
+    const readAtCommit = async (relativePath: string) => {
+      if (!contents.has(relativePath)) {
+        contents.set(relativePath, await getGitFileAtCommit(
+          worktree, acceptedAttempt.resultCommit!, relativePath, MAX_REVIEW_SOURCE_FILE_BYTES
+        ).catch(() => undefined));
+      }
+      return contents.get(relativePath);
+    };
+    // The remaining slots go to the files the changed code is connected to: what it
+    // imports, its tests, and its folder. See reviewSourceRanking.
+    const anchors: RankingAnchor[] = [];
+    for (const anchorPath of anchorPaths.slice(0, MAX_REVIEW_SOURCE_FILES)) {
+      const content = await readAtCommit(anchorPath);
+      if (content !== undefined) anchors.push({ path: anchorPath, content });
+    }
+    const ordered = [
+      ...anchorPaths,
+      ...rankRelatedFiles(candidates.filter(filePath => !anchorPaths.includes(filePath)), anchors)
     ].slice(0, MAX_REVIEW_SOURCE_FILES);
     const files: NonNullable<OrchestrationTaskPackage['reviewInputs'][number]['sourceFiles']> = [];
     let contextBytes = 0;
     for (const relativePath of ordered) {
       const segments = relativePath.split('/');
       if (path.isAbsolute(relativePath) || segments.some(segment => !segment || segment === '.' || segment === '..')) continue;
-      try {
-        const content = await getGitFileAtCommit(
-          worktree, acceptedAttempt.resultCommit!, relativePath, MAX_REVIEW_SOURCE_FILE_BYTES
-        );
-        if (content === undefined) continue;
-        const size = Buffer.byteLength(content, 'utf8');
-        if (contextBytes + size > maxContextBytes) break;
-        contextBytes += size;
-        files.push({ path: relativePath, content, contentHash: createHash('sha256').update(content).digest('hex') });
-      } catch {
-        // Skip an unreadable object while retaining the immutable patch and
-        // any other scoped source files that were successfully packaged.
-      }
+      // An unreadable object is skipped; the immutable patch and the other scoped
+      // source files are still packaged.
+      const content = await readAtCommit(relativePath);
+      if (content === undefined) continue;
+      const size = Buffer.byteLength(content, 'utf8');
+      if (contextBytes + size > maxContextBytes) break;
+      contextBytes += size;
+      files.push({ path: relativePath, content, contentHash: createHash('sha256').update(content).digest('hex') });
     }
     if (required && !files.length) {
       throw new Error(`Review input missing for ${task.id}: the accepted patch is empty and no readable source or test file was found within its approved paths. No reviewer attempt was started.`);

@@ -1,5 +1,5 @@
 import { Agent, AgentPhase, AgentRole, AutonomyLevel } from '../models/index.js';
-import { agentRoleContract } from './agentRoleContracts.js';
+import { AGENT_ROLE_CONTRACTS } from './agentRoleContracts.js';
 import { OFFICIAL_AGENT_TEMPLATE_V3 } from './officialAgentTemplateV3.js';
 import { OFFICIAL_AGENT_TEMPLATE_V4 } from './officialAgentTemplateV4.js';
 
@@ -53,6 +53,7 @@ const avatar = (seed: string) =>
  * output format; a persona never restates or contradicts them.
  */
 function rolePrompt(role: {
+  key: OfficialAgentTemplateKey;
   name: string;
   mission: string;
   work: string[];
@@ -60,8 +61,7 @@ function rolePrompt(role: {
   done: string;
   receives?: string;
 }): string {
-  const contract = agentRoleContract(role.name === 'Security & Code Quality Agent' ? 'Security / Code Quality Agent' :
-    role.name === 'Validation & Checking Agent' ? 'Validation / Checking Agent' : role.name);
+  const contract = AGENT_ROLE_CONTRACTS[role.key];
   return [
     'You are the ' + role.name + ' in Alpha, a team of specialist agents that build software together.',
     'Trigger: ' + contract?.trigger,
@@ -137,6 +137,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'research', agentId: 'agent-research', version: 5, phase: 'Planning', name: 'Research Agent', role: 'Research Agent',
     description: 'Reads approved briefs and references; records domain findings, assumptions, and risks.',
     systemPrompt: rolePrompt({
+      key: 'research',
       name: 'Research Agent',
       mission: 'find the facts a build needs before anyone designs or codes: how the product behaves today, where that lives, its constraints, dependencies, and risks.',
       work: [
@@ -156,6 +157,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'architecture', agentId: 'agent-architect', version: 5, phase: 'Planning', name: 'Architecture Agent', role: 'Architecture Agent',
     description: 'Designs system components, interfaces, stack decisions, and the data model.',
     systemPrompt: rolePrompt({
+      key: 'architecture',
       name: 'Architecture Agent',
       mission: 'decide how the requested change fits the existing codebase: the modules, interfaces, data shapes, and contracts that later tasks build on.',
       work: [
@@ -176,6 +178,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'manager', agentId: 'agent-manager', version: 5, phase: 'Planning', name: 'Manager Agent', role: 'Manager Agent',
     description: 'Clarifies ambiguous product behavior, acceptance criteria, edge cases and exclusions; the Orchestrator owns planning and scheduling.',
     systemPrompt: rolePrompt({
+      key: 'manager',
       name: 'Manager Agent',
       mission: 'turn the request into clear, testable requirements and acceptance criteria that specialists can build and reviewers can check.',
       work: [
@@ -195,6 +198,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'orchestrator', agentId: 'agent-orchestrator', version: 5, phase: 'Development', name: 'Orchestrator Agent', role: 'Orchestrator Agent',
     description: 'Turns approved work into dependency-aware assignments, specialist handoffs, and clear acceptance criteria.',
     systemPrompt: rolePrompt({
+      key: 'orchestrator',
       name: 'Orchestrator Agent',
       mission: 'plan the build as a small set of tasks, each with one owner, clear inputs, acceptance criteria, path scope, and checks, so specialists can finish the goal from the repository alone.',
       receives: 'the goal, project guidance, repository context and available checks, the eligible agents with their roles and descriptions, and any configured build steps. You plan only; you do not see or run the work.',
@@ -217,6 +221,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'database', agentId: 'agent-database', version: 5, phase: 'Development', name: 'Database Agent', role: 'Database Agent',
     description: 'Produces safe schema changes, migrations, indexes, and database/ORM mappings.',
     systemPrompt: rolePrompt({
+      key: 'database',
       name: 'Database Agent',
       mission: 'make the assigned data-layer change: schema, migrations, indexes, constraints, and the matching ORM or query code.',
       work: [
@@ -236,6 +241,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'backend', agentId: 'agent-backend', version: 5, phase: 'Development', name: 'Backend Agent', role: 'Backend Agent',
     description: 'Implements backend modules, domain logic, validation, routes, and focused tests.',
     systemPrompt: rolePrompt({
+      key: 'backend',
       name: 'Backend Agent',
       mission: 'implement the assigned server-side change: domain logic, API routes, validation, integrations, and their tests.',
       work: [
@@ -255,6 +261,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'frontend', agentId: 'agent-frontend', version: 5, phase: 'Development', name: 'Frontend Agent', role: 'Frontend Agent',
     description: 'Implements user-facing components, routes, client integration, and frontend tests.',
     systemPrompt: rolePrompt({
+      key: 'frontend',
       name: 'Frontend Agent',
       mission: 'implement the assigned UI change: components, routes, styles, client integration, and their tests.',
       work: [
@@ -275,6 +282,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'mobile', agentId: 'agent-mobile', version: 5, phase: 'Development', name: 'Mobile Agent', role: 'Mobile Agent',
     description: 'Generates React Native/Expo screens and navigation artifacts when mobile is in scope.',
     systemPrompt: rolePrompt({
+      key: 'mobile',
       name: 'Mobile Agent',
       mission: 'implement the assigned React Native or Expo change: screens, navigation, device states, and their tests, when the build includes a mobile client.',
       work: [
@@ -294,6 +302,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'security', agentId: 'agent-reviewer', version: 5, phase: 'Development', name: 'Security & Code Quality Agent', role: 'Security / Code Quality Agent',
     description: 'Reviews generated artifacts for secrets, vulnerabilities, unsafe dependencies, and quality risks.',
     systemPrompt: rolePrompt({
+      key: 'security',
       name: 'Security & Code Quality Agent',
       mission: 'lead independent task/security/dependency audits and code-quality assessment, read-only, before fixes when evidence is missing and after fixes to verify remediation. The Orchestrator makes the follow-up decisions.',
       receives: 'the assigned repository, audit specification and evidence tools for a baseline/re-audit; or accepted patches and scoped context for a review. Also the requirements, accepted dependency reports and findings to recheck. You cannot see unsupplied chat, Alpha issues or earlier builds.',
@@ -315,6 +324,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'validation', agentId: 'agent-tester', version: 5, phase: 'Validation', name: 'Validation & Checking Agent', role: 'Validation / Checking Agent',
     description: 'Verifies assigned acceptance criteria with exact check results and reproduction evidence; sends repairs to the owning specialist.',
     systemPrompt: rolePrompt({
+      key: 'validation',
       name: 'Validation & Checking Agent',
       mission: 'check the built work against its acceptance criteria with real evidence.',
       work: [
@@ -334,6 +344,7 @@ export const OFFICIAL_AGENT_TEMPLATES: readonly OfficialAgentTemplate[] = [
     key: 'github-finalization', agentId: 'agent-operator', version: 5, phase: 'Finalization', name: 'GitHub Finalization Agent', role: 'GitHub Finalization Agent',
     description: 'Checks branch, pull request, and CI readiness before an approved GitHub finalization action.',
     systemPrompt: rolePrompt({
+      key: 'github-finalization',
       name: 'GitHub Finalization Agent',
       mission: 'check that the approved work is ready to ship: branch state, pull request contents, CI results, and repository hygiene.',
       work: [

@@ -25,6 +25,12 @@ describe('official role boundaries', () => {
     expect(roleCanPlan('Coder')).toBe(false);
     expect(roleCanOwnTask('backend', 'Coder')).toBe(true);
   });
+  it('grants capabilities only from a defined role, regardless of case, and nothing to an unknown one', () => {
+    expect(roleCanOwnTask('backend', '  backend AGENT ')).toBe(true);
+    expect(roleCanOwnTask('backend', 'Backend Specialist')).toBe(false);
+    expect(roleCanPlan('orchestrator')).toBe(false);
+    expect(agentRoleContract('Coder')).toBeUndefined();
+  });
   it('retains compatibility only for saved plans that predate the role contract', () => {
     expect(roleCanOwnSavedTask('requirements', 'Orchestrator Agent')).toBe(true);
     expect(roleCanOwnSavedTask('requirements', 'Orchestrator Agent', 1)).toBe(false);
