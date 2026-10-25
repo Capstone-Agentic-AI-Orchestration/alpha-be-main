@@ -43,7 +43,6 @@ import {
   type SpecialistHandoff
 } from './chatRouter.js';
 import { orchestrationTaskKindSchema, roleCanOwnOrchestrationTask } from './orchestrationContract.js';
-import { isProjectBuildRequest } from './projectBuildIntent.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { ensureProjectFolder, projectReadRoots } from './projectFolders.js';
 import type { ProjectRoot } from './projectFiles.js';
@@ -909,16 +908,10 @@ export class ChatService extends EventEmitter {
     const { routing, thread, userMessage, reply, request } = input;
     const projectId = thread.projectId;
 
-    if (this.failedDefaultReplies.has(reply)) {
-      // Alpha could not answer. Keep the old keyword routing so a clear build
-      // request still reaches the Orchestrator instead of failing outright.
-      if (routing.answerOnly || !routing.canBuild || !projectId || !isProjectBuildRequest(request)) return null;
-      return this.startChatBuild({
-        threadId: thread.id, thread, userMessage, context: routing.context, request,
-        repositories: routing.repositories, attachmentIds: input.attachmentIds,
-        note: 'Alpha could not reach its runtime, so this request was routed by its wording.'
-      });
-    }
+    // Alpha could not answer, so there is no decision to act on. A build starts only from
+    // Alpha's own decision or an explicit /build, which the controller routes before this;
+    // guessing intent from wording started builds the user had not asked for.
+    if (this.failedDefaultReplies.has(reply)) return null;
 
     const parsed = parseAlphaRoute(reply.content);
     if (!parsed.decision && !parsed.malformed) return null;

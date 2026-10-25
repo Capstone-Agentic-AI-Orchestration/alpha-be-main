@@ -27,7 +27,6 @@ import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningW
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
 import { repositoryFileOverview } from './repositoryOverview.js';
-export { isProjectBuildRequest } from './projectBuildIntent.js';
 
 export interface ProjectBuildStartResult {
   status: 'started' | 'queued' | 'in_progress' | 'plan_ready' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';

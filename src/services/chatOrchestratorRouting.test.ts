@@ -324,12 +324,12 @@ describe('Alpha routes unaddressed chat messages', () => {
     expect(result.agentMessage.routeProposal.goal).toBe('add search');
   });
 
-  it('falls back to wording when Alpha cannot reach its runtime', async () => {
+  it('does not guess a build from wording when Alpha cannot reach its runtime', async () => {
     const { chatService } = await load();
     cliReply = { content: '', failureKind: 'spawn' };
     const result = await send(chatService, 'add a dark mode toggle', { projectId: 'project-1' });
-    expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
-    expect(result.agentMessage.content).toMatch(/routed by its wording/);
+    expect(startProjectBuildBatch).not.toHaveBeenCalled();
+    expect(result.agentMessage.content).toMatch(/could not reach/);
   });
 
   it('keeps the runtime error for a question when Alpha cannot reach its runtime', async () => {
