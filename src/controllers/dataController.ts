@@ -11,7 +11,7 @@ import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush, publishNewIssue, publishedFields } from '../services/githubBoardWrite.js';
 import { issueIdFor } from '../services/githubRepoDiscovery.js';
 import { supabaseService } from '../services/supabaseService.js';
-import { pullSharedBoard, asSyncReport } from '../services/sharedBoard.js';
+import { pullSharedBoard, applySharedBoardChanges, asSyncReport } from '../services/sharedBoard.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { machineRuntimes } from '../services/machineRuntimes.js';
 import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
@@ -239,6 +239,22 @@ dataRouter.post('/database/token/exchange', async (req: Request, res: Response) 
 /** One initial shared-board snapshot, anchored before the rows are read. */
 dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!IS_CLOUD) {
+    const workspaceId = req.workspace!.workspaceId;
+    const source = supabaseService.boardSource();
+    const changeSource = supabaseService.boardChangeSource();
+    if (!source || !changeSource) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+    try {
+      // The watermark brackets the one local SQLite snapshot; newer writes
+      // are replayed from it by the next page request.
+      const value = await changeSource.watermark(workspaceId);
+      const pulled = await pullSharedBoard(workspaceId, source, req.workspace!.userId);
+      sqliteService.setBoardSyncCursor(workspaceId, value);
+      return res.json({ workspaceId, cursor: { workspaceId, value }, ...pulled.snapshot });
+    } catch (error: any) {
+      return res.status(502).json({ error: `Could not read the team board: ${error?.message ?? error}` });
+    }
+  }
   const sync = await boardChangeSyncFor(req);
   if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
   return res.json(await sync.bootstrap(req.workspace!.workspaceId));
@@ -259,7 +275,11 @@ dataRouter.post('/board/changes', route(async (req: Request, res: Response) => {
   const sync = await boardChangeSyncFor(req);
   if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
   try {
-    return res.json(await sync.changes(req.workspace!.workspaceId, cursor, Math.min(requestedLimit, 100)));
+    const page = await sync.changes(req.workspace!.workspaceId, cursor, Math.min(requestedLimit, 100));
+    if (!IS_CLOUD && supabaseService.sharesBoard() && !page.resetRequired) {
+      await applySharedBoardChanges(req.workspace!.workspaceId, page);
+    }
+    return res.json(page);
   } catch (error) {
     if (error instanceof BoardCursorError) return res.status(400).json({ error: error.message });
     throw error;
@@ -287,10 +307,13 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
   if (supabaseService.sharesBoard()) {
     if (!requireWorkspaceCapability(req, res, 'project.read')) return;
     const source = supabaseService.boardSource();
-    if (!source) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+    const changeSource = supabaseService.boardChangeSource();
+    if (!source || !changeSource) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
     try {
       // Who is pulling, so a project the team dropped leaves this machine too.
+      const cursor = await changeSource.watermark(req.workspace!.workspaceId);
       const pulled = await pullSharedBoard(req.workspace!.workspaceId, source, req.workspace!.userId);
+      sqliteService.setBoardSyncCursor(req.workspace!.workspaceId, cursor);
       /**
        * Then this machine's own agents, which the team does not have. An issue
        * that names one refers to a row the cloud has to hold, or the card is

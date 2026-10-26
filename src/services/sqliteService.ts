@@ -477,6 +477,12 @@ export class SQLiteService {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS board_sync_cursors (
+        workspace_id TEXT PRIMARY KEY,
+        cursor TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS allowed_paths (
         path TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -2168,6 +2174,26 @@ export class SQLiteService {
     return allowed.some(p => normalized === p || normalized.startsWith(p + path.sep));
   }
 
+  /** Last board cursor this desktop has safely applied for a workspace. */
+  getBoardSyncCursor(workspaceId: string): string | null {
+    const row = this.db.prepare('SELECT cursor FROM board_sync_cursors WHERE workspace_id = ?')
+      .get(workspaceId) as { cursor: string } | undefined;
+    return row?.cursor ?? null;
+  }
+
+  /** Store only non-negative decimal cursors, without allowing an older page to roll back this device. */
+  setBoardSyncCursor(workspaceId: string, cursor: string): void {
+    if (!/^(0|[1-9]\d*)$/.test(cursor)) throw new Error('The board cursor must be a non-negative decimal number.');
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO board_sync_cursors (workspace_id, cursor, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
+      WHERE length(excluded.cursor) > length(board_sync_cursors.cursor)
+        OR (length(excluded.cursor) = length(board_sync_cursors.cursor) AND excluded.cursor >= board_sync_cursors.cursor)
+    `).run(workspaceId, cursor, now);
+  }
+
   // --- Projects ---
   /**
    * Point every reference to one id at another, in the tables that have the
@@ -3015,6 +3041,15 @@ export class SQLiteService {
     const stmt = this.db.prepare('DELETE FROM issues WHERE id = ? AND workspace_id = ?');
     const res = stmt.run(id, this.workspaceId());
     return res.changes > 0;
+  }
+
+  deleteIssueComment(id: string): boolean {
+    const stmt = this.db.prepare(`
+      DELETE FROM issue_comments WHERE id = ? AND issue_id IN (
+        SELECT id FROM issues WHERE workspace_id = ?
+      )
+    `);
+    return stmt.run(id, this.workspaceId()).changes > 0;
   }
 
   addIssueComment(c: IssueComment): IssueComment {

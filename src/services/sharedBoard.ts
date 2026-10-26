@@ -13,6 +13,8 @@ import { logInfo } from '../utils/logger.js';
 import type { SyncReport } from './githubBoardSync.js';
 import {
   boardChangeKey,
+  type BoardChange,
+  type BoardChangePage,
   type BoardChangeAccess,
   type BoardChangeLogPage,
   type BoardChangeLogRow,
@@ -114,6 +116,8 @@ export interface PullReport {
   unpublished: { agents: Agent[]; squads: Squad[] };
   /** Cards this machine already has under another id; see the module comment. */
   conflicts: Array<{ project: string; detail: string }>;
+  /** The authorized snapshot, after local merge rules have been applied. */
+  snapshot?: BoardState;
 }
 
 /**
@@ -524,7 +528,52 @@ export async function pullSharedBoard(
     source.projectAssignments(workspaceId)
   ]);
 
-  const report: PullReport = {
+  const report = emptyPullReport();
+
+  runWithWorkspace(workspaceId, () => {
+    // The roster first: an issue names an agent, and a squad names its members.
+    applyRoster(agents, squads, report);
+    applyProjects(projects, report);
+    // Before the issues, so a dropped project's cards are not written back
+    // under it -- `applyIssues` skips a card whose project is not here.
+    if (syncingLogin) removeDroppedProjects(projects, syncingLogin, report);
+    applyIssues(issues, report);
+    applyComments(comments, report);
+  });
+
+  await applySquadBindings(workspaceId, owners, links);
+  await applyProjectAssignments(workspaceId, assignments);
+
+  const visibleProjectIds = new Set(projects.map(project => project.id));
+  const visibleIssueIds = new Set(issues.map(issue => issue.id));
+  const commentsByIssue = new Map<string, IssueComment[]>();
+  for (const comment of comments) {
+    if (!visibleIssueIds.has(comment.issueId)) continue;
+    const list = commentsByIssue.get(comment.issueId) ?? [];
+    list.push(comment);
+    commentsByIssue.set(comment.issueId, list);
+  }
+  report.snapshot = {
+    // The local copy contains this machine's folders and any runner-owned state.
+    projects: runWithWorkspace(workspaceId, () => sqliteService.getProjects()).filter(project => visibleProjectIds.has(project.id)),
+    agents,
+    issues: runWithWorkspace(workspaceId, () => sqliteService.getIssues())
+      .filter(issue => visibleIssueIds.has(issue.id))
+      .map(issue => ({ ...issue, comments: commentsByIssue.get(issue.id) ?? [] }))
+  };
+
+  logInfo(
+    `Team board: ${report.agentsAdded} agent(s) added, ${report.squadsAdded} squad(s) added; ` +
+      `${report.projectsAdded} project(s) added, ${report.projectsUpdated} updated, ${report.projectsAdopted} adopted; ` +
+      `${report.issuesAdopted} card(s) adopted; ` +
+      `${report.issuesAdded} issue(s) added, ${report.issuesUpdated} updated; ${report.comments} comment(s)` +
+      (report.conflicts.length ? `; ${report.conflicts.length} clash(es) with cards made on this machine` : '')
+  );
+  return report;
+}
+
+function emptyPullReport(): PullReport {
+  return {
     projectsAdded: 0,
     projectsUpdated: 0,
     issuesAdded: 0,
@@ -541,29 +590,133 @@ export async function pullSharedBoard(
     unpublished: { agents: [], squads: [] },
     conflicts: []
   };
+}
 
-  runWithWorkspace(workspaceId, () => {
-    // The roster first: an issue names an agent, and a squad names its members.
-    applyRoster(agents, squads, report);
-    applyProjects(projects, report);
-    // Before the issues, so a dropped project's cards are not written back
-    // under it -- `applyIssues` skips a card whose project is not here.
-    if (syncingLogin) removeDroppedProjects(projects, syncingLogin, report);
-    applyIssues(issues, report);
-    applyComments(comments, report);
+/** Apply one bounded page to this desktop's SQLite mirror before advancing its cursor. */
+export async function applySharedBoardChanges(workspaceId: string, page: BoardChangePage): Promise<void> {
+  if (page.workspaceId !== workspaceId || page.nextCursor.workspaceId !== workspaceId) {
+    throw new Error('The board change page does not match the active workspace.');
+  }
+  if (!/^(0|[1-9]\d*)$/.test(page.nextCursor.value)) {
+    throw new Error('The next board cursor must be a non-negative decimal number.');
+  }
+  if (page.resetRequired) return;
+
+  const report = emptyPullReport();
+  const deletes = page.changes.filter(change => change.operation === 'delete');
+  const writes = page.changes.filter(change => change.operation !== 'delete');
+  const deleteOrder: BoardTable[] = ['projects', 'squads', 'agents', 'issues', 'issue_comments', 'workspace_squad_owners', 'workspace_squad_projects', 'workspace_project_assignments'];
+  const writeOrder: BoardTable[] = ['agents', 'squads', 'projects', 'issues', 'issue_comments', 'workspace_squad_owners', 'workspace_squad_projects', 'workspace_project_assignments'];
+  const sortBy = (order: BoardTable[]) => (left: BoardChange, right: BoardChange) => {
+    const tableOrder = order.indexOf(left.table) - order.indexOf(right.table);
+    return tableOrder || (BigInt(left.cursor) < BigInt(right.cursor) ? -1 : BigInt(left.cursor) > BigInt(right.cursor) ? 1 : 0);
+  };
+
+  await runWithWorkspace(workspaceId, async () => {
+    for (const change of deletes.sort(sortBy(deleteOrder))) {
+      await removeSharedBoardRow(workspaceId, change);
+    }
+
+    for (const change of writes.sort(sortBy(writeOrder))) {
+      if (!change.row) continue;
+      const conflictCount = report.conflicts.length;
+      await applySharedBoardRow(workspaceId, change, report);
+      if (report.conflicts.length > conflictCount) {
+        throw new Error(report.conflicts[conflictCount].detail);
+      }
+    }
   });
 
-  await applySquadBindings(workspaceId, owners, links);
-  await applyProjectAssignments(workspaceId, assignments);
+  // The cursor is the acknowledgement: a failed merge above leaves it at the
+  // previous value so the same page can safely be retried after restart.
+  sqliteService.setBoardSyncCursor(workspaceId, page.nextCursor.value);
+}
 
-  logInfo(
-    `Team board: ${report.agentsAdded} agent(s) added, ${report.squadsAdded} squad(s) added; ` +
-      `${report.projectsAdded} project(s) added, ${report.projectsUpdated} updated, ${report.projectsAdopted} adopted; ` +
-      `${report.issuesAdopted} card(s) adopted; ` +
-      `${report.issuesAdded} issue(s) added, ${report.issuesUpdated} updated; ${report.comments} comment(s)` +
-      (report.conflicts.length ? `; ${report.conflicts.length} clash(es) with cards made on this machine` : '')
-  );
-  return report;
+async function applySharedBoardRow(workspaceId: string, change: BoardChange, report: PullReport): Promise<void> {
+  const row = change.row!;
+  switch (change.table) {
+    case 'projects':
+      applyProjects([row as unknown as Project], report, true);
+      return;
+    case 'issues':
+      applyIssues([row as unknown as Issue], report);
+      return;
+    case 'issue_comments':
+      applyComments([row as unknown as IssueComment], report);
+      return;
+    case 'agents':
+      applyRoster([row as unknown as Agent], [], report);
+      return;
+    case 'squads':
+      applyRoster([], [row as unknown as Squad], report);
+      return;
+    case 'workspace_squad_owners': {
+      const owner = row as unknown as SquadOwnerRow;
+      if (owner.status === 'active') await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
+      else await workspaceRegistry.unbind('squads', owner.squad_id);
+      return;
+    }
+    case 'workspace_squad_projects': {
+      const link = row as unknown as SquadProjectRow;
+      if (link.status === 'active') {
+        await workspaceRegistry.assignSquadProject(
+          workspaceId, link.squad_id, link.project_id, link.relationship === 'owned' ? 'owned' : 'assigned'
+        );
+      } else {
+        await workspaceRegistry.removeSquadProject(workspaceId, link.squad_id, link.project_id);
+      }
+      return;
+    }
+    case 'workspace_project_assignments': {
+      const assignment = row as unknown as ProjectAssignmentRow;
+      if (assignment.status === 'active') {
+        await workspaceRegistry.assignProject(workspaceId, assignment.project_id, assignment.user_id);
+      } else {
+        await workspaceRegistry.removeProjectAssignment(workspaceId, assignment.project_id, assignment.user_id);
+      }
+      return;
+    }
+  }
+}
+
+async function removeSharedBoardRow(workspaceId: string, change: BoardChange): Promise<void> {
+  const id = change.rowKey.id;
+  if (!id) throw new Error(`The ${change.table} delete marker has no row id.`);
+  switch (change.table) {
+    case 'projects': {
+      sqliteService.deleteProject(id);
+      for (const assignment of await workspaceRegistry.listProjectAssignments(workspaceId, id)) {
+        await workspaceRegistry.removeProjectAssignment(workspaceId, id, assignment.userId);
+      }
+      for (const link of await workspaceRegistry.listSquadProjectAssignments(workspaceId, id)) {
+        await workspaceRegistry.removeSquadProject(workspaceId, link.squadId, id);
+      }
+      return;
+    }
+    case 'issues':
+      sqliteService.deleteIssue(id);
+      return;
+    case 'issue_comments':
+      sqliteService.deleteIssueComment(id);
+      return;
+    case 'agents':
+      sqliteService.deleteAgent(id);
+      return;
+    case 'squads': {
+      sqliteService.deleteSquad(id);
+      for (const link of await workspaceRegistry.listSquadProjectAssignments(workspaceId)) {
+        if (link.squadId === id) await workspaceRegistry.removeSquadProject(workspaceId, id, link.projectId);
+      }
+      await workspaceRegistry.unbind('squads', id);
+      return;
+    }
+    case 'workspace_squad_owners':
+    case 'workspace_squad_projects':
+    case 'workspace_project_assignments':
+      // These rows are retired by changing status; parent deletes clean up
+      // their local bindings. A physical child delete has no current row body.
+      return;
+  }
 }
 
 /**
@@ -691,6 +844,7 @@ async function applySquadBindings(
   for (const owner of owners) {
     if (!squads.has(owner.squad_id)) continue;
     if (owner.status === 'active') await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
+    else await workspaceRegistry.unbind('squads', owner.squad_id);
   }
 
   for (const link of links) {
@@ -733,7 +887,7 @@ async function applyProjectAssignments(workspaceId: string, rows: ProjectAssignm
   }
 }
 
-function applyProjects(projects: Project[], report: PullReport): void {
+function applyProjects(projects: Project[], report: PullReport, propagateWriteErrors = false): void {
   const local = sqliteService.getProjects();
   const byId = new Map(local.map(project => [project.id, project]));
   const byRepo = new Map<string, Project>();
@@ -755,6 +909,7 @@ function applyProjects(projects: Project[], report: PullReport): void {
         sqliteService.updateProject(cloud.id, next);
         report.projectsUpdated += 1;
       } catch (err) {
+        if (propagateWriteErrors) throw err;
         report.conflicts.push({ project: cloud.key, detail: `Could not update: ${(err as Error).message}` });
       }
       continue;

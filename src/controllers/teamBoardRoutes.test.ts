@@ -24,16 +24,20 @@ let connectionProblem: string | null = null;
 let shared: string[];
 let githubFails = false;
 const boardChangeCalls: Array<[string, ...unknown[]]> = [];
+const boardSyncOrder: string[] = [];
 
 const now = '2026-09-22T10:00:00.000Z';
 const REPO = [{ id: 'r1', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }];
 
 const teamBoard = {
-  projects: async () => [
-    { id: 'gh-repo-100', name: 'checkout', key: 'CHK', description: '', color: '', icon: '', status: 'in_progress',
-      priority: 'medium', startDate: now, targetDate: '', leadType: 'agent', leadName: '', resources: REPO,
-      githubOrg: 'acme', createdAt: now, envVars: [] }
-  ],
+  projects: async () => {
+    boardSyncOrder.push('snapshot');
+    return [
+      { id: 'gh-repo-100', name: 'checkout', key: 'CHK', description: '', color: '', icon: '', status: 'in_progress',
+        priority: 'medium', startDate: now, targetDate: '', leadType: 'agent', leadName: '', resources: REPO,
+        githubOrg: 'acme', createdAt: now, envVars: [] }
+    ];
+  },
   issues: async () => [
     { id: 'gh-issue-9001', identifier: 'CHK-7', title: 'Cart loses items', description: '', status: 'todo',
       priority: 'high', projectId: 'gh-repo-100', labels: [], subtasks: [], comments: [],
@@ -55,6 +59,7 @@ const teamBoard = {
 const teamBoardChangeSource = {
   watermark: async (workspaceId: string) => {
     boardChangeCalls.push(['watermark', workspaceId]);
+    boardSyncOrder.push('watermark');
     return '1';
   },
   readAfter: async (workspaceId: string, after: string, limit: number) => {
@@ -171,6 +176,7 @@ beforeEach(() => {
   connectionProblem = null;
   githubFails = false;
   boardChangeCalls.length = 0;
+  boardSyncOrder.length = 0;
 });
 
 afterEach(async () => {
@@ -204,8 +210,10 @@ describe('syncing a desktop on a team', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ projectsImported: 1, created: 1, errors: [] });
+    expect(boardSyncOrder.indexOf('watermark')).toBeLessThan(boardSyncOrder.indexOf('snapshot'));
     const { runWithWorkspace } = await import('../services/workspaceContext.js');
     expect(runWithWorkspace('ws-default', () => svc.getIssues()).map((i: any) => i.id)).toContain('gh-issue-9001');
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('1');
   });
 
   it('still asks a desktop of its own for the right to read GitHub', async () => {
@@ -253,7 +261,7 @@ describe('syncing a desktop on a team', () => {
 
 describe('incremental board reads on a team desktop', () => {
   it('uses the signed-in board source for bootstrap and catch-up pages', async () => {
-    const { app } = await startApi();
+    const { app, svc } = await startApi();
 
     const bootstrap = await call(app, 'GET', '/api/board/bootstrap');
     expect(bootstrap.status).toBe(200);
@@ -262,6 +270,7 @@ describe('incremental board reads on a team desktop', () => {
       cursor: { workspaceId: 'ws-default', value: '1' },
       projects: [{ id: 'gh-repo-100' }]
     });
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('1');
     expect(boardChangeCalls).toContainEqual(['watermark', 'ws-default']);
 
     const page = await call(app, 'POST', '/api/board/changes', {
@@ -274,6 +283,7 @@ describe('incremental board reads on a team desktop', () => {
       nextCursor: { workspaceId: 'ws-default', value: '2' },
       changes: [{ table: 'projects', operation: 'update', row: { id: 'gh-repo-100' } }]
     });
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('2');
     expect(boardChangeCalls).toContainEqual(['readAfter', 'ws-default', '1', 10]);
   });
 
