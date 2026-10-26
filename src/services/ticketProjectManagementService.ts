@@ -17,7 +17,7 @@ const linkSchema = z.object({
   projectId: id.nullable(), clientVisible: z.boolean(), projectPreview: previewSchema,
 }).strict();
 
-function validPreview(value: TicketSharedPreview | null): boolean {
+export function validTicketProjectPreview(value: TicketSharedPreview | null): boolean {
   if (!value) return true;
   try {
     const url = new URL(value.url);
@@ -42,7 +42,7 @@ function receipt(value: SavedTicketOperation, key: TicketOperationKey, fingerpri
     || typeof savedLink.clientVisible !== 'boolean'
     || (savedLink.projectPreview !== null && (typeof savedLink.projectPreview !== 'object' || Array.isArray(savedLink.projectPreview)))) throw new TicketReadInvariantError();
   const projectPreview = (savedLink.projectPreview === undefined ? null : savedLink.projectPreview) as TicketSharedPreview | null;
-  if (!validPreview(projectPreview)) throw new TicketReadInvariantError();
+  if (!validTicketProjectPreview(projectPreview)) throw new TicketReadInvariantError();
   return {
     ticketId: value.receipt.ticketId, operationId: value.receipt.operationId,
     version: value.receipt.version, status: value.receipt.status as TicketProjectLinkReceipt['status'],
@@ -60,7 +60,7 @@ export function createTicketProjectManagementService(
       if (subject.kind !== 'internal') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only a project manager can link a project to a request.');
       const parsed = linkSchema.safeParse(input);
       if (!parsed.success || (parsed.data.projectId === null && (parsed.data.clientVisible || parsed.data.projectPreview !== null))
-        || (!parsed.data.clientVisible && parsed.data.projectPreview !== null) || !validPreview(parsed.data.projectPreview)) {
+        || (!parsed.data.clientVisible && parsed.data.projectPreview !== null) || !validTicketProjectPreview(parsed.data.projectPreview)) {
         throw new TicketWorkflowError(400, 'invalid_ticket_project_link', 'This project link is invalid.');
       }
       return store.transaction(async tx => {
@@ -83,7 +83,7 @@ export function createTicketProjectManagementService(
         }
 
         const current = await tx.loadCurrentProjectLink(target);
-        if (current.projectPreview !== null && !validPreview(current.projectPreview)) throw new TicketReadInvariantError();
+        if (current.projectPreview !== null && !validTicketProjectPreview(current.projectPreview)) throw new TicketReadInvariantError();
         let projectName: string | null = null;
         if (parsed.data.projectId !== null) {
           const project = await tx.findWorkspaceProject(target.workspaceId, parsed.data.projectId);
