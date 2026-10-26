@@ -11,6 +11,7 @@ import { PostgresProjectStore } from './postgresProjectStore.js';
 import { SqliteIssueStore } from './sqliteIssueStore.js';
 import { SqliteProjectStore } from './sqliteProjectStore.js';
 import { PostgresChatStore } from './postgresChatStore.js';
+import { PostgresBoardChangeStore } from './postgresBoardChangeStore.js';
 import { SqliteChatStore } from './sqliteChatStore.js';
 import type { ChatStore } from './chatStore.js';
 import type { IssueStore } from './issueStore.js';
@@ -79,6 +80,22 @@ export function useAgentStores(agent: AgentStore | null, squad: SquadStore | nul
 }
 
 let runs: RunStore | null = null;
+
+let boardChanges: PostgresBoardChangeStore | null = null;
+
+/** The hosted-only durable cursor and current-row source for board pages. */
+export function boardChangeStore(): PostgresBoardChangeStore {
+  if (!IS_CLOUD) {
+    throw new Error('The desktop must read board changes through its signed-in Supabase Data API client.');
+  }
+  boardChanges ??= new PostgresBoardChangeStore(database());
+  return boardChanges;
+}
+
+/** For tests, which supply their own database rather than a pool. */
+export function useBoardChangeStore(store: PostgresBoardChangeStore | null): void {
+  boardChanges = store;
+}
 
 export function runStore(): RunStore {
   runs ??= IS_CLOUD ? new PostgresRunStore(database()) : new SqliteRunStore();
