@@ -44,7 +44,7 @@ async function startCloudApi() {
   const { PostgresIssueStore } = await import('../store/postgresIssueStore.js');
   const { PostgresAgentStore, PostgresSquadStore } = await import('../store/postgresAgentStore.js');
   const { PostgresRunStore } = await import('../store/postgresRunStore.js');
-  const { useAgentStores, useIssueStore, useProjectStore, useRunStore } = await import('../store/stores.js');
+  const { useAgentStores, useBoardChangeStore, useIssueStore, useProjectStore, useRunStore } = await import('../store/stores.js');
   const { workspaceContext } = await import('./workspaceContext.js');
   const { dataRouter } = await import('./dataController.js');
   const { jsonErrorHandler } = await import('./errorHandler.js');
@@ -56,8 +56,10 @@ async function startCloudApi() {
    * The connection has to come from the same registry as the handler.
    */
   const { sqlFor: freshSqlFor } = await import('../store/testDatabase.js');
+  const { PostgresBoardChangeStore } = await import('../store/postgresBoardChangeStore.js');
 
   workspaceRegistry.useDirectory(new PostgresWorkspaceDirectory(freshSqlFor(db), 'ws-default'));
+  useBoardChangeStore(new PostgresBoardChangeStore(freshSqlFor(db)));
   useProjectStore(new PostgresProjectStore(freshSqlFor(db)));
   useIssueStore(new PostgresIssueStore(freshSqlFor(db)));
   useAgentStores(new PostgresAgentStore(freshSqlFor(db)), new PostgresSquadStore(freshSqlFor(db)));
@@ -273,6 +275,113 @@ describe('the cloud project routes', () => {
     const res = await call(app, 'POST', '/api/projects', { name: 'Mine', key: 'MINE' });
     expect(res.status).toBe(403);
     expect((await db.query('select id from projects')).rows).toHaveLength(0);
+  });
+});
+
+describe('the cloud board change routes', () => {
+  it('reads the watermark before a snapshot and returns bounded changed rows', async () => {
+    const app = await startCloudApi();
+    const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
+    const beforeIssue = await db.query<{ cursor: string }>(`
+      select last_cursor::text as cursor from workspace_board_cursors where workspace_id='ws-default'
+    `);
+    const created = await call(app, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id });
+
+    const bootstrap = await call(app, 'GET', '/api/board/bootstrap');
+    expect(bootstrap.status).toBe(200);
+    expect(bootstrap.body).toMatchObject({
+      workspaceId: 'ws-default',
+      cursor: { workspaceId: 'ws-default', value: expect.any(String) }
+    });
+    expect(bootstrap.body.projects.map((row: any) => row.id)).toContain(project.id);
+    expect(bootstrap.body.issues.map((row: any) => row.id)).toContain(created.body.id);
+    expect(BigInt(bootstrap.body.cursor.value)).toBeGreaterThan(BigInt(beforeIssue.rows[0].cursor));
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: beforeIssue.rows[0].cursor },
+      limit: 1
+    });
+    expect(page.status).toBe(200);
+    expect(page.body.changes).toHaveLength(1);
+    expect(page.body.changes[0]).toMatchObject({
+      table: 'issues',
+      operation: 'insert',
+      row: { id: created.body.id, title: 'Fix cart' }
+    });
+    expect(page.body.hasMore).toBe(true);
+    expect(BigInt(page.body.nextCursor.value)).toBeGreaterThan(BigInt(beforeIssue.rows[0].cursor));
+  });
+
+  it('rejects a cursor that belongs to a different workspace', async () => {
+    const app = await startCloudApi();
+    const response = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-someone-else', value: '0' }
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatch(/cursor.*workspace/i);
+  });
+
+  it('coalesces repeated changes to the latest value of a row', async () => {
+    const app = await startCloudApi();
+    const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
+    const beforeChanges = await db.query<{ cursor: string }>(`
+      select last_cursor::text as cursor from workspace_board_cursors where workspace_id='ws-default'
+    `);
+    await call(app, 'PUT', `/api/projects/${project.id}`, { name: 'Intermediate name' });
+    await call(app, 'PUT', `/api/projects/${project.id}`, { name: 'Latest name' });
+
+    const response = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: beforeChanges.rows[0].cursor },
+      limit: 100
+    });
+    const projectChanges = response.body.changes.filter((change: any) =>
+      change.table === 'projects' && change.rowKey.id === project.id
+    );
+    expect(projectChanges).toHaveLength(1);
+    expect(projectChanges[0]).toMatchObject({
+      operation: 'update',
+      row: { id: project.id, name: 'Latest name' }
+    });
+  });
+
+  it('asks for a bootstrap when the cursor is ahead or its history was pruned', async () => {
+    const app = await startCloudApi();
+    await createProject(app, { name: 'Checkout', key: 'CHK' });
+    const watermark = await db.query<{ cursor: string }>(`
+      select last_cursor::text as cursor from workspace_board_cursors where workspace_id='ws-default'
+    `);
+
+    const future = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: (BigInt(watermark.rows[0].cursor) + 1n).toString() }
+    });
+    expect(future.status).toBe(200);
+    expect(future.body).toMatchObject({ resetRequired: true, changes: [] });
+
+    await db.exec(`delete from workspace_board_changes where workspace_id='ws-default'`);
+    const stale = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: '0' }
+    });
+    expect(stale.status).toBe(200);
+    expect(stale.body).toMatchObject({ resetRequired: true, changes: [] });
+  });
+
+  it('skips issue and comment entries for a role without issue.read but still advances', async () => {
+    const pm = await startCloudApi();
+    const project = (await createProject(pm, { name: 'Checkout', key: 'CHK' })).body;
+    const beforeIssue = await db.query<{ cursor: string }>(`
+      select last_cursor::text as cursor from workspace_board_cursors where workspace_id='ws-default'
+    `);
+    await call(pm, 'POST', '/api/issues', { title: 'Secret issue', projectId: project.id });
+
+    session = { login: 'Client1', role: 'client' };
+    const client = await startCloudApi();
+    const response = await call(client, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: beforeIssue.rows[0].cursor },
+      limit: 100
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.changes).toEqual([]);
+    expect(BigInt(response.body.nextCursor.value)).toBeGreaterThan(BigInt(beforeIssue.rows[0].cursor));
   });
 });
 

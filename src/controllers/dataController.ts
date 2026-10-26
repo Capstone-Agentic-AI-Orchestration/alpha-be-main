@@ -1,7 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentLearningService, AgentLessonError } from '../services/agentLearningService.js';
-import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
+import { agentStore, boardChangeStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORCHESTRATION_ENABLED, ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -65,8 +65,34 @@ import {
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
+import { BoardChangeSync, BoardCursorError, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
 
 export const dataRouter = Router();
+
+async function boardChangeSyncFor(req: Request): Promise<BoardChangeSync | null> {
+  const workspaceId = req.workspace!.workspaceId;
+  const access: BoardChangeAccess = {
+    canReadIssues: workspaceRegistry.can(req.workspace!.role, 'issue.read'),
+    canReadAgents: workspaceRegistry.can(req.workspace!.role, 'agent.read'),
+    canReadSquads: workspaceRegistry.can(req.workspace!.role, 'squad.read')
+  };
+
+  if (IS_CLOUD) {
+    // The cloud connection bypasses RLS; apply the same visible-project set
+    // that GET /projects and GET /issues use before reading current rows.
+    const projects = await projectStore().list(workspaceId);
+    access.allowedProjectIds = workspaceRegistry.projectIdsFor(
+      req.workspace!,
+      projects.map(project => project.id)
+    );
+    return new BoardChangeSync(boardChangeStore(), access);
+  }
+
+  // A desktop's Supabase client carries the token exchanged for this user.
+  // Never substitute a service-role client for this row-level path.
+  const source = supabaseService.boardChangeSource();
+  return source ? new BoardChangeSync(source, access) : null;
+}
 
 async function publishSharedAgentCopies(agent: Agent, workspaceIds: string[]): Promise<void> {
   if (!agent.sharedKey) return;
@@ -209,6 +235,36 @@ dataRouter.post('/database/token/exchange', async (req: Request, res: Response) 
   if (!result.ok) return res.status(result.status).json({ error: result.error });
   return res.json({ token: result.token, expiresAt: result.expiresAt });
 });
+
+/** One initial shared-board snapshot, anchored before the rows are read. */
+dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  const sync = await boardChangeSyncFor(req);
+  if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+  return res.json(await sync.bootstrap(req.workspace!.workspaceId));
+}));
+
+/** A bounded page after one device's last successfully applied workspace cursor. */
+dataRouter.post('/board/changes', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  const cursor = req.body?.cursor as BoardCursor | undefined;
+  if (!cursor || typeof cursor.workspaceId !== 'string' || typeof cursor.value !== 'string') {
+    return res.status(400).json({ error: 'A workspace cursor is required.' });
+  }
+  const requestedLimit = req.body?.limit ?? 100;
+  if (typeof requestedLimit !== 'number' || !Number.isInteger(requestedLimit) || requestedLimit < 1) {
+    return res.status(400).json({ error: 'The page limit must be a positive whole number.' });
+  }
+
+  const sync = await boardChangeSyncFor(req);
+  if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+  try {
+    return res.json(await sync.changes(req.workspace!.workspaceId, cursor, Math.min(requestedLimit, 100)));
+  } catch (error) {
+    if (error instanceof BoardCursorError) return res.status(400).json({ error: error.message });
+    throw error;
+  }
+}));
 
 /**
  * Read the shared board down from GitHub.

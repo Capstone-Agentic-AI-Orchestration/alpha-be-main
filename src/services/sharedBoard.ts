@@ -11,6 +11,15 @@ import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { logInfo } from '../utils/logger.js';
 import type { SyncReport } from './githubBoardSync.js';
+import {
+  boardChangeKey,
+  type BoardChangeAccess,
+  type BoardChangeLogPage,
+  type BoardChangeLogRow,
+  type BoardChangeSource,
+  type BoardTable,
+  type BoardState
+} from './boardChangeSync.js';
 
 /**
  * The team's board, onto this desktop.
@@ -197,6 +206,232 @@ export function supabaseBoardSource(client: SupabaseClient): SharedBoardSource {
           .order('project_id')
           .range(from, to)
       );
+    }
+  };
+}
+
+async function dataApiRows<T>(query: PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return data ?? [];
+}
+
+function issueChangeRow(row: IssueRow): Record<string, unknown> {
+  const { comments: _comments, ...issue } = toIssue(row, []);
+  return issue;
+}
+
+/**
+ * Incremental reads through the same signed-in Supabase client used by the
+ * desktop's existing board source. RLS remains the row-level gate; explicit
+ * workspace filters keep each request narrow and make the scope obvious.
+ */
+export function supabaseBoardChangeSource(client: SupabaseClient): BoardChangeSource {
+  async function commentsForIssues(workspaceId: string, issueIds: string[]): Promise<IssueComment[]> {
+    if (!issueIds.length) return [];
+    const comments = await dataApiRows<CommentRow>(
+      client.from('issue_comments').select('*').in('issue_id', issueIds).order('created_at')
+    );
+    return comments.map(toComment);
+  }
+
+  async function currentIssueIds(
+    workspaceId: string,
+    issueIds: string[],
+    allowedProjectIds?: ReadonlySet<string>
+  ): Promise<string[]> {
+    if (!issueIds.length) return [];
+    const rows = await dataApiRows<Pick<IssueRow, 'id' | 'project_id'>>(
+      client.from('issues').select('id,project_id').eq('workspace_id', workspaceId).in('id', issueIds)
+    );
+    return rows
+      .filter(row => !allowedProjectIds || allowedProjectIds.has(row.project_id))
+      .map(row => row.id);
+  }
+
+  return {
+    async watermark(workspaceId) {
+      const { data, error } = await client
+        .from('workspace_board_cursors')
+        .select('last_cursor')
+        .eq('workspace_id', workspaceId)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      return String(data?.last_cursor ?? '0');
+    },
+
+    async readAfter(workspaceId, after, limit) {
+      const pageSize = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 100;
+      const currentCursor = await this.watermark(workspaceId);
+      const [oldestRows, found] = await Promise.all([
+        dataApiRows<{ cursor: string | number }>(
+          client.from('workspace_board_changes')
+            .select('cursor')
+            .eq('workspace_id', workspaceId)
+            .order('cursor', { ascending: true })
+            .limit(1)
+        ),
+        dataApiRows<{
+          cursor: string | number;
+          table_name: BoardTable;
+          row_key: Record<string, string>;
+          operation: BoardChangeLogRow['operation'];
+          created_at: string;
+        }>(
+          client.from('workspace_board_changes')
+            .select('cursor,table_name,row_key,operation,created_at')
+            .eq('workspace_id', workspaceId)
+            .gt('cursor', after)
+            .lte('cursor', currentCursor)
+            .order('cursor', { ascending: true })
+            .limit(pageSize + 1)
+        )
+      ]);
+      const hasMore = found.length > pageSize;
+      return {
+        rows: found.slice(0, pageSize).map(row => ({
+          cursor: String(row.cursor),
+          table: row.table_name,
+          rowKey: row.row_key,
+          operation: row.operation,
+          createdAt: row.created_at
+        })),
+        hasMore,
+        oldestCursor: oldestRows[0] ? String(oldestRows[0].cursor) : null,
+        currentCursor
+      } satisfies BoardChangeLogPage;
+    },
+
+    async snapshot(workspaceId, access): Promise<BoardState> {
+      const [projectRows, agentRows] = await Promise.all([
+        everyRow<ProjectRow>((from, to) =>
+          client.from('projects').select('*').eq('workspace_id', workspaceId).order('id').range(from, to)
+        ),
+        access.canReadAgents
+          ? everyRow<AgentRow>((from, to) =>
+              client.from('agents').select('*').eq('workspace_id', workspaceId).order('id').range(from, to)
+            )
+          : Promise.resolve([] as AgentRow[])
+      ]);
+      let issues: Issue[] = [];
+      if (access.canReadIssues) {
+        let issueQuery = client.from('issues').select('*').eq('workspace_id', workspaceId);
+        if (access.allowedProjectIds) {
+          const projectIds = [...access.allowedProjectIds];
+          if (!projectIds.length) issueQuery = null as any;
+          else issueQuery = issueQuery.in('project_id', projectIds);
+        }
+        const issueRows = issueQuery
+          ? await everyRow<IssueRow>((from, to) => issueQuery.order('id').range(from, to))
+          : [];
+        const comments = await commentsForIssues(workspaceId, issueRows.map(row => row.id));
+        const byIssue = new Map<string, IssueComment[]>();
+        for (const comment of comments) {
+          const group = byIssue.get(comment.issueId) ?? [];
+          group.push(comment);
+          byIssue.set(comment.issueId, group);
+        }
+        issues = issueRows.map(row => toIssue(row, byIssue.get(row.id) ?? []));
+      }
+      return {
+        projects: projectRows.map(toProject),
+        agents: agentRows.map(toAgent),
+        issues
+      };
+    },
+
+    async readRows(workspaceId, changes, access) {
+      const grouped = new Map<BoardTable, BoardChangeLogRow[]>();
+      for (const change of changes) {
+        const group = grouped.get(change.table) ?? [];
+        group.push(change);
+        grouped.set(change.table, group);
+      }
+
+      const result = new Map<string, Record<string, unknown>>();
+      for (const [table, tableChanges] of grouped) {
+        const ids = [...new Set(tableChanges.map(change => change.rowKey.id).filter(Boolean))];
+        if (!ids.length) continue;
+        let rows: Array<Record<string, unknown>> = [];
+
+        switch (table) {
+          case 'projects': {
+            let query = client.from('projects').select('*').eq('workspace_id', workspaceId).in('id', ids);
+            if (access.allowedProjectIds) {
+              const allowed = ids.filter(id => access.allowedProjectIds?.has(id));
+              if (!allowed.length) continue;
+              query = query.in('id', allowed);
+            }
+            rows = (await dataApiRows<ProjectRow>(query)).map(row => toProject(row) as unknown as Record<string, unknown>);
+            break;
+          }
+          case 'issues': {
+            if (!access.canReadIssues) continue;
+            let query = client.from('issues').select('*').eq('workspace_id', workspaceId).in('id', ids);
+            if (access.allowedProjectIds) {
+              const allowed = [...access.allowedProjectIds];
+              if (!allowed.length) continue;
+              query = query.in('project_id', allowed);
+            }
+            rows = (await dataApiRows<IssueRow>(query)).map(issueChangeRow);
+            break;
+          }
+          case 'issue_comments': {
+            if (!access.canReadIssues) continue;
+            const candidates = await dataApiRows<CommentRow>(
+              client.from('issue_comments').select('*').in('id', ids)
+            );
+            const allowedParentIds = await currentIssueIds(
+              workspaceId,
+              [...new Set(candidates.map(row => row.issue_id))],
+              access.allowedProjectIds
+            );
+            rows = candidates
+              .filter(row => allowedParentIds.includes(row.issue_id))
+              .map(row => toComment(row) as unknown as Record<string, unknown>);
+            break;
+          }
+          case 'agents': {
+            if (!access.canReadAgents) continue;
+            rows = (await dataApiRows<AgentRow>(
+              client.from('agents').select('*').eq('workspace_id', workspaceId).in('id', ids)
+            )).map(row => toAgent(row) as unknown as Record<string, unknown>);
+            break;
+          }
+          case 'squads': {
+            if (!access.canReadSquads) continue;
+            rows = (await dataApiRows<SquadRow>(
+              client.from('squads').select('*').eq('workspace_id', workspaceId).in('id', ids)
+            )).map(row => toSquad(row) as unknown as Record<string, unknown>);
+            break;
+          }
+          case 'workspace_squad_owners':
+          case 'workspace_squad_projects': {
+            if (!access.canReadSquads) continue;
+            rows = await dataApiRows<Record<string, unknown>>(
+              client.from(table).select('*').eq('workspace_id', workspaceId).in('id', ids)
+            );
+            break;
+          }
+          case 'workspace_project_assignments': {
+            let query = client.from('workspace_project_assignments').select('*').eq('workspace_id', workspaceId).in('id', ids);
+            if (access.allowedProjectIds) {
+              const allowed = [...access.allowedProjectIds];
+              if (!allowed.length) continue;
+              query = query.in('project_id', allowed);
+            }
+            rows = await dataApiRows<Record<string, unknown>>(query);
+            break;
+          }
+        }
+
+        const byId = new Map(rows.map(row => [String(row.id), row]));
+        for (const change of tableChanges) {
+          const row = byId.get(change.rowKey.id);
+          if (row) result.set(boardChangeKey(table, change.rowKey), row);
+        }
+      }
+      return result;
     }
   };
 }

@@ -23,6 +23,7 @@ let sharing = true;
 let connectionProblem: string | null = null;
 let shared: string[];
 let githubFails = false;
+const boardChangeCalls: Array<[string, ...unknown[]]> = [];
 
 const now = '2026-09-22T10:00:00.000Z';
 const REPO = [{ id: 'r1', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }];
@@ -51,6 +52,34 @@ const teamBoard = {
   projectAssignments: async () => []
 };
 
+const teamBoardChangeSource = {
+  watermark: async (workspaceId: string) => {
+    boardChangeCalls.push(['watermark', workspaceId]);
+    return '1';
+  },
+  readAfter: async (workspaceId: string, after: string, limit: number) => {
+    boardChangeCalls.push(['readAfter', workspaceId, after, limit]);
+    return {
+      rows: [{ cursor: '2', table: 'projects', rowKey: { id: 'gh-repo-100' }, operation: 'update', createdAt: now }],
+      hasMore: false,
+      oldestCursor: '1',
+      currentCursor: '2'
+    };
+  },
+  snapshot: async () => ({
+    projects: await teamBoard.projects(),
+    agents: await teamBoard.agents(),
+    issues: await teamBoard.issues()
+  }),
+  readRows: async (_workspaceId: string, changes: Array<{ table: string; rowKey: Record<string, string> }>) => {
+    const projects = await teamBoard.projects();
+    return new Map(changes.map(change => [
+      `${change.table}:${JSON.stringify(change.rowKey)}`,
+      projects.find(row => row.id === change.rowKey.id)
+    ]));
+  }
+};
+
 async function startApi() {
   process.env.ALPHA_HOME = tmp;
   delete process.env.ALPHA_MODE;
@@ -67,6 +96,7 @@ async function startApi() {
       connectionProblem: () => connectionProblem,
       isConfigured: () => sharing,
       boardSource: () => teamBoard,
+      boardChangeSource: () => teamBoardChangeSource,
       shareIssue: async (issue: any) => void shared.push(`issue ${issue.id}`),
       unshareIssue: async (id: string) => void shared.push(`delete ${id}`),
       shareProject: async (project: any) => void shared.push(`project ${project.id}`),
@@ -140,6 +170,7 @@ beforeEach(() => {
   shared = [];
   connectionProblem = null;
   githubFails = false;
+  boardChangeCalls.length = 0;
 });
 
 afterEach(async () => {
@@ -217,6 +248,92 @@ describe('syncing a desktop on a team', () => {
     } finally {
       teamBoard.projects = projects;
     }
+  });
+});
+
+describe('incremental board reads on a team desktop', () => {
+  it('uses the signed-in board source for bootstrap and catch-up pages', async () => {
+    const { app } = await startApi();
+
+    const bootstrap = await call(app, 'GET', '/api/board/bootstrap');
+    expect(bootstrap.status).toBe(200);
+    expect(bootstrap.body).toMatchObject({
+      workspaceId: 'ws-default',
+      cursor: { workspaceId: 'ws-default', value: '1' },
+      projects: [{ id: 'gh-repo-100' }]
+    });
+    expect(boardChangeCalls).toContainEqual(['watermark', 'ws-default']);
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: '1' },
+      limit: 10
+    });
+    expect(page.status).toBe(200);
+    expect(page.body).toMatchObject({
+      workspaceId: 'ws-default',
+      nextCursor: { workspaceId: 'ws-default', value: '2' },
+      changes: [{ table: 'projects', operation: 'update', row: { id: 'gh-repo-100' } }]
+    });
+    expect(boardChangeCalls).toContainEqual(['readAfter', 'ws-default', '1', 10]);
+  });
+
+  it('uses only the supplied user client and scopes log and row reads to its workspace', async () => {
+    const { supabaseBoardChangeSource } = await import('../services/sharedBoard.js');
+    const requests: Array<{
+      table: string;
+      columns: string;
+      filters: unknown[][];
+    }> = [];
+    const client = {
+      from(table: string) {
+        const request = { table, columns: '', filters: [] as unknown[][] };
+        requests.push(request);
+        const query: any = {
+          select(columns: string) { request.columns = columns; return query; },
+          eq(column: string, value: unknown) { request.filters.push(['eq', column, value]); return query; },
+          in(column: string, value: unknown[]) { request.filters.push(['in', column, value]); return query; },
+          gt(column: string, value: unknown) { request.filters.push(['gt', column, value]); return query; },
+          lte(column: string, value: unknown) { request.filters.push(['lte', column, value]); return query; },
+          order() { return query; },
+          limit() { return query; },
+          range() { return query; },
+          maybeSingle: async () => ({ data: { last_cursor: '7' }, error: null }),
+          then(resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) {
+            let data: unknown[] = [];
+            if (table === 'workspace_board_changes' && request.columns === 'cursor') data = [{ cursor: '1' }];
+            if (table === 'workspace_board_changes' && request.columns !== 'cursor') data = [{
+              cursor: '2', table_name: 'projects', row_key: { id: 'changed-id' },
+              operation: 'update', created_at: now
+            }];
+            if (table === 'projects') data = [{
+              id: 'changed-id', name: 'Changed', key: 'CHG', description: '', color: '', icon: '',
+              status: 'in_progress', priority: 'medium', start_date: now, target_date: null,
+              lead_type: 'agent', lead_name: '', lead_agent_id: null, resources: [], github_org: null,
+              created_by: 'PM1', created_at: now
+            }];
+            return Promise.resolve({ data, error: null }).then(resolve, reject);
+          }
+        };
+        return query;
+      }
+    };
+    const source = supabaseBoardChangeSource(client as any);
+    const access = { canReadIssues: true, canReadAgents: true, canReadSquads: true };
+
+    expect(await source.watermark('ws-user')).toBe('7');
+    const page = await source.readAfter('ws-user', '0', 25);
+    expect(page.rows).toHaveLength(1);
+    const rows = await source.readRows('ws-user', page.rows, access);
+    expect([...rows.values()][0]).toMatchObject({ id: 'changed-id', name: 'Changed' });
+
+    const logReads = requests.filter(request => request.table === 'workspace_board_changes');
+    expect(logReads.length).toBeGreaterThanOrEqual(2);
+    expect(logReads.every(request => request.filters.some(filter =>
+      filter[0] === 'eq' && filter[1] === 'workspace_id' && filter[2] === 'ws-user'
+    ))).toBe(true);
+    const projectRead = requests.find(request => request.table === 'projects');
+    expect(projectRead?.filters).toContainEqual(['eq', 'workspace_id', 'ws-user']);
+    expect(projectRead?.filters).toContainEqual(['in', 'id', ['changed-id']]);
   });
 });
 
