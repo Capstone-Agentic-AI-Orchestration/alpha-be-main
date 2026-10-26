@@ -78,14 +78,18 @@ async function boardChangeSyncFor(req: Request): Promise<BoardChangeSync | null>
     canReadSquads: workspaceRegistry.can(req.workspace!.role, 'squad.read')
   };
 
+  // Keep snapshots and deltas aligned with GET /projects and GET /issues.
+  // This matters on desktop too: its signed-in Data API client applies RLS,
+  // while this set also enforces the app's project-assignment rules.
+  const projects = await projectStore().list(workspaceId);
+  access.allowedProjectIds = workspaceRegistry.projectIdsFor(
+    req.workspace!,
+    projects.map(project => project.id)
+  );
+
   if (IS_CLOUD) {
     // The cloud connection bypasses RLS; apply the same visible-project set
     // that GET /projects and GET /issues use before reading current rows.
-    const projects = await projectStore().list(workspaceId);
-    access.allowedProjectIds = workspaceRegistry.projectIdsFor(
-      req.workspace!,
-      projects.map(project => project.id)
-    );
     return new BoardChangeSync(boardChangeStore(), access);
   }
 

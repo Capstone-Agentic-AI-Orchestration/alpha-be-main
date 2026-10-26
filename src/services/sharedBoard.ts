@@ -57,12 +57,14 @@ import {
 
 /** Who owns a squad, and which projects it serves. */
 export interface SquadOwnerRow {
+  id?: string;
   squad_id: string;
   user_id: string;
   status: string;
 }
 
 export interface SquadProjectRow {
+  id?: string;
   squad_id: string;
   project_id: string;
   relationship: string;
@@ -71,6 +73,7 @@ export interface SquadProjectRow {
 
 /** Which person is on which project. */
 export interface ProjectAssignmentRow {
+  id?: string;
   project_id: string;
   user_id: string;
   status: string;
@@ -119,6 +122,8 @@ export interface PullReport {
   /** The authorized snapshot, after local merge rules have been applied. */
   snapshot?: BoardState;
 }
+
+const pendingBoardPageApplications = new Map<string, Promise<void>>();
 
 /**
  * A pull, in the shape the app already reads from a GitHub sync.
@@ -593,14 +598,33 @@ function emptyPullReport(): PullReport {
 }
 
 /** Apply one bounded page to this desktop's SQLite mirror before advancing its cursor. */
-export async function applySharedBoardChanges(workspaceId: string, page: BoardChangePage): Promise<void> {
+export function applySharedBoardChanges(workspaceId: string, page: BoardChangePage): Promise<void> {
   if (page.workspaceId !== workspaceId || page.nextCursor.workspaceId !== workspaceId) {
     throw new Error('The board change page does not match the active workspace.');
   }
   if (!/^(0|[1-9]\d*)$/.test(page.nextCursor.value)) {
     throw new Error('The next board cursor must be a non-negative decimal number.');
   }
-  if (page.resetRequired) return;
+  if (page.resetRequired) return Promise.resolve();
+
+  const previous = pendingBoardPageApplications.get(workspaceId) ?? Promise.resolve();
+  const applying = previous
+    .then(() => applySharedBoardChangesInOrder(workspaceId, page));
+  pendingBoardPageApplications.set(workspaceId, applying);
+  void applying.then(
+    () => {
+      if (pendingBoardPageApplications.get(workspaceId) === applying) pendingBoardPageApplications.delete(workspaceId);
+    },
+    () => {
+      if (pendingBoardPageApplications.get(workspaceId) === applying) pendingBoardPageApplications.delete(workspaceId);
+    }
+  );
+  return applying;
+}
+
+async function applySharedBoardChangesInOrder(workspaceId: string, page: BoardChangePage): Promise<void> {
+  const savedCursor = sqliteService.getBoardSyncCursor(workspaceId);
+  if (savedCursor !== null && BigInt(page.nextCursor.value) <= BigInt(savedCursor)) return;
 
   const report = emptyPullReport();
   const deletes = page.changes.filter(change => change.operation === 'delete');
@@ -652,13 +676,33 @@ async function applySharedBoardRow(workspaceId: string, change: BoardChange, rep
       return;
     case 'workspace_squad_owners': {
       const owner = row as unknown as SquadOwnerRow;
-      if (owner.status === 'active') await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
-      else await workspaceRegistry.unbind('squads', owner.squad_id);
+      if (owner.id) {
+        workspaceRegistry.syncBoardSquadOwner({
+          id: owner.id,
+          workspaceId,
+          squadId: owner.squad_id,
+          userId: owner.user_id,
+          status: owner.status === 'active' ? 'active' : 'removed'
+        });
+      } else if (owner.status === 'active') {
+        await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
+      } else {
+        await workspaceRegistry.unbind('squads', owner.squad_id);
+      }
       return;
     }
     case 'workspace_squad_projects': {
       const link = row as unknown as SquadProjectRow;
-      if (link.status === 'active') {
+      if (link.id) {
+        workspaceRegistry.syncBoardSquadProject({
+          id: link.id,
+          workspaceId,
+          squadId: link.squad_id,
+          projectId: link.project_id,
+          relationship: link.relationship === 'owned' ? 'owned' : 'assigned',
+          status: link.status === 'active' ? 'active' : 'removed'
+        });
+      } else if (link.status === 'active') {
         await workspaceRegistry.assignSquadProject(
           workspaceId, link.squad_id, link.project_id, link.relationship === 'owned' ? 'owned' : 'assigned'
         );
@@ -669,7 +713,15 @@ async function applySharedBoardRow(workspaceId: string, change: BoardChange, rep
     }
     case 'workspace_project_assignments': {
       const assignment = row as unknown as ProjectAssignmentRow;
-      if (assignment.status === 'active') {
+      if (assignment.id) {
+        workspaceRegistry.syncBoardProjectAssignment({
+          id: assignment.id,
+          workspaceId,
+          projectId: assignment.project_id,
+          userId: assignment.user_id,
+          status: assignment.status === 'active' ? 'active' : 'removed'
+        });
+      } else if (assignment.status === 'active') {
         await workspaceRegistry.assignProject(workspaceId, assignment.project_id, assignment.user_id);
       } else {
         await workspaceRegistry.removeProjectAssignment(workspaceId, assignment.project_id, assignment.user_id);
@@ -711,10 +763,13 @@ async function removeSharedBoardRow(workspaceId: string, change: BoardChange): P
       return;
     }
     case 'workspace_squad_owners':
+      workspaceRegistry.deleteBoardSquadOwner(workspaceId, id);
+      return;
     case 'workspace_squad_projects':
+      workspaceRegistry.deleteBoardSquadProject(workspaceId, id);
+      return;
     case 'workspace_project_assignments':
-      // These rows are retired by changing status; parent deletes clean up
-      // their local bindings. A physical child delete has no current row body.
+      workspaceRegistry.deleteBoardProjectAssignment(workspaceId, id);
       return;
   }
 }
@@ -843,13 +898,33 @@ async function applySquadBindings(
 
   for (const owner of owners) {
     if (!squads.has(owner.squad_id)) continue;
-    if (owner.status === 'active') await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
-    else await workspaceRegistry.unbind('squads', owner.squad_id);
+    if (owner.id) {
+      workspaceRegistry.syncBoardSquadOwner({
+        id: owner.id,
+        workspaceId,
+        squadId: owner.squad_id,
+        userId: owner.user_id,
+        status: owner.status === 'active' ? 'active' : 'removed'
+      });
+    } else if (owner.status === 'active') {
+      await workspaceRegistry.bindSquadOwner(workspaceId, owner.squad_id, owner.user_id);
+    } else {
+      await workspaceRegistry.unbind('squads', owner.squad_id);
+    }
   }
 
   for (const link of links) {
     if (!squads.has(link.squad_id) || !projects.has(link.project_id)) continue;
-    if (link.status === 'active') {
+    if (link.id) {
+      workspaceRegistry.syncBoardSquadProject({
+        id: link.id,
+        workspaceId,
+        squadId: link.squad_id,
+        projectId: link.project_id,
+        relationship: link.relationship === 'owned' ? 'owned' : 'assigned',
+        status: link.status === 'active' ? 'active' : 'removed'
+      });
+    } else if (link.status === 'active') {
       await workspaceRegistry.assignSquadProject(
         workspaceId,
         link.squad_id,
@@ -876,7 +951,17 @@ async function applySquadBindings(
 async function applyProjectAssignments(workspaceId: string, rows: ProjectAssignmentRow[]): Promise<void> {
   const cloud = new Map(rows.map(row => [JSON.stringify([row.project_id, row.user_id]), row]));
   for (const row of rows) {
-    if (row.status === 'active') await workspaceRegistry.assignProject(workspaceId, row.project_id, row.user_id);
+    if (row.id) {
+      workspaceRegistry.syncBoardProjectAssignment({
+        id: row.id,
+        workspaceId,
+        projectId: row.project_id,
+        userId: row.user_id,
+        status: row.status === 'active' ? 'active' : 'removed'
+      });
+    } else if (row.status === 'active') {
+      await workspaceRegistry.assignProject(workspaceId, row.project_id, row.user_id);
+    }
   }
   for (const local of await workspaceRegistry.listProjectAssignments(workspaceId)) {
     if (local.status !== 'active') continue;

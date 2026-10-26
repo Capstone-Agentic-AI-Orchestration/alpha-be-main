@@ -25,6 +25,7 @@ let shared: string[];
 let githubFails = false;
 const boardChangeCalls: Array<[string, ...unknown[]]> = [];
 const boardSyncOrder: string[] = [];
+const boardChangeAccesses: Array<{ allowedProjectIds?: ReadonlySet<string> }> = [];
 
 const now = '2026-09-22T10:00:00.000Z';
 const REPO = [{ id: 'r1', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }];
@@ -76,12 +77,19 @@ const teamBoardChangeSource = {
     agents: await teamBoard.agents(),
     issues: await teamBoard.issues()
   }),
-  readRows: async (_workspaceId: string, changes: Array<{ table: string; rowKey: Record<string, string> }>) => {
+  readRows: async (
+    _workspaceId: string,
+    changes: Array<{ table: string; rowKey: Record<string, string> }>,
+    access: { allowedProjectIds?: ReadonlySet<string> }
+  ) => {
+    boardChangeAccesses.push(access);
     const projects = await teamBoard.projects();
-    return new Map(changes.map(change => [
+    return new Map(changes
+      .filter(change => !access.allowedProjectIds || access.allowedProjectIds.has(change.rowKey.id))
+      .map(change => [
       `${change.table}:${JSON.stringify(change.rowKey)}`,
       projects.find(row => row.id === change.rowKey.id)
-    ]));
+      ]));
   }
 };
 
@@ -177,6 +185,7 @@ beforeEach(() => {
   githubFails = false;
   boardChangeCalls.length = 0;
   boardSyncOrder.length = 0;
+  boardChangeAccesses.length = 0;
 });
 
 afterEach(async () => {
@@ -261,6 +270,20 @@ describe('syncing a desktop on a team', () => {
 });
 
 describe('incremental board reads on a team desktop', () => {
+  it('limits delta row lookups to the client’s assigned projects', async () => {
+    role = 'client';
+    const { app } = await startApi();
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: '1' },
+      limit: 10
+    });
+
+    expect(page.status).toBe(200);
+    expect(boardChangeAccesses[0]?.allowedProjectIds).toEqual(new Set());
+    expect(page.body.changes).toEqual([]);
+  });
+
   it('uses the signed-in board source for bootstrap and catch-up pages', async () => {
     const { app, svc } = await startApi();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});

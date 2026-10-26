@@ -146,6 +146,36 @@ describe('durable workspace board change log', () => {
     ]);
   });
 
+  it('replays existing issue comments when their parent issue moves workspaces', async () => {
+    await db.exec(`
+      insert into projects (id,workspace_id,name,key,created_by)
+        values ('moving-comment-project','ws1','Comment project','MCP','PM1');
+      insert into issues (id,workspace_id,identifier,title,status,priority,project_id)
+        values ('moving-comment-issue','ws1','MCP-1','Moving issue','todo','normal','moving-comment-project');
+      insert into issue_comments (id,issue_id,author_type,author_name,content)
+        values ('moving-comment','moving-comment-issue','user','Lloyd','Keep this comment');
+    `);
+    const prior = await db.query<{ workspace_id: string; cursor: string }>(`
+      select w.id as workspace_id, coalesce(c.last_cursor, 0)::text as cursor
+      from (values ('ws1'::text), ('ws2'::text)) as w(id)
+      left join public.workspace_board_cursors c on c.workspace_id = w.id
+      order by w.id
+    `);
+
+    await db.exec(`update issues set workspace_id='ws2' where id='moving-comment-issue'`);
+
+    const result = await db.query<{ workspace_id: string; operation: string }>(`
+      select workspace_id, operation from public.workspace_board_changes
+      where table_name='issue_comments' and row_key->>'id'='moving-comment'
+        and ((workspace_id='ws1' and cursor > $1) or (workspace_id='ws2' and cursor > $2))
+      order by workspace_id, cursor
+    `, prior.rows.map(row => row.cursor));
+    expect(result.rows).toEqual([
+      { workspace_id: 'ws1', operation: 'delete' },
+      { workspace_id: 'ws2', operation: 'insert' }
+    ]);
+  });
+
   it('resolves an issue comment workspace through its parent issue', async () => {
     await db.exec(`
       insert into projects (id,workspace_id,name,key,created_by)

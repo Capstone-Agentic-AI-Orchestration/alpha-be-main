@@ -533,6 +533,29 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
     return result.changes > 0;
   }
 
+  syncBoardProjectAssignment(row: {
+    id: string;
+    workspaceId: string;
+    projectId: string;
+    userId: string;
+    status: 'active' | 'removed';
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO workspace_project_assignments (id, workspace_id, project_id, user_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id, project_id, user_id) DO UPDATE SET
+        id = excluded.id, status = excluded.status, updated_at = excluded.updated_at
+    `).run(row.id, row.workspaceId, row.projectId, row.userId, row.status, now, now);
+  }
+
+  deleteBoardProjectAssignment(workspaceId: string, id: string): void {
+    this.db.prepare(`
+      UPDATE workspace_project_assignments SET status = 'removed', updated_at = ?
+      WHERE workspace_id = ? AND id = ?
+    `).run(new Date().toISOString(), workspaceId, id);
+  }
+
   async bindSquadOwner(workspaceId: string, squadId: string, userId: string): Promise<void> {
     const now = new Date().toISOString();
     this.db
@@ -543,6 +566,29 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
          DO UPDATE SET user_id = excluded.user_id, status = 'active', updated_at = excluded.updated_at`
       )
       .run(`squad-owner-${randomUUID()}`, workspaceId, squadId, userId, now, now);
+  }
+
+  syncBoardSquadOwner(row: {
+    id: string;
+    workspaceId: string;
+    squadId: string;
+    userId: string;
+    status: 'active' | 'removed';
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO workspace_squad_owners (id, workspace_id, squad_id, user_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id, squad_id) DO UPDATE SET
+        id = excluded.id, user_id = excluded.user_id, status = excluded.status, updated_at = excluded.updated_at
+    `).run(row.id, row.workspaceId, row.squadId, row.userId, row.status, now, now);
+  }
+
+  deleteBoardSquadOwner(workspaceId: string, id: string): void {
+    this.db.prepare(`
+      UPDATE workspace_squad_owners SET status = 'removed', updated_at = ?
+      WHERE workspace_id = ? AND id = ?
+    `).run(new Date().toISOString(), workspaceId, id);
   }
 
   async releaseSquadOwner(squadId: string): Promise<void> {
@@ -580,6 +626,34 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
       )
       .run(new Date().toISOString(), workspaceId, squadId, projectId);
     return result.changes > 0;
+  }
+
+  syncBoardSquadProject(row: {
+    id: string;
+    workspaceId: string;
+    squadId: string;
+    projectId: string;
+    relationship: 'owned' | 'assigned';
+    status: 'active' | 'removed';
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO workspace_squad_projects
+        (id, workspace_id, squad_id, project_id, relationship, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id, squad_id, project_id) DO UPDATE SET
+        id = excluded.id, relationship = excluded.relationship, status = excluded.status,
+        updated_at = excluded.updated_at
+    `).run(
+      row.id, row.workspaceId, row.squadId, row.projectId, row.relationship, row.status, now, now
+    );
+  }
+
+  deleteBoardSquadProject(workspaceId: string, id: string): void {
+    this.db.prepare(`
+      UPDATE workspace_squad_projects SET status = 'removed', updated_at = ?
+      WHERE workspace_id = ? AND id = ?
+    `).run(new Date().toISOString(), workspaceId, id);
   }
 
   /** Already true: `migrate()` inserts the row when the directory opens. */
