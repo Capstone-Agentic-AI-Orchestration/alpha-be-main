@@ -40,7 +40,11 @@ const PUBLIC_EXACT = [
   // sign-in. The answer is a client id, which is public by construction.
   '/github/app/client',
   // The desktop has no session; this verifies the GitHub token it presents.
-  '/database/token/exchange'
+  '/database/token/exchange',
+  // Uses the same verified GitHub-bearer desktop identity to return runnable MCP specs.
+  '/mcp/servers/runtime',
+  // Returns redacted catalog metadata to a signed-in desktop settings view.
+  '/mcp/servers/catalog'
 ];
 const PUBLIC_PREFIXES = ['/download/'];
 

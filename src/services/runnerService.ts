@@ -647,6 +647,9 @@ export class RunnerService extends EventEmitter {
     const taskRepository = task?.repository ?? issue.githubRepo ?? 'task';
     const taskRoots = task ? [{ name: path.basename(cwd), repo: taskRepository, dir: cwd }] : undefined;
     const taskMcpServers = task ? ['alpha-task-files', ...(['audit', 'review', 'delivery'].includes(task.kind) ? ['alpha-github'] : [])] : persona.mcpServers;
+    const workspaceMcpRuntime = !ctx.orchestration && agent.id
+      ? await supabaseService.workspaceMcpRuntime(agent.id, ctx.workspaceId ?? currentWorkspaceId())
+      : null;
     reportIgnoredProjectEnv(ctx.project);
     const { env } = buildEnv(agent.envVars);
     /*
@@ -656,7 +659,7 @@ export class RunnerService extends EventEmitter {
      */
     const mcp = writeRunMcpConfig(
       runId,
-      taskMcpServers,
+      workspaceMcpRuntime?.mcpServers ?? taskMcpServers,
       env,
       cwd,
       access,
@@ -666,7 +669,9 @@ export class RunnerService extends EventEmitter {
       task ? { taskId: task.id, repository: taskRepository, kind: task.kind,
         includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths,
         requiredChecks: task.requiredChecks, reportOnly: Boolean(ctx.orchestration?.taskPackage.reportCorrection),
-        dependencyAudit: task.dependencyAudit, role: persona.role, auditDirectory: path.join(runDir, 'audits') } : undefined
+        dependencyAudit: task.dependencyAudit, role: persona.role, auditDirectory: path.join(runDir, 'audits') } : undefined,
+      workspaceMcpRuntime?.servers,
+      Boolean(!ctx.orchestration && agent.id && supabaseService.sharesBoard())
     );
 
     /**

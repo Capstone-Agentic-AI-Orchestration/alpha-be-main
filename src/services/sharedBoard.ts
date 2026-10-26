@@ -334,11 +334,11 @@ export async function pullSharedBoard(
 /**
  * The team's agents and squads, onto this machine.
  *
- * What the local persona file declares is left alone: the file is this
- * machine's authority on how an agent behaves, and `updateAgent` rewrites the
- * file's frontmatter from whatever it is given. What this machine has and the
- * team does not is collected to be published, so that an issue assigned to it
- * is a reference the cloud can keep -- `0011` enforces that again.
+ * Local persona prose and machine-only settings stay local. Workspace MCP
+ * grants are shared intentionally: an admin may grant a server on the web,
+ * and the next desktop pull must update both SQLite and the persona frontmatter
+ * before that agent can run it. What this machine has and the team does not is
+ * collected to be published, so issue assignments remain valid in the cloud.
  */
 function applyRoster(agents: Agent[], squads: Squad[], report: PullReport): void {
   const localAgents = sqliteService.getAgents();
@@ -409,7 +409,7 @@ function applyRoster(agents: Agent[], squads: Squad[], report: PullReport): void
   report.unpublished.squads = localSquads.filter(squad => !sharedSquads.has(squad.id));
 }
 
-/** The fields of an agent the team decides, minus whatever its persona file declares here. */
+/** Team-owned fields; local persona frontmatter may override them except shared MCP grants. */
 function sharedAgentFields(cloud: Agent, declaredInFile: string[]): Partial<Agent> {
   const fields: Partial<Agent> = {
     name: cloud.name,
@@ -429,7 +429,12 @@ function sharedAgentFields(cloud: Agent, declaredInFile: string[]): Partial<Agen
     isArchived: cloud.isArchived,
     allowedUsers: cloud.allowedUsers
   };
-  for (const key of declaredInFile) delete fields[key as keyof Agent];
+  // Workspace grants must reach a developer's run even when a local persona
+  // file already has an mcpServers field. updateAgent writes this explicit
+  // value through to that file while preserving its prompt body.
+  for (const key of declaredInFile) {
+    if (key !== 'mcpServers') delete fields[key as keyof Agent];
+  }
   return fields;
 }
 

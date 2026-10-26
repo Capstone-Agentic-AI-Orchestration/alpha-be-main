@@ -55,7 +55,7 @@ export interface McpCatalog {
   mcpServers: Record<string, McpServerSpec>;
 }
 
-/** User-editable catalog of MCP servers available to any agent. */
+/** Machine-local MCP fallback for solo/offline workspaces. */
 export const MCP_CATALOG_PATH = path.join(ALPHA_DIR, 'mcp.json');
 
 /**
@@ -128,7 +128,7 @@ export const BUILTIN_SERVERS: Record<string, McpServerSpec> = {
 };
 
 /**
- * Read the user catalog, if any.
+ * Read the machine-local fallback catalog, if any.
  *
  * A malformed file is reported and treated as empty rather than thrown: a typo
  * in an optional config should cost the agent its extra tools, not the turn.
@@ -144,10 +144,9 @@ export function readCatalog(): Record<string, McpServerSpec> {
   }
 }
 
-/** Every server an agent could be granted, built-ins plus user catalog. */
+/** Built-ins plus the machine-local fallback; workspace entries are layered at run time. */
 export function availableServers(): Record<string, McpServerSpec> {
-  // The catalog wins on a name collision, so a user can point `alpha-github`
-  // at their own build without editing Alpha.
+  // Local fallback wins on a name collision when no shared entry is present.
   return { ...BUILTIN_SERVERS, ...readCatalog() };
 }
 
@@ -316,11 +315,16 @@ export function writeRunMcpConfig(
    */
   projectFolder?: { dir: string; repos: string[] },
   /** Internal task authority, never accepted from a tool call or agent environment. */
-  taskScope?: TaskFileScope
+  taskScope?: TaskFileScope,
+  workspaceCatalog?: Record<string, McpServerSpec>,
+  workspaceCatalogAuthoritative = false
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
 
-  const available: Record<string, McpServerSpec> = { ...availableServers(), 'alpha-task-files': builtinServer('projectFilesMcpServer'),
+  const available: Record<string, McpServerSpec> = {
+    ...(workspaceCatalogAuthoritative ? BUILTIN_SERVERS : availableServers()),
+    ...(workspaceCatalog ?? {}),
+    'alpha-task-files': builtinServer('projectFilesMcpServer'),
     ...(projectRoots !== undefined ? { 'alpha-project-files': BUILTIN_SERVERS['alpha-project-files'], 'alpha-github': BUILTIN_SERVERS['alpha-github'] } : {}) };
   const mcpServers: Record<string, McpServerSpec> = {};
 
