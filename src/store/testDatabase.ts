@@ -92,6 +92,21 @@ const SUPABASE_STUBS = `
     );
   end;
   $$;
+
+  /* Database-triggered cursor-only board notices used by the new sync path. */
+  create function realtime.send(
+    payload jsonb,
+    event text,
+    topic text,
+    is_private boolean default true
+  ) returns uuid
+  language plpgsql as $$
+  begin
+    insert into realtime.messages (topic, extension, event, payload, private)
+    values (topic, 'broadcast', event, payload, is_private);
+    return null;
+  end;
+  $$;
 `;
 
 /** A fresh local database with provider stubs only. No network or real users. */
