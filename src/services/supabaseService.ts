@@ -19,6 +19,7 @@ import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
 import { DatabaseTokenClient } from './databaseTokenClient.js';
 import { RunPublishGate } from './runPublishGate.js';
+import type { McpServerSpec } from './mcpConfigService.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -75,6 +76,21 @@ async function githubCliToken(): Promise<string | null> {
 
 /** How often to repeat a sync failure, so a broken uplink is visible once and not endlessly. */
 const FAILURE_LOG_INTERVAL_MS = 5 * 60 * 1000;
+const WORKSPACE_MCP_CATALOG_TTL_MS = 60 * 1000;
+const WORKSPACE_MCP_CATALOG_TIMEOUT_MS = 10 * 1000;
+
+export interface WorkspaceMcpServerView {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  envKeys?: string[];
+  url?: string;
+  headerKeys?: string[];
+  builtin: boolean;
+  overridden: boolean;
+  grantedTo: string[];
+}
 
 /**
  * A run, as the cloud table wants it.
@@ -147,6 +163,16 @@ export class SupabaseService {
   private lastFailureLoggedAt = 0;
   private readonly publishGate = new RunPublishGate();
   private readonly runChannels = new Map<string, RealtimeChannel>();
+  private readonly workspaceMcpRuntimeCache = new Map<string, {
+    mcpServers: string[];
+    servers: Record<string, McpServerSpec>;
+    expiresAt: number;
+    staleUntil: number;
+  }>();
+  private readonly workspaceMcpViewsCache = new Map<string, {
+    servers: WorkspaceMcpServerView[];
+    expiresAt: number;
+  }>();
   private readonly tokens = new DatabaseTokenClient({
     cloudApi: ALPHA_CLOUD_API,
     githubToken: githubCliToken,
@@ -424,6 +450,143 @@ export class SupabaseService {
   async databaseToken(): Promise<{ token: string; expiresAt: string } | null> {
     if (!this.sharesBoard()) return null;
     return this.tokens.tokenWithExpiry();
+  }
+
+  /** Read the redacted workspace catalog for the desktop's MCP settings view. */
+  async workspaceMcpServerViews(workspaceId = currentWorkspaceId()): Promise<WorkspaceMcpServerView[] | null> {
+    if (!this.sharesBoard() || !ALPHA_CLOUD_API) return null;
+
+    const cached = this.workspaceMcpViewsCache.get(workspaceId);
+    if (cached && cached.expiresAt > Date.now()) return cached.servers.map(server => ({ ...server }));
+
+    const githubToken = await githubCliToken();
+    if (!githubToken) return cached ? cached.servers.map(server => ({ ...server })) : null;
+
+    try {
+      const response = await fetch(`${ALPHA_CLOUD_API}/mcp/servers/catalog`, {
+        headers: {
+          Authorization: `Bearer ${githubToken}`,
+          'X-Workspace-Id': workspaceId
+        },
+        signal: AbortSignal.timeout(WORKSPACE_MCP_CATALOG_TIMEOUT_MS)
+      });
+      if (!response.ok) {
+        throw new Error(`Alpha Cloud answered ${response.status} while loading the workspace MCP catalog.`);
+      }
+      const payload = await response.json() as { servers?: unknown };
+      if (!Array.isArray(payload.servers)) {
+        throw new Error('Alpha Cloud returned an invalid workspace MCP catalog.');
+      }
+
+      const servers = payload.servers as WorkspaceMcpServerView[];
+      this.workspaceMcpViewsCache.set(workspaceId, {
+        servers,
+        expiresAt: Date.now() + WORKSPACE_MCP_CATALOG_TTL_MS
+      });
+      return servers.map(server => ({ ...server }));
+    } catch (err) {
+      this.reportFailure('workspace MCP catalog', err);
+      return cached ? cached.servers.map(server => ({ ...server })) : null;
+    }
+  }
+
+  /** Fetch only the servers granted to one persona, for this desktop to execute. */
+  async workspaceMcpRuntime(
+    agentId: string,
+    workspaceId = currentWorkspaceId()
+  ): Promise<{ mcpServers: string[]; servers: Record<string, McpServerSpec> } | null> {
+    if (!this.sharesBoard() || !ALPHA_CLOUD_API || !agentId.trim()) return null;
+
+    const key = `${workspaceId}:${agentId}`;
+    const cached = this.workspaceMcpRuntimeCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { mcpServers: [...cached.mcpServers], servers: { ...cached.servers } };
+    }
+
+    const githubToken = await githubCliToken();
+    if (!githubToken) return cached && cached.staleUntil > Date.now()
+      ? { mcpServers: [...cached.mcpServers], servers: { ...cached.servers } }
+      : null;
+
+    try {
+      const response = await fetch(`${ALPHA_CLOUD_API}/mcp/servers/runtime?agentId=${encodeURIComponent(agentId)}`, {
+        headers: {
+          Authorization: `Bearer ${githubToken}`,
+          'X-Workspace-Id': workspaceId
+        },
+        signal: AbortSignal.timeout(WORKSPACE_MCP_CATALOG_TIMEOUT_MS)
+      });
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403 || response.status === 404) {
+          this.workspaceMcpRuntimeCache.delete(key);
+          return null;
+        }
+        throw new Error(`Alpha Cloud answered ${response.status} while loading this persona's MCP servers.`);
+      }
+      const payload = await response.json() as { mcpServers?: unknown; servers?: unknown };
+      if (!Array.isArray(payload.mcpServers) || !payload.mcpServers.every(name => typeof name === 'string') ||
+        !payload.servers || typeof payload.servers !== 'object' || Array.isArray(payload.servers)) {
+        throw new Error('Alpha Cloud returned an invalid persona MCP configuration.');
+      }
+
+      const result = {
+        mcpServers: payload.mcpServers as string[],
+        servers: payload.servers as Record<string, McpServerSpec>
+      };
+      this.workspaceMcpRuntimeCache.set(key, {
+        ...result,
+        expiresAt: Date.now() + WORKSPACE_MCP_CATALOG_TTL_MS,
+        staleUntil: Date.now() + WORKSPACE_MCP_CATALOG_TTL_MS * 2
+      });
+      return { mcpServers: [...result.mcpServers], servers: { ...result.servers } };
+    } catch (err) {
+      this.reportFailure('persona MCP runtime', err);
+      return cached && cached.staleUntil > Date.now()
+        ? { mcpServers: [...cached.mcpServers], servers: { ...cached.servers } }
+        : null;
+    }
+  }
+
+  /** Publish a local admin edit to the shared workspace catalog. */
+  async shareWorkspaceMcpServer(
+    workspaceId: string,
+    name: string,
+    spec: McpServerSpec,
+    actor: string
+  ): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
+    const { error } = await this.client.from('workspace_mcp_servers').upsert({
+      workspace_id: workspaceId,
+      name,
+      server_config: spec,
+      updated_by: actor,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'workspace_id,name' });
+    if (error) {
+      this.reportFailure(`share workspace MCP server ${name}`, error);
+      throw error;
+    }
+    this.workspaceMcpViewsCache.delete(workspaceId);
+    for (const key of this.workspaceMcpRuntimeCache.keys()) {
+      if (key.startsWith(`${workspaceId}:`)) this.workspaceMcpRuntimeCache.delete(key);
+    }
+    return true;
+  }
+
+  /** Remove a shared MCP entry when an admin deletes it from this desktop. */
+  async unshareWorkspaceMcpServer(workspaceId: string, name: string): Promise<boolean> {
+    if (!this.sharesBoard() || !this.client) return false;
+    const { error } = await this.client.from('workspace_mcp_servers')
+      .delete().eq('workspace_id', workspaceId).eq('name', name);
+    if (error) {
+      this.reportFailure(`remove workspace MCP server ${name}`, error);
+      throw error;
+    }
+    this.workspaceMcpViewsCache.delete(workspaceId);
+    for (const key of this.workspaceMcpRuntimeCache.keys()) {
+      if (key.startsWith(`${workspaceId}:`)) this.workspaceMcpRuntimeCache.delete(key);
+    }
+    return true;
   }
 
   /** Take a card this desktop deleted off the team's board too. */

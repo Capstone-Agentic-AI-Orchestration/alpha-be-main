@@ -57,6 +57,9 @@ export type WorkspaceCapability =
   | 'agent.read'
   | 'agent.run'
   | 'agent.manage'
+  | 'mcp.read'
+  | 'mcp.manage'
+  | 'mcp.execute'
   | 'squad.read'
   | 'squad.run'
   | 'squad.manage'
@@ -103,6 +106,8 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'agent.read',
     // Developers can maintain the local personas they are responsible for.
     'agent.manage',
+    'mcp.read',
+    'mcp.execute',
     'agent.run',
     'squad.read',
     'squad.run',
@@ -142,6 +147,9 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'agent.read',
     // A PM staffs the agents used by the projects they initiate.
     'agent.manage',
+    'mcp.read',
+    'mcp.manage',
+    'mcp.execute',
     'agent.run',
     'squad.read',
     'squad.run',
@@ -170,6 +178,9 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'agent.read',
     'agent.run',
     'agent.manage',
+    'mcp.read',
+    'mcp.manage',
+    'mcp.execute',
     'squad.read',
     'squad.run',
     'squad.manage',
