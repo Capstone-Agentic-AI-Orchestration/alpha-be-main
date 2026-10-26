@@ -1,4 +1,5 @@
 import type { Router } from 'express';
+import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 
 import type { TransactionalSql } from '../store/database.js';
 import type { TicketInvitationContentEmailProvider } from '../services/ticketInvitationEmailProvider.js';
@@ -94,6 +95,7 @@ export function createTicketClientComposition(input: {
   const messages = createTicketMessageService(new PostgresTicketTriageStore(input.database, { communicationEnabled: true }));
 
   const router = createTicketClientPortalRouteBoundary({
+    projectPortal: new PostgresClientProjectPortal(input.database),
     sessionStore: new PostgresTicketClientSessionStore(input.database),
     activationStore: new PostgresTicketClientActivationStore(input.database),
     workspaceStore: new PostgresTicketClientWorkspaceStore(input.database),

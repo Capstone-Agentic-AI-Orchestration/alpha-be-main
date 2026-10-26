@@ -15,6 +15,7 @@ import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
 import { route } from './asyncRoute.js';
+import type { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 import {
   readTicketClientCookie, ticketClientCookieNames, ticketClientOriginAllowed,
   ticketClientOriginPolicyValid, type TicketClientSessionCookiePolicy,
@@ -30,6 +31,7 @@ interface TicketQueuePage {
 /** Application services remain injected; this transport does not create a DB
  * adapter or rely on the PM/desktop GitHub session middleware. */
 export interface TicketClientApiApplication {
+  projectPortal?: PostgresClientProjectPortal;
   workflowCapabilities(): { phaseWorkflowEnabled: boolean };
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
   listWorkspaces(subject: TicketSubject): Promise<Array<{ workspaceId: string; displayName: string }>>;
@@ -261,6 +263,45 @@ export function createTicketClientApiRouter(
     const ticketId = req.params.ticketId ?? '';
     return opaqueTicketRequestValue(workspaceId) && opaqueTicketRequestValue(ticketId)
       ? { workspaceId, ticketId } : null;
+  }
+
+  if (application.projectPortal) {
+    const projects = application.projectPortal;
+    router.get('/projects', route(async (req, res) => {
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (subject) return res.json(await projects.projects(subject));
+    }));
+    router.get('/requests', route(async (req, res) => {
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (subject) return res.json(await projects.requests(subject, req.query));
+    }));
+    const projectPath = '/projects/:workspaceId/:projectId';
+    router.get(projectPath + '/requests', route(async (req, res) => {
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (subject) return res.json(await projects.requests(subject, req.query,
+        { workspaceId: req.params.workspaceId, projectId: req.params.projectId }));
+    }));
+    router.get(projectPath + '/preview/messages', route(async (req, res) => {
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (subject) return res.json(await projects.messages(
+        { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject, req.query));
+    }));
+    router.post(projectPath + '/preview/messages', route(async (req, res) => {
+      if (!available(res) || !allowedWriteOrigin(req, res)) return;
+      const subject = await authenticate(req, res, true);
+      if (subject) return res.json(await projects.reply(
+        { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject, req.body));
+    }));
+    router.get(projectPath + '/preview/messages/operations/:operationId', route(async (req, res) => {
+      if (!available(res)) return;
+      const subject = await authenticate(req, res, false);
+      if (subject) return res.json(await projects.operation(
+        { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject, req.params.operationId));
+    }));
   }
 
   router.get('/workspaces', route(async (req, res) => {

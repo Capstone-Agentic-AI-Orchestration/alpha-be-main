@@ -1,4 +1,6 @@
 import { Router, type Response } from 'express';
+import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
+import { createPmClientProjectRouter } from './clientProjectPortalController.js';
 import { createHmac } from 'node:crypto';
 
 import { ALPHA_ORG, ALPHA_SESSION_SECRET, isAllowedOrigin } from '../config/env.js';
@@ -127,6 +129,7 @@ export function createTicketPmReadRouteBoundary(
     router.use(createTicketCentralIntakeRouter(centralIntake, relayRequest));
   }
 
+  if (triageEnabled) router.use(createPmClientProjectRouter(new PostgresClientProjectPortal(db), relayRequest));
   router.use(createTicketQueueRouter(queue, relayRequest));
   router.use(createTicketReadRouter({ ...reads,
     async detail(target, subject) {
