@@ -23,16 +23,22 @@ let sharing = true;
 let connectionProblem: string | null = null;
 let shared: string[];
 let githubFails = false;
+const boardChangeCalls: Array<[string, ...unknown[]]> = [];
+const boardSyncOrder: string[] = [];
+const boardChangeAccesses: Array<{ allowedProjectIds?: ReadonlySet<string> }> = [];
 
 const now = '2026-09-22T10:00:00.000Z';
 const REPO = [{ id: 'r1', type: 'github_repo', name: 'repo', pathOrUrl: 'https://github.com/acme/checkout' }];
 
 const teamBoard = {
-  projects: async () => [
-    { id: 'gh-repo-100', name: 'checkout', key: 'CHK', description: '', color: '', icon: '', status: 'in_progress',
-      priority: 'medium', startDate: now, targetDate: '', leadType: 'agent', leadName: '', resources: REPO,
-      githubOrg: 'acme', createdAt: now, envVars: [] }
-  ],
+  projects: async () => {
+    boardSyncOrder.push('snapshot');
+    return [
+      { id: 'gh-repo-100', name: 'checkout', key: 'CHK', description: '', color: '', icon: '', status: 'in_progress',
+        priority: 'medium', startDate: now, targetDate: '', leadType: 'agent', leadName: '', resources: REPO,
+        githubOrg: 'acme', createdAt: now, envVars: [] }
+    ];
+  },
   issues: async () => [
     { id: 'gh-issue-9001', identifier: 'CHK-7', title: 'Cart loses items', description: '', status: 'todo',
       priority: 'high', projectId: 'gh-repo-100', labels: [], subtasks: [], comments: [],
@@ -51,6 +57,42 @@ const teamBoard = {
   projectAssignments: async () => []
 };
 
+const teamBoardChangeSource = {
+  watermark: async (workspaceId: string) => {
+    boardChangeCalls.push(['watermark', workspaceId]);
+    boardSyncOrder.push('watermark');
+    return '1';
+  },
+  readAfter: async (workspaceId: string, after: string, limit: number) => {
+    boardChangeCalls.push(['readAfter', workspaceId, after, limit]);
+    return {
+      rows: [{ cursor: '2', table: 'projects', rowKey: { id: 'gh-repo-100' }, operation: 'update', createdAt: now }],
+      hasMore: false,
+      oldestCursor: '1',
+      currentCursor: '2'
+    };
+  },
+  snapshot: async () => ({
+    projects: await teamBoard.projects(),
+    agents: await teamBoard.agents(),
+    issues: await teamBoard.issues()
+  }),
+  readRows: async (
+    _workspaceId: string,
+    changes: Array<{ table: string; rowKey: Record<string, string> }>,
+    access: { allowedProjectIds?: ReadonlySet<string> }
+  ) => {
+    boardChangeAccesses.push(access);
+    const projects = await teamBoard.projects();
+    return new Map(changes
+      .filter(change => !access.allowedProjectIds || access.allowedProjectIds.has(change.rowKey.id))
+      .map(change => [
+      `${change.table}:${JSON.stringify(change.rowKey)}`,
+      projects.find(row => row.id === change.rowKey.id)
+      ]));
+  }
+};
+
 async function startApi() {
   process.env.ALPHA_HOME = tmp;
   delete process.env.ALPHA_MODE;
@@ -67,6 +109,7 @@ async function startApi() {
       connectionProblem: () => connectionProblem,
       isConfigured: () => sharing,
       boardSource: () => teamBoard,
+      boardChangeSource: () => teamBoardChangeSource,
       shareIssue: async (issue: any) => void shared.push(`issue ${issue.id}`),
       unshareIssue: async (id: string) => void shared.push(`delete ${id}`),
       shareProject: async (project: any) => void shared.push(`project ${project.id}`),
@@ -115,7 +158,7 @@ async function startApi() {
   return { svc: sql.sqliteService as any, app };
 }
 
-async function call(app: express.Express, method: string, url: string, body?: unknown) {
+async function call(app: express.Express, method: string, url: string, body?: unknown, headers: Record<string, string> = {}) {
   const { createServer } = await import('node:http');
   const server = createServer(app);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -123,7 +166,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
   try {
     const res = await fetch(`http://127.0.0.1:${port}${url}`, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     return { status: res.status, body: (await res.json().catch(() => null)) as any };
@@ -140,6 +183,9 @@ beforeEach(() => {
   shared = [];
   connectionProblem = null;
   githubFails = false;
+  boardChangeCalls.length = 0;
+  boardSyncOrder.length = 0;
+  boardChangeAccesses.length = 0;
 });
 
 afterEach(async () => {
@@ -151,6 +197,7 @@ afterEach(async () => {
     }
   }
   delete process.env.ALPHA_HOME;
+  vi.restoreAllMocks();
   try {
     fs.rmSync(tmp, { recursive: true, force: true });
   } catch {
@@ -173,8 +220,10 @@ describe('syncing a desktop on a team', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ projectsImported: 1, created: 1, errors: [] });
+    expect(boardSyncOrder.indexOf('watermark')).toBeLessThan(boardSyncOrder.indexOf('snapshot'));
     const { runWithWorkspace } = await import('../services/workspaceContext.js');
     expect(runWithWorkspace('ws-default', () => svc.getIssues()).map((i: any) => i.id)).toContain('gh-issue-9001');
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('1');
   });
 
   it('still asks a desktop of its own for the right to read GitHub', async () => {
@@ -217,6 +266,127 @@ describe('syncing a desktop on a team', () => {
     } finally {
       teamBoard.projects = projects;
     }
+  });
+});
+
+describe('incremental board reads on a team desktop', () => {
+  it('limits delta row lookups to the client’s assigned projects', async () => {
+    role = 'client';
+    const { app } = await startApi();
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: '1' },
+      limit: 10
+    });
+
+    expect(page.status).toBe(200);
+    expect(boardChangeAccesses[0]?.allowedProjectIds).toEqual(new Set());
+    expect(page.body.changes).toEqual([]);
+  });
+
+  it('uses the signed-in board source for bootstrap and catch-up pages', async () => {
+    const { app, svc } = await startApi();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+    const clientHeaders = { 'X-Alpha-Client-Version': 'desktop-2.0.67' };
+    const bootstrap = await call(app, 'GET', '/api/board/bootstrap', undefined, clientHeaders);
+    expect(bootstrap.status).toBe(200);
+    expect(bootstrap.body).toMatchObject({
+      workspaceId: 'ws-default',
+      cursor: { workspaceId: 'ws-default', value: '1' },
+      projects: [{ id: 'gh-repo-100' }]
+    });
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('1');
+    expect(boardChangeCalls).toContainEqual(['watermark', 'ws-default']);
+    expect(JSON.parse(String(info.mock.calls[0][0]))).toEqual({
+      event: 'board_sync_metric',
+      workspaceId: 'ws-default',
+      clientVersion: 'desktop-2.0.67',
+      kind: 'snapshot',
+      changedRows: 3,
+      responseBytes: Buffer.byteLength(JSON.stringify(bootstrap.body), 'utf8')
+    });
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', value: '1' },
+      limit: 10
+    }, clientHeaders);
+    expect(page.status).toBe(200);
+    expect(page.body).toMatchObject({
+      workspaceId: 'ws-default',
+      nextCursor: { workspaceId: 'ws-default', value: '2' },
+      changes: [{ table: 'projects', operation: 'update', row: { id: 'gh-repo-100' } }]
+    });
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('2');
+    expect(boardChangeCalls).toContainEqual(['readAfter', 'ws-default', '1', 10]);
+    expect(JSON.parse(String(info.mock.calls[1][0]))).toEqual({
+      event: 'board_sync_metric',
+      workspaceId: 'ws-default',
+      clientVersion: 'desktop-2.0.67',
+      kind: 'delta',
+      changedRows: 1,
+      responseBytes: Buffer.byteLength(JSON.stringify(page.body), 'utf8')
+    });
+    expect(info.mock.calls.map(([line]) => String(line)).join('\n')).not.toMatch(/gh-repo-100|checkout|Cart loses items/);
+  });
+
+  it('uses only the supplied user client and scopes log and row reads to its workspace', async () => {
+    const { supabaseBoardChangeSource } = await import('../services/sharedBoard.js');
+    const requests: Array<{
+      table: string;
+      columns: string;
+      filters: unknown[][];
+    }> = [];
+    const client = {
+      from(table: string) {
+        const request = { table, columns: '', filters: [] as unknown[][] };
+        requests.push(request);
+        const query: any = {
+          select(columns: string) { request.columns = columns; return query; },
+          eq(column: string, value: unknown) { request.filters.push(['eq', column, value]); return query; },
+          in(column: string, value: unknown[]) { request.filters.push(['in', column, value]); return query; },
+          gt(column: string, value: unknown) { request.filters.push(['gt', column, value]); return query; },
+          lte(column: string, value: unknown) { request.filters.push(['lte', column, value]); return query; },
+          order() { return query; },
+          limit() { return query; },
+          range() { return query; },
+          maybeSingle: async () => ({ data: { last_cursor: '7' }, error: null }),
+          then(resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) {
+            let data: unknown[] = [];
+            if (table === 'workspace_board_changes' && request.columns === 'cursor') data = [{ cursor: '1' }];
+            if (table === 'workspace_board_changes' && request.columns !== 'cursor') data = [{
+              cursor: '2', table_name: 'projects', row_key: { id: 'changed-id' },
+              operation: 'update', created_at: now
+            }];
+            if (table === 'projects') data = [{
+              id: 'changed-id', name: 'Changed', key: 'CHG', description: '', color: '', icon: '',
+              status: 'in_progress', priority: 'medium', start_date: now, target_date: null,
+              lead_type: 'agent', lead_name: '', lead_agent_id: null, resources: [], github_org: null,
+              created_by: 'PM1', created_at: now
+            }];
+            return Promise.resolve({ data, error: null }).then(resolve, reject);
+          }
+        };
+        return query;
+      }
+    };
+    const source = supabaseBoardChangeSource(client as any);
+    const access = { canReadIssues: true, canReadAgents: true, canReadSquads: true };
+
+    expect(await source.watermark('ws-user')).toBe('7');
+    const page = await source.readAfter('ws-user', '0', 25);
+    expect(page.rows).toHaveLength(1);
+    const rows = await source.readRows('ws-user', page.rows, access);
+    expect([...rows.values()][0]).toMatchObject({ id: 'changed-id', name: 'Changed' });
+
+    const logReads = requests.filter(request => request.table === 'workspace_board_changes');
+    expect(logReads.length).toBeGreaterThanOrEqual(2);
+    expect(logReads.every(request => request.filters.some(filter =>
+      filter[0] === 'eq' && filter[1] === 'workspace_id' && filter[2] === 'ws-user'
+    ))).toBe(true);
+    const projectRead = requests.find(request => request.table === 'projects');
+    expect(projectRead?.filters).toContainEqual(['eq', 'workspace_id', 'ws-user']);
+    expect(projectRead?.filters).toContainEqual(['in', 'id', ['changed-id']]);
   });
 });
 

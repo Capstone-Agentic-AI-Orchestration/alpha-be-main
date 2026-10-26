@@ -14,7 +14,8 @@ import { commentRow, issueRow } from '../store/postgresIssueStore.js';
 import { agentRow, squadRow } from '../store/postgresAgentStore.js';
 import { projectRow } from '../store/postgresProjectStore.js';
 import { messageRow, threadRow } from '../store/postgresChatStore.js';
-import { supabaseBoardSource, type SharedBoardSource } from './sharedBoard.js';
+import { supabaseBoardSource, supabaseBoardChangeSource, type SharedBoardSource } from './sharedBoard.js';
+import type { BoardChangeSource } from './boardChangeSync.js';
 import { knownIdentity } from './identityService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
 import { DatabaseTokenClient } from './databaseTokenClient.js';
@@ -258,6 +259,11 @@ export class SupabaseService {
   /** Where to read the team's board from, as this developer. */
   boardSource(): SharedBoardSource | null {
     return this.client ? supabaseBoardSource(this.client) : null;
+  }
+
+  /** Read-only incremental board pages through this desktop's signed-in token. */
+  boardChangeSource(): BoardChangeSource | null {
+    return this.client ? supabaseBoardChangeSource(this.client) : null;
   }
 
   /**

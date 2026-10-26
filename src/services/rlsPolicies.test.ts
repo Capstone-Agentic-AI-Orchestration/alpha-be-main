@@ -337,7 +337,7 @@ describe('the board announces itself to its own workspace', () => {
     // The project, the issue, and the issue's status change.
     expect(messages.rows.length).toBeGreaterThanOrEqual(3);
     expect(messages.rows.every(row => row.topic === 'workspace:ws1:board')).toBe(true);
-    expect(messages.rows.map(row => row.event)).toContain('UPDATE');
+    expect(messages.rows.every(row => row.event === 'board_changed')).toBe(true);
   });
 
   it('lets the workspace’s own people listen', async () => {
@@ -372,6 +372,43 @@ describe('the board announces itself to its own workspace', () => {
     await expect(onChannel('workspace:ws1:board', () => as('Lloyd1020', 'dev', send))).rejects.toThrow(
       /row-level security/
     );
+  });
+});
+
+describe('the board change log stays inside its workspace', () => {
+  beforeAll(async () => {
+    await db.exec(`insert into workspaces (id,name,slug) values ('ws-log-private','Private','private')`);
+    await db.exec(`
+      insert into projects (id,workspace_id,name,key,created_by)
+      values ('private-log-project','ws-log-private','Private','PRV','PM1')
+    `);
+  });
+
+  it('lets authenticated members read their workspace cursor and changes', async () => {
+    expect(await as('Lloyd1020', 'dev', () => rows(
+      `select * from public.workspace_board_cursors where workspace_id='ws1'`
+    ))).toBe(1);
+    expect(await as('Lloyd1020', 'dev', () => rows(
+      `select * from public.workspace_board_changes where workspace_id='ws1'`
+    ))).toBeGreaterThan(0);
+  });
+
+  it('hides another workspace cursor and changes from authenticated members', async () => {
+    expect(await as('Lloyd1020', 'dev', () => rows(
+      `select * from public.workspace_board_cursors where workspace_id='ws-log-private'`
+    ))).toBe(0);
+    expect(await as('Lloyd1020', 'dev', () => rows(
+      `select * from public.workspace_board_changes where workspace_id='ws-log-private'`
+    ))).toBe(0);
+  });
+
+  it('does not let authenticated members edit the append-only log', async () => {
+    const before = await rows(`select * from public.workspace_board_changes where workspace_id='ws1'`);
+    const result = await as('Lloyd1020', 'dev', () => db.query(
+      `delete from public.workspace_board_changes where workspace_id='ws1'`
+    ));
+    expect(result.rowCount).toBe(0);
+    expect(await rows(`select * from public.workspace_board_changes where workspace_id='ws1'`)).toBe(before);
   });
 });
 

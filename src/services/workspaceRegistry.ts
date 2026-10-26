@@ -265,6 +265,15 @@ class WorkspaceRegistry {
     return this.directoryInstance;
   }
 
+  private desktopDirectoryForBoardSync(): SqliteWorkspaceDirectory {
+    if (IS_CLOUD) throw new Error('Shared-board bindings can only be mirrored on a desktop.');
+    const directory = this.directory();
+    if (!(directory instanceof SqliteWorkspaceDirectory)) {
+      throw new Error('Shared-board bindings can only be mirrored on a desktop.');
+    }
+    return directory;
+  }
+
   /** For tests, which supply their own store rather than a mode's. */
   useDirectory(directory: WorkspaceDirectory | null): void {
     this.directoryInstance = directory;
@@ -335,6 +344,20 @@ class WorkspaceRegistry {
     return this.directory().listProjectAssignments(workspaceId, projectId);
   }
 
+  syncBoardProjectAssignment(row: {
+    id: string;
+    workspaceId: string;
+    projectId: string;
+    userId: string;
+    status: 'active' | 'removed';
+  }): void {
+    this.desktopDirectoryForBoardSync().syncBoardProjectAssignment(row);
+  }
+
+  deleteBoardProjectAssignment(workspaceId: string, id: string): void {
+    this.desktopDirectoryForBoardSync().deleteBoardProjectAssignment(workspaceId, id);
+  }
+
   assignProject(workspaceId: string, projectId: string, userId: string): Promise<WorkspaceProjectAssignment> {
     return this.directory().assignProject(workspaceId, projectId, userId);
   }
@@ -347,6 +370,20 @@ class WorkspaceRegistry {
     return this.directory().bindSquadOwner(workspaceId, squadId, userId);
   }
 
+  syncBoardSquadOwner(row: {
+    id: string;
+    workspaceId: string;
+    squadId: string;
+    userId: string;
+    status: 'active' | 'removed';
+  }): void {
+    this.desktopDirectoryForBoardSync().syncBoardSquadOwner(row);
+  }
+
+  deleteBoardSquadOwner(workspaceId: string, id: string): void {
+    this.desktopDirectoryForBoardSync().deleteBoardSquadOwner(workspaceId, id);
+  }
+
   assignSquadProject(
     workspaceId: string,
     squadId: string,
@@ -354,6 +391,21 @@ class WorkspaceRegistry {
     relationship: 'owned' | 'assigned' = 'assigned'
   ): Promise<WorkspaceSquadProjectAssignment> {
     return this.directory().assignSquadProject(workspaceId, squadId, projectId, relationship);
+  }
+
+  syncBoardSquadProject(row: {
+    id: string;
+    workspaceId: string;
+    squadId: string;
+    projectId: string;
+    relationship: 'owned' | 'assigned';
+    status: 'active' | 'removed';
+  }): void {
+    this.desktopDirectoryForBoardSync().syncBoardSquadProject(row);
+  }
+
+  deleteBoardSquadProject(workspaceId: string, id: string): void {
+    this.desktopDirectoryForBoardSync().deleteBoardSquadProject(workspaceId, id);
   }
 
   removeSquadProject(workspaceId: string, squadId: string, projectId: string): Promise<boolean> {

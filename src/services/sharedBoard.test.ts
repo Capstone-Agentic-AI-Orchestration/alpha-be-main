@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { Agent, Issue, IssueComment, Project, Squad } from '../models/index.js';
+import type { BoardChangePage } from './boardChangeSync.js';
 import { createTestDatabase } from '../store/testDatabase.js';
 import { withProjectDefaults } from '../store/projectStore.js';
 
@@ -112,9 +113,9 @@ interface Board {
   comments?: IssueComment[];
   agents?: Agent[];
   squads?: Squad[];
-  owners?: Array<{ squad_id: string; user_id: string; status: string }>;
-  links?: Array<{ squad_id: string; project_id: string; relationship: string; status: string }>;
-  assignments?: Array<{ project_id: string; user_id: string; status: string }>;
+  owners?: Array<{ id?: string; squad_id: string; user_id: string; status: string }>;
+  links?: Array<{ id?: string; squad_id: string; project_id: string; relationship: string; status: string }>;
+  assignments?: Array<{ id?: string; project_id: string; user_id: string; status: string }>;
 }
 
 /** The team's board as the pull will read it. */
@@ -406,6 +407,30 @@ describe('the team’s roster', () => {
     expect(links.map(l => [l.squadId, l.status])).toEqual([['squad-web', 'active']]);
     const context = await workspaceRegistry.resolve('Dev1', 'ws-default', 'dev');
     expect(context?.access.squadOwners.get('squad-web')).toBe('Dev1');
+  });
+
+  it('keeps remote binding row ids in the desktop snapshot', async () => {
+    const { svc, board } = await load();
+
+    await board.pullSharedBoard('ws-default', source({
+      squads: [cloudSquad({ id: 'remote-squad' })],
+      owners: [{ id: 'remote-owner', squad_id: 'remote-squad', user_id: 'owner-a', status: 'active' }],
+      links: [{
+        id: 'remote-link', squad_id: 'remote-squad', project_id: 'gh-repo-100',
+        relationship: 'assigned', status: 'active'
+      }],
+      assignments: [{ id: 'remote-assignment', project_id: 'gh-repo-100', user_id: 'member-a', status: 'active' }]
+    }));
+
+    const ids = {
+      owner: svc.db.prepare('SELECT id FROM workspace_squad_owners WHERE workspace_id = ? AND squad_id = ?')
+        .get('ws-default', 'remote-squad')?.id,
+      link: svc.db.prepare('SELECT id FROM workspace_squad_projects WHERE workspace_id = ? AND squad_id = ? AND project_id = ?')
+        .get('ws-default', 'remote-squad', 'gh-repo-100')?.id,
+      assignment: svc.db.prepare('SELECT id FROM workspace_project_assignments WHERE workspace_id = ? AND project_id = ? AND user_id = ?')
+        .get('ws-default', 'gh-repo-100', 'member-a')?.id
+    };
+    expect(ids).toEqual({ owner: 'remote-owner', link: 'remote-link', assignment: 'remote-assignment' });
   });
 
   /**
@@ -730,5 +755,221 @@ describe('the rows the desktop writes back', () => {
     const [backComment] = (await pg.query<any>('select * from issue_comments')).rows;
     expect(toIssue(back, [])).toEqual({ ...issue, comments: [] });
     expect(toComment(backComment)).toEqual({ ...comment, isThinking: false, authorAvatar: undefined, agentId: undefined });
+  });
+});
+
+describe('applying incremental team-board pages', () => {
+  const page = (changes: BoardChangePage['changes'], cursor = '4'): BoardChangePage => ({
+    workspaceId: 'ws-default',
+    nextCursor: { workspaceId: 'ws-default', value: cursor },
+    hasMore: false,
+    resetRequired: false,
+    changes
+  });
+
+  it('replays pages idempotently while keeping machine paths and runner-owned issue fields', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source());
+
+    const project = inWorkspace(() => svc.getProjects().find((row: Project) => row.id === 'gh-repo-100')) as Project;
+    const machineResources = [
+      { id: 'local-path', type: 'local_path', name: 'Worktree', pathOrUrl: 'C:\\work\\checkout' },
+      { id: 'local-dir', type: 'local_dir', name: 'Checkout', pathOrUrl: 'C:\\work\\checkout' }
+    ];
+    inWorkspace(() => svc.updateProject(project.id, { resources: [...project.resources, ...machineResources] }));
+
+    const issue = inWorkspace(() => svc.getIssues().find((row: Issue) => row.id === 'gh-issue-9001')) as Issue;
+    const agentId = inWorkspace(() => svc.getAgents()[0].id);
+    inWorkspace(() => {
+      svc.updateIssue(issue.id, {
+        status: 'agent_running',
+        assignedAgentId: agentId,
+        branchName: 'local/active-work',
+        prUrl: 'https://github.com/acme/checkout/pull/7'
+      });
+      svc.savePrototypeRun({
+        id: 'run-active', issueId: issue.id, projectId: project.id, agentId, status: 'running',
+        scenario: 'success', plan: [], currentStageIndex: 0, stages: [], activities: [], createdAt: now, updatedAt: now
+      });
+      svc.setBoardSyncCursor('ws-default', '1');
+    });
+
+    const changes: BoardChangePage['changes'] = [
+      {
+        cursor: '2', table: 'projects', rowKey: { id: project.id }, operation: 'update',
+        row: cloudProject({ name: 'Renamed by the team' }) as unknown as Record<string, unknown>
+      },
+      {
+        cursor: '3', table: 'issues', rowKey: { id: issue.id }, operation: 'update',
+        row: cloudIssue({ title: 'Renamed card', status: 'todo', branchName: undefined, prUrl: undefined }) as unknown as Record<string, unknown>
+      },
+      {
+        cursor: '4', table: 'issue_comments', rowKey: { id: 'cloud-comment-2' }, operation: 'insert',
+        row: cloudComment({ id: 'cloud-comment-2', content: 'A new team comment.' }) as unknown as Record<string, unknown>
+      }
+    ];
+
+    await board.applySharedBoardChanges('ws-default', page(changes));
+    const first = inWorkspace(() => ({
+      project: svc.getProjects().find((row: Project) => row.id === project.id),
+      issue: svc.getIssues().find((row: Issue) => row.id === issue.id),
+      runs: svc.getPrototypeRuns(),
+      cursor: svc.getBoardSyncCursor('ws-default')
+    }));
+    await board.applySharedBoardChanges('ws-default', page(changes));
+    const replayed = inWorkspace(() => ({
+      project: svc.getProjects().find((row: Project) => row.id === project.id),
+      issue: svc.getIssues().find((row: Issue) => row.id === issue.id),
+      runs: svc.getPrototypeRuns(),
+      cursor: svc.getBoardSyncCursor('ws-default')
+    }));
+
+    expect(first).toEqual(replayed);
+    expect(first.project?.name).toBe('Renamed by the team');
+    expect(first.project?.resources.map((resource: any) => resource.type)).toEqual([
+      'github_repo', 'local_path', 'local_dir'
+    ]);
+    expect(first.issue).toMatchObject({
+      title: 'Renamed card', status: 'agent_running', assignedAgentId: agentId,
+      branchName: 'local/active-work', prUrl: 'https://github.com/acme/checkout/pull/7'
+    });
+    expect(first.issue?.comments.filter((comment: IssueComment) => comment.id === 'cloud-comment-2')).toHaveLength(1);
+    expect(first.runs).toHaveLength(1);
+    expect(first.cursor).toBe('4');
+  });
+
+  it('removes deleted issues and their local comments before saving the next cursor', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source());
+    expect(inWorkspace(() => svc.getIssues().map((issue: Issue) => issue.id))).toContain('gh-issue-9001');
+    inWorkspace(() => svc.setBoardSyncCursor('ws-default', '1'));
+
+    await board.applySharedBoardChanges('ws-default', page([{
+      cursor: '2', table: 'issue_comments', rowKey: { id: 'gh-acme/checkout-555' }, operation: 'delete', row: null
+    }], '2'));
+    expect(inWorkspace(() => svc.getIssues()[0]?.comments)).toEqual([]);
+    expect(inWorkspace(() => svc.getBoardSyncCursor('ws-default'))).toBe('2');
+
+    await board.applySharedBoardChanges('ws-default', page([{
+      cursor: '3', table: 'issues', rowKey: { id: 'gh-issue-9001' }, operation: 'delete', row: null
+    }], '3'));
+
+    expect(inWorkspace(() => svc.getIssues())).toEqual([]);
+    expect(inWorkspace(() => svc.getBoardSyncCursor('ws-default'))).toBe('3');
+  });
+
+  it('does not let a delayed older page overwrite rows from a newer page', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source());
+    inWorkspace(() => svc.setBoardSyncCursor('ws-default', '1'));
+
+    const olderPage = page([
+      {
+        cursor: '2', table: 'projects', rowKey: { id: 'gh-repo-100' }, operation: 'update',
+        row: cloudProject({ name: 'Project update from older page' }) as unknown as Record<string, unknown>
+      },
+      {
+        cursor: '3', table: 'issues', rowKey: { id: 'gh-issue-9001' }, operation: 'update',
+        row: cloudIssue({ title: 'Older issue title' }) as unknown as Record<string, unknown>
+      }
+    ], '3');
+    const newerPage = page([{
+      cursor: '4', table: 'issues', rowKey: { id: 'gh-issue-9001' }, operation: 'update',
+      row: cloudIssue({ title: 'Newest issue title' }) as unknown as Record<string, unknown>
+    }], '4');
+
+    await Promise.all([
+      board.applySharedBoardChanges('ws-default', olderPage),
+      board.applySharedBoardChanges('ws-default', newerPage)
+    ]);
+
+    expect(inWorkspace(() => svc.getIssues().find((issue: Issue) => issue.id === 'gh-issue-9001')?.title))
+      .toBe('Newest issue title');
+    expect(inWorkspace(() => svc.getBoardSyncCursor('ws-default'))).toBe('4');
+  });
+
+  it('retires the matching local bindings when a binding row is physically deleted', async () => {
+    const { svc, board } = await load();
+    await board.applySharedBoardChanges('ws-default', page([
+      {
+        cursor: '1', table: 'workspace_squad_owners', rowKey: { id: 'remote-owner' }, operation: 'insert',
+        row: { id: 'remote-owner', workspace_id: 'ws-default', squad_id: 'squad-a', user_id: 'owner-a', status: 'active' }
+      },
+      {
+        cursor: '2', table: 'workspace_squad_projects', rowKey: { id: 'remote-link' }, operation: 'insert',
+        row: {
+          id: 'remote-link', workspace_id: 'ws-default', squad_id: 'squad-a', project_id: 'project-a',
+          relationship: 'assigned', status: 'active'
+        }
+      },
+      {
+        cursor: '3', table: 'workspace_project_assignments', rowKey: { id: 'remote-assignment' }, operation: 'insert',
+        row: {
+          id: 'remote-assignment', workspace_id: 'ws-default', project_id: 'project-a',
+          user_id: 'member-a', status: 'active'
+        }
+      }
+    ], '3'));
+
+    await board.applySharedBoardChanges('ws-default', page([
+      { cursor: '4', table: 'workspace_squad_owners', rowKey: { id: 'remote-owner' }, operation: 'delete', row: null },
+      { cursor: '5', table: 'workspace_squad_projects', rowKey: { id: 'remote-link' }, operation: 'delete', row: null },
+      { cursor: '6', table: 'workspace_project_assignments', rowKey: { id: 'remote-assignment' }, operation: 'delete', row: null }
+    ], '6'));
+
+    const statuses = {
+      owner: svc.db.prepare("SELECT status FROM workspace_squad_owners WHERE workspace_id = ? AND squad_id = ?")
+        .get('ws-default', 'squad-a')?.status,
+      link: svc.db.prepare("SELECT status FROM workspace_squad_projects WHERE workspace_id = ? AND squad_id = ? AND project_id = ?")
+        .get('ws-default', 'squad-a', 'project-a')?.status,
+      assignment: svc.db.prepare("SELECT status FROM workspace_project_assignments WHERE workspace_id = ? AND project_id = ? AND user_id = ?")
+        .get('ws-default', 'project-a', 'member-a')?.status
+    };
+    expect(statuses).toEqual({ owner: 'removed', link: 'removed', assignment: 'removed' });
+  });
+
+  it('does not advance past a failed page that was queued before a newer page', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source());
+    inWorkspace(() => svc.setBoardSyncCursor('ws-default', '1'));
+    svc.db.exec(`
+      CREATE TRIGGER fail_queued_board_project_update
+      BEFORE UPDATE ON projects WHEN OLD.id = 'gh-repo-100'
+      BEGIN SELECT RAISE(ABORT, 'disk write failed'); END;
+    `);
+
+    const results = await Promise.allSettled([
+      board.applySharedBoardChanges('ws-default', page([{
+        cursor: '2', table: 'projects', rowKey: { id: 'gh-repo-100' }, operation: 'update',
+        row: cloudProject({ name: 'Fails before cursor 2' }) as unknown as Record<string, unknown>
+      }], '2')),
+      board.applySharedBoardChanges('ws-default', page([{
+        cursor: '3', table: 'issues', rowKey: { id: 'gh-issue-9001' }, operation: 'update',
+        row: cloudIssue({ title: 'Must wait for cursor 2' }) as unknown as Record<string, unknown>
+      }], '3'))
+    ]);
+
+    expect(results.map(result => result.status)).toEqual(['rejected', 'rejected']);
+    expect(inWorkspace(() => svc.getBoardSyncCursor('ws-default'))).toBe('1');
+    expect(inWorkspace(() => svc.getIssues().find((issue: Issue) => issue.id === 'gh-issue-9001')?.title))
+      .toBe('Cart loses items');
+  });
+
+  it('does not advance the saved cursor when applying a local write fails', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await board.pullSharedBoard('ws-default', source());
+    inWorkspace(() => svc.setBoardSyncCursor('ws-default', '1'));
+    svc.db.exec(`
+      CREATE TRIGGER fail_shared_board_project_update
+      BEFORE UPDATE ON projects WHEN OLD.id = 'gh-repo-100'
+      BEGIN SELECT RAISE(ABORT, 'disk write failed'); END;
+    `);
+
+    await expect(board.applySharedBoardChanges('ws-default', page([{
+      cursor: '2', table: 'projects', rowKey: { id: 'gh-repo-100' }, operation: 'update',
+      row: cloudProject({ name: 'Should not apply' }) as unknown as Record<string, unknown>
+    }], '2'))).rejects.toThrow('disk write failed');
+
+    expect(inWorkspace(() => svc.getBoardSyncCursor('ws-default'))).toBe('1');
   });
 });

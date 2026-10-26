@@ -1,7 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentLearningService, AgentLessonError } from '../services/agentLearningService.js';
-import { agentStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
+import { agentStore, boardChangeStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORCHESTRATION_ENABLED, ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
@@ -11,7 +11,7 @@ import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
 import { pushIssue, needsPush, publishNewIssue, publishedFields } from '../services/githubBoardWrite.js';
 import { issueIdFor } from '../services/githubRepoDiscovery.js';
 import { supabaseService } from '../services/supabaseService.js';
-import { pullSharedBoard, asSyncReport } from '../services/sharedBoard.js';
+import { pullSharedBoard, applySharedBoardChanges, asSyncReport } from '../services/sharedBoard.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { machineRuntimes } from '../services/machineRuntimes.js';
 import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
@@ -65,8 +65,56 @@ import {
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
+import { BoardChangeSync, BoardCursorError, boardStateRowCount, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
+import { recordBoardSyncMetric } from '../services/boardSyncMetrics.js';
 
 export const dataRouter = Router();
+
+async function boardChangeSyncFor(req: Request): Promise<BoardChangeSync | null> {
+  const workspaceId = req.workspace!.workspaceId;
+  const access: BoardChangeAccess = {
+    canReadIssues: workspaceRegistry.can(req.workspace!.role, 'issue.read'),
+    canReadAgents: workspaceRegistry.can(req.workspace!.role, 'agent.read'),
+    canReadSquads: workspaceRegistry.can(req.workspace!.role, 'squad.read')
+  };
+
+  // Keep snapshots and deltas aligned with GET /projects and GET /issues.
+  // This matters on desktop too: its signed-in Data API client applies RLS,
+  // while this set also enforces the app's project-assignment rules.
+  const projects = await projectStore().list(workspaceId);
+  access.allowedProjectIds = workspaceRegistry.projectIdsFor(
+    req.workspace!,
+    projects.map(project => project.id)
+  );
+
+  if (IS_CLOUD) {
+    // The cloud connection bypasses RLS; apply the same visible-project set
+    // that GET /projects and GET /issues use before reading current rows.
+    return new BoardChangeSync(boardChangeStore(), access);
+  }
+
+  // A desktop's Supabase client carries the token exchanged for this user.
+  // Never substitute a service-role client for this row-level path.
+  const source = supabaseService.boardChangeSource();
+  return source ? new BoardChangeSync(source, access) : null;
+}
+
+function recordBoardResponseMetric(
+  req: Request,
+  workspaceId: string,
+  kind: 'snapshot' | 'delta',
+  changedRows: number,
+  response: unknown
+): void {
+  const serialized = JSON.stringify(response) ?? '';
+  recordBoardSyncMetric({
+    workspaceId,
+    clientVersion: req.header('X-Alpha-Client-Version') ?? 'unknown',
+    kind,
+    changedRows,
+    responseBytes: Buffer.byteLength(serialized, 'utf8')
+  });
+}
 
 async function publishSharedAgentCopies(agent: Agent, workspaceIds: string[]): Promise<void> {
   if (!agent.sharedKey) return;
@@ -210,6 +258,66 @@ dataRouter.post('/database/token/exchange', async (req: Request, res: Response) 
   return res.json({ token: result.token, expiresAt: result.expiresAt });
 });
 
+/** One initial shared-board snapshot, anchored before the rows are read. */
+dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  if (!IS_CLOUD) {
+    const workspaceId = req.workspace!.workspaceId;
+    const source = supabaseService.boardSource();
+    const changeSource = supabaseService.boardChangeSource();
+    if (!source || !changeSource) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+    try {
+      // The watermark brackets the one local SQLite snapshot; newer writes
+      // are replayed from it by the next page request.
+      const value = await changeSource.watermark(workspaceId);
+      const pulled = await pullSharedBoard(workspaceId, source, req.workspace!.userId);
+      sqliteService.setBoardSyncCursor(workspaceId, value);
+      const response = {
+        workspaceId,
+        cursor: { workspaceId, value },
+        ...pulled.snapshot
+      };
+      recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(response), response);
+      return res.json(response);
+    } catch (error: any) {
+      return res.status(502).json({ error: `Could not read the team board: ${error?.message ?? error}` });
+    }
+  }
+  const sync = await boardChangeSyncFor(req);
+  if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+  const workspaceId = req.workspace!.workspaceId;
+  const bootstrap = await sync.bootstrap(workspaceId);
+  recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(bootstrap), bootstrap);
+  return res.json(bootstrap);
+}));
+
+/** A bounded page after one device's last successfully applied workspace cursor. */
+dataRouter.post('/board/changes', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.read')) return;
+  const cursor = req.body?.cursor as BoardCursor | undefined;
+  if (!cursor || typeof cursor.workspaceId !== 'string' || typeof cursor.value !== 'string') {
+    return res.status(400).json({ error: 'A workspace cursor is required.' });
+  }
+  const requestedLimit = req.body?.limit ?? 100;
+  if (typeof requestedLimit !== 'number' || !Number.isInteger(requestedLimit) || requestedLimit < 1) {
+    return res.status(400).json({ error: 'The page limit must be a positive whole number.' });
+  }
+
+  const sync = await boardChangeSyncFor(req);
+  if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+  try {
+    const page = await sync.changes(req.workspace!.workspaceId, cursor, Math.min(requestedLimit, 100));
+    if (!IS_CLOUD && supabaseService.sharesBoard() && !page.resetRequired) {
+      await applySharedBoardChanges(req.workspace!.workspaceId, page);
+    }
+    recordBoardResponseMetric(req, req.workspace!.workspaceId, 'delta', page.changes.length, page);
+    return res.json(page);
+  } catch (error) {
+    if (error instanceof BoardCursorError) return res.status(400).json({ error: error.message });
+    throw error;
+  }
+}));
+
 /**
  * Read the shared board down from GitHub.
  *
@@ -231,10 +339,13 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
   if (supabaseService.sharesBoard()) {
     if (!requireWorkspaceCapability(req, res, 'project.read')) return;
     const source = supabaseService.boardSource();
-    if (!source) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
+    const changeSource = supabaseService.boardChangeSource();
+    if (!source || !changeSource) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
     try {
       // Who is pulling, so a project the team dropped leaves this machine too.
+      const cursor = await changeSource.watermark(req.workspace!.workspaceId);
       const pulled = await pullSharedBoard(req.workspace!.workspaceId, source, req.workspace!.userId);
+      sqliteService.setBoardSyncCursor(req.workspace!.workspaceId, cursor);
       /**
        * Then this machine's own agents, which the team does not have. An issue
        * that names one refers to a row the cloud has to hold, or the card is

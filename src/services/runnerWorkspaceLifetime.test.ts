@@ -74,7 +74,11 @@ beforeEach(async () => {
       await new Promise<void>(resolve => stopWaiters.set(runId, resolve));
     }),
     isRunActive: (runId: string) => processes.some(process => process.options.runId === runId && !process.exited) } }));
-  vi.doMock('./supabaseService.js', () => ({ supabaseService: { isConfigured: () => false } }));
+  vi.doMock('./supabaseService.js', () => ({ supabaseService: {
+    isConfigured: () => false,
+    workspaceMcpRuntime: vi.fn(async () => null),
+    sharesBoard: () => false
+  } }));
   vi.doMock('./boardWriteThrough.js', () => ({ addCommentAndShare: vi.fn(),
     updateIssueAndPush: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes) }));
   vi.doMock('./workspaceService.js', () => ({ resolveProjectWorkspace: (project: any) => ({ dir: project.cwd }), allowAttachedWorkspace: vi.fn() }));
