@@ -86,7 +86,7 @@ async function startCloudApi() {
   return app;
 }
 
-async function call(app: express.Express, method: string, url: string, body?: unknown) {
+async function call(app: express.Express, method: string, url: string, body?: unknown, headers: Record<string, string> = {}) {
   const { createServer } = await import('node:http');
   const server = createServer(app);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -94,7 +94,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
   try {
     const res = await fetch(`http://127.0.0.1:${port}${url}`, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     return { status: res.status, body: (await res.json().catch(() => null)) as any };
@@ -134,6 +134,7 @@ afterEach(() => {
   } catch {
     /* windows handle */
   }
+  vi.restoreAllMocks();
   vi.resetModules();
 });
 
@@ -281,13 +282,15 @@ describe('the cloud project routes', () => {
 describe('the cloud board change routes', () => {
   it('reads the watermark before a snapshot and returns bounded changed rows', async () => {
     const app = await startCloudApi();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const clientHeaders = { 'X-Alpha-Client-Version': 'web-0.1.0' };
     const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
     const beforeIssue = await db.query<{ cursor: string }>(`
       select last_cursor::text as cursor from workspace_board_cursors where workspace_id='ws-default'
     `);
     const created = await call(app, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id });
 
-    const bootstrap = await call(app, 'GET', '/api/board/bootstrap');
+    const bootstrap = await call(app, 'GET', '/api/board/bootstrap', undefined, clientHeaders);
     expect(bootstrap.status).toBe(200);
     expect(bootstrap.body).toMatchObject({
       workspaceId: 'ws-default',
@@ -296,11 +299,21 @@ describe('the cloud board change routes', () => {
     expect(bootstrap.body.projects.map((row: any) => row.id)).toContain(project.id);
     expect(bootstrap.body.issues.map((row: any) => row.id)).toContain(created.body.id);
     expect(BigInt(bootstrap.body.cursor.value)).toBeGreaterThan(BigInt(beforeIssue.rows[0].cursor));
+    const bootstrapRows = bootstrap.body.projects.length + bootstrap.body.agents.length + bootstrap.body.issues.length
+      + bootstrap.body.issues.reduce((total: number, issue: any) => total + issue.comments.length, 0);
+    expect(JSON.parse(String(info.mock.calls[0][0]))).toEqual({
+      event: 'board_sync_metric',
+      workspaceId: 'ws-default',
+      clientVersion: 'web-0.1.0',
+      kind: 'snapshot',
+      changedRows: bootstrapRows,
+      responseBytes: Buffer.byteLength(JSON.stringify(bootstrap.body), 'utf8')
+    });
 
     const page = await call(app, 'POST', '/api/board/changes', {
       cursor: { workspaceId: 'ws-default', value: beforeIssue.rows[0].cursor },
       limit: 1
-    });
+    }, clientHeaders);
     expect(page.status).toBe(200);
     expect(page.body.changes).toHaveLength(1);
     expect(page.body.changes[0]).toMatchObject({
@@ -310,6 +323,16 @@ describe('the cloud board change routes', () => {
     });
     expect(page.body.hasMore).toBe(true);
     expect(BigInt(page.body.nextCursor.value)).toBeGreaterThan(BigInt(beforeIssue.rows[0].cursor));
+    expect(JSON.parse(String(info.mock.calls[1][0]))).toEqual({
+      event: 'board_sync_metric',
+      workspaceId: 'ws-default',
+      clientVersion: 'web-0.1.0',
+      kind: 'delta',
+      changedRows: 1,
+      responseBytes: Buffer.byteLength(JSON.stringify(page.body), 'utf8')
+    });
+    expect(info.mock.calls.map(([line]) => String(line)).join('\n')).not.toContain(created.body.id);
+    expect(info.mock.calls.map(([line]) => String(line)).join('\n')).not.toContain('Fix cart');
   });
 
   it('rejects a cursor that belongs to a different workspace', async () => {

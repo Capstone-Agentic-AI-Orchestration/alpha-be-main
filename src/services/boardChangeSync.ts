@@ -38,6 +38,13 @@ export interface BoardState {
   issues: Issue[];
 }
 
+/** Number of rows represented by the bootstrap, including nested comments. */
+export function boardStateRowCount(state: Partial<BoardState>): number {
+  const issues = state.issues ?? [];
+  return (state.projects?.length ?? 0) + (state.agents?.length ?? 0) + issues.length
+    + issues.reduce((total, issue) => total + (issue.comments?.length ?? 0), 0);
+}
+
 export interface BoardSyncResult {
   state: BoardState;
   cursor: BoardCursor;

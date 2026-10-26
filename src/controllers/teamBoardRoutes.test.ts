@@ -150,7 +150,7 @@ async function startApi() {
   return { svc: sql.sqliteService as any, app };
 }
 
-async function call(app: express.Express, method: string, url: string, body?: unknown) {
+async function call(app: express.Express, method: string, url: string, body?: unknown, headers: Record<string, string> = {}) {
   const { createServer } = await import('node:http');
   const server = createServer(app);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -158,7 +158,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
   try {
     const res = await fetch(`http://127.0.0.1:${port}${url}`, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     return { status: res.status, body: (await res.json().catch(() => null)) as any };
@@ -188,6 +188,7 @@ afterEach(async () => {
     }
   }
   delete process.env.ALPHA_HOME;
+  vi.restoreAllMocks();
   try {
     fs.rmSync(tmp, { recursive: true, force: true });
   } catch {
@@ -262,8 +263,10 @@ describe('syncing a desktop on a team', () => {
 describe('incremental board reads on a team desktop', () => {
   it('uses the signed-in board source for bootstrap and catch-up pages', async () => {
     const { app, svc } = await startApi();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-    const bootstrap = await call(app, 'GET', '/api/board/bootstrap');
+    const clientHeaders = { 'X-Alpha-Client-Version': 'desktop-2.0.67' };
+    const bootstrap = await call(app, 'GET', '/api/board/bootstrap', undefined, clientHeaders);
     expect(bootstrap.status).toBe(200);
     expect(bootstrap.body).toMatchObject({
       workspaceId: 'ws-default',
@@ -272,11 +275,19 @@ describe('incremental board reads on a team desktop', () => {
     });
     expect(svc.getBoardSyncCursor('ws-default')).toBe('1');
     expect(boardChangeCalls).toContainEqual(['watermark', 'ws-default']);
+    expect(JSON.parse(String(info.mock.calls[0][0]))).toEqual({
+      event: 'board_sync_metric',
+      workspaceId: 'ws-default',
+      clientVersion: 'desktop-2.0.67',
+      kind: 'snapshot',
+      changedRows: 3,
+      responseBytes: Buffer.byteLength(JSON.stringify(bootstrap.body), 'utf8')
+    });
 
     const page = await call(app, 'POST', '/api/board/changes', {
       cursor: { workspaceId: 'ws-default', value: '1' },
       limit: 10
-    });
+    }, clientHeaders);
     expect(page.status).toBe(200);
     expect(page.body).toMatchObject({
       workspaceId: 'ws-default',
@@ -285,6 +296,15 @@ describe('incremental board reads on a team desktop', () => {
     });
     expect(svc.getBoardSyncCursor('ws-default')).toBe('2');
     expect(boardChangeCalls).toContainEqual(['readAfter', 'ws-default', '1', 10]);
+    expect(JSON.parse(String(info.mock.calls[1][0]))).toEqual({
+      event: 'board_sync_metric',
+      workspaceId: 'ws-default',
+      clientVersion: 'desktop-2.0.67',
+      kind: 'delta',
+      changedRows: 1,
+      responseBytes: Buffer.byteLength(JSON.stringify(page.body), 'utf8')
+    });
+    expect(info.mock.calls.map(([line]) => String(line)).join('\n')).not.toMatch(/gh-repo-100|checkout|Cart loses items/);
   });
 
   it('uses only the supplied user client and scopes log and row reads to its workspace', async () => {

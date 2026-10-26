@@ -65,7 +65,8 @@ import {
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
-import { BoardChangeSync, BoardCursorError, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
+import { BoardChangeSync, BoardCursorError, boardStateRowCount, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
+import { recordBoardSyncMetric } from '../services/boardSyncMetrics.js';
 
 export const dataRouter = Router();
 
@@ -92,6 +93,23 @@ async function boardChangeSyncFor(req: Request): Promise<BoardChangeSync | null>
   // Never substitute a service-role client for this row-level path.
   const source = supabaseService.boardChangeSource();
   return source ? new BoardChangeSync(source, access) : null;
+}
+
+function recordBoardResponseMetric(
+  req: Request,
+  workspaceId: string,
+  kind: 'snapshot' | 'delta',
+  changedRows: number,
+  response: unknown
+): void {
+  const serialized = JSON.stringify(response) ?? '';
+  recordBoardSyncMetric({
+    workspaceId,
+    clientVersion: req.header('X-Alpha-Client-Version') ?? 'unknown',
+    kind,
+    changedRows,
+    responseBytes: Buffer.byteLength(serialized, 'utf8')
+  });
 }
 
 async function publishSharedAgentCopies(agent: Agent, workspaceIds: string[]): Promise<void> {
@@ -250,14 +268,23 @@ dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => 
       const value = await changeSource.watermark(workspaceId);
       const pulled = await pullSharedBoard(workspaceId, source, req.workspace!.userId);
       sqliteService.setBoardSyncCursor(workspaceId, value);
-      return res.json({ workspaceId, cursor: { workspaceId, value }, ...pulled.snapshot });
+      const response = {
+        workspaceId,
+        cursor: { workspaceId, value },
+        ...pulled.snapshot
+      };
+      recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(response), response);
+      return res.json(response);
     } catch (error: any) {
       return res.status(502).json({ error: `Could not read the team board: ${error?.message ?? error}` });
     }
   }
   const sync = await boardChangeSyncFor(req);
   if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
-  return res.json(await sync.bootstrap(req.workspace!.workspaceId));
+  const workspaceId = req.workspace!.workspaceId;
+  const bootstrap = await sync.bootstrap(workspaceId);
+  recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(bootstrap), bootstrap);
+  return res.json(bootstrap);
 }));
 
 /** A bounded page after one device's last successfully applied workspace cursor. */
@@ -279,6 +306,7 @@ dataRouter.post('/board/changes', route(async (req: Request, res: Response) => {
     if (!IS_CLOUD && supabaseService.sharesBoard() && !page.resetRequired) {
       await applySharedBoardChanges(req.workspace!.workspaceId, page);
     }
+    recordBoardResponseMetric(req, req.workspace!.workspaceId, 'delta', page.changes.length, page);
     return res.json(page);
   } catch (error) {
     if (error instanceof BoardCursorError) return res.status(400).json({ error: error.message });
