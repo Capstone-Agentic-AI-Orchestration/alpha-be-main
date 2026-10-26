@@ -120,7 +120,9 @@ describe('task acceptance and targeted correction', () => {
   });
 
   it('completes an accepted read-only report without a publication stage', async () => {
-    directory = fs.mkdtempSync(path.join(process.cwd(), '..', '.tmp-tests', 'report-completion-'));
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'report-completion-'));
     const repository = path.join(directory, 'repository');
     fs.mkdirSync(repository);
     git(repository, ['init', '-b', 'main']);
