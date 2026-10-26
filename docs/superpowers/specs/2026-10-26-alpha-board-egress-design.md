@@ -1,6 +1,6 @@
 # Reduce Supabase Egress from Alpha Board Sync
 
-**Status:** Draft for user review. The approach is selected; implementation has not started.
+**Status:** Approved for planning on 2026-10-26; implementation awaits plan review.
 
 ## Intent
 
@@ -112,4 +112,4 @@ For a normal reconnect or return to a visible window, fetch only pages after the
 
 ## Review gate
 
-This document describes the design only. Do not add migrations, tables, endpoints, or product code until the user approves this written design. After approval, the next step is an implementation plan.
+The user approved this design on 2026-10-26. The next step is to review and confirm the implementation plan; do not add migrations, tables, endpoints, or product code until that plan is confirmed and an execution method is selected.
