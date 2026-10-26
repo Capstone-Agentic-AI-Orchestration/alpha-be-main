@@ -104,6 +104,8 @@ export interface VercelDeployment {
   state?: string;
   readyState?: string;
   createdAt?: number;
+  target?: string;
+  meta?: { githubCommitSha?: string; githubCommitMessage?: string; githubCommitRef?: string; githubCommitAuthorLogin?: string };
 }
 
 /** Which deployment `latestDeployment` answers for: production, or the newest one from a branch. */
@@ -149,6 +151,8 @@ export interface VercelClient {
    * `null` when there is none yet.
    */
   latestDeployment(projectId: string, scope: VercelDeploymentScope): Promise<VercelDeployment | null>;
+  /** Recent deployments for one environment, newest first. */
+  listDeployments(projectId: string, scope: VercelDeploymentScope, limit?: number): Promise<VercelDeployment[]>;
   /**
    * Every alias Vercel assigned a deployment, including the automatic
    * per-branch one (`<project>-git-<branch>-<scope>.vercel.app`), which stays
@@ -257,6 +261,15 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
     return body?.deployments?.[0] ?? null;
   }
 
+  async function listDeployments(projectId: string, scope: VercelDeploymentScope, limit = 20): Promise<VercelDeployment[]> {
+    const filter = 'production' in scope ? 'target=production' : `branch=${encodeURIComponent(scope.branch)}`;
+    const body = await call<{ deployments: VercelDeployment[] }>(
+      'GET',
+      `/v7/deployments?projectId=${encodeURIComponent(projectId)}&limit=${Math.max(1, Math.min(100, limit))}&${filter}`
+    );
+    return body?.deployments ?? [];
+  }
+
   return {
     async findProjectByName(name: string) {
       return call<VercelProject>('GET', `/v9/projects/${encodeURIComponent(name)}`, undefined, true);
@@ -336,6 +349,8 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
     },
 
     latestDeployment,
+
+    listDeployments,
 
     async deploymentAliases(deploymentId: string) {
       const body = await call<{ alias?: string[] }>('GET', `/v13/deployments/${encodeURIComponent(deploymentId)}`);

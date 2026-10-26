@@ -13,6 +13,7 @@ import { seedDefaultWorkspace, workspaceRouter } from './controllers/workspaceCo
 import { workspaceContext } from './controllers/workspaceContext.js';
 import { sessionContext } from './controllers/sessionContext.js';
 import { runRouter, setRunTicketLifecycleRuntime } from './controllers/runController.js';
+import { operationsRouter } from './controllers/operationsController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
@@ -50,6 +51,7 @@ import { ALPHA_TICKETING_ACK_EMAIL_ENABLED, BREVO_API_KEY, BREVO_SENDER_EMAIL, B
   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_SENDER_EMAIL, GMAIL_SENDER_NAME } from './config/env.js';
 import { RESEND_API_KEY, RESEND_SENDER_EMAIL, RESEND_SENDER_NAME, RESEND_TEST_RECIPIENT } from './config/env.js';
 import { startTicketAcknowledgmentDelivery } from './services/ticketAcknowledgmentDeliveryService.js';
+import { startOperationsMonitoringWorker } from './services/operationsWorker.js';
 import { createTicketAcknowledgmentEmailProvider } from './services/ticketAcknowledgmentEmailProvider.js';
 import { createTicketInvitationEmailProvider } from './services/ticketInvitationEmailProvider.js';
 import { startTicketInvitationEmailDelivery } from './services/ticketInvitationEmailDeliveryService.js';
@@ -292,6 +294,7 @@ app.use('/api', hostingRouter);
 app.use('/api', agentBridgeRouter);
 app.use('/api', agentCallRouter);
 app.use('/api', runRouter);
+app.use('/api', operationsRouter);
 app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
 app.use('/api', chatRouter);
@@ -508,6 +511,7 @@ function onListening(): void {
    */
   if (IS_CLOUD) {
     logInfo('Cloud mode: runner, runtime discovery and local scaffolding are disabled.');
+    startOperationsMonitoringWorker(server);
 
     // The default workspace's row, roster and core squad; see seedDefaultWorkspace.
     seedDefaultWorkspace().catch(err => logError('Could not seed the default workspace:', err));

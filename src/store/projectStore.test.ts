@@ -215,3 +215,24 @@ describe('SQLite project ownership is one write', () => {
     expect(await store.get(WS, 'failed-project')).toBeNull();
   });
 });
+
+describe('cloud project deadline completion records', () => {
+  it('persists project and milestone completion timestamps across reloads and later edits', async () => {
+    const store = await openPostgres();
+    await store.create(WS, {
+      id: 'deadline-project', name: 'Deadline', key: 'DEAD', status: 'in_progress',
+      targetDate: '2026-10-31T00:00:00.000Z',
+      milestones: [{ id: 'milestone-1', title: 'Release', targetDate: '2026-10-30T00:00:00.000Z', completed: false }]
+    });
+    const finishedAt = '2026-10-26T02:30:00.000Z';
+    await store.update(WS, 'deadline-project', {
+      status: 'completed', completedAt: finishedAt,
+      milestones: [{ id: 'milestone-1', title: 'Release', targetDate: '2026-10-30T00:00:00.000Z', completed: true, completedAt: finishedAt }]
+    });
+    await store.update(WS, 'deadline-project', { description: 'A later metadata edit.' });
+    expect(await store.get(WS, 'deadline-project')).toMatchObject({
+      completedAt: finishedAt,
+      milestones: [{ id: 'milestone-1', completed: true, completedAt: finishedAt }]
+    });
+  });
+});

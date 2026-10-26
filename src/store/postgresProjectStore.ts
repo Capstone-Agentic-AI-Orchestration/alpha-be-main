@@ -48,13 +48,14 @@ export class PostgresProjectStore implements ProjectStore {
     const { rows } = await this.sql.query<ProjectRow>(
       `with created as (insert into projects
          (id, workspace_id, name, key, description, color, icon, status, priority,
-          start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          start_date, target_date, lead_type, lead_name, lead_agent_id, resources, github_org, created_by, created_at,
+          milestones, completed_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20)
        returning *), assigned as (
          insert into workspace_squad_projects (id, workspace_id, squad_id, project_id, relationship, status)
-         select 'squad-project-' || id || '-' || $19::text, workspace_id, $19::text, id, 'owned', 'active' from created where $19::text is not null
+         select 'squad-project-' || id || '-' || $21::text, workspace_id, $21::text, id, 'owned', 'active' from created where $21::text is not null
          returning id
-       ) select created.*, $19::text as lead_squad_id from created`,
+       ) select created.*, $21::text as lead_squad_id from created`,
       [
         project.id,
         workspaceId,
@@ -74,6 +75,11 @@ export class PostgresProjectStore implements ProjectStore {
         project.githubOrg ?? null,
         project.createdBy ?? null,
         date(project.createdAt),
+        JSON.stringify((project.milestones ?? []).map(milestone => ({
+          ...milestone,
+          completedAt: milestone.completed ? (milestone.completedAt || new Date().toISOString()) : undefined
+        }))),
+        project.completedAt ?? (project.status === 'completed' ? new Date().toISOString() : null),
         project.leadSquadId || null
       ]
     );
@@ -89,7 +95,8 @@ export class PostgresProjectStore implements ProjectStore {
       `with updated as (update projects set
          name = $3, key = $4, description = $5, color = $6, icon = $7, status = $8, priority = $9,
          start_date = $10, target_date = $11, lead_type = $12, lead_name = $13, lead_agent_id = $14,
-         resources = $15, github_org = $16
+         resources = $15, github_org = $16, milestones = $18::jsonb,
+         completed_at = case when $8 = 'completed' then coalesce(completed_at, $19::timestamptz, now()) else null end
        where workspace_id = $1 and id = $2
        returning *), demoted as (
          update workspace_squad_projects set relationship = 'assigned', updated_at = now()
@@ -119,7 +126,12 @@ export class PostgresProjectStore implements ProjectStore {
         merged.leadAgentId || null,
         JSON.stringify(shareable(merged.resources)),
         merged.githubOrg ?? null,
-        merged.leadSquadId || null
+        merged.leadSquadId || null,
+        JSON.stringify((merged.milestones ?? []).map(milestone => ({
+          ...milestone,
+          completedAt: milestone.completed ? (milestone.completedAt || new Date().toISOString()) : undefined
+        }))),
+        merged.completedAt ?? null
       ]
     );
     return rows[0] ? toProject(rows[0]) : null;
@@ -290,6 +302,8 @@ export interface ProjectRow {
   github_org: string | null;
   created_by: string | null;
   created_at: Timestamp;
+  completed_at?: Timestamp;
+  milestones?: Project['milestones'] | null;
 }
 
 /** An empty date is stored as null, not as the epoch. */
@@ -359,6 +373,8 @@ export function toProject(row: ProjectRow): Project {
     githubOrg: row.github_org ?? undefined,
     createdBy: row.created_by ?? undefined,
     createdAt: iso(row.created_at),
+    completedAt: row.completed_at ? iso(row.completed_at) : undefined,
+    milestones: row.milestones ?? [],
     // Machine-local, and never stored here; see the class comment.
     envVars: []
   };

@@ -183,6 +183,23 @@ describe('deployments', () => {
     expect(calls[0].url).not.toContain('target=');
   });
 
+  it('lists bounded production and staging history with provider metadata for Operations imports', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 200,
+      body: { deployments: [{ uid: 'dpl-uat', target: 'preview', meta: { githubCommitRef: 'uat', githubCommitSha: 'abc123' } }] }
+    }));
+    const client = createVercelClient('token', 'team_123', impl);
+
+    expect(await client.listDeployments('proj-1', { production: true }, 100)).toMatchObject([
+      { uid: 'dpl-uat', target: 'preview', meta: { githubCommitRef: 'uat', githubCommitSha: 'abc123' } }
+    ]);
+    expect(await client.listDeployments('proj-1', { branch: 'uat' }, 100)).toHaveLength(1);
+    expect(calls.map(call => call.url)).toEqual([
+      'https://api.vercel.com/v7/deployments?projectId=proj-1&limit=100&target=production&teamId=team_123',
+      'https://api.vercel.com/v7/deployments?projectId=proj-1&limit=100&branch=uat&teamId=team_123'
+    ]);
+  });
+
   it('answers null when there is no such deployment', async () => {
     const { impl } = fakeFetch(() => ({ status: 200, body: { deployments: [] } }));
     const client = createVercelClient('token', '', impl);

@@ -261,6 +261,8 @@ export interface Project {
   priority: 'high' | 'medium' | 'low';
   startDate: string;
   targetDate?: string;
+  completedAt?: string;
+  milestones?: ProjectMilestone[];
   leadType: 'member' | 'agent';
   leadName: string;
   leadAgentId?: string;
@@ -284,6 +286,14 @@ export interface Project {
    * envVars override these in turn.
    */
   envVars?: { key: string; value: string; isSecret?: boolean }[];
+}
+
+export interface ProjectMilestone {
+  id: string;
+  title: string;
+  targetDate: string;
+  completed: boolean;
+  completedAt?: string;
 }
 
 export type BuildStepPhase =

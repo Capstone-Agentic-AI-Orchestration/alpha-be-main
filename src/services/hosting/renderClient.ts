@@ -82,6 +82,7 @@ export interface RenderDeploy {
   status: string;
   createdAt?: string;
   finishedAt?: string;
+  commit?: { id?: string; message?: string; author?: string };
 }
 
 export interface CreateRenderServiceInput {
@@ -128,6 +129,8 @@ export interface RenderClient {
   triggerDeploy(serviceId: string): Promise<{ id: string }>;
   /** `null` when the service has never deployed. */
   latestDeploy(serviceId: string): Promise<RenderDeploy | null>;
+  /** Recent service deployments, newest first. */
+  listDeploys(serviceId: string, limit?: number): Promise<RenderDeploy[]>;
   deleteService(serviceId: string): Promise<void>;
   /** Change a service's build/start commands or deploy trigger. Does not trigger a deploy. */
   updateService(serviceId: string, patch: RenderServiceSettings): Promise<RenderServiceRecord>;
@@ -274,6 +277,11 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
       const items = await call<unknown[]>('GET', `/services/${serviceId}/deploys?limit=1`);
       const [first] = items;
       return first ? unwrap<RenderDeploy>(first, 'deploy') : null;
+    },
+
+    async listDeploys(serviceId: string, limit = 20) {
+      const items = await call<unknown[]>('GET', `/services/${serviceId}/deploys?limit=${Math.max(1, Math.min(100, limit))}`);
+      return items.map(item => unwrap<RenderDeploy>(item, 'deploy'));
     },
 
     async updateService(serviceId: string, patch: RenderServiceSettings) {

@@ -77,6 +77,21 @@ describe('finding a service by name', () => {
   });
 });
 
+describe('deployment history', () => {
+  it('lists recent deploys and unwraps Render list items for Operations imports', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 200,
+      body: [{ cursor: 'next', deploy: { id: 'dep-1', status: 'live', createdAt: '2026-10-25T00:00:00Z' } }]
+    }));
+    const client = createRenderClient('key', impl);
+
+    expect(await client.listDeploys('srv-1', 100)).toEqual([
+      { id: 'dep-1', status: 'live', createdAt: '2026-10-25T00:00:00Z' }
+    ]);
+    expect(calls[0].url).toBe('https://api.render.com/v1/services/srv-1/deploys?limit=100');
+  });
+});
+
 describe('creating a service', () => {
   it('always sends the free plan, the health check path and both build/start commands', async () => {
     const { impl, calls } = fakeFetch(call => {
