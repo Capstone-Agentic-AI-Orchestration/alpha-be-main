@@ -1,0 +1,16 @@
+
+> alpha-be@2.0.0 test
+> vitest run --no-file-parallelism src/services/verificationExecution.test.ts src/services/verificationService.test.ts src/services/projectPlaybook.test.ts src/services/processManager.test.ts
+
+
+ RUN  v3.2.7 C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/alpha-be-execution-redesign
+
+ ✓ src/services/verificationExecution.test.ts (15 tests) 91ms
+ ✓ src/services/verificationService.test.ts (7 tests) 84ms
+ ✓ src/services/projectPlaybook.test.ts (3 tests) 48ms
+ ✓ src/services/processManager.test.ts (7 tests) 31ms
+
+ Test Files  4 passed (4)
+      Tests  32 passed (32)
+   Start at  00:00:58
+   Duration  2.00s (transform 217ms, setup 92ms, collect 303ms, tests 254ms, environment 1ms, prepare 476ms)

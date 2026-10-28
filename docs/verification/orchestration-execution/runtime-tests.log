@@ -1,0 +1,16 @@
+
+> alpha-be@2.0.0 test
+> vitest run --no-file-parallelism src/services/repositoryExecution.test.ts src/services/verificationExecution.integration.test.ts
+
+
+ RUN  v3.2.7 C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/alpha-be-execution-redesign
+
+ ✓ src/services/verificationExecution.integration.test.ts (2 tests) 5239ms
+   ✓ real managed check execution > returns actual failure diagnostics, then passes after the fixture is repaired  1661ms
+   ✓ real managed check execution > terminates an opaque server script at its deadline and releases the loopback port  3577ms
+ ✓ src/services/repositoryExecution.test.ts (11 tests) 26ms
+
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+   Start at  00:02:21
+   Duration  6.17s (transform 128ms, setup 54ms, collect 198ms, tests 5.27s, environment 0ms, prepare 227ms)

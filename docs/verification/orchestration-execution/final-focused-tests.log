@@ -1,0 +1,62 @@
+
+> alpha-be@2.0.0 test
+> vitest run --no-file-parallelism src/services/runnerWorkspaceLifetime.test.ts src/services/verificationExecution.test.ts src/services/processManager.test.ts
+
+
+ RUN  v3.2.7 C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/alpha-be-execution-redesign
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > runs the same squad concurrently in different project workspaces with independent run state
+[INFO] Squad "Fixture squad" starting on FIX-project-a-issue: 2 member(s), branch agent/squad-fixture-squad/fix-project-a-issue-0808
+[INFO] Squad "Fixture squad" starting on FIX-project-b-issue: 2 member(s), branch agent/squad-fixture-squad/fix-project-b-issue-0809
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > runs the same squad concurrently in different project workspaces with independent run state
+[INFO] Squad run squadrun-6cd9c0b0-51cb-48ab-923d-8f93efeccdd1 stopped: Research Agent did not finish (failed). Stopped at member 1 of 2.
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > runs the same squad concurrently in different project workspaces with independent run state
+[INFO] Squad run squadrun-4aee59af-909d-491e-ad65-458605a0cbcb stopped: Research Agent did not finish (failed). Stopped at member 1 of 2.
+
+stderr | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > releases the checkout after a failed spawn with no process
+[ERROR] Execution error in run run-9aa85d74-196e-4a89-aafe-3ef984f55d6f: Error: Executable missing
+    at Object.<anonymous> (C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerWorkspaceLifetime.test.ts:207:48)
+    at Object.mockCall (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/spy/dist/index.js:96:15)
+    at Object.spy [as spawnProcess] (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/tinyspy/dist/index.js:47:80)
+    at RunnerService.executeTask (C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerService.ts:755:36)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerService.ts:480:9
+
+stderr | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > releases on finalization failure without an unhandled exit callback
+[ERROR] Execution error in run run-6a703873-3f0f-481c-93da-ca2433cfa69e: Error: Verification infrastructure unavailable
+    at C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerWorkspaceLifetime.test.ts:219:34
+    at file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11
+    at file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26
+    at file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at runSuite (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)
+    at runSuite (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > stops a sequential squad without starting its next member
+[INFO] Squad "Fixture squad" starting on FIX-squad-cancel-issue: 2 member(s), branch agent/squad-fixture-squad/fix-squad-cancel-issue-2208
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > lets a real sequential squad enqueue its next member without a queue deadlock
+[INFO] Squad "Fixture squad" starting on FIX-squad-issue: 2 member(s), branch agent/squad-fixture-squad/fix-squad-issue-2970
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > lets a real sequential squad enqueue its next member without a queue deadlock
+[INFO] Squad run squadrun-5fa63fc2-2617-4376-ba32-42f1a453b2c6: Research Agent done, starting member 2/2
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > lets a real sequential squad enqueue its next member without a queue deadlock
+[INFO] Squad run squadrun-5fa63fc2-2617-4376-ba32-42f1a453b2c6 complete: 2 member(s), 0 tokens
+
+ ✓ src/services/runnerWorkspaceLifetime.test.ts (16 tests) 4062ms
+   ✓ RunnerService workspace ownership lifetime > launches an orchestrated task from an empty context with native tools disabled  530ms
+   ✓ RunnerService workspace ownership lifetime > holds the checkout through verification after the agent exits  327ms
+   ✓ RunnerService workspace ownership lifetime > holds the checkout through final diff/review preparation  355ms
+ ✓ src/services/verificationExecution.test.ts (16 tests) 96ms
+ ✓ src/services/processManager.test.ts (8 tests) 45ms
+
+ Test Files  3 passed (3)
+      Tests  40 passed (40)
+   Start at  00:05:38
+   Duration  5.49s (transform 428ms, setup 73ms, collect 162ms, tests 4.20s, environment 0ms, prepare 351ms)

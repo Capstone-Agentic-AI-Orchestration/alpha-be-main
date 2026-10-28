@@ -29,6 +29,7 @@ import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
 import { runVerification, type VerificationResult } from './verificationService.js';
+import { describeRepositoryExecution } from './repositoryExecution.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
 import { ALPHA_ORCHESTRATION_TRANSPORT_RETRIES, RUNS_DIR } from '../config/env.js';
@@ -690,7 +691,11 @@ export class RunnerService extends EventEmitter {
         ctx.ticketWorkContext.correction ? `\n\nPM-authorized correction:\n${ctx.ticketWorkContext.correction.instructions}` : '']
         .join(''),
     } : issue;
-    const prompt = this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad, ctx.orchestration);
+    const prompt = [
+      ctx.orchestration && !ctx.orchestration.taskPackage.reportCorrection
+        ? describeRepositoryExecution(cwd, task?.requiredChecks) : '',
+      this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad, ctx.orchestration)
+    ].filter(Boolean).join('\n\n');
     const systemPrompt = ctx.orchestration
       ? appendOrchestrationTaskPolicy(persona.systemPrompt, persona, ctx.orchestration)
       : ctx.squad

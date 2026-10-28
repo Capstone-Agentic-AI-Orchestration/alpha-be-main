@@ -131,6 +131,7 @@ async function exit(index: number, code = 0, reason?: Parameters<NonNullable<Spa
 describe('RunnerService workspace ownership lifetime', () => {
   it('launches an orchestrated task from an empty context with native tools disabled', async () => {
     const fixture = work('scoped');
+    fs.writeFileSync(path.join(fixture.cwd, 'package.json'), JSON.stringify({ packageManager: 'pnpm@9.0.0', scripts: { test: 'vitest run' } }));
     await runner.startRun({ issueId: 'scoped', agentId: 'agent-fixture', plan: [], workingDir: fixture.cwd,
       orchestration: { orchestrationRunId: 'workflow-1', taskId: 'brief', attemptId: 'attempt-1',
         branchName: 'alpha/orchestration/fixture', planVersion: 1, personaHash: 'fixture-hash', modelProvider: 'Anthropic', modelName: 'fixture-model',
@@ -146,6 +147,9 @@ describe('RunnerService workspace ownership lifetime', () => {
     expect(invocations[0].systemPrompt).toContain('Native file tools and terminal commands are disabled');
     expect(invocations[0].systemPrompt).toContain('Alpha-managed Git workspace (verified by the runner before execution)');
     expect(invocations[0].systemPrompt).toContain('attempt starts at ' + 'a'.repeat(40));
+    expect(invocations[0].prompt).toContain('Package manager: pnpm.');
+    expect(invocations[0].prompt).toContain('test: pnpm run test');
+    expect(invocations[0].prompt).toContain('Alpha manages website previews from accepted frontend checkpoints.');
     await exit(0, 1);
   });
   it('does not let a second run switch the checkout while the first agent is working', async () => {

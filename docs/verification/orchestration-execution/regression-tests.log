@@ -1,0 +1,957 @@
+
+> alpha-be@2.0.0 test
+> vitest run --no-file-parallelism src/services/verificationExecution.test.ts src/services/verificationExecution.integration.test.ts src/services/repositoryExecution.test.ts src/services/verificationService.test.ts src/services/projectPlaybook.test.ts src/services/processManager.test.ts src/services/taskFileAccess.test.ts src/services/taskAcceptanceService.test.ts src/services/orchestrationRecoveryPolicy.test.ts src/services/orchestrationService.test.ts src/services/orchestrationFinalization.test.ts src/services/acceptedWebsitePreview.test.ts src/services/localPreviewCheckpoint.test.ts src/services/localPreviewService.test.ts src/services/cliRunner.test.ts src/services/runnerWorkspaceLifetime.test.ts
+
+
+ RUN  v3.2.7 C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/alpha-be-execution-redesign
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > completes an accepted read-only report without a publication stage
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > allows scoped evolution of an accepted file in a persisted later milestone
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > revalidates legacy report aliases at acceptance and gives the next agent canonical prerequisite evidence
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > rejects an out-of-scope edit, targets its owner, and accepts only after the bad edit is removed
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > blocks with an Alpha finding when repository acceptance checks throw
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > turns an unexpected handoff-recording exception into a recoverable Alpha finding
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > retries malformed reports twice with the same read-only specialist before escalating
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > recovers a malformed report and failed final check before completing review and validation
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > routes an independent review finding to its owner, then repeats review and validation before approval
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > closes report-format findings once the corrected review is accepted, so final validation can pass
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/taskAcceptanceService.test.ts > task acceptance and targeted correction > blocks before reviewer dispatch when accepted patches exceed the review context limit
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+ ✓ src/services/taskAcceptanceService.test.ts (13 tests) 33183ms
+   ✓ task acceptance and targeted correction > completes an accepted read-only report without a publication stage  1577ms
+   ✓ task acceptance and targeted correction > allows scoped evolution of an accepted file in a persisted later milestone  2642ms
+   ✓ task acceptance and targeted correction > revalidates legacy report aliases at acceptance and gives the next agent canonical prerequisite evidence  2445ms
+   ✓ task acceptance and targeted correction > rejects an out-of-scope edit, targets its owner, and accepts only after the bad edit is removed  4030ms
+   ✓ task acceptance and targeted correction > blocks with an Alpha finding when repository acceptance checks throw  1079ms
+   ✓ task acceptance and targeted correction > turns an unexpected handoff-recording exception into a recoverable Alpha finding  1496ms
+   ✓ task acceptance and targeted correction > retries malformed reports twice with the same read-only specialist before escalating  1395ms
+   ✓ task acceptance and targeted correction > recovers a malformed report and failed final check before completing review and validation  6116ms
+   ✓ task acceptance and targeted correction > routes an independent review finding to its owner, then repeats review and validation before approval  7468ms
+   ✓ task acceptance and targeted correction > closes report-format findings once the corrected review is accepted, so final validation can pass  3659ms
+   ✓ task acceptance and targeted correction > blocks before reviewer dispatch when accepted patches exceed the review context limit  1272ms
+ ✓ src/services/verificationExecution.integration.test.ts (2 tests) 5363ms
+   ✓ real managed check execution > returns actual failure diagnostics, then passes after the fixture is repaired  1842ms
+   ✓ real managed check execution > terminates an opaque server script at its deadline and releases the loopback port  3520ms
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > runs the same squad concurrently in different project workspaces with independent run state
+[INFO] Squad "Fixture squad" starting on FIX-project-a-issue: 2 member(s), branch agent/squad-fixture-squad/fix-project-a-issue-0766
+[INFO] Squad "Fixture squad" starting on FIX-project-b-issue: 2 member(s), branch agent/squad-fixture-squad/fix-project-b-issue-0767
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > runs the same squad concurrently in different project workspaces with independent run state
+[INFO] Squad run squadrun-8fe62db4-2951-4a4e-948e-91bb537cde83 stopped: Research Agent did not finish (failed). Stopped at member 1 of 2.
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > runs the same squad concurrently in different project workspaces with independent run state
+[INFO] Squad run squadrun-9f88edbd-2037-4bf5-a9a2-dd6da3e9358d stopped: Research Agent did not finish (failed). Stopped at member 1 of 2.
+
+stderr | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > releases the checkout after a failed spawn with no process
+[ERROR] Execution error in run run-c2682fd8-02c0-413e-b4da-43a1a0c6f873: Error: Executable missing
+    at Object.<anonymous> (C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerWorkspaceLifetime.test.ts:203:48)
+    at Object.mockCall (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/spy/dist/index.js:96:15)
+    at Object.spy [as spawnProcess] (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/tinyspy/dist/index.js:47:80)
+    at RunnerService.executeTask (C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerService.ts:755:36)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerService.ts:480:9
+
+stderr | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > releases on finalization failure without an unhandled exit callback
+[ERROR] Execution error in run run-42dcbee4-8935-4048-b63d-d4975b23cf67: Error: Verification infrastructure unavailable
+    at C:\Users\Lloyd\Documents\Projects\Capstone\Alpha-v2\alpha-be-execution-redesign\src\services\runnerWorkspaceLifetime.test.ts:215:34
+    at file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11
+    at file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26
+    at file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at runSuite (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)
+    at runSuite (file:///C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/release-be-2.0.59/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > stops a sequential squad without starting its next member
+[INFO] Squad "Fixture squad" starting on FIX-squad-cancel-issue: 2 member(s), branch agent/squad-fixture-squad/fix-squad-cancel-issue-2107
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > lets a real sequential squad enqueue its next member without a queue deadlock
+[INFO] Squad "Fixture squad" starting on FIX-squad-issue: 2 member(s), branch agent/squad-fixture-squad/fix-squad-issue-2804
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > lets a real sequential squad enqueue its next member without a queue deadlock
+[INFO] Squad run squadrun-34fce3b5-a878-4da2-a1f1-686b59f26694: Research Agent done, starting member 2/2
+
+stdout | src/services/runnerWorkspaceLifetime.test.ts > RunnerService workspace ownership lifetime > lets a real sequential squad enqueue its next member without a queue deadlock
+[INFO] Squad run squadrun-34fce3b5-a878-4da2-a1f1-686b59f26694 complete: 2 member(s), 0 tokens
+
+ ✓ src/services/runnerWorkspaceLifetime.test.ts (16 tests) 3934ms
+   ✓ RunnerService workspace ownership lifetime > launches an orchestrated task from an empty context with native tools disabled  542ms
+   ✓ RunnerService workspace ownership lifetime > holds the checkout through verification after the agent exits  322ms
+   ✓ RunnerService workspace ownership lifetime > holds the checkout through final diff/review preparation  305ms
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > runs only the next task owner and waits for acceptance before dispatching dependent work
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > finishes the active specialist, pauses before the next handoff, and resumes the saved plan
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > skips unrelated optional tasks and runs optional work only when required work depends on it
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > rejects a reused request key whose request fingerprint changed
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > self-repairs an agent execution failure, retries only its owner, and ignores a late old result
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > escalates provider failures without asking a project agent to repair the runtime
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > persists a bounded recovery attempt when specialist preparation fails before launch
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > assigns bounded verification repairs, gives each the failure evidence, then stops for human review
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > cancels the orchestration and ignores completion after cancellation
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > keeps the repository reserved until the active specialist confirms it stopped
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > keeps a failed stop request in cancelling state and does not release the repository
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > deterministic orchestration orchestrator > keeps an interrupted task stopped until explicit resume, then retries only that task
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > specialist launch safety > stops waiting for a launch that never returns, and stops a process that starts late
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > specialist launch safety > retries an interrupted attempt that never reached a specialist
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+stdout | src/services/orchestrationService.test.ts > specialist launch safety > still holds an attempt without a process id when a run was recorded for it
+[db] migrated thread_sessions.persona_hash
+[db] migrated prototype_runs.input_tokens
+[db] migrated prototype_runs.output_tokens
+[db] migrated prototype_runs.cache_read_tokens
+[db] migrated prototype_runs.cache_creation_tokens
+[db] migrated prototype_runs.thinking_tokens
+[db] migrated prototype_runs.cost_usd
+[db] migrated prototype_runs.num_turns
+[db] migrated orchestration_runs.repository_workspaces_json
+[db] migrated prototype_runs.squad_run_id
+[db] migrated prototype_runs.squad_order
+[db] migrated squads.description
+[db] migrated squads.avatar
+[db] migrated squads.color
+[db] migrated agents.allowed_users
+[db] migrated agents.template_key
+[db] migrated agents.template_version
+[db] migrated agents.phase
+[db] migrated agents.is_seeded
+[db] migrated agents.shared_key
+[db] migrated chat_threads.project_id
+[db] migrated chat_threads.owner_id
+[db] migrated chat_threads.usage_cleared_at
+[db] migrated issues.assigned_squad_id
+[db] migrated projects.env_vars
+[db] migrated issues.created_by
+[db] migrated issues.github_repo
+[db] migrated issues.github_number
+[db] migrated issues.github_url
+[db] migrated issue_comments.github_id
+
+ ✓ src/services/orchestrationService.test.ts (15 tests) 3466ms
+   ✓ deterministic orchestration orchestrator > keeps an interrupted task stopped until explicit resume, then retries only that task  660ms
+   ✓ specialist launch safety > retries an interrupted attempt that never reached a specialist  715ms
+   ✓ specialist launch safety > still holds an attempt without a process id when a run was recorded for it  737ms
+ ✓ src/services/taskFileAccess.test.ts (20 tests) 4789ms
+   ✓ managed task commands > generates a real npm lockfile through the bounded operation without running lifecycle scripts  4634ms
+ ✓ src/services/localPreviewCheckpoint.test.ts (4 tests) 3682ms
+   ✓ preview checkpoint selection > serves the accepted commit even when the worktree HEAD has advanced  1207ms
+   ✓ preview checkpoint selection > rejects invalid checkpoint scope: wrong-thread  820ms
+   ✓ preview checkpoint selection > rejects invalid checkpoint scope: wrong-commit  839ms
+   ✓ preview checkpoint selection > rejects invalid checkpoint scope: cancelled  815ms
+stderr | src/services/cliRunner.test.ts > scoped task native permissions > keeps OpenAI native writes and commands disabled while exposing only task MCP
+[ERROR] Could not read /task/mcp.json for Codex: ENOENT: no such file or directory, open 'C:\task\mcp.json'
+
+stderr | src/services/cliRunner.test.ts > scoped task native permissions > keeps OpenCode native writes and commands disabled while exposing only task MCP
+[ERROR] Could not read /task/mcp.json for OpenCode: ENOENT: no such file or directory, open 'C:\task\mcp.json'
+
+stderr | src/services/cliRunner.test.ts > buildTurnInvocation — Codex > adds no MCP flags — codex takes them from its own settings file
+[ERROR] Could not read /runs/chat-1/mcp.json for Codex: ENOENT: no such file or directory, open 'C:\runs\chat-1\mcp.json'
+
+stderr | src/services/cliRunner.test.ts > custom CLI arguments > cannot override the tool policy the runner set
+[ERROR] Ignored custom CLI arguments --dangerously-skip-permissions (set by Alpha for this turn); --allowedtools (set by Alpha for this turn)
+
+stderr | src/services/cliRunner.test.ts > custom CLI arguments > cannot replace the composed persona
+[ERROR] Ignored custom CLI arguments --system-prompt (set by Alpha for this turn)
+
+stderr | src/services/cliRunner.test.ts > Codex isolation from the operator config > cannot be undone through customCliArgs
+[ERROR] Ignored custom CLI arguments --sandbox (set by Alpha for this turn)
+
+stderr | src/services/cliRunner.test.ts > chat capability from skills > keeps custom CLI args from granting a tool the skills did not
+[ERROR] Ignored custom CLI arguments --allowedtools (set by Alpha for this turn)
+
+stderr | src/services/cliRunner.test.ts > a chat that reads the project only through alpha-project-files > switches Codex's own shell off, since its read-only sandbox reads anywhere
+[ERROR] Could not read /runs/chat-1/mcp.json for Codex: ENOENT: no such file or directory, open 'C:\runs\chat-1\mcp.json'
+
+stderr | src/services/cliRunner.test.ts > a chat that reads the project only through alpha-project-files > leaves chats without project roots, agents granted a shell, and runs as they were
+[ERROR] Could not read /runs/chat-1/mcp.json for Codex: ENOENT: no such file or directory, open 'C:\runs\chat-1\mcp.json'
+[ERROR] Could not read /runs/chat-1/mcp.json for Codex: ENOENT: no such file or directory, open 'C:\runs\chat-1\mcp.json'
+[ERROR] Could not read /runs/chat-1/mcp.json for Codex: ENOENT: no such file or directory, open 'C:\runs\chat-1\mcp.json'
+
+ ✓ src/services/cliRunner.test.ts (127 tests) 55ms
+ ✓ src/services/verificationExecution.test.ts (15 tests) 123ms
+ ✓ src/services/verificationService.test.ts (7 tests) 81ms
+ ✓ src/services/projectPlaybook.test.ts (3 tests) 38ms
+ ✓ src/services/processManager.test.ts (7 tests) 50ms
+ ✓ src/services/localPreviewService.test.ts (10 tests) 17ms
+ ✓ src/services/repositoryExecution.test.ts (11 tests) 27ms
+ ✓ src/services/orchestrationFinalization.test.ts (5 tests) 10ms
+ ✓ src/services/acceptedWebsitePreview.test.ts (10 tests) 12ms
+ ✓ src/services/orchestrationRecoveryPolicy.test.ts (11 tests) 14ms
+
+ Test Files  16 passed (16)
+      Tests  276 passed (276)
+   Start at  00:03:06
+   Duration  65.04s (transform 1.42s, setup 273ms, collect 4.53s, tests 54.84s, environment 3ms, prepare 1.95s)

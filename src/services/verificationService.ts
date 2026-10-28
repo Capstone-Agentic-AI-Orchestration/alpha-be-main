@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { processManager } from './processManager.js';
+import { discoverVerificationCommands, readManifest, packageManagerFor, packageManagerBinary, hasScript, verificationScriptProblem, VERIFICATION_TIMEOUT_MS, type PackageManifest, type VerificationCommand } from './repositoryExecution.js';
+export { discoverVerificationCommands, type VerificationCommand } from './repositoryExecution.js';
 
 /**
  * Commands Alpha is willing to discover from a repository's package manifest.
@@ -9,20 +11,11 @@ import { processManager } from './processManager.js';
  * is passed as an argument to the package manager rather than through a shell.
  * That keeps issue text and package metadata from becoming shell syntax.
  */
-const COMBINED_CHECK_SCRIPTS = ['verify', 'check', 'validate', 'ci'] as const;
-const INDIVIDUAL_CHECK_SCRIPTS = ['test', 'typecheck', 'lint'] as const;
 const MAX_OUTPUT_CHARS = 12_000;
 /** Install errors that mean the cached package listings are out of date, not that the lockfile is wrong. */
 const STALE_METADATA = /\bETARGET\b|notarget|No matching version found|ERR_PNPM_NO_MATCHING_VERSION|ERR_PNPM_META_FETCH/i;
 
 export type VerificationStatus = 'passed' | 'failed' | 'skipped' | 'cancelled';
-
-export interface VerificationCommand {
-  script: string;
-  bin: string;
-  args: string[];
-  display: string;
-}
 
 export interface VerificationCommandResult {
   command: VerificationCommand;
@@ -39,39 +32,6 @@ export interface VerificationResult {
   /** Requested scripts missing from the repository manifest, never treated as passed. */
   missingScripts: string[];
   summary: string;
-}
-
-interface PackageManifest {
-  packageManager?: unknown;
-  scripts?: Record<string, unknown>;
-  dependencies?: Record<string, unknown>;
-  devDependencies?: Record<string, unknown>;
-}
-
-function readManifest(cwd: string): PackageManifest | null {
-  try {
-    const raw = fs.readFileSync(path.join(cwd, 'package.json'), 'utf8');
-    const parsed = JSON.parse(raw) as PackageManifest;
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function packageManagerFor(cwd: string, manifest: PackageManifest): string {
-  const declared = typeof manifest.packageManager === 'string'
-    ? manifest.packageManager.split('@')[0]
-    : '';
-
-  if (['npm', 'pnpm', 'yarn', 'bun'].includes(declared)) return declared;
-  if (fs.existsSync(path.join(cwd, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (fs.existsSync(path.join(cwd, 'yarn.lock'))) return 'yarn';
-  if (fs.existsSync(path.join(cwd, 'bun.lockb')) || fs.existsSync(path.join(cwd, 'bun.lock'))) return 'bun';
-  return 'npm';
-}
-
-function packageManagerBinary(manager: string): string {
-  return process.platform === 'win32' ? `${manager}.cmd` : manager;
 }
 
 function dependencyInstallCommand(cwd: string, manifest: PackageManifest): VerificationCommand | undefined {
@@ -108,41 +68,6 @@ function dependencyInstallCommand(cwd: string, manifest: PackageManifest): Verif
   };
 }
 
-function hasScript(scripts: Record<string, unknown>, name: string): boolean {
-  return typeof scripts[name] === 'string' && scripts[name].trim().length > 0;
-}
-
-/**
- * Discover a small, deterministic set of repository-owned checks.
- *
- * A combined `verify`/`check`/`validate`/`ci` script is authoritative: it is
- * normally the project's own composition of tests, linting, and typechecks, so
- * running the individual scripts as well would duplicate work. Without one,
- * run the conventional checks that actually exist, in a stable order.
- */
-export function discoverVerificationCommands(cwd: string, requestedScripts?: readonly string[]): VerificationCommand[] {
-  const manifest = readManifest(cwd);
-  const scripts = manifest?.scripts;
-  if (!scripts) return [];
-
-  const manager = packageManagerFor(cwd, manifest);
-  const bin = packageManagerBinary(manager);
-  const requested = [...new Set(requestedScripts ?? [])];
-  const selected = requested.length ? undefined : COMBINED_CHECK_SCRIPTS.find(name => hasScript(scripts, name));
-  const scriptsToRun = requested.length
-    ? requested.filter(name => hasScript(scripts, name))
-    : selected
-      ? [selected]
-      : INDIVIDUAL_CHECK_SCRIPTS.filter(name => hasScript(scripts, name));
-
-  return scriptsToRun.map(script => ({
-    script,
-    bin,
-    args: ['run', script],
-    display: `${manager} run ${script}`
-  }));
-}
-
 function appendOutput(current: string, chunk: Buffer | string): string {
   const next = current + chunk.toString();
   if (next.length <= MAX_OUTPUT_CHARS) return next;
@@ -171,11 +96,15 @@ function runCommand(
         bin: command.bin,
         args: command.args,
         cwd,
+        env: { CI: 'true' },
+        timeoutMs: VERIFICATION_TIMEOUT_MS,
         onStdout: chunk => { output = appendOutput(output, chunk); },
         onStderr: chunk => { output = appendOutput(output, chunk); },
         onExit: (exitCode, signal, terminationReason) => {
           if (terminationReason === 'cancelled') {
             finish(null, signal, 'Verification process cancelled by the user.');
+          } else if (terminationReason) {
+            finish(null, signal, terminationReason === 'timeout' ? 'Verification timed out; the managed process was stopped.' : 'Verification process failed: ' + terminationReason);
           } else {
             finish(exitCode, signal);
           }
@@ -221,7 +150,15 @@ export async function runVerification(options: {
     const summary = missingScripts.length
       ? `Required checks unavailable: ${missingScripts.join(', ')}.`
       : resultSummary([], 'skipped');
-    return { status: 'skipped', commands: [], missingScripts, summary };
+    return { status: missingScripts.length ? 'failed' : 'skipped', commands: [], missingScripts, summary };
+  }
+
+  if (missingScripts.length) {
+    return { status: 'failed', commands: [], missingScripts, summary: `Required checks unavailable: ${missingScripts.join(', ')}.` };
+  }
+  const problems = commands.map(command => verificationScriptProblem(scripts, command.script)).filter(Boolean);
+  if (problems.length) {
+    return { status: 'failed', commands: [], missingScripts, summary: 'Bounded verification refused: ' + problems.join(' ') };
   }
 
   let preparation: VerificationCommandResult | undefined;
@@ -235,6 +172,7 @@ export async function runVerification(options: {
     // version the agent's lockfile pins from fresh registry data ("ETARGET No matching
     // version"). Ask the registry again once before calling the dependencies broken.
     if (preparation.exitCode !== 0 && install.args.includes('--prefer-offline') && STALE_METADATA.test(preparation.output)) {
+      if (options.shouldContinue && !options.shouldContinue()) return { status: 'cancelled', commands: [], preparation, missingScripts, summary: resultSummary([], 'cancelled') };
       const online = { ...install, args: install.args.map(arg => arg === '--prefer-offline' ? '--prefer-online' : arg) };
       online.display = `${install.display.split(' ')[0]} ${online.args.join(' ')}`;
       preparation = await runCommand(`${options.runId}-dependencies-online`, options.cwd, online);

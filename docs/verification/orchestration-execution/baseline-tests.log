@@ -1,0 +1,18 @@
+
+> alpha-be@2.0.0 test
+> vitest run --no-file-parallelism src/services/verificationService.test.ts src/services/projectPlaybook.test.ts src/services/taskFileAccess.test.ts src/services/acceptedWebsitePreview.test.ts src/services/orchestrationRecoveryPolicy.test.ts
+
+
+ RUN  v3.2.7 C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/alpha-be-execution-redesign
+
+ ✓ src/services/taskFileAccess.test.ts (20 tests) 4155ms
+   ✓ managed task commands > generates a real npm lockfile through the bounded operation without running lifecycle scripts  4030ms
+ ✓ src/services/verificationService.test.ts (7 tests) 111ms
+ ✓ src/services/projectPlaybook.test.ts (3 tests) 58ms
+ ✓ src/services/orchestrationRecoveryPolicy.test.ts (11 tests) 9ms
+ ✓ src/services/acceptedWebsitePreview.test.ts (10 tests) 13ms
+
+ Test Files  5 passed (5)
+      Tests  51 passed (51)
+   Start at  23:57:10
+   Duration  8.14s (transform 323ms, setup 146ms, collect 913ms, tests 4.35s, environment 1ms, prepare 1.44s)
