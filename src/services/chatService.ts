@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { localPreviewService } from './localPreviewService.js';
 import { previewChatContext } from './previewChatContext.js';
+import { buildDecisionAction, type ChatBuildDecision } from './chatBuildDecision.js';
+import { executeOrchestrationDecision } from './orchestrationDecision.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
@@ -77,6 +79,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { describeProjectBuild } from './chatBuildContext.js';
 
 export interface SendMessageParams {
+  buildDecision?: ChatBuildDecision;
   threadId: string;
   content: string;
   approvalMode?: ChatApprovalMode;
@@ -327,6 +330,7 @@ function sessionMemoryPrompt(threadId: string, ownerId?: string): string | undef
 }
 
 export class ChatService extends EventEmitter {
+  private buildDecisions = new Map<string, Promise<SendMessageResult>>();
   private readonly activeTurns = new Map<string, ActiveChatTurn>();
   /** Alpha replies that report a runtime failure rather than an answer. */
   private readonly failedDefaultReplies = new WeakSet<ChatMessage>();
@@ -460,6 +464,36 @@ export class ChatService extends EventEmitter {
     if (!existingUserMessage) {
       chatAttachmentService.linkToMessage(threadId, messageId, attachmentIds);
       saveChatMessageAndShare(userMessage);
+    }
+
+    // Persist the actual human reply before executing a decision. Retries return its saved outcome.
+    if (params.buildDecision && params.routing) {
+      const id = `${messageId}-build-decision`;
+      const key = JSON.stringify([workspaceId, threadId, messageId]);
+      const saved = sqliteService.getChatMessages(threadId).find(message => message.id === id);
+      if (saved) return { userMessage, agentMessage: saved, agentMessages: [saved] };
+      const pending = this.buildDecisions.get(key);
+      if (pending) return pending;
+      const job = (async () => {
+        const decision = params.buildDecision!;
+        let result: string;
+        try {
+          if (params.routing!.answerOnly || params.buildRequest || attachmentIds.length ||
+              buildDecisionAction(content) !== decision.action) throw new Error('Use a direct approval reply in the main chat, without attachments or an answer-only request.');
+          if (!decision.evidenceReady) throw new Error('The plan or validated diff is not loaded yet. Read it in the right panel, then reply again here.');
+          if (!thread.projectId || thread.ownerId !== params.routing!.context.userId) throw new Error('This build is not available in this conversation.');
+          const next = await executeOrchestrationDecision({ context: params.routing!.context, projectId: thread.projectId,
+            threadId, ...decision });
+          result = decision.action === 'start' ? `Plan v${next.run.planVersion} started. Follow the agents and instructions in the right panel.`
+            : next.run.status === 'completed' ? 'Publication completed. The pull request and review details are in the right panel.'
+              : 'Publication is in progress. Its review details are in the right panel.';
+        } catch (error) { result = `Build action not applied: ${(error as Error).message}`; }
+        const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha', content: result, timestamp: new Date().toISOString() };
+        saveChatMessageAndShare(reply); this.emit('chat_message', reply);
+        return { userMessage, agentMessage: reply, agentMessages: [reply] };
+      })();
+      this.buildDecisions.set(key, job);
+      try { return await job; } finally { this.buildDecisions.delete(key); }
     }
 
     // Preview control is not a model turn or a build. Never queue it behind an agent.
@@ -820,7 +854,7 @@ export class ChatService extends EventEmitter {
               `**${statusText(build)}**`,
               build.repositories && build.repositories.length > 1 ? `**One shared build across:** ${build.repositories.join(', ')}` : undefined,
               build.status === 'plan_ready'
-                ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Build review tab, then type **start** there when you approve the plan.`
+                ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Build review tab, then reply **start** in the main chat when you approve the plan.`
                 : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
               build.reason,
               build.repository ? `**Repository:** ${build.repository}` : undefined,
