@@ -15,6 +15,8 @@ import { resolveProjectWorkspace, ensureWorkspacesRoot, allowAttachedWorkspace }
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { IS_CLOUD } from '../config/env.js';
+import { EventEmitter } from 'node:events';
+import { hasPreviewErrors } from './previewDiagnostics.js';
 import type { ProjectRoot } from './projectFiles.js';
 const exec = promisify(execFile);
 
@@ -26,7 +28,8 @@ export interface LocalPreview {
   messageId?: string; capability: string;
   browserDiagnostics?: Array<{ kind: 'console' | 'request' | 'blocked' | 'load'; message: string; timestamp: string }>;
 }
-type Owned = { record: LocalPreview; child?: ReturnType<typeof spawn>; cancelled: boolean; touched: number; dir: string; job?: Promise<void>; stopping?: Promise<void> };
+type Owned = { record: LocalPreview; notificationKey?: string; checkpoint?: PreviewCheckpoint; child?: ReturnType<typeof spawn>; cancelled: boolean; touched: number; dir: string; job?: Promise<void>; stopping?: Promise<void> };
+export interface PreviewCheckpoint { runId: string; taskId: string; commit: string }
 
 /** Kept outside the project script: loss of the engine's pipe also stops the server after a crash. */
 export const PREVIEW_SUPERVISOR = `
@@ -105,9 +108,9 @@ export async function ownsPreviewPort(port: number, root: number): Promise<boole
   return false;
 }
 
-export class LocalPreviewService {
+export class LocalPreviewService extends EventEmitter {
   private owned = new Map<string, Owned>();
-  private pending = new Map<string, { repository?: string; job: Promise<LocalPreview> }>();
+  private pending = new Map<string, { repository?: string; checkpoint?: string; runId?: string; workspaceId?: string; job: Promise<LocalPreview> }>();
   private timer = setInterval(() => { for (const item of this.owned.values()) if (Date.now() - item.touched > 120_000 || Date.now() - Date.parse(item.record.createdAt) > 3_600_000) void this.stopOwned(item).catch(error => { item.record.error = redactPreviewLog(String(error)); this.save(item); }); }, 15_000).unref();
 
   async authorize(context: WorkspaceContext, threadId: string) {
@@ -175,21 +178,33 @@ export class LocalPreviewService {
     item.record.browserDiagnostics = [...events, { kind, message: clean, timestamp: new Date().toISOString() }].slice(-30);
     this.save(item);
   }
-  start(context: WorkspaceContext, threadId: string, repository?: string, messageId?: string): Promise<LocalPreview> {
+  start(context: WorkspaceContext, threadId: string, repository?: string, messageId?: string, checkpoint?: PreviewCheckpoint): Promise<LocalPreview> {
     const key = JSON.stringify([context.workspaceId, context.userId, threadId]);
     const pending = this.pending.get(key);
-    if (pending) return pending.repository === repository ? pending.job : Promise.reject(new Error('A preview is already being prepared in this conversation. Wait for its status before selecting another codebase.'));
-    const job = this.create(context, threadId, repository, messageId).finally(() => this.pending.delete(key));
-    this.pending.set(key, { repository, job }); return job;
+    if (pending) return pending.repository === repository && pending.checkpoint === checkpoint?.commit && pending.runId === checkpoint?.runId ? pending.job : Promise.reject(new Error('A preview is already being prepared in this conversation. Wait for its status before selecting another codebase.'));
+    const job = this.create(context, threadId, repository, messageId, checkpoint).finally(() => this.pending.delete(key));
+    this.pending.set(key, { repository, checkpoint: checkpoint?.commit, runId: checkpoint?.runId, workspaceId: context.workspaceId, job }); return job;
   }
-  private async create(context: WorkspaceContext, threadId: string, repository?: string, messageId?: string): Promise<LocalPreview> {
+  private async create(context: WorkspaceContext, threadId: string, repository?: string, messageId?: string, checkpoint?: PreviewCheckpoint): Promise<LocalPreview> {
     const project = await this.authorize(context, threadId);
     const repos = reposForProject(project);
     if (repository && !repos.some(repo => repo.toLowerCase() === repository.toLowerCase())) throw new Error('Preview repository is outside this project.');
     const candidates: Array<{ repo: string; dir: string; branch: string; commit: string; source: LocalPreview['source'] }> = [];
-    const snapshot = runWithWorkspace(context.workspaceId, () => sqliteService.getLatestOrchestrationSnapshot(project.id, threadId));
+    const snapshot = runWithWorkspace(context.workspaceId, () => checkpoint
+      ? sqliteService.getOrchestrationSnapshot(checkpoint.runId)
+      : sqliteService.getLatestOrchestrationSnapshot(project.id, threadId));
+    if (checkpoint) {
+      const task = snapshot?.tasks.find(task => task.id === checkpoint.taskId);
+      if (!snapshot || snapshot.run.workspaceId !== context.workspaceId || snapshot.run.projectId !== project.id ||
+          snapshot.run.originChatThreadId !== threadId || !['executing', 'validating', 'awaiting_approval', 'completed'].includes(snapshot.run.status) ||
+          task?.kind !== 'frontend' || task.status !== 'accepted' || (task.repository ?? snapshot.run.repository).toLowerCase() !== repository?.toLowerCase() ||
+          !snapshot.attempts.some(attempt => attempt.taskId === task.id && attempt.status === 'accepted' && attempt.resultCommit === checkpoint.commit)) {
+        throw new Error('This preview checkpoint is not an accepted website task in this conversation.');
+      }
+    }
     for (const repo of repos.filter(repo => !repository || repo.toLowerCase() === repository.toLowerCase())) {
       const saved = snapshot && repositoryWorkspaceForRun(snapshot.run, repo);
+      if (checkpoint && !saved) throw new Error('The accepted preview has no saved repository workspace.');
       // Use a build's saved checkout only when it exists; never fall back from a missing build source.
       const binding = resolveProjectWorkspace(project, repo);
       if (binding) allowAttachedWorkspace(binding, project.name);
@@ -198,11 +213,12 @@ export class LocalPreviewService {
       ensureWorkspacesRoot();
       if (!sqliteService.isPathAllowed(dir)) throw new Error('Reconnect this repository folder in Alpha before running its preview; its path is not authorized.');
       const git = async (...args: string[]) => String((await exec('git', args, { cwd: dir, windowsHide: true, timeout: 15_000 })).stdout).trim();
-      const commit = await git('rev-parse', '--verify', 'HEAD');
+      const commit = checkpoint ? await git('rev-parse', '--verify', `${checkpoint.commit}^{commit}`) : await git('rev-parse', '--verify', 'HEAD');
+      if (checkpoint && commit !== checkpoint.commit) throw new Error('The saved preview checkpoint is unavailable.');
       if (!/^[a-f0-9]{40,64}$/.test(commit)) throw new Error('Repository has no saved commit.');
       let manifest;
       try { manifest = JSON.parse(await git('show', `${commit}:package.json`)); } catch { continue; }
-      if (!previewAdapter(manifest)) continue;
+      if (!previewAdapter(manifest) && !checkpoint) continue;
       // Saved commit is reproducible even if specialists are now working beyond it.
       candidates.push({ repo, dir, commit, branch: saved?.branchName ?? await git('branch', '--show-current'), source: saved ? 'saved-build' : 'checkout' });
     }
@@ -216,14 +232,21 @@ export class LocalPreviewService {
     const id = randomUUID();
     const now = new Date().toISOString();
     const record: LocalPreview = { id, workspaceId: context.workspaceId, ownerId: context.userId, threadId, projectId: project.id, repository: source.repo, commit: source.commit, branch: source.branch, source: source.source, state: 'starting', logs: '', createdAt: now, updatedAt: now, messageId, capability: randomUUID() };
-    const item: Owned = { record, cancelled: false, touched: Date.now(), dir: path.join(ensureWorkspacesRoot(), '_previews', id) };
+    const item: Owned = { record, checkpoint, cancelled: false, touched: Date.now(), dir: path.join(ensureWorkspacesRoot(), '_previews', id) };
     this.owned.set(id, item); this.save(item);
     item.job = this.launch(item, source.dir).catch(async error => {
       if (!item.cancelled) { item.record.error = redactPreviewLog(error instanceof Error ? error.message : String(error)); item.record.state = 'failed'; try { await this.kill(item); } catch { item.record.error += ' The owned server could not be stopped; use Stop to retry.'; } this.save(item); }
     });
     return { ...record };
   }
-  private save(item: Owned) { item.record.updatedAt = new Date().toISOString(); sqliteService.saveLocalPreview(item.record); }
+  private save(item: Owned) {
+    item.record.updatedAt = new Date().toISOString(); sqliteService.saveLocalPreview(item.record);
+    const key = `${item.record.state}:${hasPreviewErrors(item.record)}`;
+    if (item.record.messageId && key !== item.notificationKey && ['starting', 'ready', 'failed', 'stopped'].includes(item.record.state)) {
+      item.notificationKey = key;
+      this.emit('status', { ...item.record });
+    }
+  }
   private log(item: Owned, chunk: unknown) { item.record.logs = (item.record.logs + redactPreviewLog(String(chunk))).slice(-8000); this.save(item); }
   private async command(item: Owned, bin: string, args: string[], port: number, timeout: number): Promise<void> {
     if (item.cancelled) throw new Error('Preview stopped.');
@@ -237,6 +260,7 @@ export class LocalPreviewService {
     });
   }
   private async launch(item: Owned, source: string) {
+    this.assertCheckpointActive(item);
     fs.mkdirSync(path.dirname(item.dir), { recursive: true });
     // Fresh clone has its own index/HEAD and no project hooks or ignored environment files.
     await exec('git', ['clone', '--shared', '--no-checkout', '--', source, item.dir], { windowsHide: true, timeout: 30_000 });
@@ -256,6 +280,7 @@ export class LocalPreviewService {
       await this.command(item, bin, install, port, 180_000);
     }
     if (item.cancelled) return;
+    this.assertCheckpointActive(item);
     const child = spawnPreview(item, bin, ['run', adapter.script, ...(manager === 'yarn' ? [] : ['--']), ...adapter.flags(port)], port);
     item.child = child;
     child.stdout?.on('data', chunk => this.log(item, chunk)); child.stderr?.on('data', chunk => this.log(item, chunk));
@@ -301,6 +326,16 @@ export class LocalPreviewService {
     const records = await this.list(context, threadId);
     if (!records.some(row => row.id === id)) throw new Error('Preview not found in this conversation.');
     const item = this.owned.get(id); if (item) await this.stopOwned(item);
+  }
+  private assertCheckpointActive(item: Owned) {
+    if (!item.checkpoint) return;
+    const snapshot = runWithWorkspace(item.record.workspaceId, () => sqliteService.getOrchestrationSnapshot(item.checkpoint!.runId));
+    if (!snapshot || !['executing', 'validating', 'awaiting_approval', 'completed'].includes(snapshot.run.status)) throw new Error('The build stopped before its website preview was ready.');
+  }
+  async stopForBuild(workspaceId: string, runId: string) {
+    // Wait for source preparation as well as already-owned processes so cancellation cannot miss a late launch.
+    await Promise.allSettled([...this.pending.values()].filter(pending => pending.workspaceId === workspaceId && pending.runId === runId).map(pending => pending.job));
+    await Promise.all([...this.owned.values()].filter(item => item.record.workspaceId === workspaceId && item.checkpoint?.runId === runId).map(item => this.stopOwned(item)));
   }
   /** Main-only capability: resolves a registered process, never a renderer-provided URL. */
   resolveSurface(id: string, capability: string): LocalPreview | undefined {

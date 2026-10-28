@@ -8,7 +8,7 @@ import { ticketOperationConflict, ticketOperationFingerprint } from './ticketOpe
 const id = z.string().min(1).max(200).refine(value => value.trim() === value);
 const previewSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-  branch: z.enum(['main', 'uat']),
+  branch: z.literal('uat'),
   url: z.string().url().max(2048),
 }).strict().nullable().default(null);
 const linkSchema = z.object({

@@ -20,6 +20,8 @@ let turnInputs: any[];
 let cliReplies: string[];
 const startProjectBuildBatch = vi.fn();
 const cancelRun = vi.fn();
+const startPlannedWork = vi.fn();
+const approveAndPublish = vi.fn();
 
 const context = { workspaceId: 'ws-default', userId: 'user-1', role: 'admin', access: {} } as any;
 
@@ -43,7 +45,7 @@ async function load() {
     })
   }));
   vi.doMock('./projectBuildOrchestrator.js', () => ({ startProjectBuildBatch }));
-  vi.doMock('./orchestrationRuntime.js', () => ({ orchestrationService: { cancelRun } }));
+  vi.doMock('./orchestrationRuntime.js', () => ({ orchestrationService: { cancelRun, startPlannedWork, approveAndPublish } }));
   const sql = await import('./sqliteService.js');
   opened.push(sql.sqliteService as any);
   opened.push((await import('./workspaceRegistry.js')).workspaceRegistry as any);
@@ -71,6 +73,8 @@ beforeEach(() => {
   cliReplies = [];
   startProjectBuildBatch.mockReset();
   cancelRun.mockReset();
+  startPlannedWork.mockReset(); approveAndPublish.mockReset();
+  process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
   startProjectBuildBatch.mockResolvedValue([{
     status: 'plan_ready', orchestrationRunId: 'orchestration-1', issueIdentifier: 'MON-1', orchestrationTaskCount: 2
   }]);
@@ -85,6 +89,7 @@ afterEach(() => {
   vi.doUnmock('./projectBuildOrchestrator.js');
   vi.doUnmock('./orchestrationRuntime.js');
   delete process.env.ALPHA_HOME;
+  delete process.env.ALPHA_ORCHESTRATION_ENABLED;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -438,3 +443,47 @@ describe('Alpha routes unaddressed chat messages', () => {
   });
 });
 
+
+
+describe('durable main-chat approvals', () => {
+  async function decisionFixture() {
+    const loaded = await specialistFixture();
+    loaded.sqlite.createChatThread({ id: 'thread-1', title: 'Build', projectId: 'project-1', ownerId: 'user-1' } as any);
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+    vi.spyOn(workspaceRegistry, 'canAccessLiveBuildRoom').mockReturnValue(true);
+    const snapshot = { run: { id: 'run-1', projectId: 'project-1', workspaceId: 'ws-default', originChatThreadId: 'thread-1', revision: 3, planVersion: 2, status: 'awaiting_plan_approval' }, tasks: [] } as any;
+    const { SQLiteService } = await import('./sqliteService.js');
+    vi.spyOn(SQLiteService.prototype, 'getOrchestrationSnapshot').mockReturnValue(snapshot);
+    startPlannedWork.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'executing' } });
+    approveAndPublish.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'completed' } });
+    return { ...loaded, snapshot, decision: { action: 'start', runId: 'run-1', expectedRevision: 3, planVersion: 2, evidenceReady: true } };
+  }
+  it('saves start it and its real outcome without calling a model, including concurrent transport retry', async () => {
+    const { chatService, sqlite, decision } = await decisionFixture();
+    const options = { buildDecision: decision, clientMessageId: 'approval-message' };
+    const [first, retry] = await Promise.all([send(chatService, 'start it', options), send(chatService, 'start it', options)]);
+    expect(first.agentMessage.content).toContain('Plan v2 started'); expect(retry.agentMessage.id).toBe(first.agentMessage.id);
+    expect(startPlannedWork).toHaveBeenCalledTimes(1); expect(turnInputs).toHaveLength(0);
+    expect(sqlite.getChatMessages('thread-1').map(message => message.content)).toEqual(['start it', first.agentMessage.content]);
+    await send(chatService, 'start it', options); expect(startPlannedWork).toHaveBeenCalledTimes(1);
+  });
+  it('keeps stale and unloaded-review refusals in history and never starts a new build', async () => {
+    const { chatService, sqlite, decision } = await decisionFixture();
+    const stale = await send(chatService, 'start', { buildDecision: { ...decision, expectedRevision: 1 } });
+    expect(stale.agentMessage.content).toContain('changed');
+    const unloaded = await send(chatService, 'start', { buildDecision: { ...decision, evidenceReady: false } });
+    expect(unloaded.agentMessage.content).toContain('not loaded');
+    expect(sqlite.getChatMessages('thread-1')).toHaveLength(4);
+    expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
+  });
+  it('requires separate publication words and forwards failures without claiming success', async () => {
+    const { chatService, snapshot, decision } = await decisionFixture();
+    snapshot.run.status = 'awaiting_approval';
+    const mismatch = await send(chatService, 'continue', { buildDecision: { ...decision, action: 'approve' } });
+    expect(mismatch.agentMessage.content).toContain('direct approval'); expect(approveAndPublish).not.toHaveBeenCalled();
+    approveAndPublish.mockRejectedValueOnce(new Error('Blocking findings must be resolved'));
+    const refused = await send(chatService, 'approve', { buildDecision: { ...decision, action: 'approve' } });
+    expect(refused.agentMessage.content).toContain('Blocking findings');
+    expect(refused.agentMessage.content).not.toContain('completed');
+  });
+});

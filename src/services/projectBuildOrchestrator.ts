@@ -86,7 +86,7 @@ function blocked(reason: string, project?: Project, repository?: string): Projec
 /** Says what is holding the repository, so the user knows whether to approve, wait, or stop it. */
 function activeBuildReason(status: string, repository: string): string {
   if (status === 'awaiting_plan_approval') {
-    return `A build plan for ${repository} is waiting for your approval, so Alpha did not start another one. Review it in its conversation’s Build review tab and type start there, or stop it to plan this request instead.`;
+    return `A build plan for ${repository} is waiting for your approval, so Alpha did not start another one. Review it in its conversation’s Build review tab and reply start in the main chat, or stop it to plan this request instead.`;
   }
   if (status === 'planning') return `The Orchestrator is still planning a build for ${repository}. Wait for the plan, or stop it to plan this request instead.`;
   if (status === 'awaiting_approval') return `The last build for ${repository} is finished and waiting for your review. Review or stop it in its conversation’s Build review tab before starting another one.`;

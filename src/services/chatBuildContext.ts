@@ -44,7 +44,7 @@ export function describeProjectBuild(
     lines.push(`- Open ${finding.severity} finding: ${clip(title, 200)}${finding.path ? ' (' + finding.path + ')' : ''}`);
   }
   if (open.length > 8) lines.push(`- …and ${open.length - 8} more open findings`);
-  lines.push('Explain the build in plain words when asked. Changing it happens from the build panel above the message box (continue, re-run the final checks, stop), not by editing code in this chat.');
+  lines.push('Explain the build in plain words when asked. Plans, instructions and review evidence are in the right panel. The user replies and approves through the main chat. Never ask them to type into a side-panel approval box. Do not edit code in this chat.');
   return lines.join('\n');
 }
 

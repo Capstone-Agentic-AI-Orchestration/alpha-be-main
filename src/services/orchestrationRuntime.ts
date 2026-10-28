@@ -9,6 +9,8 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
 import { orchestrationRecoveryService } from './orchestrationRecoveryService.js';
 import { milestonePlanner } from './orchestrationMilestonePlanner.js';
+import { prepareAcceptedWebsitePreview } from './acceptedWebsitePreview.js';
+import { localPreviewService } from './localPreviewService.js';
 
 /** One local orchestrator/runner pair for the desktop's authoritative executor. */
 export const orchestrationRunnerAdapter = new OrchestrationRunnerAdapter({ store: sqliteService });
@@ -45,6 +47,7 @@ orchestrationRunnerAdapter.attachResultHandlers({
     }
     const latest = runWithWorkspace(submitted.run.workspaceId, () => sqliteService.getOrchestrationSnapshot(submitted.run.id));
     if (latest) {
+      void prepareAcceptedWebsitePreview(latest, task.id).catch(error => logError('Could not prepare the accepted website preview:', error));
       if (latest.run.status === 'completed' && !latest.run.publication) {
         try { await synchronizePublishedOrchestrationIssue(latest); }
         catch (error) { logError(`Could not synchronize completed report ${latest.run.id}:`, error); }
@@ -65,6 +68,7 @@ orchestrationRunnerAdapter.attachResultHandlers({
   async handleRunnerCancelled(run) {
     const snapshot = await orchestrationService.handleRunnerCancelled(run);
     if (snapshot) {
+      await localPreviewService.stopForBuild(snapshot.run.workspaceId, snapshot.run.id);
       orchestrationRecoveryService.reconcileSnapshot(snapshot);
       await orchestrationRecoveryService.flushPendingMilestones();
     }

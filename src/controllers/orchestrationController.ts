@@ -1,3 +1,5 @@
+import { executeOrchestrationDecision } from '../services/orchestrationDecision.js';
+import { localPreviewService } from '../services/localPreviewService.js';
 import { Request, Response, Router } from 'express';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
 import { projectStore } from '../store/stores.js';
@@ -222,12 +224,9 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/start', des
     return res.status(409).json({ error: 'A specialist in this plan is no longer available to this project. Cancel this plan and create a fresh one.' });
   }
   try {
-    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
-    const started = await orchestrationService.startPlannedWork({
-      workspaceId: req.workspace!.workspaceId,
-      runId: snapshot.run.id,
-      expectedRevision,
-      actorId: req.workspace!.userId
+    const started = await executeOrchestrationDecision({
+      context: req.workspace!, projectId: req.params.projectId, runId: snapshot.run.id,
+      action: 'start', expectedRevision
     });
     await reconcileRecovery(started);
     res.json({ runId: started.run.id, status: started.run.status, currentTaskId: started.run.currentTaskId });
@@ -432,6 +431,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/cancel', de
       runId: snapshot.run.id,
       actorId: req.workspace!.userId
     });
+    await localPreviewService.stopForBuild(req.workspace!.workspaceId, snapshot.run.id);
     await reconcileRecovery(cancelled);
     res.json({ runId: cancelled.run.id, status: cancelled.run.status });
   } catch (error) {
@@ -457,12 +457,9 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/approve', d
 
   const workspaceId = req.workspace!.workspaceId;
   try {
-    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
-    const published = await orchestrationService.approveAndPublish({
-      workspaceId,
-      runId: snapshot.run.id,
-      expectedRevision: Number.isSafeInteger(expectedRevision) ? expectedRevision : undefined,
-      actorId: req.workspace!.userId
+    const published = await executeOrchestrationDecision({
+      context: req.workspace!, projectId: req.params.projectId, runId: snapshot.run.id,
+      action: 'approve', expectedRevision: Number.isSafeInteger(expectedRevision) ? expectedRevision : undefined
     });
     res.json({ runId: published.run.id, status: published.run.status, issueId: published.run.issueId, publication: published.run.publication });
   } catch (error) {

@@ -1,3 +1,5 @@
+import { localPreviewService } from './services/localPreviewService.js';
+import { recordPreviewChatStatus } from './services/previewChatStatus.js';
 import express from 'express';
 import { localPreviewRouter } from './controllers/localPreviewController.js';
 import cors from 'cors';
@@ -451,6 +453,10 @@ runnerService.on('squad_run_cancelled', (data) => broadcast({ type: 'squad_run_c
 
 // Subscribe chat events to WebSocket broadcast
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
+localPreviewService.on('status', record => {
+  try { const message = recordPreviewChatStatus(record); if (message) chatService.emit('chat_message', message); }
+  catch (error) { console.error('Could not record preview status:', error); }
+});
 
 /**
  * The cloud proves its database before taking traffic.
