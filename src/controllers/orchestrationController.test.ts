@@ -67,7 +67,7 @@ async function startApi() {
     getOrchestrationPlanningRecoveryPreview: calls.preview
   }));
   vi.doMock('../services/workspaceService.js', () => ({ resolveProjectWorkspace: () => ({ dir: 'D:/alpha/repository' }) }));
-  vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { canAccessLiveBuildRoom: () => true } }));
+  vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessLiveBuildRoom: () => true } }));
   vi.doMock('../services/orchestrationRuntime.js', () => ({ orchestrationService: { approveAndPublish: calls.approveAndPublish } }));
   vi.doMock('./workspaceContext.js', () => ({
     requireWorkspaceCapability: () => true,

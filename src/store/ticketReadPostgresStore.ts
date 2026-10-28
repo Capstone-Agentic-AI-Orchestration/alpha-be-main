@@ -98,8 +98,18 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
               t.project_id, t.project_display_name, t.project_client_visible,
               preview.repository as preview_repository,preview.branch as preview_branch,preview.url as preview_url
        from alpha_private.tickets t
-       left join alpha_private.ticket_project_client_previews preview
-         on preview.workspace_id=t.workspace_id and preview.ticket_id=t.id and preview.project_id=t.project_id
+       left join lateral (
+         select r.build->'frontend'->>'repository' as repository,'uat'::text as branch,r.build->'frontend'->>'url' as url
+         from alpha_private.client_uat_rounds r
+         where r.workspace_id=t.workspace_id and r.project_id=t.project_id and r.client_user_id=t.client_user_id
+           and r.status in ('published','submitted') and r.published_at is not null order by r.number desc limit 1
+       ) published_preview on true
+       left join alpha_private.ticket_project_client_previews legacy_preview
+         on legacy_preview.workspace_id=t.workspace_id and legacy_preview.ticket_id=t.id and legacy_preview.project_id=t.project_id
+       left join lateral (select
+         ${actor.kind==='client'?'published_preview.repository':'legacy_preview.repository'} as repository,
+         ${actor.kind==='client'?'published_preview.branch':'legacy_preview.branch'} as branch,
+         ${actor.kind==='client'?'published_preview.url':'legacy_preview.url'} as url) preview on true
        where t.workspace_id = $1 and t.id = $2
        for share of t`,
       [state.workspaceId, state.id],

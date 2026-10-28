@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from 'express';
+import { Router, raw, type Request, type Response } from 'express';
 
 import { IS_CLOUD } from '../config/env.js';
 import type { TicketClientSessionCheck } from '../services/ticketClientSessionService.js';
@@ -16,6 +16,8 @@ import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
 import { route } from './asyncRoute.js';
 import type { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
+import type { ProjectUat } from '../services/projectUat.js';
+import { sendUatEvidence } from './projectUatController.js';
 import {
   readTicketClientCookie, ticketClientCookieNames, ticketClientOriginAllowed,
   ticketClientOriginPolicyValid, type TicketClientSessionCookiePolicy,
@@ -32,6 +34,7 @@ interface TicketQueuePage {
  * adapter or rely on the PM/desktop GitHub session middleware. */
 export interface TicketClientApiApplication {
   projectPortal?: PostgresClientProjectPortal;
+  projectUat?: ProjectUat;
   workflowCapabilities(): { phaseWorkflowEnabled: boolean };
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
   listWorkspaces(subject: TicketSubject): Promise<Array<{ workspaceId: string; displayName: string }>>;
@@ -302,6 +305,32 @@ export function createTicketClientApiRouter(
       if (subject) return res.json(await projects.operation(
         { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject, req.params.operationId));
     }));
+  }
+
+  if(application.projectUat) {
+    const app=application.projectUat, path='/projects/:workspaceId/:projectId/uat';
+    router.post(path+'/rounds/:roundId/items/:itemId/evidence',raw({type:['image/png','image/jpeg'],limit:'3mb'}),route(async(req,res)=>{
+      if(!available(res)||!allowedWriteOrigin(req,res))return;
+      const subject=await authenticate(req,res,true);if(!subject)return;
+      const metadata=parseTicketDocumentMetadata(req);
+      if(!metadata||!Buffer.isBuffer(req.body))return res.status(400).json({code:'invalid_uat_evidence',error:'Choose a PNG or JPEG screenshot.'});
+      return res.json(await app.uploadEvidence({workspaceId:req.params.workspaceId,projectId:req.params.projectId},subject,req.params.roundId,req.params.itemId,
+        {operationId:metadata.operationId,filename:metadata.filename,contentType:metadata.contentType},req.body));
+    }));
+    for(const [method,suffix] of [['get','/rounds'],['get','/rounds/:roundId'],['put','/rounds/:roundId/items/:itemId/result'],
+      ['post','/rounds/:roundId/submit'],['get','/operations/:operationId'],['get','/rounds/:roundId/evidence/:evidenceId/content']] as const) {
+      router[method](path+suffix,route(async(req,res)=>{
+        const writing=method!=='get';
+        if(!available(res)||(writing&&!allowedWriteOrigin(req,res)))return;
+        const subject=await authenticate(req,res,writing);if(!subject)return;
+        const target={workspaceId:req.params.workspaceId,projectId:req.params.projectId};
+        if(req.params.evidenceId)return sendUatEvidence(res,await app.downloadEvidence(target,subject,req.params.roundId,req.params.evidenceId));
+        if(req.params.operationId)return res.json(await app.operation(target,subject,req.params.operationId));
+        if(suffix.endsWith('/result'))return res.json(await app.result(target,subject,req.params.roundId,req.params.itemId,req.body));
+        if(suffix.endsWith('/submit'))return res.json(await app.submit(target,subject,req.params.roundId,req.body));
+        return res.json(req.params.roundId?await app.get(target,subject,req.params.roundId):await app.list(target,subject,req.query));
+      }));
+    }
   }
 
   router.get('/workspaces', route(async (req, res) => {

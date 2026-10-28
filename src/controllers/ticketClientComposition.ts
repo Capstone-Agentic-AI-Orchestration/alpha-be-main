@@ -1,5 +1,7 @@
 import type { Router } from 'express';
 import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
+import { ProjectUat } from '../services/projectUat.js';
+import { createProjectUatBuilds } from '../services/projectUatBuilds.js';
 
 import type { TransactionalSql } from '../store/database.js';
 import type { TicketInvitationContentEmailProvider } from '../services/ticketInvitationEmailProvider.js';
@@ -96,6 +98,8 @@ export function createTicketClientComposition(input: {
 
   const router = createTicketClientPortalRouteBoundary({
     projectPortal: new PostgresClientProjectPortal(input.database),
+    projectUat: new ProjectUat(input.database,new PostgresClientProjectPortal(input.database),createProjectUatBuilds(input.database),
+      new SupabaseTicketDocumentObjectStore(input.supabaseUrl,input.supabaseServiceRoleKey)),
     sessionStore: new PostgresTicketClientSessionStore(input.database),
     activationStore: new PostgresTicketClientActivationStore(input.database),
     workspaceStore: new PostgresTicketClientWorkspaceStore(input.database),

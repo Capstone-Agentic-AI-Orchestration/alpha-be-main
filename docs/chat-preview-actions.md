@@ -11,11 +11,12 @@ This change completes the engine support for the companion frontend and desktop 
 - Project Actions APIs provide paginated workflow/run/job/step history, bounded logs and artifact downloads using project/workspace access checks. GitHub authentication and pagination/error conditions remain explicit.
 - Local website previews run a supported saved commit in a disposable copy with a restricted environment, owned process tree, loopback listener ownership check, timeouts and cleanup. The model cannot supply arbitrary commands, filesystem paths or ports.
 - Preview diagnostics capture bounded process output and browser errors/failed resources. Scoped chat investigations receive the matching preview source and commit through read-only project-file tools, with owner, thread, project and repository boundaries intact.
+- Accepted frontend checkpoints can prepare an agent-managed preview pinned to the accepted repository and commit. Startup failures and captured browser errors produce a brief, deduplicated main-chat notice; detailed evidence remains in the right panel. A ready server alone does not prove browser correctness.
 - An explicit stop-preview chat command confirms process shutdown without starting a model or cancelling the product build. Preview requests bypass frontend build-recovery inference.
 
 ## Companion clients
 
-The frontend supplies tabbed build review, plans, agents and diffs; typed plan/publication decisions; compact work-usage rows; project Actions views; preview controls; independent panel handles; and running-only agent indicators.
+The frontend keeps plans, instructions, reports, agents and diffs in the right panel. Plan/publication decisions are submitted through the main chat and saved with their outcomes. The right panel has no approval form or manual preview launch controls. Compact usage rows, project Actions views, independent panel handles and running-only agent indicators remain available.
 
 The desktop supplies the isolated native preview surface, its narrow preload IPC, browser diagnostics, navigation/network boundaries and application-shutdown cleanup. Build the three matching sources together before distributing a desktop installer.
 

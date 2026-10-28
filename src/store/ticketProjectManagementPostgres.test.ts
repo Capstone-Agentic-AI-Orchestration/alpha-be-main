@@ -141,18 +141,23 @@ describe('PM project organization and client requests on the main migration sche
     expect(ticket.rows[0]).toEqual({ project_id: null, version: 0 });
   }, 60_000);
 
-  it('shares only a ready hosted preview on the linked ticket and prevents deleting a linked project', async () => {
+  it('keeps UAT preview configuration internal until PM handoff and prevents deleting a linked project', async () => {
     const service = createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db), () => now);
-    const preview = { repository: 'Capstone-Agentic-AI-Orchestration/alpha-fe-main', branch: 'main' as const,
-      url: 'https://alpha-fe-main.vercel.app/' };
+    const preview = { repository: 'Capstone-Agentic-AI-Orchestration/alpha-fe-main', branch: 'uat' as const,
+      url: 'https://alpha-fe-main-uat.vercel.app/' };
+    await expect(service.linkProject({workspaceId,ticketId:firstTicketId},pm,{
+      schemaVersion:1,operationId:'reject-production-preview',expectedVersion:0,projectId,clientVisible:true,
+      projectPreview:{...preview,branch:'main'},
+    })).rejects.toMatchObject({status:400});
     const link = await service.linkProject({ workspaceId, ticketId: firstTicketId }, pm, {
       schemaVersion: 1, operationId: 'phase6-preview-link', expectedVersion: 0,
       projectId, clientVisible: true, projectPreview: preview,
     });
     expect(link.projectPreview).toEqual(preview);
     const reader = createTicketReadService(new PostgresTicketReadStore(db));
-    await expect(reader.detail({ workspaceId, ticketId: firstTicketId }, client))
-      .resolves.toMatchObject({ sharedProjectName: visibleProjectName, sharedProjectPreviewUrl: preview.url });
+    const clientDetail=await reader.detail({workspaceId,ticketId:firstTicketId},client);
+    expect(clientDetail.sharedProjectName).toBe(visibleProjectName);
+    expect(clientDetail).not.toHaveProperty('sharedProjectPreviewUrl');
     await expect(reader.detail({ workspaceId, ticketId: firstTicketId }, pm))
       .resolves.toMatchObject({ internal: { projectPreview: preview } });
     await expect(service.linkProject({ workspaceId, ticketId: firstTicketId }, pm, {
