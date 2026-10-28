@@ -4,13 +4,14 @@ vi.mock('@supabase/supabase-js', () => ({ createClient: mocks.create }));
 import { TicketClientIdentityProvider } from './ticketClientIdentityProvider.js';
 
 const user = { id: 'client-identity', email: 'client@example.test', email_confirmed_at: new Date().toISOString() };
-let admin: { generateLink: ReturnType<typeof vi.fn>; updateUserById: ReturnType<typeof vi.fn> };
+let admin: { generateLink: ReturnType<typeof vi.fn>; updateUserById: ReturnType<typeof vi.fn>; getUserById: ReturnType<typeof vi.fn> };
 let verify: ReturnType<typeof vi.fn>;
 let clients: Array<{ auth: { signInWithPassword: ReturnType<typeof vi.fn>; verifyOtp: ReturnType<typeof vi.fn> } }>;
 let provider: TicketClientIdentityProvider;
 beforeEach(() => {
   clients = [];
-  admin = { generateLink: vi.fn(), updateUserById: vi.fn(async () => ({ data: { user }, error: null })) };
+  admin = { generateLink: vi.fn(), updateUserById: vi.fn(async () => ({ data: { user }, error: null })),
+    getUserById: vi.fn(async () => ({ data: { user }, error: null })) };
   verify = vi.fn(async () => ({ data: { user }, error: null }));
   mocks.create.mockReset();
   mocks.create.mockImplementation(() => {
@@ -44,5 +45,13 @@ describe('client identity password provider boundary', () => {
     admin.generateLink.mockResolvedValue({ data: { user, properties: { hashed_token: 'recovery-proof', verification_type: 'recovery' } }, error: null });
     await expect(provider.generateRecoveryLink(user.email)).resolves.toEqual({ userId: user.id, tokenHash: 'recovery-proof' });
     expect(admin.generateLink).toHaveBeenCalledWith({ type: 'recovery', email: user.email });
+  });
+  it('returns only a currently confirmed email for the exact provider user ID', async () => {
+    await expect(provider.getVerifiedEmail(user.id)).resolves.toBe(user.email);
+    expect(admin.getUserById).toHaveBeenCalledWith(user.id);
+    admin.getUserById.mockResolvedValueOnce({ data: { user: { ...user, id: 'different-user' } }, error: null });
+    await expect(provider.getVerifiedEmail(user.id)).resolves.toBeNull();
+    admin.getUserById.mockResolvedValueOnce({ data: { user: { ...user, email_confirmed_at: null } }, error: null });
+    await expect(provider.getVerifiedEmail(user.id)).resolves.toBeNull();
   });
 });

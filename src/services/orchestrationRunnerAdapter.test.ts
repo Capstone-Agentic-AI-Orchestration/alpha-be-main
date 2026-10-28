@@ -20,6 +20,8 @@ describe('orchestration runner adapter', () => {
   let adapter: OrchestrationRunnerAdapter;
   let startRun: ReturnType<typeof vi.fn>;
   let bindAttempt: ReturnType<typeof vi.fn>;
+  let reserveTicket: ReturnType<typeof vi.fn>;
+  let stopTicket: ReturnType<typeof vi.fn>;
   let baseCommit: string | undefined;
   let attempts: OrchestrationAttemptRecord[];
   let tasks: Array<{ id: string; repository?: string }>;
@@ -79,6 +81,8 @@ describe('orchestration runner adapter', () => {
     const runner = Object.assign(new EventEmitter(), {
       startRun: startRun = vi.fn(async () => ({ id: 'run-attempt-1' } as PrototypeRun))
     });
+    reserveTicket = vi.fn(async () => null);
+    stopTicket = vi.fn(async () => {});
     adapter = new OrchestrationRunnerAdapter({
       store: fakeStore,
       runner,
@@ -95,7 +99,9 @@ describe('orchestration runner adapter', () => {
         autonomyLevel: 'Supervised',
         skills: [], mcpServers: [], sources: []
       }),
-      readinessFor: () => ({ status: 'ready', detail: 'Ready.' })
+      readinessFor: () => ({ status: 'ready', detail: 'Ready.' }),
+      reserveTicketExecution: reserveTicket,
+      stopTicketExecution: stopTicket,
     });
     const taskPackage: OrchestrationTaskPackage = {
       packageVersion: 6,
@@ -154,6 +160,37 @@ describe('orchestration runner adapter', () => {
         baseRef: expect.any(String), baseCommit: expect.stringMatching(/^[a-f0-9]{40}$/)
       })
     }));
+  });
+
+  it('passes a positively reserved ticket scope to the runner with the attempt run ID', async () => {
+    const ticketExecution = {
+      workspaceId: 'workspace-test', issueId: 'issue-1', projectId: 'project-1',
+      issueRevisionId: 'issue-revision-1', scopeVersionId: 'ticket-scope-1',
+      claimId: 'claim-1', runId: 'run-attempt-1', executor: { kind: 'agent', id: 'backend-agent' }, memberOrder: 0,
+    };
+    reserveTicket.mockResolvedValue(ticketExecution);
+    const prepared = await adapter.prepare(request);
+    await adapter.launch({ ...request, ...prepared });
+
+    expect(reserveTicket).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: request.workspaceId, projectId: request.projectId, issueId: request.issueId,
+      runId: 'run-attempt-1', executor: { kind: 'agent', id: 'backend-agent' },
+    }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-attempt-1', ticketExecution }));
+  });
+
+  it('releases a ticket reservation if the local runner refuses to start', async () => {
+    const ticketExecution = {
+      workspaceId: 'workspace-test', issueId: 'issue-1', projectId: 'project-1',
+      issueRevisionId: 'issue-revision-1', scopeVersionId: 'ticket-scope-1',
+      claimId: 'claim-1', runId: 'run-attempt-1', executor: { kind: 'agent', id: 'backend-agent' }, memberOrder: 0,
+    };
+    reserveTicket.mockResolvedValue(ticketExecution);
+    startRun.mockRejectedValue(new Error('runner unavailable'));
+    const prepared = await adapter.prepare(request);
+
+    await expect(adapter.launch({ ...request, ...prepared })).rejects.toThrow('runner unavailable');
+    expect(stopTicket).toHaveBeenCalledWith(ticketExecution);
   });
 
   it.each([

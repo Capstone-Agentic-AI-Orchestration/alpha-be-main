@@ -145,7 +145,7 @@ runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) =
     const workspaceId = req.workspace!.workspaceId;
     const runId = `run-${randomUUID()}`;
     ticketExecution = await reserveTicketExecution({
-      workspaceId, issueId, runId, executor: { kind: 'agent', id: agentId },
+      workspaceId, issueId, projectId: issue.projectId, runId, executor: { kind: 'agent', id: agentId },
     });
     let run;
     try {
@@ -232,6 +232,9 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
     try {
       const review = await recordTicketRunReview(req, res, run, 'changes_requested');
       if (review === null) return;
+      if (review.kind === 'unavailable') {
+        throw new TicketExecutionRelayError('Ticket review is temporarily unavailable. The Task was not returned for changes; retry after reconnecting.', 503);
+      }
     } catch (err: any) {
       const status = err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500
         ? err.status : err instanceof TicketExecutionRelayError ? 503 : Number(err?.status) || 503;
@@ -357,6 +360,9 @@ The run is still at the review gate.`,
   try {
     const review = await recordTicketRunReview(req, res, updated, 'passed');
     if (review === null) return;
+    if (review.kind === 'unavailable') {
+      throw new TicketExecutionRelayError('Ticket review is temporarily unavailable. The Task was not marked complete; retry approval after reconnecting.', 503);
+    }
   } catch (err: any) {
     const status = err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500
       ? err.status : err instanceof TicketExecutionRelayError ? 503 : Number(err?.status) || 503;
@@ -391,22 +397,59 @@ runRouter.get('/runs/:id/remote-actions', route(async (req: Request, res: Respon
 }));
 
 runRouter.post('/runs/:id/retry', desktopOnly, async (req: Request, res: Response) => {
+  let ticketExecution: Awaited<ReturnType<typeof reserveTicketExecution>> = null;
   try {
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const existing = await scopedRun(req, res, req.params.id);
     if (!existing) return;
 
-    const newRun = await runnerService.startRun({
-      issueId: existing.issueId,
-      agentId: existing.agentId,
-      plan: existing.plan,
-      scenario: 'success',
-      workspaceId: req.workspace!.workspaceId
+    if (!['failed', 'cancelled', 'changes_requested'].includes(existing.status)) {
+      return res.status(409).json({ error: `Only a failed, cancelled, or returned run can be retried. This run is ${existing.status}.` });
+    }
+
+    if (!requireEntityWorkspace(req, res, 'issues', existing.issueId)) return;
+    if (!requireEntityWorkspace(req, res, 'agents', existing.agentId)) return;
+    const workspaceId = req.workspace!.workspaceId;
+    const issue = await issueStore().get(workspaceId, existing.issueId);
+    if (!issue) return res.status(404).json({ error: 'Task not found.' });
+    if (issue.projectId !== existing.projectId) {
+      return res.status(409).json({ error: 'The Task moved to another project. Refresh it before retrying.' });
+    }
+    if (!requireProjectWorkspace(req, res, issue.projectId)) return;
+
+    const runId = `run-${randomUUID()}`;
+    ticketExecution = await reserveTicketExecution({
+      workspaceId,
+      issueId: issue.id,
+      projectId: issue.projectId,
+      runId,
+      executor: { kind: 'agent', id: existing.agentId },
     });
-    workspaceRegistry.bind('prototype_runs', newRun.id, req.workspace!.workspaceId);
+
+    let newRun;
+    try {
+      newRun = await runnerService.startRun({
+        issueId: issue.id,
+        agentId: existing.agentId,
+        plan: existing.plan,
+        scenario: 'success',
+        workspaceId,
+        ...(ticketExecution ? { runId: ticketExecution.runId, ticketExecution } : {}),
+      });
+    } catch (error) {
+      if (ticketExecution) await stopTicketExecution(ticketExecution).catch(stopError =>
+        logError('Could not release unused ticket retry reservation:', stopError?.message ?? stopError));
+      throw error;
+    }
+    workspaceRegistry.bind('prototype_runs', newRun.id, workspaceId);
     res.status(201).json(newRun);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to retry run' });
+    const status = err instanceof TicketExecutionRelayError && err.status && err.status >= 400 && err.status < 500
+      ? err.status : err instanceof TicketExecutionRelayError ? 503 : 500;
+    const message = err instanceof TicketExecutionRelayError && err.status === 409
+      ? 'The ticket-linked Task is not ready to retry. Ask the PM to check its Task status and any active run.'
+      : err.message || 'Failed to retry run';
+    res.status(status).json({ error: message });
   }
 });
 

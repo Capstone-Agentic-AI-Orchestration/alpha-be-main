@@ -10,6 +10,19 @@ import { TicketWorkflowError } from '../ticketing/workflow.js';
 export type TicketExecutionTransaction = TicketExecutionAdmissionTransaction & TicketDeveloperContextTransaction;
 export const ticketExecutionMissing = () => new TicketWorkflowError(404,'ticket_work_not_found','Issue work not found.');
 
+/** Classify an Issue for legacy/unavailable lifecycle runtimes without treating
+ * a missing or inaccessible Issue as ordinary unbound work. Lock the Issue so
+ * a concurrent PM binding cannot be missed by this compatibility path. */
+export async function classifyTicketWorkBinding(sql: Sql, target: TicketIssueTarget, subject: TicketSubject): Promise<'unlinked' | 'linked'> {
+  if (!await lockTicketDeveloper(sql, target.workspaceId, subject)) throw ticketExecutionMissing();
+  const { rows } = await sql.query<{ project_id: string }>(
+    `select project_id from public.issues where workspace_id=$1 and id=$2 for update`, [target.workspaceId, target.issueId]);
+  if (!rows[0] || !(await ticketProjectFacts(sql, target.workspaceId, rows[0].project_id))?.creatorActive) throw ticketExecutionMissing();
+  const { rows: bindings } = await sql.query(`select issue_id from alpha_private.ticket_work_bindings
+    where workspace_id=$1 and issue_id=$2 for share`, [target.workspaceId, target.issueId]);
+  return bindings.length ? 'linked' : 'unlinked';
+}
+
 export async function lockTicketDeveloper(sql:Sql,workspaceId:string,subject:TicketSubject) {
   if (subject.kind!=='internal') return null;
   const session=subject.authentication.kind==='session';
