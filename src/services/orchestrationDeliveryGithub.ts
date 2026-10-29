@@ -84,7 +84,9 @@ export class DeliveryGithub {
         const policy = required.find(item => item.context === run.name);
         if (policy?.app_id && policy.app_id !== -1 && policy.app_id !== run.app?.id) continue;
         if (checks.has(run.name)) continue;
-        checks.set(run.name, { name: run.name, state: run.status !== 'completed' ? 'pending' : run.conclusion === 'success' ? 'passed' : 'failed', url: run.html_url });
+        let state: DeliveryCheck['state'] = 'pending';
+        if (run.status === 'completed') state = run.conclusion === 'success' ? 'passed' : 'failed';
+        checks.set(run.name, { name: run.name, state, url: run.html_url });
       }
       // Statuses arrive newest first. A success from a previous attempt must
       // never hide its later failure. App-bound checks cannot be spoofed by statuses.

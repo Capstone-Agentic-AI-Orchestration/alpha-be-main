@@ -86,6 +86,49 @@ export class OrchestrationDeliveryService {
     }
     if (!pull.merged && pull.state !== 'open') throw new DeliveryError(`${target.repository}: the PR was closed without merging.`);
   }
+  private async checkStage(target: DeliveryRepository, sha: string, branch: 'dev' | 'uat',
+    pending: DeliveryRecord['stage'], passed: DeliveryRecord['stage'], mergeSha?: string | null): Promise<DeliveryRecord['stage']> {
+    const checks = await this.github.checks(target.repository, sha, branch, mergeSha);
+    target.checks = checks.checks; target.requiredChecks = checks.required;
+    if (checks.state === 'failed') return 'repair_required';
+    if (checks.state === 'pending') return pending;
+    return passed;
+  }
+  private async observePromotion(target: DeliveryRepository): Promise<DeliveryRecord['stage']> {
+    const promotion = await this.github.pull(target.repository, target.uatPrNumber!);
+    this.assertPull(target, promotion, true);
+    await this.github.assertScope(target.repository, target.uatPrNumber!);
+    if (!promotion.merged) {
+      // UAT-only failures need a new dev-based repair; never patch UAT directly.
+      return this.checkStage(target, target.devHead!, 'uat', 'uat_checks', 'uat_approval', promotion.merge_commit_sha);
+    }
+    target.uatHead ??= promotion.merge_commit_sha ?? undefined;
+    if (!target.uatHead || await this.github.branch(target.repository, 'uat') !== target.uatHead) {
+      throw new DeliveryError(`${target.repository}: the UAT branch no longer matches this promotion.`);
+    }
+    const stage = await this.checkStage(target, target.uatHead, 'uat', 'uat_deploying', 'uat_ready');
+    if (stage !== 'uat_ready') return stage;
+    target.deployment = await this.verifyDeployment(target);
+    if (!target.deployment.verifiedAt || target.deployment.sha !== target.uatHead) return 'uat_deploying';
+    return 'uat_ready';
+  }
+  private async observeRepository(target: DeliveryRepository): Promise<DeliveryRecord['stage']> {
+    const original = await this.github.pull(target.repository, target.prNumber);
+    this.assertPull(target, original, false);
+    await this.github.assertScope(target.repository, target.prNumber);
+    if (!original.merged) {
+      target.devBase = original.base.sha;
+      return this.checkStage(target, target.head, 'dev', 'pr_checks', 'dev_approval', original.merge_commit_sha);
+    }
+    if (!original.merge_commit_sha) throw new DeliveryError('GitHub has not supplied the merged commit yet.');
+    target.devHead ??= original.merge_commit_sha;
+    if (await this.github.branch(target.repository, 'dev') !== target.devHead) {
+      throw new DeliveryError(`${target.repository}: dev advanced beyond this reviewed delivery. Start a fresh delivery review.`);
+    }
+    if (target.uatPrNumber) return this.observePromotion(target);
+    target.uatBase = await this.github.branch(target.repository, 'uat');
+    return this.checkStage(target, target.devHead, 'dev', 'dev_checks', 'uat_prepare');
+  }
   private async observe(record: DeliveryRecord): Promise<DeliveryRecord> {
     const next = structuredClone(record);
     this.assertIndependentReviews(this.snapshot(record));
@@ -96,49 +139,9 @@ export class OrchestrationDeliveryService {
       }
       next.stage = 'repair_required'; next.reason = 'A bounded CI repair plan is available. Review and approve it before specialists edit files.'; return next;
     }
-    let stage: DeliveryRecord['stage'] = 'uat_ready';
     const priority: DeliveryRecord['stage'][] = ['repair_required', 'pr_checks', 'dev_approval', 'dev_checks', 'uat_prepare', 'uat_checks', 'uat_approval', 'uat_deploying', 'uat_ready'];
-    const choose = (value: DeliveryRecord['stage']) => { if (priority.indexOf(value) < priority.indexOf(stage)) stage = value; };
-    for (const target of next.repositories) {
-      const original = await this.github.pull(target.repository, target.prNumber);
-      this.assertPull(target, original, false);
-      await this.github.assertScope(target.repository, target.prNumber);
-      if (!original.merged) {
-        target.devBase = original.base.sha;
-        const checks = await this.github.checks(target.repository, target.head, 'dev', original.merge_commit_sha);
-        target.checks = checks.checks; target.requiredChecks = checks.required;
-        choose(checks.state === 'failed' ? 'repair_required' : checks.state === 'pending' ? 'pr_checks' : 'dev_approval'); continue;
-      }
-      if (!original.merge_commit_sha) throw new DeliveryError('GitHub has not supplied the merged commit yet.');
-      target.devHead ??= original.merge_commit_sha;
-      if (await this.github.branch(target.repository, 'dev') !== target.devHead) {
-        throw new DeliveryError(`${target.repository}: dev advanced beyond this reviewed delivery. Start a fresh delivery review.`);
-      }
-      if (!target.uatPrNumber) {
-        target.uatBase = await this.github.branch(target.repository, 'uat');
-        const checks = await this.github.checks(target.repository, target.devHead, 'dev');
-        target.checks = checks.checks; target.requiredChecks = checks.required;
-        choose(checks.state === 'failed' ? 'repair_required' : checks.state === 'pending' ? 'dev_checks' : 'uat_prepare'); continue;
-      }
-      const promotion = await this.github.pull(target.repository, target.uatPrNumber);
-      this.assertPull(target, promotion, true);
-      await this.github.assertScope(target.repository, target.uatPrNumber);
-      if (!promotion.merged) {
-        const checks = await this.github.checks(target.repository, target.devHead, 'uat', promotion.merge_commit_sha);
-        target.checks = checks.checks; target.requiredChecks = checks.required;
-        // UAT-only failures need a new dev-based repair; never patch UAT directly.
-        choose(checks.state === 'failed' ? 'repair_required' : checks.state === 'pending' ? 'uat_checks' : 'uat_approval'); continue;
-      }
-      target.uatHead ??= promotion.merge_commit_sha ?? undefined;
-      if (!target.uatHead || await this.github.branch(target.repository, 'uat') !== target.uatHead) {
-        throw new DeliveryError(`${target.repository}: the UAT branch no longer matches this promotion.`);
-      }
-      const checks = await this.github.checks(target.repository, target.uatHead, 'uat');
-      target.checks = checks.checks; target.requiredChecks = checks.required;
-      if (checks.state !== 'passed') { choose(checks.state === 'failed' ? 'repair_required' : 'uat_deploying'); continue; }
-      target.deployment = await this.verifyDeployment(target);
-      if (!target.deployment.verifiedAt || target.deployment.sha !== target.uatHead) choose('uat_deploying');
-    }
+    const stages = await Promise.all(next.repositories.map(target => this.observeRepository(target)));
+    const stage = stages.reduce<DeliveryRecord['stage']>((current, value) => priority.indexOf(value) < priority.indexOf(current) ? value : current, 'uat_ready');
     next.stage = stage;
     const reasons: Partial<Record<DeliveryRecord['stage'], string>> = {
       pr_checks: 'Waiting for required CI checks on the published PR commits.', dev_approval: 'Required checks passed. The reviewed changes are ready for delivery through dev to UAT.',
