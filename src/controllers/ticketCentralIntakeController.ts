@@ -21,6 +21,7 @@ function safePage(value: unknown) {
   const items = page.items.map(item => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TicketReadInvariantError();
     const row = item as Record<string, unknown>;
+    if (row.kind !== undefined && row.kind !== 'public_inquiry' && row.kind !== 'project_proposal') throw new TicketReadInvariantError();
     if ((row.status !== undefined && !['pending','accepted','declined'].includes(String(row.status)))
       || (row.handledAt != null && (typeof row.handledAt !== 'string' || !Number.isFinite(Date.parse(row.handledAt))))
       || (row.outcomeEmailStatus != null && !['pending','retry','leased','delivered','dead'].includes(String(row.outcomeEmailStatus)))) throw new TicketReadInvariantError();
@@ -37,7 +38,7 @@ function safePage(value: unknown) {
       throw new TicketReadInvariantError();
     }
     // Explicit client-data allowlist for the PM-only intake response.
-    return { id: row.id, publicReference: row.publicReference, fullName: row.fullName, email: row.email, company: row.company,
+    return { kind: row.kind ?? 'public_inquiry', id: row.id, publicReference: row.publicReference, fullName: row.fullName, email: row.email, company: row.company,
       title: row.title, description: row.description, requestedDeadline: row.requestedDeadline,
       submittedAt: row.submittedAt,
       status: row.status ?? 'pending', handledAt: row.handledAt ?? null, outcomeEmailStatus: row.outcomeEmailStatus ?? null };

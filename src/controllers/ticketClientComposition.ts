@@ -1,3 +1,5 @@
+import { ALPHA_ORG } from '../config/env.js';
+import { ClientProjectProposals } from '../services/clientProjectProposals.js';
 import type { Router } from 'express';
 import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 import { ProjectUat } from '../services/projectUat.js';
@@ -97,6 +99,7 @@ export function createTicketClientComposition(input: {
   const messages = createTicketMessageService(new PostgresTicketTriageStore(input.database, { communicationEnabled: true }));
 
   const router = createTicketClientPortalRouteBoundary({
+    projectProposals: new ClientProjectProposals(input.database, ALPHA_ORG),
     projectPortal: new PostgresClientProjectPortal(input.database),
     projectUat: new ProjectUat(input.database,new PostgresClientProjectPortal(input.database),createProjectUatBuilds(input.database),
       new SupabaseTicketDocumentObjectStore(input.supabaseUrl,input.supabaseServiceRoleKey)),

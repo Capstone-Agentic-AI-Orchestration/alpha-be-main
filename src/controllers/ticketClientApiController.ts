@@ -1,3 +1,4 @@
+import type { ClientProjectProposals } from '../services/clientProjectProposals.js';
 import { Router, raw, type Request, type Response } from 'express';
 
 import { IS_CLOUD } from '../config/env.js';
@@ -33,6 +34,8 @@ interface TicketQueuePage {
 /** Application services remain injected; this transport does not create a DB
  * adapter or rely on the PM/desktop GitHub session middleware. */
 export interface TicketClientApiApplication {
+  projectProposals?: ClientProjectProposals;
+  emailFor?(subject: Extract<TicketSubject,{kind:'client'}>): Promise<string|null>;
   projectPortal?: PostgresClientProjectPortal;
   projectUat?: ProjectUat;
   workflowCapabilities(): { phaseWorkflowEnabled: boolean };
@@ -268,6 +271,20 @@ export function createTicketClientApiRouter(
       ? { workspaceId, ticketId } : null;
   }
 
+  if (application.projectProposals && application.emailFor) {
+    const proposals = application.projectProposals;
+    const emailFor = application.emailFor;
+    router.get('/project-proposals',route(async(req,res)=>{
+      if(!available(res)) return;
+      const subject=await authenticate(req,res,false);
+      if(subject) res.json(await proposals.list(subject));
+    }));
+    router.post('/project-proposals',route(async(req,res)=>{
+      if(!available(res) || !allowedWriteOrigin(req,res)) return;
+      const subject=await authenticate(req,res,true);
+      if(subject) res.status(201).json(await proposals.submit(subject,await emailFor(subject),req.body));
+    }));
+  }
   if (application.projectPortal) {
     const projects = application.projectPortal;
     router.get('/projects', route(async (req, res) => {

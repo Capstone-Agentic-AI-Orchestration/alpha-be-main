@@ -114,6 +114,7 @@ export function createTicketCentralIntakeService(input: {
         if (result === 'not_found') throw new TicketWorkflowError(404, 'central_intake_not_found', 'This inquiry is no longer available.');
         if (result === 'already_handled') throw new TicketWorkflowError(409, 'central_intake_already_handled', 'Another PM has already handled this inquiry. Refresh the inbox.');
         if (result === 'workspace_unavailable') throw new TicketWorkflowError(503, 'ticket_writes_disabled', 'Ticket creation is unavailable in the selected workspace.');
+        if (result === 'client_access_unavailable') throw new TicketWorkflowError(409, 'client_access_unavailable', 'Client access is suspended or unavailable in this workspace.');
         if (result === 'forbidden') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot accept inquiries in this workspace.');
         return result;
       } catch (error) {

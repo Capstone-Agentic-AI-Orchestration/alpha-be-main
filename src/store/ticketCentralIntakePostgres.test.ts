@@ -1,3 +1,12 @@
+import { ClientProjectProposals } from '../services/clientProjectProposals.js';
+import { createTicketQueueService } from '../services/ticketQueueService.js';
+import { PostgresTicketQueueStore } from './ticketQueuePostgresStore.js';
+import { createTicketMessageService } from '../services/ticketMessageService.js';
+import { PostgresTicketTriageStore } from './ticketTriagePostgresStore.js';
+import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
+import { PostgresProjectStore } from './postgresProjectStore.js';
+import { createTicketProjectManagementService } from '../services/ticketProjectManagementService.js';
+import { PostgresTicketProjectManagementStore } from './ticketProjectManagementPostgresStore.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { createTicketCentralIntakeService } from '../services/ticketCentralIntakeService.js';
@@ -195,4 +204,105 @@ describe('central PM inquiry intake on PostgreSQL', () => {
     expect((await db.query('select id from alpha_private.tickets')).rows).toEqual([]);
     expect((await db.query('select * from alpha_private.ticket_client_grants')).rows).toEqual([]);
   });
+});
+
+const proposalOwner = {kind:'client' as const,userId:'proposal-client',sessionId:'a'.repeat(64)};
+const proposalBody = {schemaVersion:1 as const,operationId:'10000000-0000-4000-8000-000000000001',
+ title:'New project',description:'A separate project outcome',requestedDeadline:null};
+async function submitProposal() {
+ const proposals=new ClientProjectProposals(db,organizationKey);
+ const receipt=await proposals.submit(proposalOwner,'verified@example.test',proposalBody);
+ return {proposals,receipt};
+}
+describe('authenticated project proposals',()=>{
+ it('isolates ownership, validates identity fields, and keeps submission retries idempotent',async()=>{
+  const {proposals,receipt}=await submitProposal();
+  expect(await proposals.submit(proposalOwner,'verified@example.test',proposalBody)).toEqual(receipt);
+  expect((await proposals.list(proposalOwner)).items).toHaveLength(1);
+  expect((await proposals.list({...proposalOwner,userId:'other-client'})).items).toEqual([]);
+  await expect(proposals.submit(proposalOwner,'verified@example.test',{...proposalBody,email:'spoof@example.test'})).rejects.toMatchObject({status:400});
+  await expect(proposals.submit(proposalOwner,null,proposalBody)).rejects.toMatchObject({status:503});
+  await expect(proposals.submit({...proposalOwner,userId:'other-client'},'other@example.test',proposalBody)).rejects.toMatchObject({status:409});
+  const event=await db.query('select event_type,actor_kind,actor_id,workspace_id,ticket_id from alpha_private.ticket_central_intake_events where intake_id=$1',[receipt.id]);
+  expect(event.rows).toEqual([{event_type:'project_proposal_received',actor_kind:'client',actor_id:proposalOwner.userId,workspace_id:null,ticket_id:null}]);
+  const pending=await app.listPending(workspaceA,pmA,{});
+  expect(pending.items[0]).toMatchObject({kind:'project_proposal',fullName:'verified@example.test',email:'verified@example.test'});
+  expect(JSON.stringify(pending)).not.toContain('proposal-client');
+ });
+ it('accepts exactly once into an account-linked unlinked ticket with both grants',async()=>{
+  const {proposals,receipt}=await submitProposal();
+  const command={schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001'};
+  const accepted=await app.accept(receipt.id,workspaceA,pmA,command);
+  expect(await app.accept(receipt.id,workspaceA,pmA,command)).toEqual(accepted);
+  await expect(app.accept(receipt.id,workspaceB,pmB,{...command,operationId:'20000000-0000-4000-8000-000000000002'})).rejects.toMatchObject({status:409});
+  expect((await proposals.list(proposalOwner)).items).toEqual([]);
+  const rows=await db.query(`select t.client_user_id,t.project_id,t.source,r.project_preference,g.active,s.status
+   from alpha_private.tickets t join alpha_private.ticket_requests r on r.workspace_id=t.workspace_id and r.ticket_id=t.id
+   join alpha_private.ticket_client_grants g on g.workspace_id=t.workspace_id and g.ticket_id=t.id
+   join alpha_private.ticket_service_grants s on s.workspace_id=t.workspace_id and s.client_user_id=t.client_user_id
+   where t.id=$1`,[accepted.ticketId]);
+  expect(rows.rows).toEqual([{client_user_id:proposalOwner.userId,project_id:null,source:'authenticated_client',project_preference:'new_project',active:true,status:'active'}]);
+  expect((await db.query('select * from public.projects')).rows).toHaveLength(0);
+  await db.query(`insert into alpha_private.ticket_client_sessions
+   (session_id_hash,client_user_id,csrf_hash,created_at,expires_at)
+   values($1,$2,$3,now()-interval '1 minute',now()+interval '1 hour')`,[proposalOwner.sessionId,proposalOwner.userId,'b'.repeat(64)]);
+  const queue=await createTicketQueueService(new PostgresTicketQueueStore(db)).list(workspaceA,proposalOwner,{});
+  expect(queue.items.map(item=>item.id)).toContain(accepted.ticketId);
+  const target={workspaceId:workspaceA,ticketId:accepted.ticketId};
+  const version=async()=> (await db.query<{version:number}>('select version from alpha_private.tickets where id=$1',[accepted.ticketId])).rows[0].version;
+  const messages=createTicketMessageService(new PostgresTicketTriageStore(db,{communicationEnabled:true}));
+  await messages.reply(target,proposalOwner,{schemaVersion:1,operationId:'30000000-0000-4000-8000-000000000001',expectedVersion:await version(),body:'Can we discuss the scope?'});
+  await messages.reply(target,pmA,{schemaVersion:1,operationId:'30000000-0000-4000-8000-000000000002',expectedVersion:await version(),body:'Yes, let us confirm it.'});
+  const project=await new PostgresProjectStore(db).create(workspaceA,{id:'proposal-project',name:'New client project',key:'NEW',status:'in_progress',createdBy:pmA.userId});
+  await createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)).linkProject(target,pmA,
+   {schemaVersion:1,operationId:'40000000-0000-4000-8000-000000000001',expectedVersion:await version(),projectId:project.id,clientVisible:true,projectPreview:null});
+  const projects=await new PostgresClientProjectPortal(db).projects(proposalOwner);
+  expect(JSON.stringify(projects)).toContain('New client project');
+ });
+ it.each(['suspended','revoked'])('does not revive a %s grant or partially create a ticket',async(status)=>{
+  const {receipt}=await submitProposal();
+  await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name)
+   values('restricted',$1,$2,$3,'Client')`,[workspaceA,proposalOwner.userId,status]);
+  await expect(app.accept(receipt.id,workspaceA,pmA,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001'})).rejects.toMatchObject({status:409,code:'client_access_unavailable'});
+  expect((await db.query('select * from alpha_private.tickets')).rows).toHaveLength(0);
+  expect((await db.query('select status from alpha_private.ticket_service_grants')).rows).toEqual([{status}]);
+ });
+ it('declines without ticket, grants, or email and keeps the PM note internal',async()=>{
+  const {proposals,receipt}=await submitProposal();
+  await app.decline(receipt.id,workspaceA,pmA,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001',reason:'PRIVATE_NOTE'});
+  const result=await proposals.list(proposalOwner);
+  expect(result.items[0].status).toBe('declined');
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_NOTE');
+  for(const table of ['tickets','ticket_service_grants','ticket_client_grants','ticket_central_intake_outcomes','ticket_central_intake_acknowledgments'])
+   expect((await db.query('select * from alpha_private.'+table)).rows).toHaveLength(0);
+ });
+ it('rejects unauthorized workspaces and unavailable writes before creating grants',async()=>{
+  const {receipt}=await submitProposal();
+  const command={schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001'};
+  await expect(app.accept(receipt.id,workspaceB,pmA,command)).rejects.toMatchObject({status:403});
+  await db.query(`update public.workspaces set settings_json='{"ticketing_write_mode":"disabled"}' where id=$1`,[workspaceA]);
+  await expect(app.accept(receipt.id,workspaceA,pmA,command)).rejects.toMatchObject({status:503});
+  expect((await db.query('select * from alpha_private.ticket_service_grants')).rows).toHaveLength(0);
+ });
+});
+
+it('serializes competing PM decisions and rolls back all acceptance writes on a grant failure',async()=>{
+ const {receipt}=await submitProposal();
+ const failingDb:TransactionalSql={...db,transaction:work=>db.transaction(tx=>work({...tx,query:async(text,values)=>{
+   if(text.includes('insert into alpha_private.ticket_client_grants')) throw new Error('Injected grant failure');
+   return tx.query(text,values);
+ }}))};
+ await expect(new PostgresTicketCentralIntakeStore(failingDb).accept({organizationKey,intakeId:receipt.id,
+  workspaceId:workspaceA,subject:pmA,operationId:'20000000-0000-4000-8000-000000000001',ticketId:'failed-ticket',
+  reference:'TKT-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',occurredAt:submittedAt.toISOString()})).rejects.toThrow('Injected grant failure');
+ for(const table of ['tickets','ticket_contacts','ticket_service_grants','ticket_client_grants'])
+  expect((await db.query('select * from alpha_private.'+table)).rows).toHaveLength(0);
+ const results=await Promise.allSettled([
+  app.accept(receipt.id,workspaceA,pmA,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001'}),
+  app.accept(receipt.id,workspaceB,pmB,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000002'}),
+ ]);
+ expect(results.filter(result=>result.status==='fulfilled')).toHaveLength(1);
+ expect(results.filter(result=>result.status==='rejected')).toHaveLength(1);
+ expect((await db.query('select * from alpha_private.tickets')).rows).toHaveLength(1);
+ expect((await db.query('select * from alpha_private.ticket_client_grants')).rows).toHaveLength(1);
 });

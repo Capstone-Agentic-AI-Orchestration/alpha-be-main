@@ -1,3 +1,4 @@
+import type { ClientProjectProposals } from '../services/clientProjectProposals.js';
 import type { TicketClientIdentityProvider } from '../services/ticketClientIdentityProvider.js';
 import type { TicketClientSessionPolicy } from '../services/ticketClientSessionService.js';
 import { createTicketClientSessionService } from '../services/ticketClientSessionService.js';
@@ -35,6 +36,7 @@ import type { PostgresClientProjectPortal } from '../services/clientProjectPorta
 import type { ProjectUat } from '../services/projectUat.js';
 
 export interface TicketClientPortalRouteDependencies {
+  projectProposals?: ClientProjectProposals;
   projectPortal?: PostgresClientProjectPortal;
   projectUat?: ProjectUat;
   sessionStore: TicketClientSessionStore;
@@ -101,6 +103,8 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
   };
 
   const clientApi: TicketClientApiApplication = {
+    projectProposals: dependencies.projectProposals,
+    emailFor: sessions.emailFor,
     projectPortal: dependencies.projectPortal,
     projectUat: dependencies.projectUat,
     authenticate: sessions.authenticate,
