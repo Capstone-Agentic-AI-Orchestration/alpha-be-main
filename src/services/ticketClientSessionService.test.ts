@@ -28,7 +28,8 @@ function fixture(activeGrant = true) {
     resolveSession: vi.fn(async (id: string) => rows.get(id) ?? null),
     transaction: vi.fn(async (work: (transaction: typeof tx) => Promise<unknown>) => work(tx)),
   } as unknown as TicketClientSessionStore;
-  const verifier = { verifyCredential: vi.fn(async () => identity) };
+  const verifier = { verifyCredential: vi.fn(async () => identity),
+    getVerifiedEmail: vi.fn(async (userId: string) => userId === identity.userId ? identity.email : null) };
   const service = createTicketClientSessionService(
     store, verifier, { lifetimeMs: 30 * 60 * 1000 }, () => new Date(instant),
   );
@@ -79,6 +80,16 @@ describe('client session application service', () => {
     await expect(f.service.authenticate(session, csrf, 'A'.repeat(43), true)).resolves.toEqual({ kind: 'csrf_invalid' });
     await expect(f.service.authenticate(session, undefined, undefined, true)).resolves.toEqual({ kind: 'csrf_invalid' });
     expect(f.store.resolveSession).toHaveBeenCalledTimes(3);
+  });
+
+  it('resolves only the current verified email for the authenticated provider identity', async () => {
+    const f = fixture();
+    const subject = { kind: 'client' as const, userId: identity.userId, sessionId: 'a'.repeat(64) };
+    await expect(f.service.emailFor(subject)).resolves.toBe(identity.email);
+    expect(f.verifier.getVerifiedEmail).toHaveBeenCalledWith(identity.userId);
+    await expect(f.service.emailFor({ ...subject, userId: 'another-user' })).resolves.toBeNull();
+    f.verifier.getVerifiedEmail.mockRejectedValueOnce(new Error('provider unavailable'));
+    await expect(f.service.emailFor(subject)).resolves.toBeNull();
   });
 
   it('refuses expired sessions at the expiry boundary', async () => {

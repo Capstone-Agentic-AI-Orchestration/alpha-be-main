@@ -141,7 +141,20 @@ export function createTicketClientSessionService(
     }
   }
 
-  return { exchange, authenticate, revoke };
+  async function emailFor(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<string | null> {
+    if (!subject || subject.kind !== 'client' || !opaque(subject.userId)
+      || !/^[a-f0-9]{64}$/.test(subject.sessionId) || !identityVerifier.getVerifiedEmail) return null;
+    try {
+      const email = await identityVerifier.getVerifiedEmail(subject.userId);
+      return typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+        ? email.trim() : null;
+    } catch {
+      // The session remains valid if the display-only identity lookup fails.
+      return null;
+    }
+  }
+
+  return { exchange, authenticate, revoke, emailFor };
 }
 
 function validSessionRow(row: TicketClientSessionRecord | null, expectedHash: string): row is TicketClientSessionRecord {

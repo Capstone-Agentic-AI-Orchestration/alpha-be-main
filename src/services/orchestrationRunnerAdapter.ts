@@ -9,6 +9,8 @@ import { OrchestrationService, type OrchestrationExecutor, type OrchestrationLau
 import { runWithWorkspace } from './workspaceContext.js';
 import { SQLiteService, sqliteService } from './sqliteService.js';
 import { runnerService, type StartRunParams } from './runnerService.js';
+import { reserveTicketExecution as reserveTicketExecutionDefault, stopTicketExecution as stopTicketExecutionDefault,
+  type TicketExecutionHandle } from './ticketExecutionRelay.js';
 import { addBranchWorktree, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { roleCanOwnSavedTask } from './orchestrationContract.js';
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
@@ -34,6 +36,8 @@ interface AdapterDependencies {
   isPathAllowed?: (workingDir: string) => boolean;
   resolvePersona?: typeof resolveAgentLogged;
   readinessFor?: typeof agentReadiness;
+  reserveTicketExecution?: (input: Parameters<typeof reserveTicketExecutionDefault>[0]) => Promise<TicketExecutionHandle | null>;
+  stopTicketExecution?: (handle: TicketExecutionHandle) => Promise<void>;
 }
 
 function normalizeRepository(value: string | undefined): string {
@@ -55,6 +59,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
   private readonly isPathAllowed: (workingDir: string) => boolean;
   private readonly resolvePersona: typeof resolveAgentLogged;
   private readonly readinessFor: typeof agentReadiness;
+  private readonly reserveTicketExecution: NonNullable<AdapterDependencies['reserveTicketExecution']>;
+  private readonly stopTicketExecution: NonNullable<AdapterDependencies['stopTicketExecution']>;
   private resultHandlers?: OrchestrationResultHandlers;
   private eventHandlersAttached = false;
 
@@ -67,6 +73,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
     this.isPathAllowed = dependencies.isPathAllowed ?? (workingDir => this.store.isPathAllowed(workingDir));
     this.resolvePersona = dependencies.resolvePersona ?? resolveAgentLogged;
     this.readinessFor = dependencies.readinessFor ?? agentReadiness;
+    this.reserveTicketExecution = dependencies.reserveTicketExecution ?? reserveTicketExecutionDefault;
+    this.stopTicketExecution = dependencies.stopTicketExecution ?? stopTicketExecutionDefault;
   }
 
   attachResultHandlers(handlers: OrchestrationResultHandlers): void {
@@ -225,13 +233,12 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       }
 
       const prototypeRunId = `run-${request.attemptId}`;
-      // Bind the durable attempt before queueing the process. A very fast CLI
-      // completion can then never arrive before its parent task is known.
-      this.store.bindOrchestrationAttempt({
-        runId: request.runId,
-        attemptId: request.attemptId,
-        prototypeRunId,
-        actorId: 'orchestrator'
+      const ticketExecution = await this.reserveTicketExecution({
+        workspaceId: request.workspaceId,
+        issueId: issue.id,
+        projectId: project.id,
+        runId: prototypeRunId,
+        executor: { kind: 'agent', id: agent.id },
       });
       const task = request.taskPackage.task;
       const plan = [
@@ -239,27 +246,44 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
         `Complete only task ${task.id}: ${task.title}.`,
         `Task package version ${request.taskPackage.packageVersion}.`
       ];
-      await this.runner.startRun({
-        runId: prototypeRunId,
-        issueId: issue.id,
-        agentId: agent.id,
-        plan,
-        workspaceId: request.workspaceId,
-        workingDir,
-        orchestration: {
-          orchestrationRunId: request.runId,
-          taskId: request.taskId,
+      try {
+        // Bind the durable attempt before queueing the process. A very fast CLI
+        // completion can then never arrive before its parent task is known.
+        this.store.bindOrchestrationAttempt({
+          runId: request.runId,
           attemptId: request.attemptId,
-          branchName: expectedBranch,
-          baseRef: repositoryWorkspace.baseRef,
-          baseCommit: repositoryWorkspace.baseCommit,
-          planVersion: request.planVersion,
-          taskPackage: request.taskPackage,
-          personaHash: request.personaHash ?? '',
-          modelProvider: request.modelProvider ?? '',
-          modelName: request.modelName ?? ''
+          prototypeRunId,
+          actorId: 'orchestrator'
+        });
+        await this.runner.startRun({
+          runId: prototypeRunId,
+          issueId: issue.id,
+          agentId: agent.id,
+          plan,
+          workspaceId: request.workspaceId,
+          workingDir,
+          ...(ticketExecution ? { ticketExecution } : {}),
+          orchestration: {
+            orchestrationRunId: request.runId,
+            taskId: request.taskId,
+            attemptId: request.attemptId,
+            branchName: expectedBranch,
+            baseRef: repositoryWorkspace.baseRef,
+            baseCommit: repositoryWorkspace.baseCommit,
+            planVersion: request.planVersion,
+            taskPackage: request.taskPackage,
+            personaHash: request.personaHash ?? '',
+            modelProvider: request.modelProvider ?? '',
+            modelName: request.modelName ?? ''
+          }
+        });
+      } catch (error) {
+        if (ticketExecution) {
+          try { await this.stopTicketExecution(ticketExecution); }
+          catch (releaseError) { logError(`Could not release ticket execution ${ticketExecution.claimId}:`, releaseError); }
         }
-      });
+        throw error;
+      }
       return { prototypeRunId };
     });
   }

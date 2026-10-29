@@ -120,4 +120,18 @@ export class TicketClientIdentityProvider implements TicketClientIdentityVerifie
       emailVerified: Boolean(user.email_confirmed_at),
     };
   }
+
+  async getVerifiedEmail(userId: string): Promise<string | null> {
+    if (typeof userId !== 'string' || !userId.trim() || userId.length > 200 || userId.trim() !== userId) return null;
+    try {
+      const { data, error } = await this.admin.auth.admin.getUserById(userId);
+      const user = data.user;
+      const email = typeof user?.email === 'string' ? user.email.trim() : '';
+      if (error || user?.id !== userId || !user.email_confirmed_at
+        || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null;
+      return email;
+    } catch {
+      return null;
+    }
+  }
 }

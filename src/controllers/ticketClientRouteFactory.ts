@@ -72,7 +72,7 @@ export function createTicketClientRouteBoundary(dependencies: TicketClientRouteD
   const messages = createTicketMessageService(dependencies.messageStore);
   const creation = createTicketCreationService(dependencies.creationStore);
 
-  const sessionApplication = { authenticate: sessions.authenticate, revoke: sessions.revoke };
+  const sessionApplication = { authenticate: sessions.authenticate, revoke: sessions.revoke, emailFor: sessions.emailFor };
   const activationApplication = {
     async activate(input: unknown) {
       if (!input || typeof input !== 'object' || Array.isArray(input)) {
