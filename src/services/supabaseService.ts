@@ -648,7 +648,10 @@ export class SupabaseService {
   }
 
   /**
-   * Broadcast live stage transitions or log chunks to a run's channel.
+   * Broadcast a run's live stage transitions, activity and outcome to its channel.
+   *
+   * Raw log lines are left out on purpose: the activity feed already carries
+   * each one, and the full log arrives with the run's final row.
    *
    * Private (see 0006): Realtime lets the message through only if this token's
    * login owns the run, and delivers it only to the owner and their overseers.
@@ -662,7 +665,7 @@ export class SupabaseService {
   async broadcastRunEvent(
     runId: string,
     event: {
-      type: 'stage_update' | 'log_chunk' | 'run_activity' | 'run_completed' | 'run_failed' | 'run_cancelled';
+      type: 'stage_update' | 'run_activity' | 'run_completed' | 'run_failed' | 'run_cancelled';
       payload: any;
     }
   ): Promise<void> {

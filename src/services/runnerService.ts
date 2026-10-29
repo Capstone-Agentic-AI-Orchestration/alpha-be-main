@@ -1503,6 +1503,10 @@ ${issue.description}
     const updatedRun = { ...run, stages: updatedStages, updatedAt: new Date().toISOString() };
     sqliteService.savePrototypeRun(updatedRun);
     const eventPayload = { runId, stageId, message };
+    // Local only. The desktop shows these lines over its own socket, and the
+    // run row carries them to the cloud when the run ends. Sending each line to
+    // Supabase Realtime cost one REST call per line plus a copy to every
+    // subscriber, and duplicated what the run_activity event below already sends.
     this.emit('log_chunk', eventPayload);
 
     this.appendActivity(runId, {
@@ -1514,10 +1518,6 @@ ${issue.description}
       toolName: activityOptions.toolName,
       detail: activityOptions.detail
     });
-
-    if (supabaseService.isConfigured()) {
-      supabaseService.broadcastRunEvent(runId, { type: 'log_chunk', payload: eventPayload }).catch(() => {});
-    }
   }
 
   /**
