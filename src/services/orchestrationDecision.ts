@@ -18,6 +18,11 @@ export async function executeOrchestrationDecision(input: {
   if (input.threadId && (snapshot.run.revision !== expectedRevision || snapshot.run.planVersion !== input.planVersion)) {
     throw new Error('This plan or review changed. Read the current revision on the right, then reply again in the main chat.');
   }
+  if (input.threadId && !runWithWorkspace(context.workspaceId, () => sqliteService.getOrchestrationPlans(runId))
+    .some(plan => plan.version === input.planVersion)) throw new Error('The approved plan version is unavailable. Refresh the review.');
+  if (input.threadId && runWithWorkspace(context.workspaceId, () => sqliteService.listChatPendingDecisions(projectId, input.threadId!)).length > 1) {
+    throw new Error('More than one build is waiting for a decision in this conversation. Resolve the extra pending build first.');
+  }
   if (action === 'start') {
     if (!ALPHA_ORCHESTRATION_ENABLED) throw new Error('The Orchestrator is unavailable on this desktop.');
     if (snapshot.run.status !== 'awaiting_plan_approval') throw new Error('This plan is no longer waiting to start.');

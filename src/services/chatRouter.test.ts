@@ -30,6 +30,16 @@ describe('continuing a stopped build', () => {
 });
 
 describe('parseAlphaRoute', () => {
+  it('dispatches a structured response without a text marker', () => {
+    const result = parseAlphaRoute(JSON.stringify({ contract: 'alpha_chat_v1', message: '',
+      decision: { route: 'build', goal: 'Add search', repositories: ['org/fe'], assignments: [] } }));
+    expect(result.decision).toEqual({ route: 'build', goal: 'Add search', repositories: ['org/fe'] });
+    expect(result.message).toBe('');
+  });
+  it('extracts an ordinary answer from the structured response', () => {
+    expect(parseAlphaRoute(JSON.stringify({ contract: 'alpha_chat_v1', message: 'The tests passed.', decision: null })))
+      .toEqual({ message: 'The tests passed.', malformed: false });
+  });
   it('validates bounded specialist assignments before dispatch', () => {
     const assignment = { agentId: 'backend-1', kind: 'backend', instruction: 'Inspect the API', reason: 'API expertise' };
     const parse = (assignments: unknown[]) => parseAlphaRoute('ALPHA_ROUTE ' + JSON.stringify({ route: 'delegate', assignments }));

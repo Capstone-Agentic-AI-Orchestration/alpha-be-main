@@ -1,0 +1,80 @@
+{
+  "provider": "Anthropic",
+  "model": "sonnet",
+  "timestamp": "2026-10-28T16:45:15.422Z",
+  "failed": 0,
+  "results": [
+    {
+      "message": "Please add search to the header.",
+      "expected": "build",
+      "response": {
+        "contract": "alpha_chat_v1",
+        "message": "",
+        "decision": {
+          "route": "build",
+          "goal": "Add a search input to the app header of the Task app. The user can type a query in the header and the task list is filtered to tasks whose title or description match the query (case-insensitive). Include a clear button to reset the search, an empty-state message when nothing matches, and keep the header layout responsive on small screens. Follow the existing header, styling and component conventions, and add tests for the search behavior.",
+          "repositories": [
+            "acme/app"
+          ],
+          "assignments": []
+        }
+      },
+      "failureKind": null,
+      "passed": true
+    },
+    {
+      "message": "What is a pull request?",
+      "expected": null,
+      "response": {
+        "contract": "alpha_chat_v1",
+        "message": "A pull request (PR) is a request to merge changes from one branch into another, usually into a main branch, on a platform like GitHub, GitLab, or Bitbucket.\n\nHow it typically works:\n1. You create a branch and commit your changes there.\n2. You push the branch and open a pull request, with a title and description of what changed and why.\n3. Teammates review the diff, leave comments, and request changes. Automated checks such as tests and linting often run at this stage.\n4. Once it's approved and the checks pass, the PR is merged into the target branch.\n\nPRs give you a place to review code, discuss it, and run checks before it lands in the main codebase. They also leave a record of why each change was made.",
+        "decision": null
+      },
+      "failureKind": null,
+      "passed": true
+    },
+    {
+      "message": "Show the existing website locally.",
+      "expected": "preview",
+      "response": {
+        "contract": "alpha_chat_v1",
+        "message": "",
+        "decision": {
+          "route": "preview",
+          "goal": "Run the existing Task app website locally in an isolated preview from the saved commit.",
+          "repositories": [
+            "acme/app"
+          ],
+          "assignments": []
+        }
+      },
+      "failureKind": null,
+      "passed": true
+    },
+    {
+      "message": "Could the backend agent inspect the API error handling and report findings?",
+      "expected": "delegate",
+      "response": {
+        "contract": "alpha_chat_v1",
+        "message": "",
+        "decision": {
+          "route": "delegate",
+          "goal": "Inspect the API error handling in the acme/app repository and report findings (read-only, no code changes).",
+          "repositories": [
+            "acme/app"
+          ],
+          "assignments": [
+            {
+              "agentId": "backend-1",
+              "kind": "backend",
+              "instruction": "Read-only review of API error handling in acme/app. Examine: how errors are raised, caught and propagated in route handlers/controllers/services; presence and consistency of centralized error middleware or handlers; HTTP status code usage; error response shape (consistent fields, no leaking of stack traces or internal details); validation error handling; handling of async/unhandled rejections; handling of failures from external integrations or database calls; logging of errors; and existing test coverage of error paths. Report concrete findings with file paths and line references, rate each by severity, note gaps or inconsistencies, and suggest recommended fixes. Do not modify any code.",
+              "reason": "Backend agent is the API specialist and owns server logic, error handling and backend tests."
+            }
+          ]
+        }
+      },
+      "failureKind": null,
+      "passed": true
+    }
+  ]
+}
