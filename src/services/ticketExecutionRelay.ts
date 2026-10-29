@@ -11,6 +11,9 @@ type RelayRequest = (path: string, init: {
 export interface TicketExecutionHandle {
   workspaceId: string;
   issueId: string;
+  projectId: string;
+  issueRevisionId: string;
+  scopeVersionId: string;
   claimId: string;
   runId: string;
   executor: TicketExecutor;
@@ -35,13 +38,14 @@ function record(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
-function validWorkContext(value: unknown, workspaceId: string, issueId: string): value is DeveloperTicketWorkContext {
+function validWorkContext(value: unknown, workspaceId: string, issueId: string, projectId?: string): value is DeveloperTicketWorkContext {
   const context = record(value);
   const correction = context && (context.correction === null ? null : record(context.correction));
   return Boolean(context
     && typeof context.ticketReference === 'string' && context.ticketReference.length > 0 && context.ticketReference.length <= 200
     && Number.isSafeInteger(context.ticketVersion) && (context.ticketVersion as number) >= 0
     && context.issueId === issueId && typeof context.projectId === 'string' && context.projectId.length > 0
+    && (!projectId || context.projectId === projectId)
     && typeof context.issueRevisionId === 'string' && context.issueRevisionId.length > 0
     && typeof context.scopeVersionId === 'string' && context.scopeVersionId.length > 0
     && typeof context.brief === 'string' && context.brief.trim().length > 0 && context.brief.length <= 12000
@@ -61,10 +65,14 @@ function validWorkContext(value: unknown, workspaceId: string, issueId: string):
 export async function reserveTicketExecution(input: {
   workspaceId: string;
   issueId: string;
+  projectId: string;
   runId: string;
   executor: TicketExecutor;
   memberOrder?: number;
 }, request: RelayRequest = cloudRequest, cloudAvailable = usesCloudDirectory()): Promise<TicketExecutionHandle | null> {
+  // A standalone desktop has no remote ticket authority to consult and its
+  // local Issues cannot be linked to cloud tickets. Keep its ordinary runner
+  // behavior; cloud-backed work must always be positively classified below.
   if (!cloudAvailable) return null;
   const capability = await request('/ticket-work/workflow-capabilities', {
     workspaceId: input.workspaceId,
@@ -72,13 +80,13 @@ export async function reserveTicketExecution(input: {
   });
   // Older cloud versions and environments without ticket triage are not Phase
   // 7--9 deployments. Preserve their existing, unlinked Issue behavior.
-  if (capability.status === 404 || capability.status === 503) return null;
+  if (capability.status === 404) {
+    throw new TicketExecutionRelayError('The connected Alpha server cannot verify ticket-linked task access. Update Alpha and try again.');
+  }
   const capabilities = record(capability.body);
   if (capability.status !== 200 || typeof capabilities?.phaseWorkflowEnabled !== 'boolean') {
     throw new TicketExecutionRelayError('Could not verify ticket execution access. Refresh and try again.', capability.status);
   }
-  if (!capabilities.phaseWorkflowEnabled) return null;
-
   const answer = await request(`/ticket-work/issues/${encodeURIComponent(input.issueId)}/reservations`, {
     method: 'POST',
     workspaceId: input.workspaceId,
@@ -94,12 +102,17 @@ export async function reserveTicketExecution(input: {
   }
   if (result.kind === 'unlinked') return null;
   if (result.kind !== 'ticket' || typeof result.claimId !== 'string' || !result.claimId.trim()
-    || result.runId !== input.runId || !validWorkContext(result.workContext, input.workspaceId, input.issueId)) {
+    || result.workspaceId !== input.workspaceId || result.runId !== input.runId
+    || !validWorkContext(result.workContext, input.workspaceId, input.issueId, input.projectId)
+    || typeof result.issueRevisionId !== 'string' || result.issueRevisionId !== result.workContext.issueRevisionId) {
     throw new TicketExecutionRelayError('The cloud returned an invalid ticket execution reservation. Do not retry until it is reconciled.', 502);
   }
   return {
     workspaceId: input.workspaceId,
     issueId: input.issueId,
+    projectId: result.workContext.projectId,
+    issueRevisionId: result.issueRevisionId,
+    scopeVersionId: result.workContext.scopeVersionId,
     claimId: result.claimId,
     runId: input.runId,
     executor: input.executor,
@@ -124,7 +137,10 @@ export async function admitTicketExecution(
   });
   const result = record(answer.body);
   if (answer.status !== 200 || !result || typeof result.launch !== 'boolean'
-    || !validWorkContext(result.workContext, handle.workspaceId, handle.issueId)) {
+    || result.workspaceId !== handle.workspaceId || result.runId !== handle.runId
+    || !validWorkContext(result.workContext, handle.workspaceId, handle.issueId, handle.projectId)
+    || result.workContext.issueRevisionId !== handle.issueRevisionId
+    || result.workContext.scopeVersionId !== handle.scopeVersionId) {
     throw new TicketExecutionRelayError('Ticket work authorization changed or could not be verified. The agent was not started.', answer.status);
   }
   return { launch: result.launch, workContext: result.workContext };
@@ -142,16 +158,19 @@ export async function stopTicketExecution(handle: TicketExecutionHandle, request
   }
 }
 
-/** Persist a human run decision with the cloud ticket authority. A missing or
- * older workflow endpoint preserves ordinary, unlinked Issue behavior; once
- * the cloud advertises this workflow, malformed/denied responses fail closed. */
+/** Persist a human run decision with the cloud ticket authority. A standalone
+ * desktop has no cloud-linked ticket work; configured cloud failures must fail
+ * closed because the Issue may be bound to a ticket. */
 export async function reviewTicketExecution(input: {
   workspaceId: string;
   issueId: string;
   runId: string;
   decision: TicketRunReviewDecision;
 }, request: RelayRequest = cloudRequest, cloudAvailable = usesCloudDirectory()): Promise<TicketRunReviewResult> {
-  if (!cloudAvailable) return { kind: 'unavailable' };
+  // A desktop with no cloud directory cannot host ticket-linked work, so its
+  // local runs follow the ordinary unlinked review path. A configured cloud
+  // that cannot answer below remains unavailable and must fail closed.
+  if (!cloudAvailable) return { kind: 'unlinked' };
   const capability = await request('/ticket-work/workflow-capabilities', {
     workspaceId: input.workspaceId,
     timeoutMs: 10_000,

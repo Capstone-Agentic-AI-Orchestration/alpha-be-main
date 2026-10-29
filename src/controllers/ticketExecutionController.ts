@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { TransactionalSql } from '../store/database.js';
 import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
-import { loadTicketWorkContext } from '../store/ticketExecutionPostgresStore.js';
+import { classifyTicketWorkBinding, loadTicketWorkContext } from '../store/ticketExecutionPostgresStore.js';
 import { projectDeveloperTicketContext } from '../ticketing/developerContext.js';
 import { route } from './asyncRoute.js';
 import { assignedWorkTicketSubject, opaqueTicketRequestValue, relayPmTicketRequest } from './ticketRequestAuth.js';
@@ -46,13 +46,19 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (await relayPmTicketRequest(req, res)) return;
-    if (!runtime?.enabled) return workflowUnavailable(res);
     const subject = assignedWorkTicketSubject(req, res);
     if (!subject) return;
     const workspaceId = req.workspace?.workspaceId ?? '';
     const issueId = req.params.issueId ?? '';
     if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Task not found.' });
-    const runId = `ticket-run-${randomUUID()}`;
+    if (!runtime) {
+      const classification = await db.transaction(sql => classifyTicketWorkBinding(sql, { workspaceId, issueId }, subject));
+      if (classification === 'unlinked') return res.json({ kind: 'unlinked' });
+      return workflowUnavailable(res);
+    }
+    const suppliedRunId = req.body?.runId;
+    const runId = suppliedRunId === undefined ? `ticket-run-${randomUUID()}` : suppliedRunId;
+    if (!opaqueTicketRequestValue(runId)) return res.status(400).json({ error: 'Invalid execution request.' });
     const result = await runtime.reserve({ workspaceId, issueId }, subject, {
       operationId: typeof req.body?.operationId === 'string' ? req.body.operationId : `reserve-${randomUUID()}`,
       executor: req.body?.executor,
@@ -63,7 +69,7 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
       || !opaqueTicketRequestValue(result.verificationId) || result.context.issueId !== issueId) {
       throw new Error('Invalid ticket execution reservation.');
     }
-    return res.json({ kind: result.kind, claimId: result.receipt.claimId, issueRevisionId: result.receipt.issueRevisionId,
+    return res.json({ kind: result.kind, workspaceId, claimId: result.receipt.claimId, issueRevisionId: result.receipt.issueRevisionId,
       runId: result.runId, workContext: result.context });
   }));
 
@@ -80,7 +86,9 @@ export function createTicketExecutionRouter(db: TransactionalSql, runtime: Ticke
     if (!opaqueTicketRequestValue(workspaceId) || !opaqueTicketRequestValue(issueId)) return res.status(404).json({ error: 'Task not found.' });
     const result = await runtime.admit({ workspaceId, issueId }, subject, req.body);
     if (!result.context || result.context.issueId !== issueId || typeof result.launch !== 'boolean') throw new Error('Invalid ticket execution admission.');
-    return res.json({ launch: result.launch, workContext: result.context });
+    const runId = req.body?.runId;
+    if (!opaqueTicketRequestValue(runId)) throw new Error('Invalid ticket execution admission.');
+    return res.json({ launch: result.launch, workspaceId, runId, workContext: result.context });
   }));
 
   router.post('/issues/:issueId/claims/:claimId/stop', route(async (req, res) => {

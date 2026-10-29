@@ -7,6 +7,7 @@ import type { TicketSubject } from '../store/ticketCommandStore.js';
 export interface TicketClientSessionApplication {
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
   revoke(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<void>;
+  emailFor?(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<string | null>;
 }
 
 export interface TicketClientSessionCookiePolicy {
@@ -156,9 +157,12 @@ export function createTicketClientSessionRouter(
     if (!available(res)) return;
     try {
       const result = await application.authenticate(readTicketClientCookie(req, sessionCookieName));
-      return res.json(result.kind === 'authenticated'
-        ? { authenticated: true, expiresAt: result.expiresAt }
-        : { authenticated: false });
+      if (result.kind !== 'authenticated') return res.json({ authenticated: false });
+      let email: string | null = null;
+      try { email = await application.emailFor?.(result.subject) ?? null; }
+      catch { /* Email is display-only and must not change session authentication. */ }
+      return res.json({ authenticated: true, expiresAt: result.expiresAt,
+        ...(typeof email === 'string' && email.length <= 254 ? { email } : {}) });
     } catch (error) { return next(error); }
   });
 

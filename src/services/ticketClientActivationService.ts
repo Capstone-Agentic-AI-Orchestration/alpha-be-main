@@ -19,6 +19,8 @@ const activationInputSchema = z.object({
 export interface TicketClientIdentityVerifier {
   /** Verify signature, issuer, audience, expiry and email_verified with the configured provider. */
   verifyCredential(credential: string): Promise<VerifiedClientIdentity | null>;
+  /** Read the current confirmed email for a previously verified provider user ID. */
+  getVerifiedEmail?(userId: string): Promise<string | null>;
 }
 
 export interface TicketClientActivationReceipt {
