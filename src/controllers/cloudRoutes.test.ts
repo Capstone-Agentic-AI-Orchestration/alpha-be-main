@@ -102,7 +102,11 @@ async function startCloudApi() {
   const { liveBuildRoomRouter } = await import('./liveBuildRoomController.js');
   const { orchestrationRouter } = await import('./orchestrationController.js');
   const { agentCallRouter } = await import('./agentCallController.js');
-  const { runRouter } = await import('./runController.js');
+  const { runRouter, setRunTicketLifecycleRuntime } = await import('./runController.js');
+  const { createTicketLifecycleRuntime } = await import('../services/ticketLifecycleRuntime.js');
+  setRunTicketLifecycleRuntime(createTicketLifecycleRuntime({
+    ...sqlFor(db), transaction: work => db.transaction(tx => work(sqlFor(tx as unknown as PGlite)))
+  }, true));
   const { runtimeRouter } = await import('./runtimeController.js');
   const { githubRouter } = await import('./githubController.js');
   const { chatRouter } = await import('./chatController.js');
@@ -117,6 +121,7 @@ async function startCloudApi() {
       login: session.login,
       role: session.role,
       githubToken: 'gho_test',
+      ticketAuthentication: { kind: 'verified_github_bearer', verificationId: 'cloud-route-auth-fixture' },
       expiresAt: new Date(Date.now() + 60_000).toISOString()
     };
     next();

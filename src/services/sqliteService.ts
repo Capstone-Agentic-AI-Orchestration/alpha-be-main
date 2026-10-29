@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import type { DeliveryRecord } from './orchestrationDelivery.js';
 import type { UsageEntry } from './chatUsage.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -405,6 +406,46 @@ export class SQLiteService {
     this.db.close();
   }
 
+  getOrchestrationDelivery(runId: string): DeliveryRecord | undefined {
+    const row = this.db.prepare('SELECT record FROM orchestration_deliveries WHERE workspace_id = ? AND run_id = ?')
+      .get(this.workspaceId(), runId) as { record: string } | undefined;
+    return row ? JSON.parse(row.record) : undefined;
+  }
+
+  saveOrchestrationDelivery(record: DeliveryRecord, expectedRevision?: number): DeliveryRecord {
+    if (record.workspaceId !== this.workspaceId()) throw new Error('Delivery is outside this workspace.');
+    this.db.transaction(() => {
+      if (expectedRevision === undefined) {
+        this.db.prepare('INSERT OR IGNORE INTO orchestration_deliveries(workspace_id, run_id, revision, record) VALUES(?,?,?,?)')
+          .run(record.workspaceId, record.runId, record.revision, JSON.stringify(record));
+      } else {
+        if (record.revision !== expectedRevision + 1) throw new Error('Delivery revision must advance exactly once.');
+        const result = this.db.prepare('UPDATE orchestration_deliveries SET record = ?, revision = ? WHERE workspace_id = ? AND run_id = ? AND revision = ?')
+          .run(JSON.stringify(record), record.revision, record.workspaceId, record.runId, expectedRevision);
+        if (result.changes !== 1) throw new Error('Delivery changed. Refresh before continuing.');
+      }
+      const event = record.history.at(-1);
+      if (event && expectedRevision !== undefined) this.db.prepare(`INSERT INTO orchestration_delivery_events
+        (workspace_id, run_id, revision, action, event) VALUES(?,?,?,?,?)`).run(record.workspaceId, record.runId, record.revision, event.action, JSON.stringify(event));
+    })();
+    return this.getOrchestrationDelivery(record.runId)!;
+  }
+
+  hasOrchestrationDeliveryAction(runId: string, action: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM orchestration_delivery_events WHERE workspace_id = ? AND run_id = ? AND action = ? LIMIT 1')
+      .get(this.workspaceId(), runId, action));
+  }
+
+  listOrchestrationDeliveryEvents(runId: string, afterRevision = 0): DeliveryRecord['history'] {
+    return (this.db.prepare('SELECT revision, event FROM orchestration_delivery_events WHERE workspace_id = ? AND run_id = ? AND revision > ? ORDER BY revision LIMIT 200')
+      .all(this.workspaceId(), runId, afterRevision) as Array<{ revision: number; event: string }>).map(row => ({ ...JSON.parse(row.event), revision: row.revision }));
+  }
+
+  listAllOrchestrationDeliveries(): DeliveryRecord[] {
+    return (this.db.prepare('SELECT record FROM orchestration_deliveries').all() as Array<{ record: string }>)
+      .map(row => JSON.parse(row.record));
+  }
+
   saveLocalPreview(value: { id: string; workspaceId: string; ownerId: string; threadId: string; createdAt?: string }): void {
     const thread = this.db.prepare('SELECT usage_cleared_at FROM chat_threads WHERE id = ? AND workspace_id = ? AND owner_id = ?')
       .get(value.threadId, value.workspaceId, value.ownerId) as { usage_cleared_at?: string } | undefined;
@@ -455,6 +496,14 @@ export class SQLiteService {
   }
 
   private initTables() {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS orchestration_deliveries (
+      workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, revision INTEGER NOT NULL,
+      record TEXT NOT NULL, PRIMARY KEY(workspace_id, run_id)
+    )`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS orchestration_delivery_events (
+      workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, revision INTEGER NOT NULL,
+      action TEXT NOT NULL, event TEXT NOT NULL, PRIMARY KEY(workspace_id, run_id, revision)
+    ); CREATE INDEX IF NOT EXISTS idx_delivery_events_action ON orchestration_delivery_events(workspace_id, run_id, action)`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS local_previews (
         id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, owner_id TEXT NOT NULL,

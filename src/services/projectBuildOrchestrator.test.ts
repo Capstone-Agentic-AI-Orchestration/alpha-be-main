@@ -244,6 +244,31 @@ afterEach(() => {
 });
 
 describe('project builds triggered from chat', () => {
+  it('pins CI repairs to the trusted source and preserves the original authorized paths', async () => {
+    const service = await load();
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'repair-thread', messageId: crypto.randomUUID(),
+      content: 'Fix the failed tests. Base branch: main', requestedRepository: selectedRepo,
+      deliveryRepair: { repositories: [{ repository: selectedRepo, base: 'alpha/orchestration/original', commit: 'a'.repeat(40), includePaths: ['src/cart/**'], excludePaths: ['src/auth/**'] }] }
+    });
+    expect(result.status).toBe('plan_ready');
+    const git = await import('../utils/gitUtils.js');
+    expect(git.fetchRemoteBranch).toHaveBeenCalledWith(checkoutDir, 'alpha/orchestration/original');
+    const plan = startOrchestration.mock.calls[0][0].plan;
+    expect(plan.tasks.every((task: any) => task.scope.includePaths.join() === 'src/cart/**' && task.scope.excludePaths.includes('.github/workflows/**'))).toBe(true);
+    expect(startSquadRun).not.toHaveBeenCalled();
+  });
+  it('rejects a repair source that changed before planning', async () => {
+    const service = await load();
+    const result = await service.startProjectBuild({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'repair-stale-thread', messageId: crypto.randomUUID(), content: 'Fix CI', requestedRepository: selectedRepo,
+      deliveryRepair: { repositories: [{ repository: selectedRepo, base: 'dev', commit: 'z'.repeat(40), includePaths: ['src/**'], excludePaths: [] }] }
+    });
+    expect(result.status).toBe('blocked'); expect(result.reason).toMatch(/repair source changed/);
+    expect(plannerCreatePlan).not.toHaveBeenCalled(); expect(startOrchestration).not.toHaveBeenCalled();
+  });
   it('resolves the requested dev base before creating a planning worktree and supplies its evidence', async () => {
     const service = await load();
     const git = await import('../utils/gitUtils.js');

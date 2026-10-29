@@ -18,6 +18,46 @@ import { requireProjectWorkspace, requireWorkspaceCapability } from './workspace
 
 export const orchestrationRouter = Router();
 
+orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/delivery', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'squad.read')) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const { orchestrationDeliveryService } = await import('../services/orchestrationDeliveryRuntime.js');
+  res.set('Cache-Control', 'no-store');
+  const record = orchestrationDeliveryService.ensure(snapshot);
+  res.json({ delivery: record ? await orchestrationDeliveryService.refresh(req.workspace!.workspaceId, snapshot.run.id) : null,
+    canControl: workspaceRegistry.can(req.workspace!.role, 'squad.run'), canPromote: workspaceRegistry.can(req.workspace!.role, 'squad.run') });
+}));
+
+orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/delivery/events', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'squad.read') || !scopedSnapshot(req, res)) return;
+  const after = req.query.afterRevision === undefined ? 0 : Number(req.query.afterRevision);
+  if (!Number.isSafeInteger(after) || after < 0) return res.status(400).json({ error: 'Choose a valid event revision.' });
+  res.set('Cache-Control', 'no-store');
+  res.json(runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.listOrchestrationDeliveryEvents(req.params.runId, after)));
+}));
+
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/delivery/actions', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res)) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const { action, expectedRevision, key } = req.body ?? {};
+  if (!['enable_uat', 'pause_delivery', 'resume_delivery', 'merge_dev', 'prepare_uat', 'merge_uat', 'prepare_repair'].includes(action) ||
+    !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || typeof key !== 'string' || !/^[A-Za-z0-9:_-]{8,100}$/.test(key)) {
+    return res.status(400).json({ error: 'Choose a valid delivery action and current revision.' });
+  }
+  try {
+    const { deliveryServiceForActor } = await import('../services/orchestrationDeliveryRuntime.js');
+    const service = await deliveryServiceForActor(req.workspace!);
+    res.json(await service.act({ context: req.workspace!, runId: snapshot.run.id, projectId: req.params.projectId,
+      action, expectedRevision, key }));
+  } catch (error) {
+    const { DeliveryError } = await import('../services/orchestrationDelivery.js');
+    if (error instanceof DeliveryError) return res.status(error.status).json({ error: error.message });
+    return res.status(409).json({ error: 'Delivery could not finish this action. Refresh to reconcile GitHub before retrying.' });
+  }
+}));
+
 async function reconcileRecovery(snapshot: OrchestrationSnapshot): Promise<void> {
   try {
     orchestrationRecoveryService.reconcileSnapshot(snapshot);

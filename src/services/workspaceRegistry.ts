@@ -50,8 +50,10 @@ export type WorkspaceCapability =
   | 'project.manage'
   /** Provision a new remote repository; project managers own this action. */
   | 'project.provision_repository'
-  /** Open the dev -> uat -> main promotion pull requests of a project's repositories. */
+  /** Open production promotion pull requests (uat -> main). */
   | 'project.promote'
+  /** Development delivery to UAT; production promotion remains separate. */
+  | 'project.promote_uat'
   | 'issue.read'
   | 'issue.manage'
   | 'agent.read'
@@ -85,6 +87,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'intake.submit'
   ],
   dev: [
+    'project.promote_uat',
     'workspace.read',
     /*
      * Who else is in this workspace. Knowing your colleagues is not
@@ -125,6 +128,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'workspace.bind_local'
   ],
   pm: [
+    'project.promote_uat',
     'workspace.read',
     'workspace.read_members',
     /*
@@ -139,7 +143,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'project.update',
     'project.manage',
     'project.provision_repository',
-    // Promotion is a release decision: the PM who runs the project makes it.
+    // Production promotion is a release decision; UAT is developer delivery.
     'project.promote',
     'issue.read',
     'issue.manage',
@@ -163,6 +167,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'workspace.bind_local'
   ],
   admin: [
+    'project.promote_uat',
     'workspace.read',
     'workspace.read_members',
     'workspace.manage_members',
