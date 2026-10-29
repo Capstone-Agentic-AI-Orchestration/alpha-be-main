@@ -2,7 +2,7 @@ import http from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-async function startApi() {
+async function startApi(role = 'admin') {
   vi.resetModules();
   const reservation = {
     runId: 'orchestration-planning-1', projectId: 'project-1', repository: 'acme/shop', repositoryKey: 'acme/shop',
@@ -25,6 +25,8 @@ async function startApi() {
     publication: { branchName: 'alpha/orchestration/approved1', baseBranch: 'main', resultCommit: 'b'.repeat(40),
       pullRequestUrl: 'https://github.com/acme/shop/pull/42', publishedAt: '2026-10-20T00:02:00.000Z' } } };
   const calls = {
+    deliveryAct: vi.fn(async () => ({ runId: 'orchestration-approved-1', stage: 'uat_checks' })),
+    deliveryRefresh: vi.fn(async () => ({ runId: 'orchestration-approved-1', stage: 'dev_approval' })),
     documents: vi.fn(() => [{ version: 1, fileName: 'build-plan-v1.md', content: '# Approved plan\n', contentHash: 'hash' }]),
     getRecovery: vi.fn((): any => recovery),
     inspect: vi.fn(async () => ({ state: 'changed', safeToRetire: false, canPreview: true, changed: true })),
@@ -69,8 +71,15 @@ async function startApi() {
   vi.doMock('../services/workspaceService.js', () => ({ resolveProjectWorkspace: () => ({ dir: 'D:/alpha/repository' }) }));
   vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessLiveBuildRoom: () => true } }));
   vi.doMock('../services/orchestrationRuntime.js', () => ({ orchestrationService: { approveAndPublish: calls.approveAndPublish } }));
+  vi.doMock('../services/orchestrationDeliveryRuntime.js', () => ({
+    orchestrationDeliveryService: { ensure: () => ({}), refresh: calls.deliveryRefresh },
+    deliveryServiceForActor: async () => ({ act: calls.deliveryAct })
+  }));
   vi.doMock('./workspaceContext.js', () => ({
-    requireWorkspaceCapability: () => true,
+    requireWorkspaceCapability: (_req: any, res: any, capability: string) => {
+      if (capability === 'project.promote' && role === 'dev') { res.status(403).json({ error: 'PM authorization required.' }); return false; }
+      return true;
+    },
     requireProjectWorkspace: () => true
   }));
 
@@ -78,7 +87,7 @@ async function startApi() {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).workspace = { workspaceId: 'ws-test', userId: 'user-1', role: 'admin' };
+    (req as any).workspace = { workspaceId: 'ws-test', userId: 'user-1', role };
     next();
   });
   app.use('/api', orchestrationRouter);
@@ -106,12 +115,34 @@ afterEach(() => {
     '../config/env.js', '../store/stores.js', '../services/sqliteService.js',
     '../services/orchestrationPlanningRecovery.js', '../services/workspaceService.js',
     '../services/orchestrationFinalization.js', '../services/orchestrationReviewService.js', '../services/orchestrationRuntime.js',
-    '../services/workspaceRegistry.js', './workspaceContext.js'
+    '../services/workspaceRegistry.js', '../services/orchestrationDeliveryRuntime.js', './workspaceContext.js'
   ]) vi.doUnmock(mod);
   vi.resetModules();
 });
 
 describe('task workflow project routes', () => {
+  it('exposes delivery only for the matching project and workspace', async () => {
+    const { app, calls, awaitingSnapshot } = await startApi();
+    const url = `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/delivery`;
+    expect((await call(app, 'GET', url)).body.delivery.stage).toBe('dev_approval');
+    calls.getSnapshot.mockReturnValue({ ...awaitingSnapshot, run: { ...awaitingSnapshot.run, projectId: 'other' } });
+    expect((await call(app, 'GET', url)).status).toBe(404);
+    expect(calls.deliveryRefresh).toHaveBeenCalledTimes(1);
+  });
+  it('allows UAT actions from a developer without a PM capability', async () => {
+    const { app, calls, awaitingSnapshot } = await startApi('dev');
+    const result = await call(app, 'POST', `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/delivery/actions`,
+      { action: 'merge_uat', expectedRevision: 1, key: 'delivery-key-1' });
+    expect(result.status).toBe(200); expect(calls.deliveryAct).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ role: 'dev' }) }));
+  });
+  it('validates delivery action identity and passes the server-resolved actor', async () => {
+    const { app, calls, awaitingSnapshot } = await startApi();
+    const url = `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/delivery/actions`;
+    expect((await call(app, 'POST', url, { action: 'merge_uat', expectedRevision: -1, key: 'delivery-key-1' })).status).toBe(400);
+    expect((await call(app, 'POST', url, { action: 'merge_uat', expectedRevision: 1, key: 'delivery-key-1', actorId: 'forged' })).status).toBe(200);
+    expect(calls.deliveryAct).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ userId: 'user-1', role: 'admin' }),
+      projectId: 'project-1', action: 'merge_uat' }));
+  });
   it('serves plan Markdown only for a matching project and workspace', async () => {
     const { app, calls, awaitingSnapshot } = await startApi();
     const url = `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/plans`;

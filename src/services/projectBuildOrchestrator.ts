@@ -44,6 +44,8 @@ export interface ProjectBuildStartResult {
 }
 
 interface StartProjectBuildInput {
+  /** Trusted delivery service constraint. Never populated from a model or HTTP body. */
+  deliveryRepair?: { repositories: Array<{ repository: string; base: string; commit: string; includePaths: string[]; excludePaths: string[] }> };
   context: WorkspaceContext;
   projectId?: string;
   threadId: string;
@@ -251,6 +253,7 @@ function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Proj
 }
 
 async function startOrchestratedProjectBuild(input: {
+  deliveryRepair?: StartProjectBuildInput['deliveryRepair'];
   context: WorkspaceContext;
   project: Project;
   repositories: SelectedProjectRepository[];
@@ -277,6 +280,7 @@ async function startOrchestratedProjectBuild(input: {
   const linkedIssueId = input.issueId?.trim() || undefined;
   const expectedIssueId = linkedIssueId ?? `chat-build-${requestKey}`;
   const requestFingerprint = orchestrationRequestFingerprint({
+    ...(input.deliveryRepair ? { repairScopeHash: crypto.createHash('sha256').update(JSON.stringify(input.deliveryRepair)).digest('hex') } : {}),
     workspaceId, projectId: project.id, issueId: expectedIssueId, repository,
     repositories: repositories.map(item => item.repository),
     createdBy: context.userId, originalRequest: cleanGoal
@@ -403,7 +407,9 @@ async function startOrchestratedProjectBuild(input: {
   const branchName = orchestrationBranchName(proposedRunId);
   try {
     for (const [index, target] of repositories.entries()) {
-      const requestedBase = requestedBuildBase(cleanGoal);
+      const repair = input.deliveryRepair?.repositories.find(item => item.repository.toLowerCase() === target.repository.toLowerCase());
+      if (input.deliveryRepair && !repair) throw new Error('Repair repository is outside the original delivery.');
+      const requestedBase = repair?.base ?? requestedBuildBase(cleanGoal);
       const base = requestedBase ?? (await remoteHasDevBranch(target.checkoutDir) ? 'dev' : undefined);
       let baseRef = 'HEAD';
       if (base) {
@@ -412,6 +418,7 @@ async function startOrchestratedProjectBuild(input: {
       }
       const baseCommit = await getHeadCommit(target.checkoutDir, baseRef);
       baseRefs.set(target.repository, baseRef);
+      if (repair && baseCommit !== repair.commit) throw new Error('The CI repair source changed. Refresh delivery evidence before planning.');
       const worktreePath = index === 0
         ? projectRunWorkspacePath(project.id, proposedRunId)
         : projectRunWorkspacePath(project.id, `${proposedRunId}-${crypto.createHash('sha256').update(target.repository.toLowerCase()).digest('hex').slice(0, 12)}`);
@@ -488,6 +495,19 @@ async function startOrchestratedProjectBuild(input: {
         dependsOn: step.dependsOn ?? []
       }))
     });
+    if (input.deliveryRepair) {
+      if (planned.plan.schemaVersion !== 1 || planned.plan.milestones?.length) throw new Error('CI repair needs a bounded direct plan.');
+      // The model may choose owners and dependencies, but cannot expand the
+      // previously authorized write scope or alter the workflow gates.
+      for (const task of planned.plan.tasks) {
+        const repair = input.deliveryRepair.repositories.find(item => item.repository.toLowerCase() === (task.repository ?? repository).toLowerCase());
+        if (!repair) throw new Error('Repair plan selected an unauthorized repository.');
+        task.scope = {
+          includePaths: [...repair.includePaths],
+          excludePaths: [...new Set([...repair.excludePaths, '.github/workflows/**'])]
+        };
+      }
+    }
   } catch (error) {
     const detail = error instanceof OrchestrationPlanningError ? error.message : error instanceof Error ? error.message : 'The plan could not be validated.';
     const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
@@ -699,7 +719,8 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     }
     return startOrchestratedProjectBuild({
       context, project, repositories: selectedCheckouts, members: projectAgents,
-      buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId
+      buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId,
+      deliveryRepair: input.deliveryRepair
     });
   });
 }

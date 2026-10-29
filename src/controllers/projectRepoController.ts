@@ -179,8 +179,8 @@ projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId/artifacts/:a
 projectRepoRouter.post(
   '/projects/:id/repos/:owner/:name/promote',
   withProjectRepo(async (req, res, repo) => {
-    if (!requireWorkspaceCapability(req, res, 'project.promote')) return;
     const { from, to } = req.body ?? {};
+    if (!requireWorkspaceCapability(req, res, from === 'dev' && to === 'uat' ? 'project.promote_uat' : 'project.promote')) return;
     if (typeof from !== 'string' || typeof to !== 'string') {
       return res.status(400).json({ error: '"from" and "to" branches are required.' });
     }

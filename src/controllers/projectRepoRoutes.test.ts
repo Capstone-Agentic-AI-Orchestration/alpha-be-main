@@ -35,7 +35,7 @@ async function startApi(options: { role?: string; canSeeProject?: boolean; promo
     },
     requireWorkspaceCapability: (_req: any, res: any, capability: string) => {
       const managerOnly = ['project.promote', 'project.provision_repository'].includes(capability);
-      const allowed = !managerOnly || ['pm', 'admin'].includes(options.role ?? 'dev');
+      const allowed = capability === 'project.promote_uat' ? ['dev', 'pm', 'admin'].includes(options.role ?? 'dev') : !managerOnly || ['pm', 'admin'].includes(options.role ?? 'dev');
       if (!allowed) res.status(403).json({ error: `Your workspace role cannot ${capability.replace('.', ' ')}.` });
       return allowed;
     }
@@ -213,12 +213,17 @@ describe('a project’s repositories', () => {
 });
 
 describe('promotion', () => {
-  it('is a project manager’s to make, not a developer’s', async () => {
+  it('allows a developer to prepare UAT promotion', async () => {
     const { app, calls } = await startApi({ role: 'dev' });
 
     const res = await call(app, 'POST', '/api/projects/p1/repos/acme/shop-be/promote', { from: 'dev', to: 'uat' });
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(201);
+    expect(calls).toEqual(['promote acme/shop-be dev->uat']);
+  });
+  it('keeps production promotion restricted for developers', async () => {
+    const { app, calls } = await startApi({ role: 'dev' });
+    expect((await call(app, 'POST', '/api/projects/p1/repos/acme/shop-be/promote', { from: 'uat', to: 'main' })).status).toBe(403);
     expect(calls).toEqual([]);
   });
 

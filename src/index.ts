@@ -570,6 +570,9 @@ function onListening(): void {
           error => logError('Could not publish a task workflow event:', error instanceof Error ? error.message : String(error))
         );
         server.once('close', stopEventDelivery);
+        void import('./services/orchestrationDeliveryRuntime.js').then(({ startOrchestrationDeliveryMonitor }) => {
+          server.once('close', startOrchestrationDeliveryMonitor());
+        }).catch(err => logError('Could not start UAT delivery monitoring:', err));
         return reconcileInterruptedOrchestrations();
       })
       .catch(err => logError('Could not initialize task orchestration recovery:', err));

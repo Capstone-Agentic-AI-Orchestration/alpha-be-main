@@ -350,13 +350,14 @@ const TOOLS: Record<string, ToolDef> = {
       const cwd = requireWorkspace();
       const head = await getCurrentBranch(cwd);
       const pipeline = await remoteHasDevBranch(cwd);
-      // A pipeline repository takes agent work into dev; promotion to uat and
-      // main is a project manager's pull request, never an agent's.
+      // Agent work targets dev. UAT promotion runs through Alpha's
+      // checked delivery service without a PM authorization requirement.
+      // Production promotion uses separate release controls.
       const target = base || (pipeline ? 'dev' : await remoteDefaultBranch(cwd)) || 'main';
       if (pipeline && (target === 'uat' || target === 'main')) {
         audit('open_pull_request', head, false, `Refused: ${target} is a promotion target.`);
         throw new Error(
-          `Refusing to open a pull request into "${target}". In this repository work goes into dev, and a project manager promotes dev to uat and uat to main.`
+          `Refusing to open a pull request into "${target}" through this tool. Work goes into dev; Alpha's checked delivery flow handles UAT, and production promotion uses the separate release controls.`
         );
       }
 

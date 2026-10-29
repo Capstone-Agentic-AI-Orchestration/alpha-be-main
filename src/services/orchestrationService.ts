@@ -362,6 +362,10 @@ export class OrchestrationService {
         }
       });
       await this.publication.synchronizePublishedIssue(completed);
+      if (typeof this.store.saveOrchestrationDelivery === 'function') {
+        const { OrchestrationDeliveryService } = await import('./orchestrationDeliveryService.js');
+        new OrchestrationDeliveryService(this.store).ensure(completed);
+      }
       return this.store.getOrchestrationSnapshot(input.runId)!;
     }));
   }
@@ -1852,6 +1856,7 @@ function legacySingleRepositoryWorkspace(
 }
 
 export function orchestrationRequestFingerprint(input: {
+  repairScopeHash?: string;
   workspaceId: string;
   projectId: string;
   issueId: string;
