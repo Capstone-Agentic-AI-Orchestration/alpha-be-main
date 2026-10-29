@@ -72,9 +72,9 @@ describe('verificationService', () => {
 
     const result = await runVerification({ runId: 'run-required-checks', cwd, requiredScripts: ['test', 'lint'] });
 
-    expect(result.commands.map(command => command.command.script)).toEqual(['test']);
+    expect(result.commands).toEqual([]);
     expect(result.missingScripts).toEqual(['lint']);
-    expect(result.status).toBe('passed');
+    expect(result.status).toBe('failed');
     expect(result.summary).toContain('Required checks unavailable: lint.');
   });
 

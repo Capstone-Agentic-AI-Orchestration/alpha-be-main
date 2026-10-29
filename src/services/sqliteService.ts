@@ -3898,6 +3898,14 @@ export class SQLiteService {
     });
   }
 
+  listChatPendingDecisions(projectId: string, threadId: string): OrchestrationSnapshot[] {
+    const rows = this.db.prepare(`SELECT id FROM orchestration_runs
+      WHERE workspace_id = ? AND project_id = ? AND origin_chat_thread_id = ?
+      AND status IN ('awaiting_plan_approval', 'awaiting_approval', 'publishing') ORDER BY created_at DESC`)
+      .all(this.workspaceId(), projectId, threadId) as Array<{ id: string }>;
+    return rows.flatMap(row => { const snapshot = this.getOrchestrationSnapshot(row.id); return snapshot ? [snapshot] : []; });
+  }
+
   getLatestOrchestrationSnapshot(projectId: string, originChatThreadId?: string): OrchestrationSnapshot | undefined {
     const row = originChatThreadId
       ? this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND origin_chat_thread_id = ? ORDER BY created_at DESC LIMIT 1')

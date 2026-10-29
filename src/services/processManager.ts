@@ -13,6 +13,8 @@ export interface SpawnOptions {
   args: string[];
   cwd: string;
   env?: Record<string, string>;
+  /** A bounded operation may shorten, but never extend, the global deadline. */
+  timeoutMs?: number;
   /**
    * Text to write to the child's stdin, then close it.
    *
@@ -49,6 +51,9 @@ export class ProcessManager {
    */
   spawnProcess(options: SpawnOptions): ChildProcess {
     const { runId, bin, args, cwd, env, stdin, onStdout, onStderr, onExit } = options;
+    const timeoutMs = options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+      ? Math.min(options.timeoutMs, EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS)
+      : EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS;
 
     // 1. Verify working directory allowlist
     if (!sqliteService.isPathAllowed(cwd)) {
@@ -105,6 +110,7 @@ export class ProcessManager {
     const child = crossSpawn(bin, args, {
       cwd,
       env: { ...process.env, ...env },
+      windowsHide: true,
       stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
     });
 
@@ -130,12 +136,12 @@ export class ProcessManager {
 
     // 2. Set hard wall-clock timeout
     const timer = setTimeout(() => {
-      logError(`Run ${runId} exceeded wall-clock timeout (${EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS / 1000}s)`);
+      logError(`Run ${runId} exceeded wall-clock timeout (${timeoutMs / 1000}s)`);
       logAudit('PROCESS_WALL_CLOCK_TIMEOUT', { runId, bin });
       void this.terminateProcessAndWait(runId, 'timeout').catch(error =>
         logError(`Could not confirm timeout termination for run ${runId}:`, error)
       );
-    }, EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS);
+    }, timeoutMs);
 
     this.terminationReasons.delete(runId);
     let resolveExited!: () => void;

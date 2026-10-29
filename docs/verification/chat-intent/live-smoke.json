@@ -1,0 +1,30 @@
+{
+  "provider": "Anthropic",
+  "model": "sonnet",
+  "timestamp": "2026-10-28T16:37:29.353Z",
+  "failed": 0,
+  "results": [
+    {
+      "id": "yes-plan",
+      "message": "yes",
+      "target": "plan",
+      "result": {
+        "intent": "consent",
+        "target": "plan",
+        "evidence": "yes"
+      },
+      "passed": true
+    },
+    {
+      "id": "negation",
+      "message": "Do not start the plan yet.",
+      "target": "none",
+      "result": {
+        "intent": "none",
+        "target": "none",
+        "evidence": ""
+      },
+      "passed": true
+    }
+  ]
+}

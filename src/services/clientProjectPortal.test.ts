@@ -123,6 +123,11 @@ describe('client project portal on the complete migration schema', () => {
   });
 
   it('validates PM membership, selected workspace and preview URL constraints', async () => {
+    await expect(app.getPreview({...target,workspaceId:'workspace-b'},pm)).rejects.toMatchObject({status:404});
+    await expect(app.getPreview({...target,projectId:'project-b'},pm)).rejects.toMatchObject({status:404});
+    await expect(app.getPreview(target,{...pm,userId:'outsider'})).rejects.toMatchObject({status:404});
+    await expect(app.getPreview(target,client)).rejects.toMatchObject({status:404});
+    expect(await app.getPreview(target,pm)).toEqual({preview:null});
     await expect(app.setPreview({...target,workspaceId:'workspace-b'},pm,{preview})).rejects.toMatchObject({status:404});
     await expect(app.setPreview({...target,projectId:'project-b'},pm,{preview})).rejects.toMatchObject({status:404});
     await expect(app.setPreview(target,{...pm,userId:'outsider'}, {preview})).rejects.toMatchObject({status:404});
@@ -136,6 +141,7 @@ describe('client project portal on the complete migration schema', () => {
     expect((await app.getPreview(target,pm)).preview).toEqual(preview);
     expect((await app.projects(client)).items[0].preview).toBeNull();
     await app.setPreview(target,pm,{preview:null});
+    expect(await app.getPreview(target,pm)).toEqual({preview:null});
     expect((await app.projects(client)).items[0].preview).toBeNull();
   });
 

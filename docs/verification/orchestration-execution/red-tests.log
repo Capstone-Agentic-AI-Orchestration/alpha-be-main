@@ -1,0 +1,220 @@
+
+> alpha-be@2.0.0 test
+> vitest run --no-file-parallelism src/services/verificationExecution.test.ts
+
+
+ RUN  v3.2.7 C:/Users/Lloyd/Documents/Projects/Capstone/Alpha-v2/alpha-be-execution-redesign
+
+ ❯ src/services/verificationExecution.test.ts (15 tests | 15 failed) 295ms
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"vite"} 27ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"next dev"} 17ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"vitest"} 19ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"vitest --watch"} 21ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"tsc --watch"} 22ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"npm run dev","dev":"vite"} 19ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"pnpm run live","live":"next start"} 21ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"yarn live","live":"python -m http.server"} 20ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"node test.js","pretest":"vite"} 19ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"node test.js","posttest":"npm run dev","dev":"vite"} 18ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"npm run other","other":"npm test"} 19ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"node test.js & node server.js"} 17ms
+     → expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+   × bounded repository verification > keeps bounded scripts and supplies noninteractive execution settings 30ms
+     → expected "spy" to be called with arguments: [ ObjectContaining{…} ]
+
+Received:
+
+  1st spy call:
+
+  [
+-   ObjectContaining {
+-     "env": ObjectContaining {
+-       "CI": "true",
+-     },
+-     "timeoutMs": Any<Number>,
++   {
++     "args": [
++       "run",
++       "test",
++     ],
++     "bin": "npm.cmd",
++     "cwd": "C:\\Users\\Lloyd\\AppData\\Local\\Temp\\alpha-execution-5u8YpP",
++     "onExit": [Function onExit],
++     "onStderr": [Function onStderr],
++     "onStdout": [Function onStdout],
++     "runId": "bounded",
+    },
+  ]
+
+  2nd spy call:
+
+  [
+-   ObjectContaining {
+-     "env": ObjectContaining {
+-       "CI": "true",
+-     },
+-     "timeoutMs": Any<Number>,
++   {
++     "args": [
++       "run",
++       "typecheck",
++     ],
++     "bin": "npm.cmd",
++     "cwd": "C:\\Users\\Lloyd\\AppData\\Local\\Temp\\alpha-execution-5u8YpP",
++     "onExit": [Function onExit],
++     "onStderr": [Function onStderr],
++     "onStdout": [Function onStdout],
++     "runId": "bounded",
+    },
+  ]
+
+
+Number of calls: 2
+
+   × bounded repository verification > never reports missing required checks as passed 18ms
+     → expected 'passed' to be 'failed' // Object.is equality
+   × bounded repository verification > reports a forced timeout as failed even if the child exits zero 6ms
+     → expected 'passed' to be 'failed' // Object.is equality
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 15 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"vite"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"next dev"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"vitest"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"vitest --watch"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"tsc --watch"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"npm run dev","dev":"vite"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"pnpm run live","live":"next start"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"yarn live","live":"python -m http.server"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"node test.js","pretest":"vite"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"node test.js","posttest":"npm run dev","dev":"vite"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"npm run other","other":"npm test"}
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > rejects unbounded script definitions before any install or check: {"test":"node test.js & node server.js"}
+AssertionError: expected 'Alpha could not prepare this reposito…' to match /bounded|preview|watch|cyclic/i
+
+- Expected:
+/bounded|preview|watch|cyclic/i
+
++ Received:
+"Alpha could not prepare this repository's dependencies with npm install --no-audit --no-fund --package-lock=false --prefer-offline. Could not start npm install --no-audit --no-fund --package-lock=false --prefer-offline: Cannot read properties of undefined (reading 'once')"
+
+ ❯ src/services/verificationExecution.test.ts:41:28
+     39|     const result = await runVerification({ runId: 'blocked', cwd: fixt…
+     40|     expect(result.status).toBe('failed');
+     41|     expect(result.summary).toMatch(/bounded|preview|watch|cyclic/i);
+       |                            ^
+     42|     expect(spawnProcess).not.toHaveBeenCalled();
+     43|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/15]⎯
+
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > keeps bounded scripts and supplies noninteractive execution settings
+AssertionError: expected "spy" to be called with arguments: [ ObjectContaining{…} ]
+
+Received:
+
+  1st spy call:
+
+  [
+-   ObjectContaining {
+-     "env": ObjectContaining {
+-       "CI": "true",
+-     },
+-     "timeoutMs": Any<Number>,
++   {
++     "args": [
++       "run",
++       "test",
++     ],
++     "bin": "npm.cmd",
++     "cwd": "C:\\Users\\Lloyd\\AppData\\Local\\Temp\\alpha-execution-5u8YpP",
++     "onExit": [Function onExit],
++     "onStderr": [Function onStderr],
++     "onStdout": [Function onStdout],
++     "runId": "bounded",
+    },
+  ]
+
+  2nd spy call:
+
+  [
+-   ObjectContaining {
+-     "env": ObjectContaining {
+-       "CI": "true",
+-     },
+-     "timeoutMs": Any<Number>,
++   {
++     "args": [
++       "run",
++       "typecheck",
++     ],
++     "bin": "npm.cmd",
++     "cwd": "C:\\Users\\Lloyd\\AppData\\Local\\Temp\\alpha-execution-5u8YpP",
++     "onExit": [Function onExit],
++     "onStderr": [Function onStderr],
++     "onStdout": [Function onStdout],
++     "runId": "bounded",
+    },
+  ]
+
+
+Number of calls: 2
+
+ ❯ src/services/verificationExecution.test.ts:52:26
+     50|     const result = await runVerification({ runId: 'bounded', cwd: fixt…
+     51|     expect(result.status).toBe('passed');
+     52|     expect(spawnProcess).toHaveBeenCalledWith(expect.objectContaining({
+       |                          ^
+     53|       env: expect.objectContaining({ CI: 'true' }),
+     54|       timeoutMs: expect.any(Number)
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/15]⎯
+
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > never reports missing required checks as passed
+AssertionError: expected 'passed' to be 'failed' // Object.is equality
+
+Expected: "failed"
+Received: "passed"
+
+ ❯ src/services/verificationExecution.test.ts:64:27
+     62|     });
+     63|     const result = await runVerification({ runId: 'missing', cwd: fixt…
+     64|     expect(result.status).toBe('failed');
+       |                           ^
+     65|     expect(result.missingScripts).toEqual(['lint']);
+     66|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/15]⎯
+
+ FAIL  src/services/verificationExecution.test.ts > bounded repository verification > reports a forced timeout as failed even if the child exits zero
+AssertionError: expected 'passed' to be 'failed' // Object.is equality
+
+Expected: "failed"
+Received: "passed"
+
+ ❯ src/services/verificationExecution.test.ts:74:27
+     72|     });
+     73|     const result = await runVerification({ runId: 'timeout', cwd: fixt…
+     74|     expect(result.status).toBe('failed');
+       |                           ^
+     75|     expect(result.commands[0].output).toMatch(/timed out/i);
+     76|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/15]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  15 failed (15)
+   Start at  23:58:38
+   Duration  855ms (transform 107ms, setup 72ms, collect 66ms, tests 295ms, environment 0ms, prepare 142ms)

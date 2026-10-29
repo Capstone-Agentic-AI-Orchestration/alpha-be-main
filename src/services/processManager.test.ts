@@ -27,6 +27,29 @@ function fakeChild() {
 }
 
 describe('ProcessManager termination reasons', () => {
+  it('enforces a shorter operation deadline even while output continues', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    treeKillMock.mockImplementationOnce((_pid: number, _signal: string, done: (error?: Error | null) => void) => {
+      child.emit('exit', null, 'SIGTERM');
+      done(null);
+    });
+    const manager = new ProcessManager();
+    const onExit = vi.fn();
+    try {
+      manager.spawnProcess({ runId: 'bounded-deadline', bin: 'node', args: [], cwd: process.cwd(), timeoutMs: 500, onExit });
+      await vi.advanceTimersByTimeAsync(400);
+      child.stdout.emit('data', Buffer.from('still running'));
+      expect(onExit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(onExit).toHaveBeenCalledWith(null, 'SIGTERM', 'timeout');
+      expect(manager.isRunActive('bounded-deadline')).toBe(false);
+    } finally {
+      child.emit('exit', 0, null);
+      vi.useRealTimers();
+    }
+  });
   it('settles a failed spawn with no PID even when no exit event arrives', () => {
     const child = fakeChild(); delete child.pid; spawnMock.mockReturnValueOnce(child);
     const manager = new ProcessManager(); const onExit = vi.fn();

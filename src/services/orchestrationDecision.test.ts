@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ snapshot: {} as any, allowed: true, visible: true, start: vi.fn(), publish: vi.fn() }));
 vi.mock('../config/env.js', () => ({ ALPHA_ORCHESTRATION_ENABLED: true }));
-vi.mock('./sqliteService.js', () => ({ sqliteService: { getOrchestrationSnapshot: () => mocks.snapshot } }));
+vi.mock('./sqliteService.js', () => ({ sqliteService: { getOrchestrationSnapshot: () => mocks.snapshot,
+  getOrchestrationPlans: () => [{ version: 2 }], listChatPendingDecisions: () => [mocks.snapshot] } }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: {
   can: () => mocks.allowed, canAccessLiveBuildRoom: () => mocks.allowed,
   canAccessProjectAgentRun: async () => mocks.visible

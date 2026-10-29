@@ -18,6 +18,7 @@ import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { logError, logInfo } from '../utils/logger.js';
 
@@ -73,6 +74,12 @@ export type { CliToolRecord } from './turnAccumulator.js';
 export type TurnMode = 'chat' | 'review' | 'run';
 
 export interface CliTurnOptions {
+  /** Optional constrained response for short, tool-free interpretation turns. */
+  responseSchema?: Record<string, unknown>;
+  toolFree?: boolean;
+  /** Runner-owned schema file for Codex; callers normally supply responseSchema. */
+  responseSchemaPath?: string;
+  timeoutMs?: number;
   usageContext?: UsageContext;
   runId: string;
   cwd: string;
@@ -486,6 +493,7 @@ export function buildTurnInvocation(
       args: [
         'exec',
         '--json',
+        ...(options.responseSchemaPath ? ['--output-schema', options.responseSchemaPath] : []),
         ...(isLocalCodex ? ['--oss', '--local-provider', provider === 'Ollama' ? 'ollama' : 'lmstudio'] : []),
         // A run edits the repository it was given; so does a chat whose agent
         // was granted `sk-fs`. Codex's non-interactive approval switch is a
@@ -747,6 +755,8 @@ export function buildTurnInvocation(
           ? ['--append-system-prompt', persona]
           : []),
       '--output-format', 'stream-json',
+      ...(options.responseSchema ? ['--json-schema', JSON.stringify(options.responseSchema)] : []),
+      ...(options.toolFree ? ['--tools', ''] : []),
       // Claude only emits content_block_delta events when this opt-in is set.
       // The parser already understands those fragments and folds them into one
       // activity, so the run can show the assistant while it is still writing.
@@ -932,6 +942,7 @@ export async function runCliTurn(options: CliTurnOptions): Promise<CliTurnResult
   // with a note about it, and the notes accumulate so a second refusal is not repeated.
   const notes: string[] = [];
   let result = await runCliTurnOnce(options);
+  if (options.toolFree) return result;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const note = toolDenialNote(options.provider, result);
     if (!note || notes.includes(note)) return result;
@@ -950,6 +961,8 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
   const idleThinking = `Analyzing question using ${provider} (${modelName ?? 'default model'})...`;
 
   let stderr = '';
+  let structuredOutput: unknown;
+  let responseSchemaPath: string | undefined;
 
   // Defaults so the catch block can still report something useful if argv
   // construction itself fails — RuntimeService.agyPath() throws when the
@@ -988,10 +1001,16 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
   }
 
   try {
+    if (options.responseSchema && ['OpenAI', 'Ollama', 'LM Studio'].includes(provider)) {
+      fs.mkdirSync(RUNS_DIR, { recursive: true });
+      responseSchemaPath = path.join(RUNS_DIR, `response-schema-${randomUUID()}.json`);
+      fs.writeFileSync(responseSchemaPath, JSON.stringify(options.responseSchema));
+    }
     const codexArgs = codexGatewayArgs(provider, modelName, options.codexBaseUrl);
     const invocation = buildTurnInvocation(
       {
         ...options,
+        responseSchemaPath,
         codexConfigArgs: codexArgs,
         personaFile: writeTurnPersona(runId, options.systemPrompt ?? '') ?? undefined
       },
@@ -1007,6 +1026,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
     // occurs: those are content blocks nested inside an assistant message.
     const parser = new StreamParser(family);
     let cancelled = false;
+    let forcedFailure = false;
     let exitCode: number | null = null;
 
     usage = startUsage(options.usageContext, family, modelName);
@@ -1016,6 +1036,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
         bin,
         args,
         cwd,
+        timeoutMs: options.timeoutMs,
         /**
           * Agent env first, then the family's isolation overrides — a HOME
           * supplied by an agent's envVars must not defeat the isolation.
@@ -1031,6 +1052,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
         stdin: invocation.stdin,
         onExit: (code, _signal, terminationReason) => {
           cancelled = terminationReason === 'cancelled';
+          forcedFailure = Boolean(terminationReason && terminationReason !== 'cancelled');
           exitCode = typeof code === 'number' ? code : null;
           resolve();
         }
@@ -1039,6 +1061,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       if (child.stdout) {
         createLineBuffer(child.stdout, (line) => {
           for (const ev of parser.parseLine(line)) {
+            if (ev.structuredOutput !== undefined) structuredOutput = ev.structuredOutput;
             usage?.accept(ev);
             if (ev.fatal || ev.telemetry?.isError) usageErrored = true;
             turn.accept(ev);
@@ -1062,7 +1085,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       logError('CLI stream had unhandled event types', unhandled.join(', '));
     }
 
-    const content = turn.getContent();
+    const content = options.responseSchema && structuredOutput !== undefined ? JSON.stringify(structuredOutput) : turn.getContent();
     const thinking = turn.getThinking(idleThinking);
 
     if (cancelled) {
@@ -1086,7 +1109,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       };
     }
 
-    if (!content.trim()) {
+    if (!content.trim() || (options.responseSchema && (exitCode !== 0 || usageErrored || forcedFailure))) {
       // Report the real reason instead of a reassuring placeholder. The old
       // fallback ("All systems and components are aligned") made a failed
       // spawn look like a successful answer, which is how this went unnoticed.
@@ -1096,7 +1119,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       // the last line.
       const stderrLines = stderr.split('\n').map(l => l.trim()).filter(Boolean);
       const detail =
-        turn.getStreamError() ||
+        (forcedFailure ? 'the structured response process was terminated before successful completion' : '') || turn.getStreamError() ||
         stderrLines.find(l => /error|fail|not supported|denied/i.test(l)) ||
         stderrLines.at(-1) ||
         'the CLI produced no output';
@@ -1134,6 +1157,7 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
         cancelled: false
     };
   } finally {
+    if (responseSchemaPath) fs.rmSync(responseSchemaPath, { force: true });
     usage?.finish(usageOutcome);
     // Remove transient tool credentials after the spawn, retaining audit evidence
     // that the Orchestrator must validate after this turn returns.

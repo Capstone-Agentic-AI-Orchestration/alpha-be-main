@@ -76,6 +76,12 @@ describe('PM project feedback boundary',()=>{
   const session={ticketAuthentication:{kind:'verified_github_bearer',verificationId:'verified'}};
   it('requires a PM context and binds management to the selected workspace',async()=>{
     const f=fixture();
+    expect(await invoke(f.pm,'GET',path)).toMatchObject({status:401});
+    expect(await invoke(f.pm,'GET',path,{workspace:{...workspace,role:'dev'},session})).toMatchObject({status:403});
+    expect(f.projectPortal.getPreview).not.toHaveBeenCalled();
+    expect(await invoke(f.pm,'GET',path,{workspace,session,query:{workspaceId:'untrusted'}})).toMatchObject({status:200,body:{preview:null}});
+    expect(f.projectPortal.getPreview).toHaveBeenCalledWith({workspaceId:'selected-workspace',projectId:'project-a'},
+      {kind:'internal',userId:'pm',authentication:session.ticketAuthentication});
     expect(await invoke(f.pm,'PUT',path)).toMatchObject({status:401});
     expect(await invoke(f.pm,'PUT',path,{workspace:{...workspace,role:'dev'},session})).toMatchObject({status:403});
     expect(f.projectPortal.setPreview).not.toHaveBeenCalled();

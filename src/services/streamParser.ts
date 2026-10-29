@@ -47,6 +47,7 @@ export interface RunTelemetry {
 }
 
 export interface ParsedEvent {
+  structuredOutput?: unknown;
   type:
     | 'log'
     | 'text_delta'
@@ -343,6 +344,7 @@ export class StreamParser {
       type: 'result',
       stage: this.currentStage,
       message: `Run ${json.subtype ?? 'finished'}`,
+      structuredOutput: !json.is_error ? json.structured_output : undefined,
       telemetry
     });
 

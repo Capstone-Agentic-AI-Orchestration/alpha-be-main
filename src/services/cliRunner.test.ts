@@ -45,6 +45,17 @@ const valueOf = (args: string[], flag: string) => {
 };
 
 describe('buildTurnInvocation — Claude', () => {
+  it('uses native structured output with no native tools for interpretation', () => {
+    const schema = { type: 'object', properties: { intent: { type: 'string' } } };
+    const { args } = buildTurnInvocation(options({ responseSchema: schema, toolFree: true, mode: 'chat', approvalMode: 'ask', projectRoots: [], skills: [] }), noMcp);
+    expect(valueOf(args, '--json-schema')).toBe(JSON.stringify(schema));
+    expect(valueOf(args, '--tools')).toBe('');
+  });
+  it('passes a runner-owned schema file to Codex before the prompt', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', responseSchemaPath: '/runs/schema.json', mode: 'chat', approvalMode: 'ask', projectRoots: [] }), noMcp);
+    expect(valueOf(args, '--output-schema')).toBe('/runs/schema.json');
+    expect(args.join(' ')).toContain('features.shell_tool=false');
+  });
   it('appends the persona instead of replacing the default system prompt', () => {
     const { args } = buildTurnInvocation(options(), noMcp);
 
