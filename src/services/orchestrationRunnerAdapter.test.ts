@@ -129,7 +129,7 @@ describe('orchestration runner adapter', () => {
 
   afterEach(async () => {
     if (fs.existsSync(worktree)) await removeDetachedWorktree(source, worktree);
-    if (root) fs.rmSync(root, { recursive: true, force: true });
+    if (root) fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     root = '';
   });
 

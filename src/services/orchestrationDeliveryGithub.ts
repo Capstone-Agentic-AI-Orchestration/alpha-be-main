@@ -60,23 +60,23 @@ export class DeliveryGithub {
     if (!nonBypassable) throw new DeliveryError(`${repo}: ${branch} strict checks must also apply to administrators, or use an active ruleset with a verified empty bypass list.`);
     return [...required.values()];
   }
+  private async readCheckRuns(repo: string, commit: string) {
+    const runs: CheckRun[] = [];
+    for (let page = 1; page <= 50; page++) {
+      const result = await this.api.get<{ total_count: number; check_runs: CheckRun[] }>(
+        `/repos/${repo}/commits/${commit}/check-runs?filter=latest&per_page=100&page=${page}`);
+      if (result.total_count > 5000) throw new DeliveryError('Too many CI checks to verify safely. Narrow the delivery policy.');
+      runs.push(...result.check_runs);
+      if (runs.length >= result.total_count) return runs;
+      if (!result.check_runs.length) throw new DeliveryError('CI check pagination is incomplete. Refresh before continuing.');
+    }
+    throw new DeliveryError('CI check pagination is incomplete.');
+  }
   async checks(repo: string, sha: string, branch: 'dev' | 'uat', mergeSha?: string | null) {
     const required = await this.required(repo, branch);
     const read = async (commit: string) => {
-      const readRuns = async () => {
-        const runs: CheckRun[] = [];
-        for (let page = 1; page <= 50; page++) {
-          const result = await this.api.get<{ total_count: number; check_runs: CheckRun[] }>(
-            `/repos/${repo}/commits/${commit}/check-runs?filter=latest&per_page=100&page=${page}`);
-          if (result.total_count > 5000) throw new DeliveryError('Too many CI checks to verify safely. Narrow the delivery policy.');
-          runs.push(...result.check_runs);
-          if (runs.length >= result.total_count) return runs;
-          if (!result.check_runs.length) throw new DeliveryError('CI check pagination is incomplete. Refresh before continuing.');
-        }
-        throw new DeliveryError('CI check pagination is incomplete.');
-      };
       const [runs, statuses] = await Promise.all([
-        readRuns(),
+        this.readCheckRuns(repo, commit),
         this.api.getAll<Status>(`/repos/${repo}/commits/${commit}/statuses?per_page=100`)
       ]);
       const checks = new Map<string, DeliveryCheck>();

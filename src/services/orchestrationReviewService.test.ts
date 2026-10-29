@@ -31,7 +31,7 @@ describe('orchestration review checkpoint', () => {
   afterEach(() => {
     store?.close();
     store = undefined;
-    if (directory) fs.rmSync(directory, { recursive: true, force: true });
+    if (directory) fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     directory = '';
   });
 
