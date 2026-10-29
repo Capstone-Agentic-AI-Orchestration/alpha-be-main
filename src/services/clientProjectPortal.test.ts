@@ -135,9 +135,11 @@ describe('client project portal on the complete migration schema', () => {
       await expect(app.setPreview(target,pm,{preview:{...preview,url}})).rejects.toMatchObject({status:400});
     }
     await expect(app.setPreview(target,pm,{preview:{...preview,branch:'dev'}})).rejects.toMatchObject({status:400});
+    await expect(app.setPreview(target,pm,{preview:{...preview,branch:'main'}})).rejects.toMatchObject({status:400});
     expect(await app.setPreview(target,pm,{preview})).toEqual({preview});
-    expect(await app.getPreview(target,pm)).toEqual({preview});
-    expect((await app.projects(client)).items[0].preview).toEqual(preview);
+    // Configuration stays internal until a PM-reviewed UAT round is published.
+    expect((await app.getPreview(target,pm)).preview).toEqual(preview);
+    expect((await app.projects(client)).items[0].preview).toBeNull();
     await app.setPreview(target,pm,{preview:null});
     expect(await app.getPreview(target,pm)).toEqual({preview:null});
     expect((await app.projects(client)).items[0].preview).toBeNull();

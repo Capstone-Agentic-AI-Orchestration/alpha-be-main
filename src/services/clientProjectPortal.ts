@@ -21,7 +21,7 @@ const messagePageSchema = pageSchema.pick({ limit: true }).extend({ before: id.n
 const messageSchema = z.object({ schemaVersion: z.literal(1), operationId: id,
   body: z.string().trim().min(1).max(4000) }).strict();
 const previewSchema = z.object({ preview: z.object({ repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-  branch: z.enum(['main', 'uat']), url: z.string().url().max(2048) }).strict().nullable() }).strict();
+  branch: z.literal('uat'), url: z.string().url().max(2048) }).strict().nullable() }).strict();
 function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
   if (!result.success) throw new TicketWorkflowError(400, 'invalid_project_portal_input', 'Check the request details.');
@@ -40,7 +40,7 @@ interface RequestRow {
   pending_project_requested: boolean; cursor_found: boolean;
 }
 export interface ClientProject { workspaceId: string; projectId: string; intakeOptionId: string; name: string;
-  updatedAt: string; preview: TicketSharedPreview | null }
+  updatedAt: string; preview: Pick<TicketSharedPreview,'branch'|'url'> | null }
 export interface ClientProjectRequest extends ClientTicketQueueItem {
   workspaceId: string; projectId: string | null; projectName: string | null;
   requestedProjectName: string | null; projectLinkStatus: 'linked' | 'pending_review' | null;
@@ -67,6 +67,37 @@ const needsAction = `status not in ('closed','declined','cancelled','on_hold')
  * Existing ticket chat, workflow and project-link approval remain separate. */
 export class PostgresClientProjectPortal {
   constructor(private readonly db: TransactionalSql) {}
+
+  /** Shared authority for the project QA module; always called on its transaction. */
+  async authorizeProject(sql: Sql, target: ProjectTarget, subject: TicketSubject, write = false) {
+    if (subject.kind === 'client') return this.lockClientProject(sql, target, this.client(subject), write);
+    return this.lockProject(sql, target, subject, write);
+  }
+
+  async authorizeRecipient(sql: Sql, target: ProjectTarget, subject: TicketSubject, clientId: string, write = false) {
+    await this.authorizeProject(sql, target, subject, write);
+    if (subject.kind === 'client' && subject.userId !== clientId) missing();
+    const { rows } = await sql.query(`select t.id from alpha_private.tickets t
+      join alpha_private.ticket_client_grants cg on cg.workspace_id=t.workspace_id and cg.ticket_id=t.id
+        and cg.client_user_id=t.client_user_id and cg.active and cg.revoked_at is null
+      join alpha_private.ticket_service_grants sg on sg.workspace_id=t.workspace_id and sg.client_user_id=t.client_user_id
+        and sg.status='active' and sg.revoked_at is null
+      where t.workspace_id=$1 and t.project_id=$2 and t.client_user_id=$3 and t.project_client_visible
+      order by t.id for share of t,cg,sg`, [target.workspaceId,target.projectId,clientId]);
+    if (!rows.length) missing();
+  }
+
+  async getPreview(target: ProjectTarget, subject: TicketSubject) {
+    if (subject.kind !== 'internal') missing();
+    return this.db.transaction(async sql => {
+      await this.authorizeProject(sql,target,subject);
+      const {rows} = await sql.query<{repository:string;branch:'main'|'uat';url:string}>(
+        'select repository,branch,url from alpha_private.client_project_previews where workspace_id=$1 and project_id=$2', [target.workspaceId,target.projectId]);
+      const preview = rows[0]?.url ? rows[0] : null;
+      if (!validTicketProjectPreview(preview)) throw new TicketReadInvariantError();
+      return {preview};
+    });
+  }
 
   private client(subject: TicketSubject): Client {
     if (subject.kind !== 'client' || !id.safeParse(subject.userId).success || !/^[a-f0-9]{64}$/.test(subject.sessionId)) missing();
@@ -125,7 +156,10 @@ export class PostgresClientProjectPortal {
         select l.workspace_id,l.project_id,p.name,greatest(l.updated_at,pp.updated_at) as updated_at,
           pp.repository,pp.branch,pp.url from linked l
         join public.projects p on p.workspace_id=l.workspace_id and p.id=l.project_id
-        left join alpha_private.client_project_previews pp on pp.workspace_id=l.workspace_id and pp.project_id=l.project_id
+        left join lateral (select r.updated_at,r.build->'frontend'->>'repository' as repository,
+          'uat'::text as branch,r.build->'frontend'->>'url' as url from alpha_private.client_uat_rounds r
+          where r.workspace_id=l.workspace_id and r.project_id=l.project_id and r.client_user_id=$1
+          and r.status in ('published','submitted') and r.published_at is not null order by r.number desc limit 1) pp on true
         order by updated_at desc,l.workspace_id collate "C",l.project_id collate "C"`, [client.userId, client.sessionId]);
       const items: ClientProject[] = [];
       for (const row of rows) {
@@ -134,7 +168,7 @@ export class PostgresClientProjectPortal {
         if (!validTicketProjectPreview(preview)) throw new TicketReadInvariantError();
         items.push({ workspaceId: row.workspace_id, projectId: row.project_id,
           intakeOptionId: ticketClientProjectOptionId(row.workspace_id, client.userId, row.project_id),
-          name: row.name, updatedAt: ticketSqlIso(row.updated_at), preview });
+          name: row.name, updatedAt: ticketSqlIso(row.updated_at), preview:preview?{branch:preview.branch,url:preview.url}:null });
       }
       return { items };
     });
@@ -214,20 +248,6 @@ export class PostgresClientProjectPortal {
       return { items, nextCursor: present.length > page.limit && last
         ? Buffer.from(JSON.stringify([last.workspaceId,last.id])).toString('base64url') : null,
         counters: { kind: 'client' as const, open: Number(counts[0].open), needsClient: Number(counts[0].needs_client) } };
-    });
-  }
-
-  async getPreview(target: ProjectTarget, subject: TicketSubject) {
-    if (subject.kind !== 'internal') missing();
-    return this.db.transaction(async sql => {
-      await this.lockProject(sql, target, subject);
-      const { rows } = await sql.query<{ repository: string; branch: 'main' | 'uat'; url: string }>(
-        'select repository,branch,url from alpha_private.client_project_previews where workspace_id=$1 and project_id=$2',
-        [target.workspaceId, target.projectId],
-      );
-      const preview = rows[0]?.url ? rows[0] : null;
-      if (!validTicketProjectPreview(preview)) throw new TicketReadInvariantError();
-      return { preview };
     });
   }
 

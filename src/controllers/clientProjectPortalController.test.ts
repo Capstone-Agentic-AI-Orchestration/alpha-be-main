@@ -3,6 +3,8 @@ import type { Router } from 'express';
 import type { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 import { createTicketClientApiRouter, type TicketClientApiApplication } from './ticketClientApiController.js';
 import { createPmClientProjectRouter } from './clientProjectPortalController.js';
+import type { ProjectUat } from '../services/projectUat.js';
+import { createPmProjectUatRouter } from './projectUatController.js';
 
 vi.mock('../config/env.js', async original => ({ ...await original<object>(), IS_CLOUD: true }));
 const subject = { kind:'client',userId:'client-a',sessionId:'a'.repeat(64) };
@@ -13,11 +15,17 @@ function fixture() {
     clients:vi.fn(async(..._args:unknown[])=>({items:[{clientId:'client-a',displayName:'Client A'}]})),getPreview:vi.fn(async(..._args:unknown[])=>({preview:null}))};
   const authenticate = vi.fn(async (session:unknown,csrf:unknown,header:unknown,write:boolean) =>
     session!=='session' ? {kind:'expired'} : write && (csrf!=='csrf'||header!=='csrf') ? {kind:'csrf_invalid'} : {kind:'authenticated',subject});
-  const client = createTicketClientApiRouter({projectPortal,authenticate} as unknown as TicketClientApiApplication,
+  const projectUat={list:vi.fn(async(..._args:unknown[])=>({items:[],nextBefore:null})),get:vi.fn(async(..._args:unknown[])=>({id:'round'})),
+    result:vi.fn(async(..._args:unknown[])=>receipt),submit:vi.fn(async(..._args:unknown[])=>receipt),operation:vi.fn(async(..._args:unknown[])=>receipt),
+    targets:vi.fn(async(..._args:unknown[])=>({items:[]})),preview:vi.fn(async(..._args:unknown[])=>({build:{}})),
+    create:vi.fn(async(..._args:unknown[])=>receipt),command:vi.fn(async(..._args:unknown[])=>receipt),triage:vi.fn(async(..._args:unknown[])=>receipt),
+    uploadEvidence:vi.fn(async(..._args:unknown[])=>receipt),downloadEvidence:vi.fn(async(..._args:unknown[])=>({filename:'screenshot.png',contentType:'image/png',bytes:new Uint8Array([1])}))};
+  const client = createTicketClientApiRouter({projectPortal,projectUat,authenticate} as unknown as TicketClientApiApplication,
     {secure:true,allowedOrigins:['https://alpha.example']});
   const relay = vi.fn(async(_req:any,_res:any)=>false);
   const pm = createPmClientProjectRouter(projectPortal as unknown as PostgresClientProjectPortal,relay);
-  return {projectPortal,authenticate,client,pm,relay};
+  const pmUat=createPmProjectUatRouter(projectUat as unknown as ProjectUat,relay);
+  return {projectPortal,projectUat,authenticate,client,pm,pmUat,relay};
 }
 function invoke(router:Router,method:string,path:string,overrides:Record<string,any>={}) {
   const layer=(router as any).stack.find((l:any)=>l.route?.path===path&&l.route.methods[method.toLowerCase()]);
@@ -29,7 +37,7 @@ function invoke(router:Router,method:string,path:string,overrides:Record<string,
     let status=200;const responseHeaders:Record<string,string>={};
     const res={setHeader:(n:string,v:string)=>{responseHeaders[n.toLowerCase()]=v;},status:(s:number)=>{status=s;return res;},
       json:(body:any)=>{resolve({status,body,headers:responseHeaders});return res;}};
-    layer.route.stack[0].handle(req,res,reject);
+    layer.route.stack.at(-1).handle(req,res,reject);
   });
 }
 const base='/projects/:workspaceId/:projectId';
@@ -102,5 +110,40 @@ describe('PM project feedback boundary',()=>{
     f.relay.mockImplementation(async (_req:any,res:any)=>{res.status(503).json({error:'Cloud unavailable'});return true;});
     expect(await invoke(f.pm,'POST',path+'/messages',{workspace,session})).toMatchObject({status:503});
     expect(f.projectPortal.reply).not.toHaveBeenCalled();
+  });
+});
+
+describe('project QA HTTP boundaries',()=>{
+  const path=base+'/uat';
+  it('requires client cookies on every QA collection/detail/receipt read and CSRF/origin on writes',async()=>{
+    const f=fixture();
+    for(const suffix of ['/rounds','/rounds/:roundId','/operations/:operationId','/rounds/:roundId/evidence/:evidenceId/content']){
+      expect(await invoke(f.client,'GET',path+suffix,{headers:{cookie:''}})).toMatchObject({status:401});
+    }
+    for(const [method,suffix] of [['PUT','/rounds/:roundId/items/:itemId/result'],['POST','/rounds/:roundId/submit'],['POST','/rounds/:roundId/items/:itemId/evidence']]){
+      expect(await invoke(f.client,method,path+suffix,{headers:{origin:'https://evil.example'}})).toMatchObject({status:403});
+      expect(await invoke(f.client,method,path+suffix,{headers:{'x-csrf-token':''}})).toMatchObject({status:403});
+      expect(await invoke(f.client,method,path+suffix,{headers:{cookie:''}})).toMatchObject({status:401});
+    }
+    expect(f.projectUat.result).not.toHaveBeenCalled();expect(f.projectUat.submit).not.toHaveBeenCalled();
+    expect(f.projectUat.uploadEvidence).not.toHaveBeenCalled();expect(f.projectUat.downloadEvidence).not.toHaveBeenCalled();
+    await invoke(f.client,'PUT',path+'/rounds/:roundId/items/:itemId/result',{params:{workspaceId:'workspace-a',projectId:'project-a',roundId:'round-a',itemId:'item-a'}});
+    expect(f.projectUat.result.mock.calls[0].slice(0,4)).toEqual([{workspaceId:'workspace-a',projectId:'project-a'},subject,'round-a','item-a']);
+  });
+  it('registers the missing settings GET with PM workspace authorization',async()=>{
+    const f=fixture();
+    const result=await invoke(f.pm,'GET','/projects/:projectId/client-preview',{
+      workspace:{workspaceId:'workspace-a',userId:'pm',role:'pm'},session:{ticketAuthentication:{kind:'verified_github_bearer',verificationId:'verified'}}});
+    expect(result.body).toEqual({preview:null});expect(f.projectPortal.getPreview.mock.calls[0][0]).toEqual({workspaceId:'workspace-a',projectId:'project-a'});
+  });
+  it('derives PM workspace from middleware and never from the publication payload',async()=>{
+    const f=fixture(),path='/projects/:projectId/uat/rounds/:roundId/commands';
+    const body={operationId:'operation',expectedVersion:0,action:'publish',workspaceId:'other',clientId:'other'};
+    const overrides={workspace:{workspaceId:'selected-workspace',userId:'pm',role:'pm'},session:{ticketAuthentication:{kind:'verified_github_bearer',verificationId:'verified'}},
+      params:{projectId:'selected-project',roundId:'round'},body};
+    expect(await invoke(f.pmUat,'POST',path,{...overrides,workspace:{...overrides.workspace,role:'dev'}})).toMatchObject({status:403});
+    await invoke(f.pmUat,'POST',path,overrides);
+    expect(f.projectUat.command.mock.calls[0][0]).toEqual({workspaceId:'selected-workspace',projectId:'selected-project'});
+    expect(f.projectUat.command.mock.calls[0][3]).toEqual(body); // The actual service rejects extra fields strictly.
   });
 });
