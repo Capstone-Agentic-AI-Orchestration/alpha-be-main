@@ -10,12 +10,14 @@ import { newTicketWorkflow } from '../ticketing/workflow.js';
 import { decodeTicketWorkflow } from './ticketPostgresCodec.js';
 
 interface CentralIntakeDbRow {
+  kind: 'public_inquiry' | 'project_proposal';
   id: string; public_reference: string; full_name: string; email: string; company: string | null; title: string;
   description: string; requested_deadline: string | null; submitted_at: Date | string;
   status: 'pending' | 'accepted' | 'declined'; handled_at: Date | string | null;
   outcome_email_status: CentralIntakeItem['outcomeEmailStatus'];
 }
 interface SavedOperationDbRow {
+  kind: string; client_user_id: string | null; email: string;
   id: string; fingerprint: string; fingerprint_key_id: string; status: string;
   accepted_by: string | null; accepted_workspace_id: string | null; accepted_ticket_id: string | null;
   acceptance_operation_id: string | null; reference?: string | null;
@@ -39,7 +41,7 @@ function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
     || (row.requested_deadline !== null && !/^\d{4}-\d{2}-\d{2}$/.test(row.requested_deadline))) {
     throw new Error('Central inquiry row is invalid.');
   }
-  return { id: row.id, publicReference: row.public_reference, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
+  return { kind: row.kind, id: row.id, publicReference: row.public_reference, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
     description: row.description, requestedDeadline: row.requested_deadline, submittedAt: iso(row.submitted_at),
     status: row.status, handledAt: row.handled_at ? iso(row.handled_at) : null, outcomeEmailStatus: row.outcome_email_status ?? null };
 }
@@ -145,7 +147,7 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(workspaceId, subject);
       if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
       const { rows } = await tx.query<CentralIntakeDbRow>(
-        `select i.id,i.public_reference,i.full_name,i.email,i.company,i.title,i.description,i.requested_deadline,i.submitted_at,
+        `select i.kind,i.id,i.public_reference,i.full_name,i.email,i.company,i.title,i.description,i.requested_deadline,i.submitted_at,
                 i.status,coalesce(i.accepted_at,i.declined_at) as handled_at,o.status as outcome_email_status
            from alpha_private.ticket_central_intakes i
            left join alpha_private.ticket_central_intake_outcomes o on o.organization_key=i.organization_key and o.intake_id=i.id
@@ -163,14 +165,14 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
   async accept(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; ticketId: string; reference: string; occurredAt: string;
-  }): Promise<CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable' | 'forbidden'> {
+  }): Promise<CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable' | 'client_access_unavailable' | 'forbidden'> {
     return this.db.transaction(async tx => {
       const authorization = new PostgresTicketAuthorization(tx);
       const scope = await authorization.lockQueueScope(input.workspaceId, input.subject);
       if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
       if (scope.mode !== 'enabled') return 'workspace_unavailable';
       const { rows } = await tx.query<SavedOperationDbRow>(
-        `select intake.id,intake.status,intake.accepted_by,intake.accepted_workspace_id,
+        `select intake.kind,intake.client_user_id,intake.email,intake.id,intake.status,intake.accepted_by,intake.accepted_workspace_id,
                 intake.accepted_ticket_id,intake.acceptance_operation_id,ticket.reference
            from alpha_private.ticket_central_intakes intake
            left join alpha_private.tickets ticket
@@ -198,23 +200,38 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       if (!workspaceRow || workspaceRow.write_mode !== 'enabled') return 'workspace_unavailable';
       if (!text(workspaceRow.name)) throw new Error('Workspace display name is invalid.');
 
+      const proposal = existing.kind === 'project_proposal';
+      if (proposal) {
+        await tx.query('select pg_advisory_xact_lock(hashtextextended($1,0))',
+          [`proposal-grant:${input.workspaceId}:${existing.client_user_id}`]);
+        await tx.query(`insert into alpha_private.ticket_service_grants
+          (id,workspace_id,client_user_id,status,display_name,created_at)
+          values($1,$2,$3,'active',$4,$5) on conflict(workspace_id,client_user_id) do nothing`,
+          [randomUUID(),input.workspaceId,existing.client_user_id,existing.email.slice(0,160),input.occurredAt]);
+        const grant = await tx.query<{status:string;write_mode:string;revoked_at:Date|null}>(`select status,write_mode,revoked_at
+          from alpha_private.ticket_service_grants where workspace_id=$1 and client_user_id=$2 for update`,
+          [input.workspaceId,existing.client_user_id]);
+        if (grant.rows[0]?.status !== 'active' || grant.rows[0]?.write_mode !== 'enabled' || grant.rows[0]?.revoked_at != null) return 'client_access_unavailable';
+      }
       const contact = await tx.query<{ id: string }>(
         `insert into alpha_private.ticket_contacts
            (id,workspace_id,full_name,email,company,email_verified,created_at)
-         select $1,$2,full_name,email,company,false,$3
+         select $1,$2,full_name,email,company,kind='project_proposal',$3
            from alpha_private.ticket_central_intakes where organization_key=$4 and id=$5 and status='pending'
          returning id`, [randomUUID(), input.workspaceId, input.occurredAt, input.organizationKey, input.intakeId]);
       const contactId = contact.rows[0]?.id;
       if (!text(contactId)) throw new Error('The inquiry contact could not be created.');
 
-      const state = newTicketWorkflow(input.ticketId, input.workspaceId);
+      const initial = newTicketWorkflow(input.ticketId, input.workspaceId, proposal ? existing.client_user_id : null);
+      // The PM has reviewed this proposal in intake; scope discussion can start immediately.
+      const state = proposal ? { ...initial, status: 'under_review' as const } : initial;
       const workflow = decodeTicketWorkflow(state);
       await tx.query(
         `insert into alpha_private.tickets
            (id,workspace_id,reference,title,description,client_safe_company_label,source,status,version,workflow_state,
             client_user_id,contact_id,project_id,project_display_name,project_client_visible,related_ticket_id,
             created_at,client_updated_at,internal_updated_at,closed_at)
-         select $1,$2,$3,title,description,$4,'public_inquiry',$5,$6,$7::jsonb,null,$8,null,null,false,null,$9,$9,$9,null
+         select $1,$2,$3,title,description,$4,case when kind='project_proposal' then 'authenticated_client' else 'public_inquiry' end,$5,$6,$7::jsonb,client_user_id,$8,null,null,false,null,$9,$9,$9,null
            from alpha_private.ticket_central_intakes where organization_key=$10 and id=$11 and status='pending'`,
         [state.id, input.workspaceId, input.reference, workspaceRow.name, state.status, state.version,
           JSON.stringify(workflow), contactId, input.occurredAt, input.organizationKey, input.intakeId]);
@@ -222,23 +239,36 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         `insert into alpha_private.ticket_requests
            (workspace_id,ticket_id,source,intake_context_id,intake_entry_id,project_preference,
             preferred_project_id,requested_project_label,requested_deadline,contact_id,submitted_at)
-         select $1,$2,'public_inquiry',null,null,'not_sure',null,null,requested_deadline,$3,submitted_at
+         select $1,$2,case when kind='project_proposal' then 'authenticated_client' else 'public_inquiry' end,null,null,case when kind='project_proposal' then 'new_project' else 'not_sure' end,null,null,requested_deadline,$3,submitted_at
            from alpha_private.ticket_central_intakes where organization_key=$4 and id=$5`,
         [input.workspaceId, state.id, contactId, input.organizationKey, input.intakeId]);
+      if (proposal) {
+        const grant = await tx.query(`insert into alpha_private.ticket_client_grants
+          (workspace_id,ticket_id,client_user_id,active,created_at)
+          select t.workspace_id,t.id,t.client_user_id,true,$4
+          from alpha_private.tickets t join alpha_private.ticket_service_grants sg
+            on sg.workspace_id=t.workspace_id and sg.client_user_id=t.client_user_id
+           and sg.status='active' and sg.revoked_at is null and sg.write_mode='enabled'
+          where t.workspace_id=$1 and t.id=$2 and t.client_user_id=$3 returning ticket_id`,
+          [input.workspaceId,state.id,existing.client_user_id,input.occurredAt]);
+        if (grant.rows.length !== 1) throw new Error('Proposal ticket access could not be granted.');
+      }
       await tx.query(
         `insert into alpha_private.ticket_audit_events
            (id,workspace_id,ticket_id,actor_kind,actor_id,event_type,occurred_at,metadata)
-         values ($1,$2,$3,'anonymous',null,'inquiry_received',$4,$5::jsonb),
+         values ($1,$2,$3,$9,$10,$11,$4,$5::jsonb),
                 ($6,$2,$3,'pm',$7,'inquiry_accepted',$4,$8::jsonb)`,
         [randomUUID(), input.workspaceId, state.id, input.occurredAt,
           JSON.stringify({ centralIntakeId: input.intakeId }), randomUUID(), input.subject.userId,
-          JSON.stringify({ centralIntakeId: input.intakeId, operationId: input.operationId })]);
+          JSON.stringify({ centralIntakeId: input.intakeId, operationId: input.operationId }),
+          proposal ? 'client' : 'anonymous', proposal ? existing.client_user_id : null,
+          proposal ? 'project_proposal_received' : 'inquiry_received']);
       await tx.query(
         `insert into alpha_private.ticket_outbox_events
            (id,workspace_id,ticket_id,event_type,dedupe_key,payload,status,available_at,created_at)
          values ($1,$2,$3,'ticket_created',$4,$5::jsonb,'pending',$6,$6)`,
         [randomUUID(), input.workspaceId, state.id, `central-intake:${input.organizationKey}:${input.intakeId}`,
-          JSON.stringify({ source: 'public_inquiry', centralIntakeId: input.intakeId }), input.occurredAt]);
+          JSON.stringify({ source: proposal ? 'authenticated_client' : 'public_inquiry', centralIntakeId: input.intakeId }), input.occurredAt]);
       const updated = await tx.query(
         `update alpha_private.ticket_central_intakes
             set status='accepted',accepted_by=$3,accepted_workspace_id=$4,accepted_ticket_id=$5,
@@ -266,10 +296,10 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(input.workspaceId, input.subject);
       if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
       const { rows } = await tx.query<{
-        status: string; declined_by: string | null; declined_workspace_id: string | null;
+        kind: string; status: string; declined_by: string | null; declined_workspace_id: string | null;
         decline_operation_id: string | null; decline_reason: string | null;
       }>(
-        `select status,declined_by,declined_workspace_id,decline_operation_id,decline_reason
+        `select kind,status,declined_by,declined_workspace_id,decline_operation_id,decline_reason
            from alpha_private.ticket_central_intakes
           where organization_key=$1 and id=$2 for update`,
         [input.organizationKey, input.intakeId]);
@@ -293,7 +323,7 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         [input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
           input.operationId, input.occurredAt, input.reason]);
       if (updated.length !== 1) throw new Error('Central inquiry could not be atomically declined.');
-      await tx.query(`insert into alpha_private.ticket_central_intake_outcomes
+      if (existing.kind !== 'project_proposal') await tx.query(`insert into alpha_private.ticket_central_intake_outcomes
         (organization_key,intake_id,idempotency_key,status,available_at,created_at)
         values($1,$2,$3,'pending',$4,$4)`, [input.organizationKey,input.intakeId,randomUUID(),input.occurredAt]);
       await tx.query(

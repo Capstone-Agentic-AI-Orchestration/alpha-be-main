@@ -3,6 +3,7 @@ import type { TicketSubject } from './ticketCommandStore.js';
 
 export interface CentralIntakeCursor { submittedAt: string; id: string }
 export interface CentralIntakeItem {
+  kind?: 'public_inquiry' | 'project_proposal';
   id: string; publicReference: string; fullName: string; email: string; company: string | null; title: string;
   description: string; requestedDeadline: string | null; submittedAt: string;
   status?: 'pending' | 'accepted' | 'declined';
@@ -30,7 +31,7 @@ export interface TicketCentralIntakeStore {
   accept(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; ticketId: string; reference: string; occurredAt: string;
-  }): Promise<CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable' | 'forbidden'>;
+  }): Promise<CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable' | 'client_access_unavailable' | 'forbidden'>;
   decline(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; reason: string | null; occurredAt: string;

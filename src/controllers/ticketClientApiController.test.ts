@@ -4,7 +4,7 @@ const subject = { kind: 'client' as const, userId: 'client-a', sessionId: 'sessi
 const cookie = '__Secure-alpha_client_session=session-secret; alpha_client_csrf=csrf-secret';
 const timestamp = '2026-10-08T03:00:00.000Z';
 
-async function setup() {
+async function setup(withProposals = false) {
   vi.resetModules();
   vi.doMock('../config/env.js', () => ({ IS_CLOUD: true }));
   vi.doMock('./ticketRequestAuth.js', () => ({
@@ -36,7 +36,9 @@ async function setup() {
       status: 'received', reference: 'T-1', privateMetadata: 'secret' })),
     lookupCreation: vi.fn(),
   };
-  const router = createTicketClientApiRouter(app as any, {
+  const proposals = { list: vi.fn(async () => ({items:[]})), submit: vi.fn(async () => ({id:'proposal-a'})) };
+  const emailFor = vi.fn(async () => 'verified@example.test');
+  const router = createTicketClientApiRouter({...app, ...(withProposals ? {projectProposals:proposals,emailFor} : {})} as any, {
     secure: true, allowedOrigins: ['https://alpha.example'],
   });
 
@@ -71,7 +73,7 @@ async function setup() {
     });
   }
 
-  return { app, router, invoke };
+  return { app, router, invoke, proposals, emailFor };
 }
 
 afterEach(() => { vi.doUnmock('../config/env.js'); vi.doUnmock('./ticketRequestAuth.js'); vi.resetModules(); });
@@ -160,4 +162,24 @@ describe('client ticket API contract boundary', () => {
     expect(f.app.authenticate).not.toHaveBeenCalled();
     expect(f.app.create).not.toHaveBeenCalled();
   });
+});
+
+describe('project proposal client API',()=>{
+ it('uses the authenticated subject and server verified email',async()=>{
+  const f=await setup(true);
+  const body={schemaVersion:1,operationId:'10000000-0000-4000-8000-000000000001',title:'Project',description:'Outcome',requestedDeadline:null};
+  expect((await f.invoke('POST','/project-proposals',{body})).status).toBe(201);
+  expect(f.emailFor).toHaveBeenCalledWith(subject);
+  expect(f.proposals.submit).toHaveBeenCalledWith(subject,'verified@example.test',body);
+  expect((await f.invoke('GET','/project-proposals')).body).toEqual({items:[]});
+  expect(f.proposals.list).toHaveBeenCalledWith(subject);
+ });
+ it('rejects missing session, invalid CSRF and foreign origins before proposal access',async()=>{
+  const f=await setup(true);
+  expect((await f.invoke('GET','/project-proposals',{headers:{cookie:''}})).status).toBe(401);
+  expect((await f.invoke('POST','/project-proposals',{headers:{'x-csrf-token':'wrong'}})).status).toBe(403);
+  expect((await f.invoke('POST','/project-proposals',{headers:{origin:'https://foreign.example'}})).status).toBe(403);
+  expect(f.proposals.submit).not.toHaveBeenCalled();
+  expect(f.proposals.list).not.toHaveBeenCalled();
+ });
 });
