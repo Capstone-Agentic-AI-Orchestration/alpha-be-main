@@ -30,6 +30,8 @@ export interface TicketClientSessionTransaction {
 export interface TicketClientSessionStore {
   /** Fresh hash lookup. The adapter must not cache session or revocation state. */
   resolveSession(sessionIdHash: string): Promise<TicketClientSessionRecord | null>;
+  /** Display-only name from this client's verified, currently granted contact. */
+  resolveClientName?(clientUserId: string): Promise<string | null>;
   /**
    * Grant check + session insert/audit or exact revocation/audit atomically.
    * Session/service-grant checks must use the shared authorization-first lock

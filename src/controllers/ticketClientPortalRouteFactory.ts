@@ -82,7 +82,7 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
   const queue = createTicketQueueService(dependencies.queueStore);
   const reads = createTicketReadService(dependencies.readStore);
 
-  const sessionApplication = { authenticate: sessions.authenticate, revoke: sessions.revoke, emailFor: sessions.emailFor };
+  const sessionApplication = { authenticate: sessions.authenticate, revoke: sessions.revoke, emailFor: sessions.emailFor, nameFor: sessions.nameFor };
   const activationApplication = {
     async activate(input: unknown) {
       if (!input || typeof input !== 'object' || Array.isArray(input)) {

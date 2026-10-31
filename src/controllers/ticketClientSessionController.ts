@@ -8,6 +8,7 @@ export interface TicketClientSessionApplication {
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
   revoke(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<void>;
   emailFor?(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<string | null>;
+  nameFor?(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<string | null>;
 }
 
 export interface TicketClientSessionCookiePolicy {
@@ -159,10 +160,14 @@ export function createTicketClientSessionRouter(
       const result = await application.authenticate(readTicketClientCookie(req, sessionCookieName));
       if (result.kind !== 'authenticated') return res.json({ authenticated: false });
       let email: string | null = null;
+      let fullName: string | null = null;
       try { email = await application.emailFor?.(result.subject) ?? null; }
       catch { /* Email is display-only and must not change session authentication. */ }
+      try { fullName = await application.nameFor?.(result.subject) ?? null; }
+      catch { /* Name is display-only and must not change session authentication. */ }
       return res.json({ authenticated: true, expiresAt: result.expiresAt,
-        ...(typeof email === 'string' && email.length <= 254 ? { email } : {}) });
+        ...(typeof email === 'string' && email.length <= 254 ? { email } : {}),
+        ...(typeof fullName === 'string' && fullName.trim().length > 0 && fullName.trim().length <= 200 ? { fullName: fullName.trim() } : {}) });
     } catch (error) { return next(error); }
   });
 

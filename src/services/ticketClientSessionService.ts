@@ -154,7 +154,18 @@ export function createTicketClientSessionService(
     }
   }
 
-  return { exchange, authenticate, revoke, emailFor };
+  async function nameFor(subject: Extract<TicketSubject, { kind: 'client' }>): Promise<string | null> {
+    if (!subject || subject.kind !== 'client' || !opaque(subject.userId) || !/^[a-f0-9]{64}$/.test(subject.sessionId)) return null;
+    try {
+      const name = await store.resolveClientName?.(subject.userId);
+      return typeof name === 'string' && name.trim().length > 0 && name.trim().length <= 200 ? name.trim() : null;
+    } catch {
+      // A missing display name must not prevent the authenticated client from using the portal.
+      return null;
+    }
+  }
+
+  return { exchange, authenticate, revoke, emailFor, nameFor };
 }
 
 function validSessionRow(row: TicketClientSessionRecord | null, expectedHash: string): row is TicketClientSessionRecord {
