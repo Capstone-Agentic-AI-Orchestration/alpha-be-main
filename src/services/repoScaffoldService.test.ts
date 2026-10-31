@@ -153,3 +153,45 @@ describe('a paired project', () => {
     expect(provisioned).toEqual([]);
   });
 });
+
+/**
+ * Vercel refuses uppercase project names, and the frontend project takes the
+ * repository name, so a mixed-case name used to create the repository and
+ * then fail hosting. The name is lowercased before anything is created.
+ */
+describe('repository names', () => {
+  it('lowercases a mixed-case paired base name for both repositories', async () => {
+    const { service, provisioned } = await load();
+
+    const repos = await service.createPairedProject({
+      ...base,
+      repoName: '  TestProjectRepov1 ',
+      frontendStack: 'react',
+      backendStack: 'nodejs'
+    });
+
+    expect(provisioned.map(repo => repo.name)).toEqual(['testprojectrepov1-be', 'testprojectrepov1-fe']);
+    expect(repos[1].hosting).toMatchObject({ repo: 'acme/testprojectrepov1-fe', partner: 'acme/testprojectrepov1-be' });
+  });
+
+  it('lowercases a standalone name', async () => {
+    const { service, provisioned } = await load();
+
+    const result = await service.createScaffoldedRepository({ ...base, repoName: 'Shop-Web', stack: 'react' });
+
+    expect(provisioned[0].name).toBe('shop-web');
+    expect(result.nameWithOwner).toBe('acme/shop-web');
+  });
+
+  it('refuses names Vercel would refuse, before creating anything', async () => {
+    const { service, provisioned } = await load();
+
+    await expect(
+      service.createScaffoldedRepository({ ...base, repoName: 'shop---web', stack: 'react' })
+    ).rejects.toThrow(/Invalid repository name/);
+    await expect(
+      service.createScaffoldedRepository({ ...base, repoName: 'shop web', stack: 'react' })
+    ).rejects.toThrow(/Invalid repository name/);
+    expect(provisioned).toEqual([]);
+  });
+});
