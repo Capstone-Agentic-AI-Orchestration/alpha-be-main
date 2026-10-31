@@ -274,6 +274,7 @@ dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => 
       sqliteService.setBoardSyncCursor(workspaceId, value);
       const response = {
         workspaceId,
+        userId: req.workspace!.userId,
         cursor: { workspaceId, value },
         ...pulled.snapshot
       };
@@ -287,8 +288,10 @@ dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => 
   if (!sync) return res.status(503).json({ error: 'This desktop is not connected to the team board.' });
   const workspaceId = req.workspace!.workspaceId;
   const bootstrap = await sync.bootstrap(workspaceId);
-  recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(bootstrap), bootstrap);
-  return res.json(bootstrap);
+  // Who the snapshot was read for, so a shared machine never reuses another account's cache.
+  const response = { ...bootstrap, userId: req.workspace!.userId };
+  recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(response), response);
+  return res.json(response);
 }));
 
 /** A bounded page after one device's last successfully applied workspace cursor. */
@@ -310,8 +313,9 @@ dataRouter.post('/board/changes', route(async (req: Request, res: Response) => {
     if (!IS_CLOUD && supabaseService.sharesBoard() && !page.resetRequired) {
       await applySharedBoardChanges(req.workspace!.workspaceId, page);
     }
-    recordBoardResponseMetric(req, req.workspace!.workspaceId, 'delta', page.changes.length, page);
-    return res.json(page);
+    const response = { ...page, userId: req.workspace!.userId };
+    recordBoardResponseMetric(req, req.workspace!.workspaceId, 'delta', page.changes.length, response);
+    return res.json(response);
   } catch (error) {
     if (error instanceof BoardCursorError) return res.status(400).json({ error: error.message });
     throw error;
@@ -1109,7 +1113,7 @@ function isIssueStatus(value: unknown): value is IssueStatus {
 }
 
 async function activeRunForIssue(workspaceId: string, issueId: string) {
-  return (await runStore().list(workspaceId)).find(run =>
+  return (await runStore().listSummaries(workspaceId)).find(run =>
     run.issueId === issueId && ACTIVE_RUN_STATUSES.has(run.status)
   );
 }

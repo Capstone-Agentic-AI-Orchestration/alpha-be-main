@@ -32,7 +32,7 @@ operationsRouter.get('/operations', route(async (req: Request, res: Response) =>
   const sql = database();
   const [projects, runs, deployments, targets, policies, settings, expenses, budgets, notices, ticketRows, ticketEvents] = await Promise.all([
     projectStore().list(workspaceId),
-    runStore().list(workspaceId),
+    runStore().listSummaries(workspaceId),
     sql.query<any>(`select d.*, p.name as project_name from alpha_private.ops_deployments d
       join public.projects p on p.workspace_id=d.workspace_id and p.id=d.project_id
       where d.workspace_id=$1 order by d.started_at desc limit 250`, [workspaceId]),

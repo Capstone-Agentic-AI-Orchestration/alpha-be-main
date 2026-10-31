@@ -19,6 +19,12 @@ export type RemoteActionInput = Omit<RemoteAction, 'id' | 'createdAt'> &
 
 export interface RunStore {
   list(workspaceId: string): Promise<PrototypeRun[]>;
+  /**
+   * The same runs without stage logs or the activity feed. Lists, analytics
+   * and dashboards use this: the logs are most of a run's size, and reading
+   * them back for counts made every refresh download the whole history.
+   */
+  listSummaries(workspaceId: string): Promise<PrototypeRun[]>;
   get(workspaceId: string, id: string): Promise<PrototypeRun | null>;
   /**
    * `ownerId` is the login a *new* row is recorded under, and is ignored when
@@ -37,4 +43,14 @@ export interface RunStore {
   /** Everything a run did to a remote: pushes, pull requests, merges. */
   recordRemoteAction(workspaceId: string, action: RemoteActionInput): Promise<RemoteAction>;
   listRemoteActions(workspaceId: string, runId?: string): Promise<RemoteAction[]>;
+}
+
+/** A run as lists show it: every field except stage logs and the activity feed. */
+export function summarizeRun(run: PrototypeRun): PrototypeRun {
+  return {
+    ...run,
+    stages: (run.stages ?? []).map(stage => ({ ...stage, logs: [] })),
+    activities: [],
+    logsOmitted: true
+  };
 }

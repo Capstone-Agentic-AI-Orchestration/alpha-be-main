@@ -160,6 +160,37 @@ describe.each(backends)('the run store ($name)', backend => {
     expect(await runs.get(WS, 'theirs')).toBeNull();
   });
 
+  /** Lists and analytics read summaries, so stage logs and activity must not travel. */
+  it('lists summaries without logs or activity, and keeps everything else', async () => {
+    const runs = await backend.open();
+    await runs.save(WS, aRun(WS, {
+      stages: [
+        { id: 'workspace', label: 'Workspace', description: 'Prepare', status: 'success', logs: ['secret-ish output', 'more'], durationMs: 12 },
+        { id: 'tests', label: 'Tests', description: '', status: 'running', logs: ['running'] }
+      ],
+      usage: { inputTokens: 10, costUsd: 0.01 },
+      prUrl: 'https://github.com/acme/checkout/pull/9'
+    }), OWNER);
+    await runs.save(OTHER_WS, aRun(OTHER_WS, { id: 'theirs' }), 'Someone-else');
+
+    const [full] = await runs.list(WS);
+    const summaries = await runs.listSummaries(WS);
+    expect(summaries.map(run => run.id)).toEqual(['run-1']);
+    const [summary] = summaries;
+    expect(summary.logsOmitted).toBe(true);
+    expect(summary.activities).toEqual([]);
+    expect(summary.stages.map(stage => [stage.id, stage.status, stage.logs])).toEqual([
+      ['workspace', 'success', []],
+      ['tests', 'running', []]
+    ]);
+    expect(summary.stages[0].durationMs).toBe(12);
+    const { stages: _s, activities: _a, logsOmitted: _l, ...rest } = summary;
+    const { stages: _fs, activities: _fa, ...fullRest } = full;
+    expect(rest).toEqual(fullRest);
+    expect(JSON.stringify(summaries)).not.toContain('secret-ish output');
+    expect((await runs.get(WS, 'run-1'))!.stages[0].logs).toEqual(['secret-ish output', 'more']);
+  });
+
   it('groups a squad run with its members, in the order they work', async () => {
     const runs = await backend.open();
     const memberAssignments = [
