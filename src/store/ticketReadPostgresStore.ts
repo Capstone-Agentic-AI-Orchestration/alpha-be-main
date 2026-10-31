@@ -191,7 +191,10 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
     }
 
     const contactColumns = actor.kind === 'pm'
-      ? 'c.full_name, c.email, c.company, c.email_verified'
+      ? `case when r.source = 'public_inquiry' then c.full_name else null::text end as full_name,
+         case when r.source = 'public_inquiry' then c.email else null::text end as email,
+         case when r.source = 'public_inquiry' then c.company else null::text end as company,
+         case when r.source = 'public_inquiry' then c.email_verified else null::boolean end as email_verified`
       : 'null::text as full_name, null::text as email, null::text as company, null::boolean as email_verified';
     const { rows: requestRows } = await this.sql.query<RequestDbRow>(
       `select r.workspace_id, r.ticket_id, r.source, r.project_preference, r.preferred_project_id,

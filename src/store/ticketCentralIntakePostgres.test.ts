@@ -16,6 +16,8 @@ import { sqlFor, createTestDatabase } from './testDatabase.js';
 import type { TransactionalSql } from './database.js';
 import { PostgresTicketCentralIntakeStore } from './ticketCentralIntakePostgresStore.js';
 import { PostgresTicketAcknowledgmentStore } from './ticketAcknowledgmentPostgresStore.js';
+import { PostgresTicketReadStore } from './ticketReadPostgresStore.js';
+import { createTicketReadService } from '../services/ticketReadService.js';
 import { createTicketAcknowledgmentDeliveryService } from '../services/ticketAcknowledgmentDeliveryService.js';
 
 const organizationKey = 'central-intake-test-org';
@@ -258,6 +260,21 @@ describe('authenticated project proposals',()=>{
    {schemaVersion:1,operationId:'40000000-0000-4000-8000-000000000001',expectedVersion:await version(),projectId:project.id,clientVisible:true,projectPreview:null});
   const projects=await new PostgresClientProjectPortal(db).projects(proposalOwner);
   expect(JSON.stringify(projects)).toContain('New client project');
+ });
+ it('lets a PM open an accepted account-linked proposal without exposing auth contact data',async()=>{
+  const {receipt}=await submitProposal();
+  const accepted=await app.accept(receipt.id,workspaceA,pmA,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000004'});
+  const target={workspaceId:workspaceA,ticketId:accepted.ticketId};
+  await db.query(`insert into alpha_private.ticket_messages
+   (workspace_id,ticket_id,id,author_kind,author_id,audience,body,created_at)
+   values($1,$2,'proposal-message','client',$3,'client','working?',now())`,[workspaceA,accepted.ticketId,proposalOwner.userId]);
+  const reads=createTicketReadService(new PostgresTicketReadStore(db));
+  await expect(reads.detail(target,pmA)).resolves.toMatchObject({
+   internal:{request:{source:'authenticated_client',contact:null}},
+  });
+  await expect(reads.conversation(target,pmA,{})).resolves.toMatchObject({
+   items:[{id:'proposal-message',author:'client',body:'working?'}],nextCursor:null,
+  });
  });
  it('enables an existing disabled client grant when a PM accepts a proposal',async()=>{
   const {receipt}=await submitProposal();
