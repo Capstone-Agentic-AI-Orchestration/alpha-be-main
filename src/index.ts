@@ -62,6 +62,14 @@ import { clientAccessConfigurationProblems, resolveClientWebOrigin } from './tic
 import { createTicketLifecycleRuntime } from './services/ticketLifecycleRuntime.js';
 import { createTicketExecutionRouter } from './controllers/ticketExecutionController.js';
 import { createTicketIssueCompletionRouter } from './controllers/ticketIssueCompletionController.js';
+import {
+  STREAM_PROTOCOL,
+  isLoopbackBind,
+  localAccessToken,
+  requireLocalToken,
+  requireLoopbackHost,
+  verifyStreamHandshake
+} from './services/localAccess.js';
 
 const resendTicketEmailProvider = createTicketInvitationEmailProvider({
   apiKey: RESEND_API_KEY, senderEmail: RESEND_SENDER_EMAIL, senderName: RESEND_SENDER_NAME,
@@ -168,6 +176,17 @@ if (IS_CLOUD && (!DATABASE_URL || !DATABASE_CA_CERT)) {
 const app = express();
 
 /**
+ * Read once, at import: the desktop shell sets it before requiring this module.
+ * See services/localAccess.ts for what the token, Host and handshake checks stop.
+ */
+const LOCAL_TOKEN = IS_DESKTOP ? localAccessToken() : undefined;
+/** A daemon someone deliberately bound to a LAN address keeps answering that name. */
+const CHECK_LOOPBACK_HOST = IS_DESKTOP && isLoopbackBind(HOST);
+
+// First, before CORS: a request addressed to another hostname is a rebound page.
+if (CHECK_LOOPBACK_HOST) app.use(requireLoopbackHost);
+
+/**
  * CORS allowlist, not `*`.
  *
  * This API spawns agents that run shell commands. With `origin: '*'` any website
@@ -225,19 +244,15 @@ app.use('/api/public/ticket-intakes', IS_CLOUD && ALPHA_TICKETING_TRIAGE_ENABLED
   : createTicketPublicIntakeUnavailableRouter());
 
 /**
- * Optional shared secret for local callers.
+ * Shared secret for local callers.
  *
- * Enforced only when ALPHA_LOCAL_TOKEN is set, so local development keeps
- * working unconfigured. Set it (and send `X-Alpha-Token`) whenever the daemon
- * might be reachable by another process or user on the machine.
+ * The installed app always has one: main.js makes it per launch and gives it
+ * only to its own window. From source it is enforced only when
+ * ALPHA_LOCAL_TOKEN is set, so local development keeps working unconfigured;
+ * set it, and VITE_ALPHA_LOCAL_TOKEN to match, to run the same check.
  */
-if (process.env.ALPHA_LOCAL_TOKEN) {
-  const expected = process.env.ALPHA_LOCAL_TOKEN;
-  app.use('/api', (req, res, next) => {
-    if (req.path === '/health') return next();
-    if (req.header('X-Alpha-Token') === expected) return next();
-    return res.status(401).json({ error: 'Missing or invalid X-Alpha-Token' });
-  });
+if (LOCAL_TOKEN) {
+  app.use('/api', requireLocalToken(LOCAL_TOKEN));
   logInfo('Local token authentication is ENABLED');
 }
 
@@ -365,7 +380,24 @@ const clients = new Set<WebSocket>();
  * replace here — only something to stop exposing.
  */
 if (IS_DESKTOP) {
-  const wss = new WebSocketServer({ server });
+  /**
+   * Any web page can open a WebSocket to loopback; browsers do not apply CORS
+   * to it. So the handshake is checked here: a loopback Host, an allowed Origin
+   * when there is one, and the launch token offered as a subprotocol.
+   */
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: (info: { origin?: string; req: http.IncomingMessage }) => {
+      const verdict = verifyStreamHandshake(
+        { origin: info.origin, host: info.req.headers.host, protocols: info.req.headers['sec-websocket-protocol'] },
+        { token: LOCAL_TOKEN, checkHost: CHECK_LOOPBACK_HOST, originAllowed: isAllowedOrigin }
+      );
+      if (!verdict.ok) logError(`Refused a WebSocket connection (${verdict.reason}).`);
+      return verdict.ok;
+    },
+    // Echo only the protocol name, never the entry that carries the token.
+    handleProtocols: protocols => (protocols.has(STREAM_PROTOCOL) ? STREAM_PROTOCOL : false)
+  });
 
   wss.on('connection', (ws: WebSocket) => {
     clients.add(ws);

@@ -13,6 +13,7 @@ import type { runVerification } from './verificationService.js';
 import { dependencyAuditSpecSchema } from './dependencyAuditContract.js';
 import { agentRoleContract, roleCanOwnTask } from './agentRoleContracts.js';
 import { runDependencyAudit, stopDependencyAudits } from './dependencyAuditService.js';
+import { childProcessEnv } from './childProcessEnv.js';
 
 const scopeSchema = z.object({
   taskId: z.string().min(1), repository: z.string().min(1), kind: orchestrationTaskKindSchema,
@@ -158,7 +159,7 @@ export async function generateTaskLockfile(roots: ProjectRoot[], scope: TaskFile
     if (fs.existsSync(path.join(root.dir, 'package-lock.json'))) fs.copyFileSync(path.join(root.dir, 'package-lock.json'), path.join(scratch, 'package-lock.json'));
     await new Promise<void>((resolve, reject) => {
       const child = spawn('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], {
-        cwd: scratch, windowsHide: true, env: { ...process.env, npm_config_ignore_scripts: 'true' }
+        cwd: scratch, windowsHide: true, env: childProcessEnv({ npm_config_ignore_scripts: 'true' })
       });
       if (child.pid) activeLocks.set(child.pid, child);
       let output = '';

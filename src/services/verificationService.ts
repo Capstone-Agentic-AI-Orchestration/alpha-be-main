@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { processManager } from './processManager.js';
+import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { discoverVerificationCommands, readManifest, packageManagerFor, packageManagerBinary, hasScript, verificationScriptProblem, VERIFICATION_TIMEOUT_MS, type PackageManifest, type VerificationCommand } from './repositoryExecution.js';
 export { discoverVerificationCommands, type VerificationCommand } from './repositoryExecution.js';
 
@@ -96,7 +97,12 @@ function runCommand(
         bin: command.bin,
         args: command.args,
         cwd,
-        env: { CI: 'true' },
+        /**
+         * Verification runs the project's own scripts (npm ci, test, build), so
+         * it gets the same GitHub isolation as an agent's shell. A project with
+         * a private git dependency needs ALPHA_ALLOW_AGENT_GIT_CREDENTIALS=1.
+         */
+        env: { CI: 'true', ...agentCredentialEnv() },
         timeoutMs: VERIFICATION_TIMEOUT_MS,
         onStdout: chunk => { output = appendOutput(output, chunk); },
         onStderr: chunk => { output = appendOutput(output, chunk); },
