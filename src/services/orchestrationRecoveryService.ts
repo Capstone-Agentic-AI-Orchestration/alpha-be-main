@@ -201,7 +201,7 @@ function milestoneFor(
       : reportCorrectionsUsed === undefined
       ? 'Alpha preserved the current work and will not start another repair without your direction.'
       : reportCorrectionAvailable
-        ? 'Alpha preserved the code work. Review this exact report error and choose whether to send one more bounded, read-only correction from this chat or the Live Build Room.'
+        ? 'Alpha preserved the code work. Review this exact report error and choose whether to send one more bounded, read-only correction from this chat.'
         : 'Alpha preserved the code work. The bounded report-correction limit is exhausted; review the saved response and decide whether to keep the build paused or start a fresh request.';
     const planningNote = finalValidationCorrectionError
       ? ` Alpha could not safely assign an automatic correction: ${safeRecoverySummary(finalValidationCorrectionError)}.`
@@ -308,7 +308,7 @@ export class OrchestrationRecoveryService {
     }
     // A stopped build keeps its failed task as history and gets no new recovery. Opening one here
     // would be closed again by the cancel above on the next check, posting both chat messages each
-    // time; every room refresh runs this check, so the pair repeated about once a second.
+    // time; every build review refresh runs this check, so the pair repeated about once a second.
     if (terminalCancel) return undefined;
     const currentFailure = Boolean(failedTask || finalValidation ||
       ['blocked', 'recovery_required', 'failed'].includes(snapshot.run.status));
@@ -564,7 +564,7 @@ export class OrchestrationRecoveryService {
           return { accepted: true, actionId: created.action.id, explanation };
         }
         if (input.action === 'review_saved_changes') {
-          const message = 'Open the Live Build Room to inspect the saved branch, task evidence, and changed files.';
+          const message = 'Review the saved branch, task evidence, and changed files in this chat.';
           this.store.finishOrchestrationRecoveryAction({
             recoveryId: episode.id, idempotencyKey: input.idempotencyKey, actorId: input.actorId,
             status: 'completed', result: { message }

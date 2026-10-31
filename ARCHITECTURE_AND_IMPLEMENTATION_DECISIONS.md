@@ -5,6 +5,8 @@
 **Status:** Approved & Documented  
 **Document Location:** `alpha-be-main/ARCHITECTURE_AND_IMPLEMENTATION_DECISIONS.md`
 
+> Current status: the standalone Live Build Room has been removed. Project build snapshots remain available through project chat review; the section below records the original design.
+
 ---
 
 ## Table of Contents

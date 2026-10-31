@@ -80,7 +80,7 @@ export class SquadRunner {
     return current;
   }
 
-  /** Keep the local runner authoritative while publishing the room's parent run to the shared board. */
+  /** Keep the local runner authoritative while publishing the parent run to the shared board. */
   private async persistSquadRun(run: SquadRun, workspaceId: string): Promise<void> {
     sqliteService.saveSquadRun(run);
     if (supabaseService.isConfigured()) {

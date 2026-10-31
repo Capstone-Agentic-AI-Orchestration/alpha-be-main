@@ -1,6 +1,7 @@
 # Orchestrator recovery, project chat, and Live Build Room
 
 Status: the recovery, chat, review-handoff, final-validation repair, Live Build Room, and report/planning contract audit changes are published in Windows v2.0.50 from backend source commit `51cbc7096a66906b034a72c0eb87f562dc7b1a8c`. The package is unsigned; browser visual acceptance and installed-app update verification remain outstanding.
+The standalone Live Build Room was subsequently removed. Project build review remains available inside chat through project-scoped build snapshots.
 Source review: 2026-10-21, Asia/Manila. This describes the checked-out source, not a verification of the installed desktop app.
 
 ## Implementation status

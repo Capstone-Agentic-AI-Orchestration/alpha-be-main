@@ -15,21 +15,21 @@ import {
   requireWorkspaceCapability
 } from './workspaceContext.js';
 
-export const liveBuildRoomRouter = Router();
+export const projectBuildSnapshotRouter = Router();
 
-type RoomCardStatus = 'completed' | 'running' | 'waiting' | 'review' | 'failed' | 'idle';
-type RoomPhaseStatus = 'completed' | 'running' | 'waiting' | 'review' | 'failed';
+type ProjectBuildCardStatus = 'completed' | 'running' | 'waiting' | 'review' | 'failed' | 'idle';
+type ProjectBuildPhaseStatus = 'completed' | 'running' | 'waiting' | 'review' | 'failed';
 const STALE_AGENT_SIGNAL_MS = 5 * 60 * 1000;
 
-interface RoomPhase {
+interface ProjectBuildPhase {
   id: string;
   label: string;
   description: string;
-  status: RoomPhaseStatus;
+  status: ProjectBuildPhaseStatus;
   progress: number;
 }
 
-interface RoomActivity {
+interface ProjectBuildActivity {
   id: string;
   sequence: number;
   kind: 'status' | 'stage' | 'assistant' | 'tool' | 'tool_result' | 'file_change' | 'handoff' | 'error' | 'summary' | 'attachment' | 'steering';
@@ -40,7 +40,7 @@ interface RoomActivity {
   createdAt: string;
 }
 
-interface RoomAgentCard {
+interface ProjectBuildAgentCard {
   executionId: string;
   source: 'squad' | 'project_chat' | 'agent_run';
   sourceLabel: string;
@@ -49,7 +49,7 @@ interface RoomAgentCard {
   agentRole: string;
   avatar?: string;
   color?: string;
-  status: RoomCardStatus;
+  status: ProjectBuildCardStatus;
   progress: number;
   currentTask: string;
   currentStage?: string;
@@ -59,7 +59,7 @@ interface RoomAgentCard {
   orchestrationTaskId?: string;
   orchestrationAttemptNumber?: number;
   orchestrationTaskCount?: number;
-  activity: RoomActivity[];
+  activity: ProjectBuildActivity[];
   filePaths: string[];
   branchName?: string;
   updatedAt?: string | null;
@@ -76,7 +76,7 @@ function progressForRun(run: PrototypeRun | undefined): number {
   return Math.min(100, Math.round((complete / run.stages.length) * 100));
 }
 
-function phaseStatusForRun(run: PrototypeRun | SquadRun | undefined): RoomPhaseStatus {
+function phaseStatusForRun(run: PrototypeRun | SquadRun | undefined): ProjectBuildPhaseStatus {
   if (!run) return 'waiting';
   if (run.status === 'completed') return 'completed';
   if (run.status === 'awaiting_approval') return 'review';
@@ -84,7 +84,7 @@ function phaseStatusForRun(run: PrototypeRun | SquadRun | undefined): RoomPhaseS
   return run.status === 'running' || run.status === 'validating' ? 'running' : 'waiting';
 }
 
-function phaseStatusForCard(status: RoomCardStatus): RoomPhaseStatus {
+function phaseStatusForCard(status: ProjectBuildCardStatus): ProjectBuildPhaseStatus {
   if (status === 'completed') return 'completed';
   if (status === 'running') return 'running';
   if (status === 'review') return 'review';
@@ -92,7 +92,7 @@ function phaseStatusForCard(status: RoomCardStatus): RoomPhaseStatus {
   return 'waiting';
 }
 
-function cardStatus(run: any | undefined, squadRun: any | undefined, memberIndex: number): RoomCardStatus {
+function cardStatus(run: any | undefined, squadRun: any | undefined, memberIndex: number): ProjectBuildCardStatus {
   if (!run) {
     return squadRun && memberIndex > (squadRun.currentMemberIndex ?? -1) ? 'waiting' : 'idle';
   }
@@ -103,7 +103,7 @@ function cardStatus(run: any | undefined, squadRun: any | undefined, memberIndex
   return run.status === 'queued' ? 'waiting' : 'running';
 }
 
-function currentTask(run: any | undefined, status: RoomCardStatus, assignedStageLabel?: string): string {
+function currentTask(run: any | undefined, status: ProjectBuildCardStatus, assignedStageLabel?: string): string {
   if (status === 'completed') return 'Work completed';
   if (status === 'review') return 'Ready for review';
   if (status === 'failed') return 'Run stopped — review activity';
@@ -117,7 +117,7 @@ function currentTask(run: any | undefined, status: RoomCardStatus, assignedStage
   return run?.stages?.[run.currentStageIndex]?.label || 'Execution in progress';
 }
 
-function callCardStatus(status: AgentCall['status']): RoomCardStatus {
+function callCardStatus(status: AgentCall['status']): ProjectBuildCardStatus {
   if (status === 'completed') return 'completed';
   if (status === 'awaiting_confirmation') return 'review';
   if (status === 'failed' || status === 'cancelled') return 'failed';
@@ -128,7 +128,7 @@ function callCardStatus(status: AgentCall['status']): RoomCardStatus {
 
 function callTask(
   call: Pick<AgentCall, 'status' | 'operationMode' | 'origin'> & { activities: AgentCallActivity[]; error?: string },
-  status: RoomCardStatus,
+  status: ProjectBuildCardStatus,
   targetLabel?: string
 ): string {
   if (status === 'waiting') return 'Queued for execution';
@@ -157,7 +157,7 @@ function safeProjectPath(value: string): string {
   return normalized.slice(0, 180);
 }
 
-function roomRunActivity(activities: RunActivity[] = []): RoomActivity[] {
+function projectBuildRunActivity(activities: RunActivity[] = []): ProjectBuildActivity[] {
   return activities.slice(-40).map(activity => {
     const toolName = activity.toolName?.replace(/[^A-Za-z0-9_. -]/g, '').slice(0, 80);
     return {
@@ -168,13 +168,13 @@ function roomRunActivity(activities: RunActivity[] = []): RoomActivity[] {
       toolName,
       detail: safeOperationalText(activity.detail),
       isStreaming: activity.isStreaming,
-      paths: roomRunActivityPaths(activity),
+      paths: projectBuildActivityPaths(activity),
       createdAt: activity.createdAt
     };
   });
 }
 
-function orchestrationRunActivity(run: PrototypeRun): RoomActivity[] {
+function orchestrationRunActivity(run: PrototypeRun): ProjectBuildActivity[] {
   const recentOutput = run.stages
     .filter(stage => stage.id === 'tests' || stage.status === 'failed')
     .flatMap((stage, index) => {
@@ -190,11 +190,11 @@ function orchestrationRunActivity(run: PrototypeRun): RoomActivity[] {
         createdAt: stage.completedAt ?? run.updatedAt
       }];
     });
-  return [...roomRunActivity(run.activities), ...recentOutput]
+  return [...projectBuildRunActivity(run.activities), ...recentOutput]
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
 }
 
-function roomRunActivityPaths(activity: RunActivity): string[] | undefined {
+function projectBuildActivityPaths(activity: RunActivity): string[] | undefined {
   if (activity.kind !== 'tool') return undefined;
   let paths: unknown[] = [];
   try {
@@ -214,7 +214,7 @@ function roomRunActivityPaths(activity: RunActivity): string[] | undefined {
   return values.length ? Array.from(new Set(values)) : undefined;
 }
 
-function safeRoomRun(run: PrototypeRun): PrototypeRun {
+function safeProjectBuildRun(run: PrototypeRun): PrototypeRun {
   return {
     ...run,
     plan: run.plan.map(item => safeOperationalText(item, 360) ?? ''),
@@ -504,7 +504,7 @@ function latestCallActivityAt(call: Pick<AgentCall, 'activities' | 'startedAt' |
   return call.activities.at(-1)?.createdAt ?? call.startedAt ?? call.createdAt;
 }
 
-function hasStaleAgentSignal(status: RoomCardStatus, updatedAt?: string | null): boolean {
+function hasStaleAgentSignal(status: ProjectBuildCardStatus, updatedAt?: string | null): boolean {
   if (status !== 'running' || !updatedAt) return false;
   const timestamp = Date.parse(updatedAt);
   return Number.isFinite(timestamp) && Date.now() - timestamp > STALE_AGENT_SIGNAL_MS;
@@ -572,7 +572,7 @@ function phaseRows(
   visibleAgentIds: ReadonlySet<string>,
   selectedRun: SquadRun | undefined,
   memberRunByAgent: ReadonlyMap<string, PrototypeRun>
-): RoomPhase[] {
+): ProjectBuildPhase[] {
   const enabledSteps = steps
     .filter(step => step.enabled)
     .filter(step => !step.agentId || visibleAgentIds.has(step.agentId))
@@ -622,34 +622,17 @@ function phaseRows(
   });
 }
 
-/** Return only projects that can actually open a room for this caller. */
-liveBuildRoomRouter.get('/live-build-room/projects', route(async (req: Request, res: Response) => {
-  if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
-  const all = await projectStore().list(req.workspace!.workspaceId);
-  const projects = workspaceRegistry.scopeProjects(all, req.workspace!);
-  res.json(projects
-    .filter(project => workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, project.id))
-    .map(project => ({
-      id: project.id,
-      key: project.key,
-      name: project.name,
-      color: project.color
-    })));
-}));
-
 /**
- * Project-scoped execution room.
+ * Project-scoped build snapshot for chat's Orchestrator review.
  *
- * The endpoint intentionally returns a complete room snapshot rather than
- * making the browser stitch together workspace, project, squad and run rows.
- * That keeps authorization in one place and prevents a client from combining
- * a permitted project with a squad or run from another project.
+ * The endpoint keeps project, squad and run reads behind one project access
+ * check so clients cannot combine unrelated execution records.
  */
-liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req: Request, res: Response) => {
+projectBuildSnapshotRouter.get('/projects/:projectId/build-snapshot', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
-  if (!workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, req.params.projectId)) {
-    return res.status(404).json({ error: 'This project room is not available to this account.' });
+  if (!workspaceRegistry.canAccessProjectBuilds(req.workspace!, req.params.projectId)) {
+    return res.status(404).json({ error: 'This project build is not available to this account.' });
   }
 
   const workspaceId = req.workspace!.workspaceId;
@@ -717,7 +700,9 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const selectedSquad = squads.find(squad => squad.id === squadRun?.squadId) ?? squads[0];
   const selectedRun = squadRun && squadRun.squadId === selectedSquad?.id ? squadRun : undefined;
   const membersById = new Map((await agentStore().list(workspaceId)).map(agent => [agent.id, agent]));
-  const allProjectRuns = (await runStore().list(workspaceId)).filter(run => run.projectId === project.id);
+  const allProjectRuns = IS_CLOUD
+    ? await runStore().listSummaries(workspaceId, project.id)
+    : (await runStore().list(workspaceId)).filter(run => run.projectId === project.id);
   const requestedOrchestrationId = typeof req.query.orchestrationRunId === 'string'
     ? req.query.orchestrationRunId
     : typeof req.query.runId === 'string' && req.query.runId.startsWith('orchestration-')
@@ -743,22 +728,22 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     ? [requestedOrchestration, activeOrchestration, latestOrchestration].find(item => item?.run.projectId === project.id)
     : undefined;
   // Project-chat calls run on the desktop and remain in that owner's private
-  // local history. Cloud rooms use the shared Postgres run telemetry instead;
+  // local history. Cloud project build snapshots use shared Postgres telemetry;
   // never let a cloud request fall through to the desktop SQLite store.
   const projectAgentCalls = IS_CLOUD
     ? []
     : sqliteService.getAgentCalls({ workspaceId, projectId: project.id });
-  const roomAgentIds = new Set([
+  const projectBuildAgentIds = new Set([
     ...squads.flatMap(squad => squad.memberAgentIds),
     ...squadRuns.flatMap(run => run.memberAgentIds),
     ...allProjectRuns.map(run => run.agentId),
     ...projectAgentCalls.filter(call => accessibleSquadIds.has(call.squadId)).map(call => call.agentId)
   ]);
-  const roomAgentVisibility = await Promise.all(Array.from(roomAgentIds, async agentId => ({
+  const projectBuildAgentVisibility = await Promise.all(Array.from(projectBuildAgentIds, async agentId => ({
     agentId,
     visible: await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, project.id, agentId)
   })));
-  const visibleAgentIds = new Set(roomAgentVisibility.filter(item => item.visible).map(item => item.agentId));
+  const visibleAgentIds = new Set(projectBuildAgentVisibility.filter(item => item.visible).map(item => item.agentId));
   if (selectedOrchestration) {
     const taskOwners = [...new Set(selectedOrchestration.tasks.map(task => task.ownerAgentId))];
     const taskOwnerVisibility = await Promise.all(taskOwners.map(async agentId => ({
@@ -782,10 +767,21 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   });
   const visibleStandaloneRuns = standaloneRunCandidates.filter(run => visibleAgentIds.has(run.agentId));
   const projectRuns = [...visibleSquadRuns, ...visibleStandaloneRuns];
-  const memberRuns = selectedRun
+  const memberRunSummaries = selectedRun
     ? projectRuns.filter(run => run.squadRunId === selectedRun.id)
       .sort((a, b) => (a.squadOrder ?? 0) - (b.squadOrder ?? 0))
     : [];
+  const memberRunIds = new Set(memberRunSummaries.map(run => run.id));
+  const activeStandaloneRunSummaries = projectRuns.filter(run =>
+    !run.squadRunId && ['queued', 'running', 'validating', 'awaiting_approval'].includes(run.status)
+  );
+  const buildDetailIds = [...memberRunIds, ...activeStandaloneRunSummaries.map(run => run.id)];
+  const buildDetails = IS_CLOUD && buildDetailIds.length > 0
+    ? await runStore().listProjectBuildDetails(workspaceId, buildDetailIds)
+    : [];
+  const buildDetailsById = new Map(buildDetails.map(run => [run.id, run]));
+  const memberRuns = memberRunSummaries.map(run => buildDetailsById.get(run.id) ?? run);
+  const activeStandaloneRuns = activeStandaloneRunSummaries.map(run => buildDetailsById.get(run.id) ?? run);
   const memberRunByAgent = new Map(memberRuns.map(run => [run.agentId, run]));
 
   const authorizedChatCalls = (await Promise.all(
@@ -926,9 +922,6 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
 
   const liveChatCalls = chatCalls.filter(isLiveCall);
   const activeSquadRuns = squadRuns.filter(run => run.status === 'running' || run.status === 'awaiting_approval');
-  const activeStandaloneRuns = projectRuns.filter(run =>
-    !run.squadRunId && ['queued', 'running', 'validating', 'awaiting_approval'].includes(run.status)
-  );
   const hasProjectLiveWork = activeSquadRuns.length > 0 || liveChatCalls.length > 0 || activeStandaloneRuns.length > 0;
   const squadRunsForCards = activeSquadRuns.length
     ? activeSquadRuns
@@ -937,7 +930,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       : selectedRun
         ? [selectedRun]
         : [];
-  const agentCards: RoomAgentCard[] = squadRunsForCards.flatMap(projectSquadRun => {
+  const agentCards: ProjectBuildAgentCard[] = squadRunsForCards.flatMap(projectSquadRun => {
     const squad = squadsById.get(projectSquadRun.squadId);
     if (!squad) return [];
     const runsByAgent = new Map(
@@ -959,7 +952,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
           detail: event.summary,
           createdAt: event.createdAt
         }));
-      const activity = [...roomRunActivity(run?.activities), ...handoffActivity]
+      const activity = [...projectBuildRunActivity(run?.activities), ...handoffActivity]
         .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
       return [{
         executionId,
@@ -995,7 +988,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     if (!agent) continue;
     const status = cardStatus(run, undefined, 0);
     const issue = issues.find(item => item.id === run.issueId && item.projectId === project.id);
-    const activity = roomRunActivity(run.activities);
+    const activity = projectBuildRunActivity(run.activities);
     agentCards.push({
       executionId: run.id,
       source: 'agent_run',
@@ -1144,7 +1137,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       const agent = membersById.get(agentId);
       const run = memberRunByAgent.get(agentId);
       const status = cardStatus(run, selectedRun, memberIndex);
-      const activity = roomRunActivity(run?.activities);
+      const activity = projectBuildRunActivity(run?.activities);
       return [{
         executionId: run?.id ?? `ready:${selectedSquad.id}:${agentId}`,
         source: 'squad' as const,
@@ -1229,7 +1222,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
   const issueForCall = (call: typeof liveChatCalls[number]) => call.target?.type === 'issue'
     ? issues.find(issue => issue.id === call.target?.id && issue.projectId === project.id)
     : undefined;
-  const roomIssue = selectedRun
+  const buildIssue = selectedRun
     ? issues.find(issue => issue.id === selectedRun.issueId && issue.projectId === project.id)
     : activeStandaloneRuns.map(issueForRun).find(Boolean)
       ?? liveChatCalls.map(issueForCall).find(Boolean)
@@ -1392,7 +1385,7 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
     ) : [],
     issue: selectedOrchestration
       ? issues.find(issue => issue.id === selectedOrchestration.run.issueId && issue.projectId === project.id)
-      : roomIssue,
+      : buildIssue,
     activeRun: selectedRun ? {
       ...selectedRun,
       mission: safeOperationalText(selectedRun.mission, 700) ?? '',
@@ -1407,11 +1400,11 @@ liveBuildRoomRouter.get('/projects/:projectId/live-build-room', route(async (req
       stoppedReason: safeOperationalText(selectedRun.stoppedReason, 500),
       memberAgentIds: visibleSelectedMemberIds,
       currentMemberIndex: visibleCurrentMemberIndex,
-      memberRuns: memberRuns.map(safeRoomRun),
-      activities: currentRun ? safeRoomRun(currentRun).activities ?? [] : []
+      memberRuns: memberRuns.map(safeProjectBuildRun),
+      activities: currentRun ? safeProjectBuildRun(currentRun).activities ?? [] : []
     } : null,
     agentCards,
-    activity: roomRunActivity(currentRun?.activities),
+    activity: projectBuildRunActivity(currentRun?.activities),
     handoffs: handoffs.slice(0, 120),
     handoff: {
       from: agentName(previousAgentId) ?? 'Project brief',

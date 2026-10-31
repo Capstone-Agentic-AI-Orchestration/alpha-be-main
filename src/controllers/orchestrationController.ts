@@ -78,7 +78,7 @@ function errorResponse(res: Response, error: unknown): void {
 function authorizedProject(req: Request, res: Response, capability = 'squad.run'): boolean {
   if (!requireWorkspaceCapability(req, res, capability as 'squad.run' | 'deployment.manage')) return false;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return false;
-  if (!workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, req.params.projectId)) {
+  if (!workspaceRegistry.canAccessProjectBuilds(req.workspace!, req.params.projectId)) {
     res.status(404).json({ error: 'This project build is not available to this account.' });
     return false;
   }
@@ -96,13 +96,13 @@ function scopedSnapshot(req: Request, res: Response) {
 
 /**
  * The latest Orchestrator build status for each issue the caller can see, so
- * board cards can show build progress without loading every Live Build Room.
+ * board cards can show build progress without loading every project build snapshot.
  */
 orchestrationRouter.get('/issues/build-status', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   const projectIds = (await projectStore().list(req.workspace!.workspaceId))
     .map(project => project.id)
-    .filter(projectId => workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, projectId));
+    .filter(projectId => workspaceRegistry.canAccessProjectBuilds(req.workspace!, projectId));
   res.json(runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.listLatestIssueBuilds(projectIds)));
 }));
 
@@ -117,7 +117,7 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/plans', desk
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
-  if (!workspaceRegistry.canAccessLiveBuildRoom(req.workspace!, req.params.projectId)) {
+  if (!workspaceRegistry.canAccessProjectBuilds(req.workspace!, req.params.projectId)) {
     return res.status(404).json({ error: 'This project build is not available to this account.' });
   }
   const snapshot = scopedSnapshot(req, res);
@@ -255,7 +255,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/start', des
     return res.status(400).json({ error: 'expectedRevision must be a non-negative integer.' });
   }
   if (snapshot.run.status !== 'awaiting_plan_approval') {
-    return res.status(409).json({ error: 'This plan is no longer waiting to start. Refresh the Live Build Room to see its current state.' });
+    return res.status(409).json({ error: 'This plan is no longer waiting to start. Refresh the project build review to see its current state.' });
   }
   const taskOwners = [...new Set(snapshot.tasks.map(task => task.ownerAgentId))];
   const ownerVisibility = await Promise.all(taskOwners.map(agentId =>
@@ -313,7 +313,7 @@ orchestrationRouter.post('/projects/:projectId/planning-recoveries/:runId/inspec
     return res.status(404).json({ error: 'The interrupted planning reservation is no longer active.' });
   }
   if (reservation.ownerSessionId === orchestrationSessionId) {
-    return res.status(409).json({ error: 'This planner still belongs to the active Alpha session. Refresh the room after it finishes.' });
+    return res.status(409).json({ error: 'This planner still belongs to the active Alpha session. Refresh the build review after it finishes.' });
   }
   const project = await projectStore().get(workspaceId, req.params.projectId);
   if (!project) return res.status(404).json({ error: 'Project not found.' });
@@ -328,7 +328,7 @@ orchestrationRouter.post('/projects/:projectId/planning-recoveries/:runId/inspec
       projectId: project.id,
       reservation
     }));
-    if (!removed) return res.status(409).json({ error: 'The saved workspace changed during inspection. It was preserved; refresh the room to review it.' });
+    if (!removed) return res.status(409).json({ error: 'The saved workspace changed during inspection. It was preserved; refresh the build review to review it.' });
     const cleaned = runWithWorkspace(workspaceId, () => sqliteService.cleanOrchestrationPlanningReservation({
       projectId: project.id, runId: reservation.runId, reservation, actorId: req.workspace!.userId
     }));

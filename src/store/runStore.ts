@@ -24,7 +24,9 @@ export interface RunStore {
    * and dashboards use this: the logs are most of a run's size, and reading
    * them back for counts made every refresh download the whole history.
    */
-  listSummaries(workspaceId: string): Promise<PrototypeRun[]>;
+  listSummaries(workspaceId: string, projectId?: string): Promise<PrototypeRun[]>;
+  /** Project build runs, with only recent logs and activity. */
+  listProjectBuildDetails(workspaceId: string, runIds: string[]): Promise<PrototypeRun[]>;
   get(workspaceId: string, id: string): Promise<PrototypeRun | null>;
   /**
    * `ownerId` is the login a *new* row is recorded under, and is ignored when

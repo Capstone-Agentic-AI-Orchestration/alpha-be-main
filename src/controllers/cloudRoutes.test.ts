@@ -99,7 +99,7 @@ async function startCloudApi() {
   const { workspaceContext } = await import('./workspaceContext.js');
   const { workspaceRouter } = await import('./workspaceController.js');
   const { dataRouter } = await import('./dataController.js');
-  const { liveBuildRoomRouter } = await import('./liveBuildRoomController.js');
+  const { projectBuildSnapshotRouter } = await import('./projectBuildSnapshotController.js');
   const { orchestrationRouter } = await import('./orchestrationController.js');
   const { agentCallRouter } = await import('./agentCallController.js');
   const { runRouter, setRunTicketLifecycleRuntime } = await import('./runController.js');
@@ -128,7 +128,7 @@ async function startCloudApi() {
   });
   app.use('/api', workspaceContext);
   for (const router of [
-    workspaceRouter, dataRouter, liveBuildRoomRouter, orchestrationRouter, agentCallRouter, runRouter,
+    workspaceRouter, dataRouter, projectBuildSnapshotRouter, orchestrationRouter, agentCallRouter, runRouter,
     runtimeRouter, githubRouter, chatRouter, mcpRouter
   ]) {
     app.use('/api', router);
@@ -164,7 +164,6 @@ async function call(
 const STARTUP_READS = [
   '/api/workspaces', '/api/projects', '/api/issues', '/api/agents', '/api/squads', '/api/skills',
   '/api/runtimes', '/api/chat/threads', '/api/runs', '/api/squad-runs', '/api/analytics',
-  '/api/live-build-room/projects'
 ];
 
 /** Every route that needs the machine with the code and the agents on it. */
@@ -219,17 +218,17 @@ describe('the cloud, without SQLite', () => {
     }
   });
 
-  it('loads a project room from cloud stores without opening desktop SQLite', async () => {
+  it('loads a project build snapshot from cloud stores without opening desktop SQLite', async () => {
     session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
-    const created = await createOwnedProject(app, { name: 'Room project', key: 'ROOM' });
+    const created = await createOwnedProject(app, { name: 'Build project', key: 'BLD' });
     expect(created.status).toBe(201);
 
-    const room = await call(app, 'GET', `/api/projects/${created.body.id}/live-build-room`);
+    const snapshot = await call(app, 'GET', `/api/projects/${created.body.id}/build-snapshot`);
 
-    expect(room.status).toBe(200);
-    expect(room.body.project).toMatchObject({ id: created.body.id, name: 'Room project' });
-    expect(room.body.agentCards).toEqual([]);
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.body.project).toMatchObject({ id: created.body.id, name: 'Build project' });
+    expect(snapshot.body.agentCards).toEqual([]);
   });
 
   /** None, rather than a scan of Render's disk that finds none every time. */

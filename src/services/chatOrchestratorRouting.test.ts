@@ -457,7 +457,7 @@ describe('durable main-chat approvals', () => {
     const loaded = await specialistFixture();
     loaded.sqlite.createChatThread({ id: 'thread-1', title: 'Build', projectId: 'project-1', ownerId: 'user-1' } as any);
     const { workspaceRegistry } = await import('./workspaceRegistry.js');
-    vi.spyOn(workspaceRegistry, 'canAccessLiveBuildRoom').mockReturnValue(true);
+    vi.spyOn(workspaceRegistry, 'canAccessProjectBuilds').mockReturnValue(true);
     const snapshot = { run: { id: 'run-1', projectId: 'project-1', workspaceId: 'ws-default', originChatThreadId: 'thread-1', revision: 3, planVersion: 2, status: 'awaiting_plan_approval' }, tasks: [] } as any;
     const { SQLiteService } = await import('./sqliteService.js');
     vi.spyOn(SQLiteService.prototype, 'getOrchestrationSnapshot').mockReturnValue(snapshot);

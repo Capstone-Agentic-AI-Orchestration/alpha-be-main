@@ -20,7 +20,7 @@ import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
 import { mcpRouter } from './controllers/mcpController.js';
-import { liveBuildRoomRouter } from './controllers/liveBuildRoomController.js';
+import { projectBuildSnapshotRouter } from './controllers/projectBuildSnapshotController.js';
 import { orchestrationRouter } from './controllers/orchestrationController.js';
 import { projectRepoRouter } from './controllers/projectRepoController.js';
 import { hostingRouter } from './controllers/hostingController.js';
@@ -304,7 +304,7 @@ app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICK
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);
 app.use('/api', dataRouter);
-app.use('/api', liveBuildRoomRouter);
+app.use('/api', projectBuildSnapshotRouter);
 app.use('/api', orchestrationRouter);
 app.use('/api', projectRepoRouter);
 app.use('/api', hostingRouter);

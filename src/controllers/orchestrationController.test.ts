@@ -69,7 +69,7 @@ async function startApi(role = 'admin') {
     getOrchestrationPlanningRecoveryPreview: calls.preview
   }));
   vi.doMock('../services/workspaceService.js', () => ({ resolveProjectWorkspace: () => ({ dir: 'D:/alpha/repository' }) }));
-  vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessLiveBuildRoom: () => true } }));
+  vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessProjectBuilds: () => true } }));
   vi.doMock('../services/orchestrationRuntime.js', () => ({ orchestrationService: { approveAndPublish: calls.approveAndPublish } }));
   vi.doMock('../services/orchestrationDeliveryRuntime.js', () => ({
     orchestrationDeliveryService: { ensure: () => ({}), refresh: calls.deliveryRefresh },

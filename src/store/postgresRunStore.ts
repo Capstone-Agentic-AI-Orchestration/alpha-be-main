@@ -29,7 +29,9 @@ export class PostgresRunStore implements RunStore {
    * Logs are removed in the database, so they never cross the connection.
    * Each stage keeps its status and timing with an empty log list.
    */
-  async listSummaries(workspaceId: string): Promise<PrototypeRun[]> {
+  async listSummaries(workspaceId: string, projectId?: string): Promise<PrototypeRun[]> {
+    const projectScope = projectId ? 'and project_id = $2' : '';
+    const parameters = projectId ? [workspaceId, projectId] : [workspaceId];
     const { rows } = await this.sql.query<RunRow>(
       `select id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index,
          coalesce((
@@ -44,10 +46,66 @@ export class PostgresRunStore implements RunStore {
          branch_name, pr_url, changed_files, insertions, deletions, test_summary,
          squad_run_id, squad_order, input_tokens, output_tokens, cache_read_tokens,
          cache_creation_tokens, thinking_tokens, cost_usd, num_turns, created_at, updated_at
-       from prototype_runs where workspace_id = $1 order by created_at desc`,
-      [workspaceId]
+       from prototype_runs where workspace_id = $1 ${projectScope} order by created_at desc`,
+      parameters
     );
     return rows.map(row => ({ ...toRun(row), logsOmitted: true }));
+  }
+
+  /** Read only selected project build runs, trimming logs and activity before they cross the database connection. */
+  async listProjectBuildDetails(workspaceId: string, runIds: string[]): Promise<PrototypeRun[]> {
+    if (runIds.length === 0) return [];
+    const { rows } = await this.sql.query<RunRow>(
+      `select id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index,
+         coalesce((
+           select jsonb_agg(
+             case when jsonb_typeof(stage.value) = 'object' then
+               jsonb_set(
+                 jsonb_set(stage.value, '{description}', to_jsonb(left(coalesce(stage.value->>'description', ''), 360)), false),
+                 '{logs}', coalesce((
+                   select jsonb_agg(
+                     case when jsonb_typeof(recent_log.value) = 'string'
+                       then to_jsonb(left(recent_log.value #>> '{}', 500))
+                       else recent_log.value end
+                     order by recent_log.ordinality)
+                   from (
+                     select log.value, log.ordinality
+                     from jsonb_array_elements(
+                       case when jsonb_typeof(stage.value->'logs') = 'array' then stage.value->'logs' else '[]'::jsonb end
+                     ) with ordinality as log(value, ordinality)
+                     order by log.ordinality desc
+                     limit 8
+                   ) recent_log
+                 ), '[]'::jsonb), true)
+               else stage.value end
+             order by stage.ordinality)
+           from jsonb_array_elements(case when jsonb_typeof(stages) = 'array' then stages else '[]'::jsonb end)
+             with ordinality as stage(value, ordinality)
+         ), '[]'::jsonb) as stages,
+         coalesce((
+           select jsonb_agg(
+             case when jsonb_typeof(recent_activity.value) = 'object' then
+               jsonb_set(
+                 jsonb_set(recent_activity.value, '{message}', to_jsonb(left(coalesce(recent_activity.value->>'message', ''), 320)), false),
+                 '{detail}', to_jsonb(left(coalesce(recent_activity.value->>'detail', ''), 600)), false
+               )
+             else recent_activity.value end
+             order by recent_activity.ordinality)
+           from (
+             select activity.value, activity.ordinality
+             from jsonb_array_elements(case when jsonb_typeof(activities) = 'array' then activities else '[]'::jsonb end)
+               with ordinality as activity(value, ordinality)
+             order by activity.ordinality desc
+             limit 40
+           ) recent_activity
+         ), '[]'::jsonb) as activities,
+         branch_name, pr_url, changed_files, insertions, deletions, left(test_summary, 700) as test_summary,
+         squad_run_id, squad_order, input_tokens, output_tokens, cache_read_tokens,
+         cache_creation_tokens, thinking_tokens, cost_usd, num_turns, created_at, updated_at
+       from prototype_runs where workspace_id = $1 and id = any($2::text[])`,
+      [workspaceId, runIds]
+    );
+    return rows.map(toRun);
   }
 
   async get(workspaceId: string, id: string): Promise<PrototypeRun | null> {

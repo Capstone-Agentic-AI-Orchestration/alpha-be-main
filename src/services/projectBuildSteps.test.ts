@@ -16,7 +16,7 @@ async function startDaemon() {
 }
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-build-room-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-build-'));
   opened = [];
 });
 
@@ -29,7 +29,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('project build room configuration', () => {
+describe('project build configuration', () => {
   it('persists ordered project steps and keeps them inside the active workspace', async () => {
     const { svc, runWithWorkspace } = await startDaemon();
     const defaultProject = svc.createProject({ id: 'project-default', name: 'Default project', key: 'DEF' });

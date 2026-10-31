@@ -132,7 +132,7 @@ export function runToCloudRow(
   };
 }
 
-/** The squad-level run record as the shared room table stores it. */
+/** The squad-level run record as the shared project build table stores it. */
 export function squadRunToCloudRow(
   run: SquadRun,
   workspaceId: string,
@@ -729,7 +729,7 @@ export class SupabaseService {
     return save;
   }
 
-  /** Persist the parent squad run so the shared Live Build Room can reconstruct the sequence. */
+  /** Persist the parent squad run so the shared project build review can reconstruct the sequence. */
   saveSquadRunToCloud(run: SquadRun, workspaceId = currentWorkspaceId()): Promise<void> {
     if (!this.client) return Promise.resolve();
     const client = this.client;

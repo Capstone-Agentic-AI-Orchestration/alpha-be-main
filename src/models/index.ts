@@ -305,7 +305,7 @@ export type BuildStepPhase =
   | 'review'
   | 'delivery';
 
-/** An ordered, project-owned step displayed by the Live Build Room. */
+/** An ordered, project-owned step displayed by the project build review. */
 export interface ProjectBuildStep {
   id: string;
   projectId: string;
@@ -616,7 +616,7 @@ export type AgentCallActivityKind =
 
 export type AgentCallOrigin = 'agent_call' | 'chat_turn';
 
-/** A safe operational event for the project chat Live Build Room. */
+/** A safe operational event for project chat build review. */
 export interface AgentCallActivity {
   id: string;
   sequence: number;

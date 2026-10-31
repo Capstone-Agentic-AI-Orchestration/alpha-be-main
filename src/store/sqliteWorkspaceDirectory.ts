@@ -688,7 +688,7 @@ export class SqliteWorkspaceDirectory implements WorkspaceDirectory {
    *
    * Issues used to carry `assigned_squad_id` directly. Read-triggered and
    * idempotent, so an existing installation needs no destructive migration
-   * before the Live Build Room becomes useful. Desktop only: a cloud database
+   * before the project build review becomes useful. Desktop only: a cloud database
    * has no rows that predate the table.
    */
   private ensureLegacySquadProjectAssignments(): void {
