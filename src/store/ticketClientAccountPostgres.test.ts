@@ -19,6 +19,7 @@ import type { TicketClientIdentityProvider } from '../services/ticketClientIdent
 import type { TicketSubject } from './ticketCommandStore.js';
 import { createClientTicketInvitationSecretProtector } from '../ticketing/clientTicketSecrets.js';
 import { createTicketClientAccountRouter } from '../controllers/ticketClientAccountController.js';
+import { createTicketClientSessionRouter } from '../controllers/ticketClientSessionController.js';
 import type { Router } from 'express';
 
 vi.mock('../config/env.js', async original => ({ ...await original<typeof import('../config/env.js')>(), IS_CLOUD: true }));
@@ -110,6 +111,24 @@ function invoke(router: Router, method: 'get' | 'post', path: string, body?: unk
 }
 
 describe('client password account workflow on PostgreSQL', () => {
+  it('returns only the signed-in client verified contact name in the session response', async () => {
+    const setup = await app.begin(await invite());
+    const issue = await app.finish(setup.token, setup.csrf, { password: initialPassword });
+    const router = createTicketClientSessionRouter(sessions, { secure: true, allowedOrigins: [origin] });
+    const cookie = `__Secure-alpha_client_session=${issue.sessionCookieValue}`;
+    expect((await invoke(router, 'get', '/session', undefined, cookie)).body).toMatchObject({ authenticated: true, fullName: 'Test client' });
+    expect(await new PostgresTicketClientSessionStore(db).resolveClientName('another-user')).toBeNull();
+    await db.query(`update alpha_private.ticket_contacts set email_verified=false`);
+    const unverified = await invoke(router, 'get', '/session', undefined, cookie);
+    expect(unverified.body.authenticated).toBe(true);
+    expect(unverified.body).not.toHaveProperty('fullName');
+    await db.query(`update alpha_private.ticket_contacts set email_verified=true`);
+    await db.query(`update alpha_private.ticket_client_grants set active=false`);
+    const revoked = await invoke(router, 'get', '/session', undefined, cookie);
+    expect(revoked.body.authenticated).toBe(true);
+    expect(revoked.body).not.toHaveProperty('fullName');
+  }, 60000);
+
   it('preserves the inquiry, verifies the invitation, resumes setup, then signs into the same account', async () => {
     const link = await invite();
     const router = createTicketClientAccountRouter(app, { secure: true, allowedOrigins: [origin] },

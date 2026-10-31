@@ -16,6 +16,22 @@ function iso(value: Date | string): string {
 export class PostgresTicketClientSessionStore implements TicketClientSessionStore {
   constructor(private readonly db: TransactionalSql) {}
 
+  async resolveClientName(clientUserId: string): Promise<string | null> {
+    const { rows } = await this.db.query<{ full_name: string }>(
+      `select btrim(c.full_name) as full_name
+         from alpha_private.tickets t
+         join alpha_private.ticket_contacts c on c.workspace_id=t.workspace_id and c.id=t.contact_id
+        where t.client_user_id=$1 and c.email_verified and length(btrim(c.full_name)) between 1 and 200
+          and exists (select 1 from alpha_private.ticket_service_grants sg
+            where sg.workspace_id=t.workspace_id and sg.client_user_id=$1 and sg.status='active' and sg.revoked_at is null)
+          and exists (select 1 from alpha_private.ticket_client_grants cg
+            where cg.workspace_id=t.workspace_id and cg.ticket_id=t.id and cg.client_user_id=$1 and cg.active and cg.revoked_at is null)
+        order by t.created_at, t.id collate "C" limit 1`,
+      [clientUserId],
+    );
+    return rows[0]?.full_name ?? null;
+  }
+
   async resolveSession(sessionIdHash: string): Promise<TicketClientSessionRecord | null> {
     const { rows } = await this.db.query<{
       session_id_hash: string; client_user_id: string; csrf_hash: string;

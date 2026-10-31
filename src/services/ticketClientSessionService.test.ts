@@ -26,6 +26,7 @@ function fixture(activeGrant = true) {
   };
   const store = {
     resolveSession: vi.fn(async (id: string) => rows.get(id) ?? null),
+    resolveClientName: vi.fn(async () => '  Test client  '),
     transaction: vi.fn(async (work: (transaction: typeof tx) => Promise<unknown>) => work(tx)),
   } as unknown as TicketClientSessionStore;
   const verifier = { verifyCredential: vi.fn(async () => identity),
@@ -98,6 +99,20 @@ describe('client session application service', () => {
     f.advanceTime(issued!.expiresAt);
 
     await expect(f.service.authenticate(issued!.sessionCookieValue)).resolves.toEqual({ kind: 'unauthenticated' });
+  });
+
+  it('returns a bounded contact name and keeps display lookup failures separate from authentication', async () => {
+    const f = fixture();
+    const subject = { kind: 'client' as const, userId: identity.userId, sessionId: 'a'.repeat(64) };
+    await expect(f.service.nameFor(subject)).resolves.toBe('Test client');
+    expect(f.store.resolveClientName).toHaveBeenCalledWith(identity.userId);
+    vi.mocked(f.store.resolveClientName!).mockResolvedValueOnce('x'.repeat(201));
+    await expect(f.service.nameFor(subject)).resolves.toBeNull();
+    vi.mocked(f.store.resolveClientName!).mockRejectedValueOnce(new Error('profile lookup unavailable'));
+    await expect(f.service.nameFor(subject)).resolves.toBeNull();
+    vi.mocked(f.store.resolveClientName!).mockClear();
+    await expect(f.service.nameFor({ ...subject, sessionId: 'invalid' })).resolves.toBeNull();
+    expect(f.store.resolveClientName).not.toHaveBeenCalled();
   });
 
   it('revokes only the exact current client session and makes it unusable', async () => {
