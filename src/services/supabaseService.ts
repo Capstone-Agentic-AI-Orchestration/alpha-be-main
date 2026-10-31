@@ -158,6 +158,9 @@ export function squadRunToCloudRow(
 /** The events after which a run sends nothing more. */
 const TERMINAL_RUN_EVENTS = new Set(['run_completed', 'run_failed', 'run_cancelled']);
 
+/** What a run publishes to its Realtime channel. Raw log lines stay local. */
+type RunBroadcastEventType = 'stage_update' | 'run_activity' | 'run_completed' | 'run_failed' | 'run_cancelled';
+
 export class SupabaseService {
   private client: SupabaseClient | null = null;
   private initError: string | null = null;
@@ -665,7 +668,7 @@ export class SupabaseService {
   async broadcastRunEvent(
     runId: string,
     event: {
-      type: 'stage_update' | 'run_activity' | 'run_completed' | 'run_failed' | 'run_cancelled';
+      type: RunBroadcastEventType;
       payload: any;
     }
   ): Promise<void> {
