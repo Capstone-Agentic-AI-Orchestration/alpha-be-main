@@ -32,7 +32,7 @@ import { runVerification, type VerificationResult } from './verificationService.
 import { describeRepositoryExecution } from './repositoryExecution.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
-import { ALPHA_ORCHESTRATION_TRANSPORT_RETRIES, RUNS_DIR } from '../config/env.js';
+import { ALPHA_CLOUD_RUN_ACTIVITY, ALPHA_ORCHESTRATION_TRANSPORT_RETRIES, RUNS_DIR } from '../config/env.js';
 import { admitTicketExecution, stopTicketExecution, type TicketExecutionHandle } from './ticketExecutionRelay.js';
 import type { DeveloperTicketWorkContext } from '../ticketing/developerContext.js';
 import type { OrchestrationTaskPackage } from './orchestrationService.js';
@@ -1503,6 +1503,10 @@ ${issue.description}
     const updatedRun = { ...run, stages: updatedStages, updatedAt: new Date().toISOString() };
     sqliteService.savePrototypeRun(updatedRun);
     const eventPayload = { runId, stageId, message };
+    // Local only. The desktop shows these lines over its own socket, and the
+    // run row carries them to the cloud when the run ends. Sending each line to
+    // Supabase Realtime cost one REST call per line plus a copy to every
+    // subscriber.
     this.emit('log_chunk', eventPayload);
 
     this.appendActivity(runId, {
@@ -1514,10 +1518,6 @@ ${issue.description}
       toolName: activityOptions.toolName,
       detail: activityOptions.detail
     });
-
-    if (supabaseService.isConfigured()) {
-      supabaseService.broadcastRunEvent(runId, { type: 'log_chunk', payload: eventPayload }).catch(() => {});
-    }
   }
 
   /**
@@ -1585,7 +1585,8 @@ ${issue.description}
     const eventPayload = { runId, activity };
     this.emit('run_activity', eventPayload);
 
-    if (supabaseService.isConfigured()) {
+    // Live on the desktop always; to Supabase only when switched on (see ALPHA_CLOUD_RUN_ACTIVITY).
+    if (ALPHA_CLOUD_RUN_ACTIVITY && supabaseService.isConfigured()) {
       supabaseService.broadcastRunEvent(runId, { type: 'run_activity', payload: eventPayload }).catch(() => {});
     }
   }

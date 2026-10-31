@@ -425,6 +425,21 @@ export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 export const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 /**
+ * Send each run's activity feed to Supabase Realtime as it happens.
+ *
+ * Off unless set to `1`. The feed is one message per log line or tool call,
+ * plus a resend of the growing assistant message on every streamed delta,
+ * and it is most of what a run sends to Supabase. The desktop running the
+ * agent still shows it live over its local socket, and the whole feed reaches
+ * the cloud with the run's final event and saved row, so what turning it off
+ * costs is the step-by-step feed for someone watching a run live from the web.
+ *
+ * An installed desktop only sees this if `ALPHA_CLOUD_RUN_ACTIVITY` is in
+ * alpha-desktop's PUBLIC_SETTINGS when it is built.
+ */
+export const ALPHA_CLOUD_RUN_ACTIVITY = process.env.ALPHA_CLOUD_RUN_ACTIVITY === '1';
+
+/**
  * Where the desktop asks for its database token: the cloud API's base URL,
  * e.g. `https://alpha-fe-main.vercel.app/api`. Desktop only.
  *
