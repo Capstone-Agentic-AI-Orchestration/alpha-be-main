@@ -165,21 +165,36 @@ async function runHostingSetup(
 }
 
 /**
- * GitHub repository names allow letters, digits, '.', '_' and '-'. Rejecting
- * rather than silently rewriting: a repo whose name is not the one that was
- * typed is worse than an error explaining why.
+ * Repository names are lowercase.
+ *
+ * GitHub accepts any case, but the frontend's Vercel project takes the same
+ * name and Vercel refuses uppercase ("Project names ... must be lowercase"),
+ * so a repository called TestProject-fe was created on GitHub and then left
+ * unhosted. Case is the one thing rewritten here: GitHub names are
+ * case-insensitive, so testproject-fe is the same repository to anyone typing
+ * either, and the create form already shows the lowercase name as it is typed.
+ * Everything else that is wrong is refused with an explanation.
+ */
+export function normalizeRepoName(name: unknown): string {
+  return typeof name === 'string' ? name.trim().toLowerCase() : '';
+}
+
+/**
+ * Lowercase letters, digits, '.', '_' and '-': what both GitHub and Vercel
+ * accept. Vercel also refuses '---' anywhere in a project name.
  */
 function assertValidRepoName(name: string): void {
   const valid =
-    /^[A-Za-z0-9._-]{1,100}$/.test(name) &&
+    /^[a-z0-9._-]{1,100}$/.test(name) &&
     !name.startsWith('.') &&
     !name.startsWith('-') &&
+    !name.includes('---') &&
     name !== '.' &&
     name !== '..';
 
   if (!valid) {
     throw new Error(
-      `Invalid repository name "${name}". Use letters, numbers, dots, hyphens and underscores.`
+      `Invalid repository name "${name}". Use lowercase letters, numbers, dots, hyphens and underscores, without "---".`
     );
   }
 }
@@ -237,7 +252,6 @@ export async function createScaffoldedRepository(
 ): Promise<CreateScaffoldedRepoResult> {
   const {
     projectKey,
-    repoName,
     org,
     visibility = 'private',
     stack,
@@ -245,6 +259,7 @@ export async function createScaffoldedRepository(
     includeDocker = false,
     description
   } = input;
+  const repoName = normalizeRepoName(input.repoName);
 
   if (!org?.trim()) {
     throw new Error('An organization is required. Alpha does not create personal repositories.');
@@ -254,7 +269,7 @@ export async function createScaffoldedRepository(
   assertSafePathSegment(projectKey, 'project key');
   assertSafePathSegment(org.trim(), 'organization');
 
-  const serviceName = input.serviceName?.trim() || repoName;
+  const serviceName = normalizeRepoName(input.serviceName) || repoName;
   // Same resolver the clone path uses, so both land under one allowlisted root.
   // Only a desktop keeps a working copy.
   const workspaceDir = IS_DESKTOP ? (ensureWorkspacesRoot(), projectRepoPath(projectKey, repoName)) : undefined;
@@ -372,7 +387,7 @@ export async function createPairedProject(input: CreatePairedProjectInput): Prom
   }
 
   const { frontendStack: _fe, backendStack: _be, ...common } = input;
-  const base = input.repoName;
+  const base = normalizeRepoName(input.repoName);
   const be = await createScaffoldedRepository({
     ...common,
     repoName: `${base}-be`,
