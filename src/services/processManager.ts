@@ -4,6 +4,7 @@ import treeKill from 'tree-kill';
 import { sqliteService } from './sqliteService.js';
 import { logAudit, logInfo, logError } from '../utils/logger.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
+import { childProcessEnv } from './childProcessEnv.js';
 
 export type ProcessTerminationReason = 'cancelled' | 'timeout' | 'provider_error' | 'spawn_error';
 
@@ -109,7 +110,7 @@ export class ProcessManager {
 
     const child = crossSpawn(bin, args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: childProcessEnv(env),
       windowsHide: true,
       stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
     });

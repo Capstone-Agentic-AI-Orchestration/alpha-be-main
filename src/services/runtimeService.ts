@@ -6,6 +6,7 @@ import { RuntimeCatalogSource, RuntimeEngine } from '../models/index.js';
 import { sqliteService } from './sqliteService.js';
 import { enrichRuntimeUpdates } from './runtimeUpdateService.js';
 import { logInfo } from '../utils/logger.js';
+import { childProcessEnv } from './childProcessEnv.js';
 import { reconcileDetectedRuntimes } from './runtimeReconciliation.js';
 import {
   findClaude,
@@ -42,7 +43,7 @@ function runClosedStdin(
       // ENOENT/EINVAL even when the same command works in the user's shell.
       child = crossSpawn(bin, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: options.env ? { ...process.env, ...options.env } : process.env
+        env: childProcessEnv(options.env)
       });
     } catch {
       resolve({ ok: false, stdout: '', stderr: '', timedOut: false });
