@@ -259,6 +259,17 @@ describe('authenticated project proposals',()=>{
   const projects=await new PostgresClientProjectPortal(db).projects(proposalOwner);
   expect(JSON.stringify(projects)).toContain('New client project');
  });
+ it('enables an existing disabled client grant when a PM accepts a proposal',async()=>{
+  const {receipt}=await submitProposal();
+  await db.query(`insert into alpha_private.ticket_service_grants
+    (id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
+    values('preexisting-grant',$1,$2,'active','Client portal',false,'disabled')`,[workspaceA,proposalOwner.userId]);
+  const accepted=await app.accept(receipt.id,workspaceA,pmA,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000003'});
+  expect(accepted.workspaceId).toBe(workspaceA);
+  expect((await db.query(`select status,accepts_new_requests,write_mode,revoked_at
+    from alpha_private.ticket_service_grants where workspace_id=$1 and client_user_id=$2`,[workspaceA,proposalOwner.userId])).rows)
+    .toEqual([{status:'active',accepts_new_requests:false,write_mode:'enabled',revoked_at:null}]);
+ });
  it.each(['suspended','revoked'])('does not revive a %s grant or partially create a ticket',async(status)=>{
   const {receipt}=await submitProposal();
   await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name)

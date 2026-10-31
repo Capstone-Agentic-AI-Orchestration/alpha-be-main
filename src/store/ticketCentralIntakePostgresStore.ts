@@ -211,7 +211,26 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         const grant = await tx.query<{status:string;write_mode:string;revoked_at:Date|null}>(`select status,write_mode,revoked_at
           from alpha_private.ticket_service_grants where workspace_id=$1 and client_user_id=$2 for update`,
           [input.workspaceId,existing.client_user_id]);
-        if (grant.rows[0]?.status !== 'active' || grant.rows[0]?.write_mode !== 'enabled' || grant.rows[0]?.revoked_at != null) return 'client_access_unavailable';
+        const grantRow = grant.rows[0];
+        if (grantRow?.status !== 'active' || grantRow.revoked_at != null) return 'client_access_unavailable';
+        // Client activation provisions an active grant in disabled mode until a
+        // PM accepts a proposal or otherwise enables the client's ticket access.
+        // Acceptance is that explicit PM decision, so promote only this safe
+        // disabled state. Suspended, revoked, and maintenance grants remain
+        // unavailable and must be changed through their own access controls.
+        if (grantRow.write_mode === 'disabled') {
+          const enabled = await tx.query(
+            `update alpha_private.ticket_service_grants
+                set write_mode='enabled'
+              where workspace_id=$1 and client_user_id=$2
+                and status='active' and revoked_at is null and write_mode='disabled'
+              returning workspace_id`,
+            [input.workspaceId, existing.client_user_id],
+          );
+          if (enabled.rows.length !== 1) return 'client_access_unavailable';
+          grantRow.write_mode = 'enabled';
+        }
+        if (grantRow.write_mode !== 'enabled') return 'client_access_unavailable';
       }
       const contact = await tx.query<{ id: string }>(
         `insert into alpha_private.ticket_contacts
