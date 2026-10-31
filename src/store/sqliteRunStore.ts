@@ -1,7 +1,7 @@
 import type { PrototypeRun, RemoteAction, SquadRun } from '../models/index.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
-import type { RemoteActionInput, RunStore } from './runStore.js';
+import { summarizeRun, type RemoteActionInput, type RunStore } from './runStore.js';
 
 /**
  * Runs on the machine that produced them.
@@ -12,6 +12,11 @@ import type { RemoteActionInput, RunStore } from './runStore.js';
 export class SqliteRunStore implements RunStore {
   async list(workspaceId: string): Promise<PrototypeRun[]> {
     return runWithWorkspace(workspaceId, () => sqliteService.getPrototypeRuns());
+  }
+
+  /** Local, so nothing crosses the network; stripped for one list shape everywhere. */
+  async listSummaries(workspaceId: string): Promise<PrototypeRun[]> {
+    return (await this.list(workspaceId)).map(summarizeRun);
   }
 
   async get(workspaceId: string, id: string): Promise<PrototypeRun | null> {

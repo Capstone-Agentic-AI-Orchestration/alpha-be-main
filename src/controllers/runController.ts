@@ -79,9 +79,27 @@ async function scopedSquadRun(req: Request, res: Response, runId: string) {
 
 runRouter.get('/runs', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'deployment.read')) return;
-  const runs = (await runStore().list(req.workspace!.workspaceId))
+  // ?view=summary omits stage logs and activity; older clients still get full rows.
+  const summary = req.query.view === 'summary';
+  const store = runStore();
+  const all = summary
+    ? await store.listSummaries(req.workspace!.workspaceId)
+    : await store.list(req.workspace!.workspaceId);
+  const runs = all
     .filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId));
   res.json(runs);
+}));
+
+/** One run with its stage logs and activity, for the screen that opens it. */
+runRouter.get('/runs/:id', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'deployment.read')) return;
+  const run = await scopedRun(req, res, String(req.params.id));
+  if (!run) return;
+  if (!workspaceRegistry.canAccessProject(req.workspace!, run.projectId)) {
+    res.status(404).json({ error: 'Run not found' });
+    return;
+  }
+  res.json(run);
 }));
 
 runRouter.get('/analytics', route(async (req: Request, res: Response) => {
@@ -89,16 +107,22 @@ runRouter.get('/analytics', route(async (req: Request, res: Response) => {
   // Financial and token telemetry are intentionally not part of the product
   // contract. Persisted runner data may still contain it for migration, but
   // this endpoint exposes only workspace-scoped operational signals.
-  const allRuns = await runStore().list(req.workspace!.workspaceId);
-  const scopedRuns = allRuns.filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId));
+  // Summaries: counts and timings need no logs, and this is polled.
+  const allRuns = await runStore().listSummaries(req.workspace!.workspaceId);
+  const accessibleRuns = allRuns.filter(run => workspaceRegistry.canAccessProject(req.workspace!, run.projectId));
   const all = analyticsFrom(allRuns, await agentStore().list(req.workspace!.workspaceId)) as any;
+  const bucketMs = 3 * 60 * 60 * 1000;
+  const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+  // The 24-hour figures cover the last 24 hours; "total runs" stays all-time.
+  const scopedRuns = accessibleRuns.filter(run => {
+    const createdMs = Date.parse(run.createdAt);
+    return Number.isFinite(createdMs) && createdMs >= cutoffMs;
+  });
   const judged = scopedRuns.filter(run => ['completed', 'failed', 'cancelled', 'changes_requested'].includes(run.status));
   const completed = judged.filter(run => run.status === 'completed').length;
   const durations = scopedRuns
     .map(run => Date.parse(run.updatedAt) - Date.parse(run.createdAt))
     .filter(duration => Number.isFinite(duration) && duration >= 0);
-  const bucketMs = 3 * 60 * 60 * 1000;
-  const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
   const baseMs = Math.floor(cutoffMs / bucketMs) * bucketMs;
   const buckets = Array.from({ length: 8 }, (_, index) => ({
     hour: `${String(new Date(baseMs + index * bucketMs).getHours()).padStart(2, '0')}:00`,
@@ -113,11 +137,11 @@ runRouter.get('/analytics', route(async (req: Request, res: Response) => {
     if (run.status === 'completed') buckets[index].completed += 1;
     if (run.status === 'failed') buckets[index].failed += 1;
   }
-  const fullWorkspace = scopedRuns.length === allRuns.length;
+  const fullWorkspace = accessibleRuns.length === allRuns.length;
   res.json({
     totalRuns24h: scopedRuns.length,
     avgLatencyMs: durations.length ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length) : 0,
-    totalAgentRuns: scopedRuns.length,
+    totalAgentRuns: accessibleRuns.length,
     successRate: judged.length ? Math.round((completed / judged.length) * 1000) / 10 : 0,
     runTimeline: buckets,
     agentBreakdown: fullWorkspace

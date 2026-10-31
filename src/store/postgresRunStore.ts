@@ -25,6 +25,31 @@ export class PostgresRunStore implements RunStore {
     return rows.map(toRun);
   }
 
+  /**
+   * Logs are removed in the database, so they never cross the connection.
+   * Each stage keeps its status and timing with an empty log list.
+   */
+  async listSummaries(workspaceId: string): Promise<PrototypeRun[]> {
+    const { rows } = await this.sql.query<RunRow>(
+      `select id, issue_id, project_id, agent_id, status, scenario, plan, current_stage_index,
+         coalesce((
+           select jsonb_agg(
+             case when jsonb_typeof(stage.value) = 'object'
+               then jsonb_set(stage.value, '{logs}', '[]'::jsonb) else stage.value end
+             order by stage.ordinality)
+           from jsonb_array_elements(case when jsonb_typeof(stages) = 'array' then stages else '[]'::jsonb end)
+             with ordinality as stage(value, ordinality)
+         ), '[]'::jsonb) as stages,
+         '[]'::jsonb as activities,
+         branch_name, pr_url, changed_files, insertions, deletions, test_summary,
+         squad_run_id, squad_order, input_tokens, output_tokens, cache_read_tokens,
+         cache_creation_tokens, thinking_tokens, cost_usd, num_turns, created_at, updated_at
+       from prototype_runs where workspace_id = $1 order by created_at desc`,
+      [workspaceId]
+    );
+    return rows.map(row => ({ ...toRun(row), logsOmitted: true }));
+  }
+
   async get(workspaceId: string, id: string): Promise<PrototypeRun | null> {
     const { rows } = await this.sql.query<RunRow>(
       'select * from prototype_runs where workspace_id = $1 and id = $2',

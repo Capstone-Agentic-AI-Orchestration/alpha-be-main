@@ -514,6 +514,11 @@ export interface PrototypeRun {
   orchestrationRunId?: string;
   orchestrationTaskId?: string;
   orchestrationAttemptId?: string;
+  /**
+   * Set on list summaries, which omit stage logs and the activity feed. Open
+   * the run (GET /runs/:id) for the full record.
+   */
+  logsOmitted?: boolean;
   createdAt: string;
   updatedAt: string;
 }

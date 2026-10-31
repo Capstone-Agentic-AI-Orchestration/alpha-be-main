@@ -484,6 +484,72 @@ async function createOwnedProject(app: express.Express, input: Record<string, un
   return call(app, 'POST', '/api/projects', { ...input, leadAgentId: 'agent-research' }, headers);
 }
 
+describe('run reads that stay small', () => {
+  /**
+   * Lists, analytics and dashboards are polled. Reading every run's stage logs
+   * for them was nearly all of the database's outbound traffic; the logs now
+   * load only when one run is opened.
+   */
+  async function seedRuns() {
+    session = { login: 'PM1', role: 'pm' };
+    const app = await startCloudApi();
+    const project = (await createOwnedProject(app, { name: 'Checkout', key: 'CHK' })).body;
+    const issue = (await call(app, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id })).body;
+    const { PostgresRunStore } = await import('../store/postgresRunStore.js');
+    const { sqlFor } = await import('../store/testDatabase.js');
+    const store = new PostgresRunStore(sqlFor(db));
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const run = (id: string, createdAt: string, status: string) => ({
+      id, issueId: issue.id, projectId: project.id, agentId: 'agent-research', status, scenario: 'success',
+      plan: [], currentStageIndex: 0, createdAt, updatedAt: createdAt,
+      stages: [{ id: 'build', label: 'Build', description: '', status: 'success', logs: ['LOG-LINE-' + id] }],
+      activities: [{ id: 'a-' + id, sequence: 1, kind: 'status', message: 'ACTIVITY-' + id, createdAt }]
+    }) as any;
+    await store.save('ws-default', run('run-new', now, 'completed'), 'PM1');
+    await store.save('ws-default', run('run-old', old, 'failed'), 'PM1');
+    return app;
+  }
+
+  it('lists summaries without logs, and serves the full run on request', async () => {
+    const app = await seedRuns();
+
+    const summary = await call(app, 'GET', '/api/runs?view=summary');
+    expect(summary.status).toBe(200);
+    expect(summary.body.map((r: any) => r.id).sort()).toEqual(['run-new', 'run-old']);
+    expect(JSON.stringify(summary.body)).not.toMatch(/LOG-LINE|ACTIVITY-/);
+    expect(summary.body.every((r: any) => r.logsOmitted === true && r.stages[0].status === 'success')).toBe(true);
+
+    const full = await call(app, 'GET', '/api/runs');
+    expect(JSON.stringify(full.body)).toMatch(/LOG-LINE-run-new/);
+
+    const detail = await call(app, 'GET', '/api/runs/run-new');
+    expect(detail.status).toBe(200);
+    expect(detail.body.stages[0].logs).toEqual(['LOG-LINE-run-new']);
+    expect(detail.body.activities[0].message).toBe('ACTIVITY-run-new');
+    expect(detail.body.logsOmitted).toBeUndefined();
+
+    expect((await call(app, 'GET', '/api/runs/run-missing')).status).toBe(404);
+    expect((await call(app, 'GET', '/api/runs/run-new', undefined, { 'X-Workspace-Id': 'ws-nowhere' })).status).toBe(403);
+  });
+
+  it('keeps a client out of run details', async () => {
+    await seedRuns();
+    session = { login: 'Client1', role: 'client' };
+    const client = await startCloudApi();
+    const res = await call(client, 'GET', '/api/runs/run-new');
+    expect([403, 404]).toContain(res.status);
+    expect(JSON.stringify(res.body)).not.toMatch(/LOG-LINE/);
+  });
+
+  it('counts the last 24 hours in the 24-hour figures and all runs in the total', async () => {
+    const app = await seedRuns();
+    const res = await call(app, 'GET', '/api/analytics');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ totalRuns24h: 1, totalAgentRuns: 2, successRate: 100 });
+  });
+});
+
 describe('Orchestrator project build defaults', () => {
   beforeEach(() => { session = { login: 'PM1', role: 'pm' }; });
   it('creates a project with the Orchestrator as build lead and no squad assignment', async () => {
