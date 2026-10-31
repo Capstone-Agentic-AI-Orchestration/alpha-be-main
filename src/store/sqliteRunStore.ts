@@ -15,8 +15,22 @@ export class SqliteRunStore implements RunStore {
   }
 
   /** Local, so nothing crosses the network; stripped for one list shape everywhere. */
-  async listSummaries(workspaceId: string): Promise<PrototypeRun[]> {
-    return (await this.list(workspaceId)).map(summarizeRun);
+  async listSummaries(workspaceId: string, projectId?: string): Promise<PrototypeRun[]> {
+    return (await this.list(workspaceId))
+      .filter(run => !projectId || run.projectId === projectId)
+      .map(summarizeRun);
+  }
+
+  /** Keep the project build payload shape consistent with the cloud store. */
+  async listProjectBuildDetails(workspaceId: string, runIds: string[]): Promise<PrototypeRun[]> {
+    const wantedIds = new Set(runIds);
+    return (await this.list(workspaceId))
+      .filter(run => wantedIds.has(run.id))
+      .map(run => ({
+        ...run,
+        stages: (run.stages ?? []).map(stage => ({ ...stage, logs: (stage.logs ?? []).slice(-8) })),
+        activities: (run.activities ?? []).slice(-40)
+      }));
   }
 
   async get(workspaceId: string, id: string): Promise<PrototypeRun | null> {

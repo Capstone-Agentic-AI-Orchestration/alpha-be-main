@@ -751,7 +751,7 @@ dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async 
     reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The Orchestrator is unavailable in this desktop version. Update the app before starting a build.' });
 }));
 
-// --- Project Build Room ---
+// --- Project build data ---
 
 /**
  * A project's build steps.

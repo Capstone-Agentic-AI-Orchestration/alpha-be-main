@@ -9,7 +9,7 @@ vi.mock('./orchestrationDeliveryService.js', () => ({ OrchestrationDeliveryServi
 vi.mock('./identityService.js', () => ({ currentIdentity: async () => ({ source: 'github', login: state.user, role: state.role }) }));
 vi.mock('./alphaGitHubToken.js', () => ({ requiresSessionAuthentication: () => false, isSessionAuthenticated: () => true }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { resolve: async () => state.access ? ({ userId: state.user, workspaceId: 'ws', role: state.role }) : null,
-  can: (_role: string, capability: string) => capability === 'squad.read' || state.role === 'dev', canAccessLiveBuildRoom: () => state.access } }));
+  can: (_role: string, capability: string) => capability === 'squad.read' || state.role === 'dev', canAccessProjectBuilds: () => state.access } }));
 vi.mock('./githubApi.js', () => ({ tokenForThisRequest: state.token, githubApiWithToken: (token: string) => { state.withToken(token); return state.api; }, githubApi: () => state.api }));
 import { deliveryServiceForActor, startOrchestrationDeliveryMonitor } from './orchestrationDeliveryRuntime.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';

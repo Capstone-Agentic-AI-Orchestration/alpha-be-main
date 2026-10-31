@@ -101,7 +101,7 @@ export interface SendMessageParams {
    * When supplied, the thread is bound to that workspace.
    */
   workspaceId?: string;
-  /** Authenticated owner, supplied by the chat route for room activity links. */
+  /** Authenticated owner, supplied by the chat route for project build activity links. */
   userId?: string;
   /** Caller's role in that workspace, for role-gated chat behaviour. */
   workspaceRole?: WorkspaceRole;
@@ -491,7 +491,7 @@ export class ChatService extends EventEmitter {
         let result: string;
         try {
           if (!thread.projectId || thread.ownerId !== params.routing!.context.userId) throw new Error('This build is not available in this conversation.');
-          if (!workspaceRegistry.canAccessLiveBuildRoom(params.routing!.context, thread.projectId)) throw new Error('Your workspace role cannot access this build review.');
+          if (!workspaceRegistry.canAccessProjectBuilds(params.routing!.context, thread.projectId)) throw new Error('Your workspace role cannot access this build review.');
           const snapshot = decision
             ? runWithWorkspace(params.routing!.context.workspaceId, () => sqliteService.getOrchestrationSnapshot(decision.runId))
             : pendingDecisions[0];
@@ -740,7 +740,7 @@ export class ChatService extends EventEmitter {
           try {
             if (activityCallId) agentCallService.recordChatTurnHandoff(activityCallId, agentMessages.at(-1)!.senderName);
           } catch {
-            // A missing room event never blocks the next agent's chat turn.
+            // A missing activity event never blocks the next agent's chat turn.
           }
         }
       }

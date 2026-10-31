@@ -548,10 +548,10 @@ class WorkspaceRegistry {
     return this.listProjectSquadIds(context, projectId).filter(squadId => this.canAccessSquad(context, squadId));
   }
 
-  canAccessLiveBuildRoom(context: WorkspaceContext, projectId: string): boolean {
-    // The room observes project work, not only squad runs. A project with a
+  canAccessProjectBuilds(context: WorkspaceContext, projectId: string): boolean {
+    // Project build review covers project work, not only squad runs. A project with a
     // direct agent call (or no current squad assignment) still has a valid,
-    // project-scoped room; project access remains the authorization boundary.
+    // project-scoped build; project access remains the authorization boundary.
     return context.role !== 'client' && this.canAccessProject(context, projectId);
   }
 

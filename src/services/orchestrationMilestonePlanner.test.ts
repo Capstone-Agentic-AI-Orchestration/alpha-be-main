@@ -5,7 +5,7 @@ import { parseOrchestrationPlan } from './orchestrationContract.js';
 const mocks = vi.hoisted(() => ({
   resolve: vi.fn(), can: vi.fn(), access: vi.fn(), clean: vi.fn(), head: vi.fn(), file: vi.fn(), changed: vi.fn(), createPlan: vi.fn()
 }));
-vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { resolve: mocks.resolve, can: mocks.can, canAccessLiveBuildRoom: mocks.can, canAccessProjectAgentRun: mocks.access } }));
+vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { resolve: mocks.resolve, can: mocks.can, canAccessProjectBuilds: mocks.can, canAccessProjectAgentRun: mocks.access } }));
 vi.mock('./agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready' }) }));
 vi.mock('./personaService.js', () => ({ resolveAgent: (agent: any) => ({ ...agent, modelProvider: 'OpenAI', modelName: 'fixture' }) }));
 vi.mock('./projectBuildOrchestrator.js', () => ({ plannerModelName: () => 'fixture', repositoryPlanningContext: () => ({ context: 'Current source tree', scripts: ['test'] }) }));

@@ -56,7 +56,7 @@ export function startOrchestrationDeliveryMonitor(intervalMs = 60_000): () => vo
         if (stopped || ['superseded', 'uat_ready'].includes(record.stage) || (record.authorization?.actorId ?? record.ownerId) !== identity.login) continue;
         try {
           const context = await workspaceRegistry.resolve(identity.login, record.workspaceId, identity.role);
-          if (!context || !workspaceRegistry.can(context.role, 'squad.read') || !workspaceRegistry.canAccessLiveBuildRoom(context, record.projectId)) continue;
+          if (!context || !workspaceRegistry.can(context.role, 'squad.read') || !workspaceRegistry.canAccessProjectBuilds(context, record.projectId)) continue;
           const service = await deliveryServiceForActor(context);
           await service.refresh(record.workspaceId, record.runId);
           if (workspaceRegistry.can(context.role, 'squad.run')) await service.advanceAuthorized(context, record.runId);

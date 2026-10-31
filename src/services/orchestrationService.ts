@@ -480,10 +480,10 @@ export class OrchestrationService {
         return snapshot.run.currentTaskId ? snapshot : this.dispatchNextUnlocked(snapshot, input.actorId, undefined, input.now);
       }
       if (snapshot.run.status !== 'awaiting_plan_approval') {
-        throw new Error('This build plan is no longer waiting to start. Refresh the Live Build Room to see its current state.');
+        throw new Error('This build plan is no longer waiting to start. Refresh the project build review to see its current state.');
       }
       if (!Number.isSafeInteger(input.expectedRevision) || snapshot.run.revision !== input.expectedRevision) {
-        throw new Error('The build plan changed after you opened it. Refresh the Live Build Room before starting work.');
+        throw new Error('The build plan changed after you opened it. Refresh the project build review before starting work.');
       }
       const eligibleAgents = this.store.getAgents().filter(agent => !agent.isArchived);
       if (eligibleAgents.length) {

@@ -989,7 +989,7 @@ export class SQLiteService {
       /*
        * Durable recovery record for planner worktrees that could not be
        * safely retired. A human may explicitly keep the saved files and
-       * release repository admission; the record remains for room history.
+       * release repository admission; the record remains in build history.
        */
       CREATE TABLE IF NOT EXISTS orchestration_planning_recoveries (
         workspace_id TEXT NOT NULL,
@@ -2456,7 +2456,7 @@ export class SQLiteService {
     return remove();
   }
 
-  // --- Project Build Room ---
+  // --- Project build data ---
   getProjectBuildSteps(projectId: string): ProjectBuildStep[] {
     const workspaceId = this.workspaceId();
     const project = this.db
@@ -4267,14 +4267,14 @@ export class SQLiteService {
       if (!current || current.request_key !== input.reservation.requestKey ||
           current.request_fingerprint !== input.reservation.requestFingerprint ||
           (current.owner_session_id ?? null) !== input.reservation.ownerSessionId) {
-        throw new Error('The planning reservation changed during recovery. Refresh the room and inspect the active build.');
+        throw new Error('The planning reservation changed during recovery. Refresh the build review and inspect the active build.');
       }
       const reservation = this.db.prepare(`DELETE FROM orchestration_planning_reservations
         WHERE workspace_id = ? AND project_id = ? AND run_id = ? AND request_key = ?
           AND request_fingerprint = ? AND owner_session_id IS ?`)
         .run(workspaceId, input.projectId, input.runId, input.reservation.requestKey,
           input.reservation.requestFingerprint, input.reservation.ownerSessionId);
-      if (reservation.changes !== 1) throw new Error('The planning reservation changed during recovery. Refresh the room and inspect the active build.');
+      if (reservation.changes !== 1) throw new Error('The planning reservation changed during recovery. Refresh the build review and inspect the active build.');
       const prior = this.db.prepare(`SELECT state, revision FROM orchestration_planning_recoveries
         WHERE workspace_id = ? AND project_id = ? AND run_id = ?`)
         .get(workspaceId, input.projectId, input.runId) as { state: string; revision: number } | undefined;

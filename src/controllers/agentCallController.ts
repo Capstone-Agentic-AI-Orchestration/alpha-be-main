@@ -290,7 +290,7 @@ agentCallRouter.get('/agent-calls/:id/patch', desktopOnly, (req: Request, res: R
   if (!requireWorkspaceCapability(req, res, 'chat.read')) return;
   const call = getCallForCaller(req, res, req.params.id);
   if (!call) return;
-  // A room may show another teammate's operational activity, but proposed
+  // A project build review may show another teammate's operational activity, but proposed
   // patch contents stay with the chat owner, matching the private chat view.
   if (call.requestedBy !== req.workspace!.userId) {
     return res.status(404).json({ error: 'Patch not found for this caller.' });

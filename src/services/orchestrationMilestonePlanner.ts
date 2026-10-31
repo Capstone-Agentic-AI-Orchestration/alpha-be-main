@@ -19,7 +19,7 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
   return async (snapshot, milestone) => {
     const { run } = snapshot;
     const context = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
-    if (!context || !workspaceRegistry.can(context.role, 'squad.run') || !workspaceRegistry.canAccessLiveBuildRoom(context, run.projectId)) throw new Error('Project execution access is no longer available.');
+    if (!context || !workspaceRegistry.can(context.role, 'squad.run') || !workspaceRegistry.canAccessProjectBuilds(context, run.projectId)) throw new Error('Project execution access is no longer available.');
     const project = store.getProjects().find(item => item.id === run.projectId);
     if (!project) throw new Error('The milestone project is unavailable.');
     const runtimes = store.getRuntimes();
@@ -80,7 +80,7 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
     // Detect source changes while the model was thinking. Never activate a stale expansion.
     for (const [index, workspace] of workspaces.entries()) if (!await isGitWorkingTreeClean(workspace.worktreePath) || await getHeadCommit(workspace.worktreePath) !== checkpoints[index].commit) throw new Error('The repository checkpoint changed during milestone planning.');
     const refreshed = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
-    if (!refreshed || !workspaceRegistry.can(refreshed.role, 'squad.run') || !workspaceRegistry.canAccessLiveBuildRoom(refreshed, run.projectId)) throw new Error('Project execution access changed during milestone planning.');
+    if (!refreshed || !workspaceRegistry.can(refreshed.role, 'squad.run') || !workspaceRegistry.canAccessProjectBuilds(refreshed, run.projectId)) throw new Error('Project execution access changed during milestone planning.');
     for (const task of result.plan.tasks) if (!await workspaceRegistry.canAccessProjectAgentRun(refreshed, run.projectId, task.ownerAgentId)) throw new Error('A planned specialist is no longer authorized for this project.');
     const ids = new Map(result.plan.tasks.map(task => [task.id, `m${(run.plan.milestones?.findIndex(item => item.id === milestone.id) ?? -1) + 1}-${createHash('sha256').update(task.id).digest('hex').slice(0, 16)}`]));
     return { checkpoints, tasks: result.plan.tasks.map(task => ({ ...task, id: ids.get(task.id)!, milestoneId: milestone.id, dependsOn: task.dependsOn.map(id => ids.get(id)!) })) };

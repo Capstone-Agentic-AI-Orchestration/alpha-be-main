@@ -4,7 +4,7 @@ import type { SavedTicketReadiness } from './ticketTechnicalReadinessStore.js';
 import type { TicketFacts } from '../ticketing/workflow.js';
 
 export interface TicketDeliveryAssessmentCandidate {
-  /** Persisted immutable registration, never an arbitrary build-room artifact. */
+  /** Persisted immutable registration, never an arbitrary build artifact. */
   snapshot: TicketDeliverySnapshot;
   facts: TicketFacts;
   readiness: SavedTicketReadiness;

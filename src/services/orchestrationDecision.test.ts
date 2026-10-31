@@ -4,7 +4,7 @@ vi.mock('../config/env.js', () => ({ ALPHA_ORCHESTRATION_ENABLED: true }));
 vi.mock('./sqliteService.js', () => ({ sqliteService: { getOrchestrationSnapshot: () => mocks.snapshot,
   getOrchestrationPlans: () => [{ version: 2 }], listChatPendingDecisions: () => [mocks.snapshot] } }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: {
-  can: () => mocks.allowed, canAccessLiveBuildRoom: () => mocks.allowed,
+  can: () => mocks.allowed, canAccessProjectBuilds: () => mocks.allowed,
   canAccessProjectAgentRun: async () => mocks.visible
 } }));
 vi.mock('./orchestrationRuntime.js', () => ({ orchestrationService: { startPlannedWork: mocks.start, approveAndPublish: mocks.publish } }));
