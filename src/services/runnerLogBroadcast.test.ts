@@ -1,36 +1,36 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 /**
- * Raw log lines stay on the machine running the agent.
+ * What a run sends to Supabase Realtime while it works.
  *
- * Each line used to go to Supabase Realtime as well, one REST call per line
- * on top of the activity event that already carried it. The desktop shows the
- * lines over its local socket and the cloud gets them with the run row.
+ * Raw log lines never go: the desktop shows them over its local socket and
+ * the cloud gets them with the run row. The activity feed goes only when
+ * ALPHA_CLOUD_RUN_ACTIVITY is on, because it is one message per line on top
+ * of that, and the full feed reaches the cloud with the run's final event.
  */
 
 let tmp: string;
 let sqlite: any;
-let runner: any;
-let supabase: any;
-let runToCloudRow: any;
 
-beforeEach(async () => {
+async function load(cloudActivity: boolean) {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-run-log-'));
   process.env.ALPHA_HOME = tmp;
+  if (cloudActivity) process.env.ALPHA_CLOUD_RUN_ACTIVITY = '1';
+  else delete process.env.ALPHA_CLOUD_RUN_ACTIVITY;
   vi.resetModules();
   sqlite = (await import('./sqliteService.js')).sqliteService;
-  runner = (await import('./runnerService.js')).runnerService;
+  const runner = (await import('./runnerService.js')).runnerService;
   const cloud = await import('./supabaseService.js');
-  supabase = cloud.supabaseService;
-  runToCloudRow = cloud.runToCloudRow;
-});
+  return { runner, supabase: cloud.supabaseService, runToCloudRow: cloud.runToCloudRow };
+}
 
 afterEach(() => {
   try { sqlite?.close(); } catch { /* already closed */ }
   delete process.env.ALPHA_HOME;
+  delete process.env.ALPHA_CLOUD_RUN_ACTIVITY;
   vi.restoreAllMocks();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -54,25 +54,47 @@ function plantRunningRun() {
   });
 }
 
-describe('run log lines', () => {
-  it('stream to the local socket and stay off Supabase Realtime', () => {
-    plantRunningRun();
-    vi.spyOn(supabase, 'isConfigured').mockReturnValue(true);
-    const broadcast = vi.spyOn(supabase, 'broadcastRunEvent').mockResolvedValue(undefined);
-    const local: string[] = [];
-    runner.on('log_chunk', (event: { message: string }) => local.push(event.message));
+const lines = ['$ npm test (exit 0)', '[npm test] 12 passed', '[Tool Result] wrote src/index.ts'];
 
-    const lines = ['$ npm test (exit 0)', '[npm test] 12 passed', '[Tool Result] wrote src/index.ts'];
-    for (const line of lines) runner['appendLog']('run-log', 'tests', line);
+async function runLines(cloudActivity: boolean) {
+  const { runner, supabase, runToCloudRow } = await load(cloudActivity);
+  plantRunningRun();
+  vi.spyOn(supabase, 'isConfigured').mockReturnValue(true);
+  const broadcast = vi.spyOn(supabase, 'broadcastRunEvent').mockResolvedValue(undefined);
+  const local = { log_chunk: [] as string[], run_activity: [] as string[] };
+  runner.on('log_chunk', (event: { message: string }) => local.log_chunk.push(event.message));
+  runner.on('run_activity', (event: { activity: { message: string } }) => local.run_activity.push(event.activity.message));
 
-    expect(local).toEqual(lines);
-    const sent = broadcast.mock.calls.map(([, event]: any) => event.type);
-    expect(sent).not.toContain('log_chunk');
-    expect(sent).toEqual(['run_activity', 'run_activity', 'run_activity']);
+  for (const line of lines) runner['appendLog']('run-log', 'tests', line);
 
-    const saved = sqlite.getPrototypeRuns().find((run: any) => run.id === 'run-log');
+  const saved = sqlite.getPrototypeRuns().find((run: any) => run.id === 'run-log');
+  return {
+    local,
+    sent: broadcast.mock.calls.map(([, event]: any) => event.type),
+    saved,
+    cloudRow: runToCloudRow(saved, 'ws-1', 'dev-1') as any
+  };
+}
+
+describe('what a run sends to Supabase Realtime', () => {
+  it('sends neither log lines nor the activity feed by default', async () => {
+    const { local, sent, saved, cloudRow } = await runLines(false);
+
+    // The desktop still gets everything live.
+    expect(local.log_chunk).toEqual(lines);
+    expect(local.run_activity).toEqual(lines);
+    expect(sent).toEqual([]);
+
+    // And the cloud gets all of it with the run row.
     expect(saved.stages[0].logs).toEqual(lines);
-    // What the cloud row gets when the run ends: the same lines, in the stages column.
-    expect(runToCloudRow(saved, 'ws-1', 'dev-1').stages[0].logs).toEqual(lines);
+    expect(cloudRow.stages[0].logs).toEqual(lines);
+    expect(cloudRow.activities.map((a: any) => a.message)).toEqual(lines);
+  });
+
+  it('sends the activity feed, never log lines, when ALPHA_CLOUD_RUN_ACTIVITY is on', async () => {
+    const { local, sent } = await runLines(true);
+
+    expect(local.log_chunk).toEqual(lines);
+    expect(sent).toEqual(['run_activity', 'run_activity', 'run_activity']);
   });
 });

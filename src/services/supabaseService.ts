@@ -119,6 +119,9 @@ export function runToCloudRow(
     plan: run.plan ?? [],
     current_stage_index: run.currentStageIndex ?? 0,
     stages: run.stages ?? [],
+    // The activity feed is not streamed to the cloud by default
+    // (ALPHA_CLOUD_RUN_ACTIVITY), so the row is how a web viewer gets it.
+    activities: run.activities ?? [],
     branch_name: run.branchName ?? null,
     pr_url: run.prUrl ?? null,
     changed_files: run.changedFiles || 0,
@@ -158,7 +161,10 @@ export function squadRunToCloudRow(
 /** The events after which a run sends nothing more. */
 const TERMINAL_RUN_EVENTS = new Set(['run_completed', 'run_failed', 'run_cancelled']);
 
-/** What a run publishes to its Realtime channel. Raw log lines stay local. */
+/**
+ * What a run publishes to its Realtime channel. Raw log lines stay local, and
+ * the activity feed is sent only when ALPHA_CLOUD_RUN_ACTIVITY is on.
+ */
 type RunBroadcastEventType = 'stage_update' | 'run_activity' | 'run_completed' | 'run_failed' | 'run_cancelled';
 
 export class SupabaseService {
@@ -651,10 +657,11 @@ export class SupabaseService {
   }
 
   /**
-   * Broadcast a run's live stage transitions, activity and outcome to its channel.
+   * Broadcast a run's live stage transitions and outcome to its channel, and
+   * its activity feed when ALPHA_CLOUD_RUN_ACTIVITY is on.
    *
-   * Raw log lines are left out on purpose: the activity feed already carries
-   * each one, and the full log arrives with the run's final row.
+   * Raw log lines are left out on purpose: the full log, like the full
+   * activity feed, arrives with the run's final event and saved row.
    *
    * Private (see 0006): Realtime lets the message through only if this token's
    * login owns the run, and delivers it only to the owner and their overseers.
