@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathMatchesScope } from '../utils/pathScope.js';
-import { agentRoleContract, roleCanPlan } from './agentRoleContracts.js';
+import { agentRoleContract, roleCanOwnTask, roleCanPlan } from './agentRoleContracts.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { runCliTurn } from './cliRunner.js';
 import type { ProjectRoot } from './projectFiles.js';
@@ -20,6 +20,61 @@ import {
 
 const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', 'frontend', 'mobile']);
 const UNIVERSAL_SCOPE_PATTERNS = new Set(['*', '**', '**/*', '*.*']);
+
+/** Work that stores who a user is and how they sign in. */
+const ACCOUNT_WORK = /\b(?:sign[\s-]?up|sign[\s-]?in|log[\s-]?in|login|register|registration|authenticat\w*|accounts?|credentials?|passwords?)\b/i;
+/** Packages that give a backend somewhere durable to keep records. */
+const DATA_LAYER_PACKAGES = new Set([
+  'better-sqlite3', 'sqlite3', 'sqlite', '@libsql/client', 'pg', 'postgres', 'mysql', 'mysql2', 'mariadb', 'mssql', 'tedious', 'oracledb',
+  'mongodb', 'mongoose', 'redis', 'ioredis', 'prisma', 'drizzle-orm', 'typeorm', 'sequelize', 'knex', 'kysely', 'objection',
+  'lowdb', 'nedb', '@seald-io/nedb', 'firebase-admin', 'dynamoose'
+]);
+const DATA_LAYER_SCOPES = ['@prisma/', '@mikro-orm/', '@supabase/', '@neondatabase/', '@planetscale/', '@vercel/postgres', '@aws-sdk/client-dynamodb', '@google-cloud/firestore'];
+const DATA_LAYER_PATHS = ['prisma', 'migrations', 'drizzle', 'db/migrations', 'src/db', 'src/database', 'database'];
+
+/**
+ * Whether a checkout already has somewhere durable to store records. Unknown
+ * (no readable manifest) is treated as "has one", so the rule below only acts
+ * on a checkout it has positively seen to be empty.
+ */
+function repositoryHasDataLayer(directory: string): boolean {
+  let manifest: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+  try { manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8')); } catch { return true; }
+  const names = [...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.devDependencies ?? {})];
+  if (names.some(name => DATA_LAYER_PACKAGES.has(name) || DATA_LAYER_SCOPES.some(scope => name.startsWith(scope)))) return true;
+  return DATA_LAYER_PATHS.some(entry => fs.existsSync(path.join(directory, entry)));
+}
+
+/**
+ * Account work on a backend with no data layer needs a Database task first.
+ *
+ * Without one the Backend Agent may not create storage (Database owns schema)
+ * and may not keep credentials in memory, so its only correct move was to stop
+ * and ask the user for something the plan could have scheduled itself.
+ */
+function accountStorageIssue(plan: OrchestrationPlan, input: OrchestrationPlanningInput, roots: ProjectRoot[]): string | undefined {
+  const databaseOwner = input.eligibleAgents.some(agent => agent.ready !== false && roleCanOwnTask('database', agent.role));
+  if (!databaseOwner) return undefined;
+  const repositoryOf = (task: OrchestrationPlan['tasks'][number]) => (task.repository ?? roots[0]?.repo ?? '').toLowerCase();
+  const byId = new Map(plan.tasks.map(task => [task.id, task]));
+  const dependsOnDatabase = (task: OrchestrationPlan['tasks'][number], repository: string, seen = new Set<string>()): boolean =>
+    task.dependsOn.some(id => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      const dependency = byId.get(id);
+      if (!dependency) return false;
+      return (dependency.kind === 'database' && repositoryOf(dependency) === repository) || dependsOnDatabase(dependency, repository, seen);
+    });
+  for (const task of plan.tasks) {
+    if (task.kind !== 'backend' || !task.required) continue;
+    if (!ACCOUNT_WORK.test([task.title, task.description, ...task.acceptanceCriteria].join(' '))) continue;
+    const repository = repositoryOf(task);
+    const root = roots.find(item => item.repo.toLowerCase() === repository);
+    if (!root || repositoryHasDataLayer(root.dir) || dependsOnDatabase(task, repository)) continue;
+    return `Backend task ${task.id} stores accounts, but ${task.repository ?? root.repo} has no data layer. Add a required kind:"database" task owned by the Database agent in the same repository that sets up repository-local account storage (scope must include package.json and package-lock.json plus its data-layer paths), write its data-access contract into both tasks, and make ${task.id} depend on it.`;
+  }
+  return undefined;
+}
 const MAX_REPOSITORY_CONTEXT_CHARS = 16_000;
 const MAX_REPAIR_INPUT_CHARS = 12_000;
 const MAX_SEMANTIC_REPAIR_PLAN_CHARS = 32_000;
@@ -116,6 +171,7 @@ function plannerSystemPrompt(agent: PlannerAgentIdentity): string {
     'Security & Code Quality leads independent security/dependency audits; specialists may self-check their own work. You decide the audit scope and fix assignments. For dependency vulnerability remediation with missing audit evidence, assign one Security kind:audit baseline task per affected repository before code changes. Give it dependencyAudit:{scanner:"npm",purpose:"baseline",level:"low"} and no requiredChecks. For a direct plan include a required Security audit with purpose:"verification" after the implementation/review in each affected repository; functional validation follows that verification. Implementation must depend on its baseline audit, consume the findings, and create/update package-lock.json for reproducible final verification. A baseline-only first adaptive milestone is allowed; later milestones consume its accepted evidence and add remediation and final Security verification. Never ask a backend-only task to audit both repositories. This operation is a built-in capability, not an availableScripts entry. Do not invent shell access or support for other scanners. A specifically named unsupported CI scanner requires its actual report or a setup clarification.',
     'When required code work and an eligible independent reviewer are both available, include required read-only review per affected repository, owned by an agent who owns none of that code work. Each review depends on all required code tasks in its own repository; required functional validation in that repository follows the review. For dependency remediation combine the independent code review and final scan in ONE kind:"review" task with dependencyAudit:{scanner:"npm",purpose:"verification",level:"low"}; that task must return reviewFindings as well as auditEvidenceIds. The complete per-repository chain is kind:audit/purpose:baseline -> kind:backend or frontend (fixes and lockfile) -> kind:review/purpose:verification -> kind:validation. Do not use a standalone kind:audit task instead of the independent review after fixes. If no independent reviewer is available, leave semantic review to the existing human approval step.',
     'Use explicit dependencies and relative path scopes. Keep the plan within the stated goal and exclusions. Use only verification scripts listed in availableScripts. Code tasks need at least one configured check.',
+    'Durable data has an owner. When the goal needs data that must survive a restart (accounts, signup or login, sessions, saved records) and the backend repository shows no data layer (no database driver, ORM, schema or migrations), plan a required kind:"database" task owned by the eligible Database agent first, in that backend repository, and make every backend task that reads or writes that data depend on it. Never tell a specialist to stop and report missing persistence that another eligible specialist in this plan can provide. Unsafe stores stay forbidden: no plaintext passwords and no in-memory credential stores.',
     'Specialists see only their repository checkout and their task package. They cannot read the chat, Alpha issues, earlier builds, saved plans, or failure records. Never create a task to review, recover, or continue an earlier build, plan, issue, or failure, and never cite issue keys or saved records in task text. If the goal refers to earlier work, plan the concrete product changes it implies, writing all needed context into the task description, and let the specialist read the current code to see what already exists.',
     'Return one JSON object matching the supplied plan schema, with no prose around it. The application validates all ownership, role, dependency, requirement coverage, scope, build-step, and check rules before any task can start.'
   ].filter(Boolean).join('\n\n---\n\n');
@@ -153,6 +209,8 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
     'Base every task on what the repository files show. When a repository is marked as a starter scaffold or lacks the screens, endpoints, or clients the goal needs, plan to build them; never ask a specialist to improve, fix, or integrate with code that does not exist.',
     'Branch setup belongs to Alpha. Supplied branchContext is server-verified: the isolated branch already starts from its recorded base commit. Do not assign Git creation, switching, or base verification to specialists or make it a code acceptance criterion. Specialists use the provided branch evidence and implement only their scoped product work.',
     'When a frontend or mobile task calls an API that a backend task in this build creates or changes, write the contract into the plan: the exact method, path, request fields, and response fields, in both the backend task and the frontend task descriptions. Make the frontend task depend on that backend task. Specialists cannot see other repositories, so the contract in their task is all they know. If the build has no backend task and the frontend has no documented API, keep the frontend work to local state or a typed client for a contract you define in the task, and say which.',
+    'When you add a database task for a backend without a data layer: use repository-local SQLite through a maintained npm driver such as better-sqlite3, read the database file location from an environment variable with a local default, keep the database file out of Git, and include package.json and package-lock.json in its scope so it can add the driver and regenerate the lockfile. Write the data-access contract (module path, exported functions, record fields) into both the database task and every backend task that uses it. Say in the database task that a host without a persistent disk resets this file on redeploy; a hosted database needs credentials the user must supply, so do not plan one unless the request provides them.',
+    'For account work, tell the backend task to hash passwords with Node\'s built-in crypto.scrypt and a per-user random salt, compare hashes in constant time, and issue random opaque session tokens from crypto.randomBytes that are stored only as hashes. That needs no signing secret, so the specialist never has to invent a credential.',
     `Allowed enum values (these are schema rules, not plan fields): task.kind = ${orchestrationTaskKindSchema.options.join(', ')}; task.requiredChecks = ${orchestrationRequiredCheckSchema.options.join(', ')}. For each repository, choose requiredChecks only from that repository’s availableScripts list.`,
     'Optional task.dependencyAudit is {scanner:"npm",purpose:"baseline"|"verification"|"self-check",level:"low"|"moderate"|"high"|"critical"}. Independent baseline/verification belongs to Security audit/review tasks. Self-check belongs only to an implementation or validation task and cannot satisfy final Security assessment. The server starts with low severity; do not weaken it to evade findings.',
     'Every final Security dependency verification needs a committed npm lockfile. If its repository has no package-lock.json or npm-shrinkwrap.json, assign its implementation specialist to generate one and make verification depend on that task, even when the baseline found no vulnerabilities. Security must stay read-only.',
@@ -214,6 +272,7 @@ function semanticRepairInstructions(
     'Correct the proposed task plan so it passes the validation message below. This is the only semantic correction attempt.',
     'Make the smallest change that fixes the listed issue. Preserve the authorized goal, project rules, exclusions, requirements, required project steps, repository assignments, file scopes, and checks wherever they already comply. Do not add work or permissions beyond the request. Keep every assignment within the eligible agents and listed repositories. The application will validate the corrected plan again before starting any specialist.',
     `Validation message: ${validationError.message}`,
+    'If the validation message asks for a Database task, adding that task and its dependency is the requested correction. Keep it in the named repository, owned by the Database agent, with package.json and package-lock.json in its scope.',
     'For dependency remediation, preserve/add the optional task.dependencyAudit field with {scanner:"npm",purpose:"baseline"|"verification"|"self-check",level:"low"|"moderate"|"high"|"critical"}. In each repository use a Security kind:audit baseline, implementation depending on that baseline, a Security kind:review with purpose:verification depending on all implementation in that repository, then functional validation depending on that review. A kind:audit verification alone does not replace independent code review. Keep separate chains for separate repositories. Final verification cannot weaken the baseline threshold.',
     'Original planning constraints:',
     JSON.stringify(planningContext, null, 2),
@@ -324,6 +383,8 @@ function validatePlan(
         task.scope.includePaths.some(pattern => pathMatchesScope(file, pattern)) && !task.scope.excludePaths.some(pattern => pathMatchesScope(file, pattern))));
     if (!owner) throw new OrchestrationPlanningError(`Final Security verification for ${repository} requires a committed npm lockfile. Assign its implementation specialist a required scoped lockfile task before verification, including when its baseline is clean.`, 'invalid_plan');
   }
+  const storageIssue = accountStorageIssue(plan, input, roots);
+  if (storageIssue) throw new OrchestrationPlanningError(storageIssue, 'invalid_plan');
   const repositoryScripts = new Map((input.repositories ?? []).map(repository => [repository.repository.toLowerCase(), new Set(repository.availableScripts)]));
   const knownScripts = new Set(input.availableScripts);
   for (const task of plan.tasks) {
