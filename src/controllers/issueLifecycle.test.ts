@@ -77,7 +77,7 @@ async function startApi() {
 
 async function request(
   app: express.Express,
-  method: 'PUT' | 'POST',
+  method: 'PUT' | 'POST' | 'DELETE',
   url: string,
   body?: unknown
 ) {
@@ -133,6 +133,23 @@ function plantRun(svc: any, status: string) {
     updatedAt: now
   });
 }
+
+describe('POST /issues lifecycle guard', () => {
+  it('does not allow a task to be created directly in Building', async () => {
+    const { app, svc } = await startApi();
+    svc.createProject({ id: 'p1', name: 'Demo', key: 'DEMO' });
+
+    const res = await request(app, 'POST', '/api/issues', {
+      projectId: 'p1',
+      title: 'Run the build',
+      status: 'agent_running'
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('developer or admin starts');
+    expect(svc.getIssues()).toHaveLength(0);
+  });
+});
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-lifecycle-'));
@@ -250,5 +267,31 @@ describe('POST /issues/:id/complete', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toContain('must reach review');
     expect(svc.getIssues()[0].status).toBe('agent_running');
+  });
+});
+
+describe('DELETE /issues/:id', () => {
+  it('does not remove a task while its agent run is active', async () => {
+    const { svc, app } = await startApi();
+    plantIssue(svc);
+    plantRun(svc, 'running');
+
+    const res = await request(app, 'DELETE', '/api/issues/iss-1');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('active agent run');
+    expect(svc.getIssues()[0].id).toBe('iss-1');
+  });
+
+  it('removes a task after its run has stopped', async () => {
+    const { svc, app } = await startApi();
+    plantIssue(svc);
+    plantRun(svc, 'completed');
+
+    const res = await request(app, 'DELETE', '/api/issues/iss-1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(svc.getIssues()).toHaveLength(0);
   });
 });

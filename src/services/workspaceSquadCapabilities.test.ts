@@ -11,6 +11,16 @@ describe('workspace squad management capabilities', () => {
     expect(workspaceRegistry.can('pm', 'squad.manage')).toBe(false);
   });
 
+  it('keeps PMs in review mode for agents and Orchestrator runs', () => {
+    expect(workspaceRegistry.can('pm', 'agent.read')).toBe(true);
+    expect(workspaceRegistry.can('pm', 'squad.read')).toBe(true);
+    expect(workspaceRegistry.can('pm', 'agent.manage')).toBe(false);
+    expect(workspaceRegistry.can('pm', 'agent.run')).toBe(false);
+    expect(workspaceRegistry.can('pm', 'mcp.execute')).toBe(false);
+    expect(workspaceRegistry.can('pm', 'squad.run')).toBe(false);
+    expect(workspaceRegistry.can('pm', 'deployment.manage')).toBe(false);
+  });
+
   it('allows workspace administrators to manage squads', () => {
     expect(workspaceRegistry.can('admin', 'squad.manage')).toBe(true);
   });

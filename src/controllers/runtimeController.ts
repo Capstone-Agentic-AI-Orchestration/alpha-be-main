@@ -4,6 +4,7 @@ import { IS_CLOUD } from '../config/env.js';
 import { machineRuntimes } from '../services/machineRuntimes.js';
 import { requireWorkspaceCapability } from './workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
+import { workspaceRegistry } from '../services/workspaceRegistry.js';
 
 export const runtimeRouter = Router();
 
@@ -14,10 +15,16 @@ runtimeRouter.get('/runtimes', (req: Request, res: Response) => {
   if (cached.length > 0 || IS_CLOUD) {
     return res.json(cached);
   }
+  // Runtime discovery is an execution-side capability. A PM may inspect a
+  // cached catalog, but an empty catalog must not trigger a host scan.
+  if (!workspaceRegistry.can(req.workspace!.role, 'agent.run')) {
+    return res.json([]);
+  }
   runtimeRefreshService.refresh(true).then(r => res.json(r)).catch(err => res.status(500).json({ error: err.message }));
 });
 
 runtimeRouter.post('/runtimes/scan', desktopOnly, async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
   try {
     const runtimes = await runtimeRefreshService.refresh(true);
     res.json(runtimes);
@@ -27,6 +34,7 @@ runtimeRouter.post('/runtimes/scan', desktopOnly, async (req: Request, res: Resp
 });
 
 runtimeRouter.post('/runtimes/:id/refresh', desktopOnly, async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
   try {
     const runtime = await runtimeRefreshService.refreshOne(req.params.id);
     res.json(runtime);

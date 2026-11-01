@@ -531,7 +531,7 @@ describe('the cloud roster routes', () => {
     expect(rows[0]).toMatchObject({ name: 'Senior Reviewer', workspace_id: 'ws-default' });
   });
 
-  it('lets a project manager staff an agent for the workspace', async () => {
+  it('keeps agent staffing out of the PM review role', async () => {
     session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();
 
@@ -553,8 +553,8 @@ describe('the cloud roster routes', () => {
       createdAt: new Date().toISOString()
     });
 
-    expect(created.status).toBe(201);
-    expect(created.body).toMatchObject({ name: 'Project Reviewer', owner: 'PM1' });
+    expect(created.status).toBe(403);
+    expect(created.body.error).toContain('agent manage');
   });
 
   /**

@@ -149,19 +149,13 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'issue.manage',
     'ticket.manage',
     'agent.read',
-    // A PM staffs the agents used by the projects they initiate.
-    'agent.manage',
+    // PMs can inspect agents and build evidence, but developers/admins own
+    // agent configuration, runtime access, and Orchestrator execution.
     'mcp.read',
-    'mcp.manage',
-    'mcp.execute',
-    'agent.run',
     'squad.read',
-    'squad.run',
     'chat.read',
     'chat.write',
     'deployment.read',
-    'deployment.env_preview',
-    'deployment.manage',
     'analytics.read',
     'workspace.manage_settings',
     'workspace.bind_local'
