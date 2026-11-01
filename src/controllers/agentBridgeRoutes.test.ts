@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const CAN: Record<string, string[]> = {
   'deployment.read': ['dev', 'pm', 'admin'],
-  'deployment.manage': ['pm', 'admin']
+  'deployment.manage': ['admin']
 };
 
 async function startApi(options: { role?: string; cloud?: boolean } = {}) {

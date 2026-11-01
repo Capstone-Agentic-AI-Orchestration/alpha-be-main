@@ -481,6 +481,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     const override = parseChatOverride(content).override;
     const forcedBuild = intent === 'build' || override === 'build';
     const answerOnly = intent === 'ask' || override === 'ask';
+    if (forcedBuild && !workspaceRegistry.can(req.workspace!.role, 'agent.run')) {
+      return res.status(403).json({ error: 'Your workspace role cannot start builds. Ask a developer or admin to run this task.' });
+    }
     const buildRequest = isInternal && forcedBuild
       ? { context: req.workspace!, repositories: requestedRepositories, issueId: issueId || undefined }
       : undefined;

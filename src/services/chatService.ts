@@ -565,6 +565,9 @@ export class ChatService extends EventEmitter {
     }
 
     if (params.buildRequest) {
+      if (!workspaceRegistry.can(params.buildRequest.context.role, 'agent.run')) {
+        throw new ChatRouteError('Your workspace role cannot start builds. Ask a developer or admin to run this task.', 403);
+      }
       return this.startChatBuild({
         threadId, thread, userMessage,
         context: params.buildRequest.context,
@@ -1026,7 +1029,7 @@ export class ChatService extends EventEmitter {
       if (!reply.content) {
         reply.content = routing.answerOnly
           ? 'I did not start a build. Send the message without /ask if you want me to plan this change.'
-          : 'This sounds like a product change, but your workspace role cannot start builds. Ask a project manager to update your access.';
+          : 'This sounds like a product change, but your workspace role cannot start builds. Ask a developer or admin to run this task.';
       }
       return null;
     }
@@ -1117,7 +1120,7 @@ export class ChatService extends EventEmitter {
 
     if (input.action === 'build') {
       if (!input.routing.canBuild) {
-        throw new ChatRouteError('Your workspace role cannot start builds. Ask a project manager to update your access.', 403);
+        throw new ChatRouteError('Your workspace role cannot start builds. Ask a developer or admin to run this task.', 403);
       }
       if (!thread.projectId) throw new ChatRouteError('Choose a project for this conversation before planning a build.', 409);
       const proposal = proposals.at(-1)?.routeProposal;

@@ -23,8 +23,8 @@ const project = {
 /** The deployment capabilities as `workspaceRegistry` grants them. */
 const CAN: Record<string, string[]> = {
   'deployment.read': ['dev', 'pm', 'admin'],
-  'deployment.manage': ['pm', 'admin'],
-  'deployment.env_preview': ['dev', 'pm', 'admin']
+  'deployment.manage': ['admin'],
+  'deployment.env_preview': ['dev', 'admin']
 };
 
 interface Options {
@@ -168,7 +168,7 @@ describe('in the cloud, from a project page', () => {
     ]);
   });
 
-  it('keeps setting up hosting to a project manager or admin', async () => {
+  it('keeps setting up hosting out of a developer role', async () => {
     const { app, calls } = await startApi({ cloud: true, role: 'dev' });
 
     const res = await call(app, 'POST', projectRoute);
@@ -177,7 +177,7 @@ describe('in the cloud, from a project page', () => {
     expect(calls.some(c => c.kind === 'setup')).toBe(false);
   });
 
-  it.each(['pm', 'admin'])('sets up hosting for a %s', async role => {
+  it.each(['admin'])('sets up hosting for a %s', async role => {
     const { app, calls } = await startApi({ cloud: true, role });
 
     expect((await call(app, 'POST', projectRoute)).status).toBe(200);
@@ -202,7 +202,7 @@ describe('in the cloud, from a project page', () => {
 
 describe('in the cloud, by repository', () => {
   it('refuses a repository outside the organization, without asking GitHub', async () => {
-    const { app, calls } = await startApi({ cloud: true });
+    const { app, calls } = await startApi({ cloud: true, role: 'admin' });
 
     const res = await call(app, 'POST', '/api/hosting/someone-else/shop-fe', { stack: 'react' });
 
@@ -247,8 +247,8 @@ describe('on a desktop', () => {
     ]);
   });
 
-  it('forwards a set-up with the hints in the body and room to finish', async () => {
-    const { app, calls } = await startApi({ role: 'pm' });
+  it('forwards an admin set-up with the hints in the body and room to finish', async () => {
+    const { app, calls } = await startApi({ role: 'admin' });
 
     await call(app, 'POST', projectRoute);
 
@@ -265,7 +265,7 @@ describe('on a desktop', () => {
   });
 
   it('never runs hosting itself', async () => {
-    const { app, calls } = await startApi({ role: 'pm' });
+    const { app, calls } = await startApi({ role: 'admin' });
 
     await call(app, 'POST', projectRoute);
 
@@ -352,7 +352,7 @@ describe('hosting variables', () => {
   });
 
   /** Production is a release decision. */
-  it('keeps production to a project manager or admin', async () => {
+  it('keeps production changes to an admin', async () => {
     const { app, calls } = await startApi({ cloud: true, role: 'dev' });
 
     expect((await call(app, 'PUT', `${projectRoute}/env`, { environment: 'main', vars })).status).toBe(403);
@@ -360,14 +360,13 @@ describe('hosting variables', () => {
     expect(calls.some(c => c.kind === 'env_set' || c.kind === 'env_delete')).toBe(false);
   });
 
-  it('lets a project manager change production', async () => {
+  it('keeps a project manager from changing production', async () => {
     const { app, calls } = await startApi({ cloud: true, role: 'pm' });
 
-    await call(app, 'DELETE', `${projectRoute}/env?environment=main&key=STRIPE_KEY`);
+    const res = await call(app, 'DELETE', `${projectRoute}/env?environment=main&key=STRIPE_KEY`);
 
-    expect(calls.filter(c => c.kind === 'env_delete')).toEqual([
-      { kind: 'env_delete', repo: `${ORG}/shop-fe`, environment: 'main', key: 'STRIPE_KEY' }
-    ]);
+    expect(res.status).toBe(403);
+    expect(calls.filter(c => c.kind === 'env_delete')).toEqual([]);
   });
 
   it('keeps a client out entirely', async () => {

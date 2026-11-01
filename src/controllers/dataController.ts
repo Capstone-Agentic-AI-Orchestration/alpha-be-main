@@ -1199,6 +1199,11 @@ dataRouter.post('/issues', route(async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'A project is required for a task in this workspace.' });
   }
   if (!requireProjectWorkspace(req, res, rest.projectId)) return;
+  if (rest.status === 'agent_running') {
+    return res.status(409).json({
+      error: 'Tasks enter Building only when a developer or admin starts an Orchestrator build.'
+    });
+  }
   const workspaceId = req.workspace!.workspaceId;
   const draft = { status: 'todo', priority: 'medium', labels: [], ...rest, createdBy: rest.createdBy || identity.login } as Issue;
 
@@ -1355,6 +1360,12 @@ dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   const issue = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!issue) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
+  const activeRun = await activeRunForIssue(req.workspace!.workspaceId, issue.id);
+  if (activeRun) {
+    return res.status(409).json({
+      error: 'This task has an active agent run; wait for it to stop before removing the task.'
+    });
+  }
   const deleted = await issueStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) {
     await workspaceRegistry.unbind('issues', req.params.id);
