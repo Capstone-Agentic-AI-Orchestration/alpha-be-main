@@ -87,7 +87,11 @@ beforeEach(async () => {
     getHeadCommit: async () => 'a'.repeat(40),
     remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => true }));
   vi.doMock('./githubService.js', () => ({ githubService: {} }));
-  vi.doMock('./verificationService.js', () => ({ runVerification: verify }));
+  vi.doMock('./verificationService.js', () => ({
+    runVerification: verify,
+    shouldRunRepositoryVerification: (kind?: string, checks: readonly string[] = []) =>
+      checks.length > 0 || !['requirements', 'architecture', 'audit', 'review', 'delivery'].includes(kind ?? '')
+  }));
   vi.doMock('./agentReadiness.js', () => ({ agentReadiness: () => ({ status: 'ready' }) }));
   vi.doMock('./personaService.js', () => ({
     resolveAgent: (input: any) => ({ systemPrompt: input.systemPrompt || '' }),

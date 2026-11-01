@@ -35,6 +35,22 @@ export interface VerificationResult {
   summary: string;
 }
 
+/**
+ * Planning and read-only report tasks must not be blocked by an unrelated
+ * repository test suite. They do not own implementation files, so implicit
+ * discovery of `test`, `typecheck`, or `lint` is both noisy and impossible for
+ * the assigned specialist to repair. An explicitly assigned check still wins.
+ */
+const REPORT_ONLY_TASK_KINDS = new Set(['requirements', 'architecture', 'audit', 'review', 'delivery']);
+
+export function shouldRunRepositoryVerification(
+  taskKind?: string,
+  requiredScripts: readonly string[] = []
+): boolean {
+  if (requiredScripts.length > 0) return true;
+  return !taskKind || !REPORT_ONLY_TASK_KINDS.has(taskKind);
+}
+
 function dependencyInstallCommand(cwd: string, manifest: PackageManifest): VerificationCommand | undefined {
   const hasDependencies = [manifest.dependencies, manifest.devDependencies].some(value =>
     Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length)

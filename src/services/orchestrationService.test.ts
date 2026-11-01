@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SQLiteService } from './sqliteService.js';
 import { parseOrchestrationPlan } from './orchestrationContract.js';
-import { OrchestrationService, type OrchestrationExecutor, type OrchestrationLaunchRequest } from './orchestrationService.js';
+import { OrchestrationService, repairGuidanceForFailure, type OrchestrationExecutor, type OrchestrationLaunchRequest } from './orchestrationService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 
 const plan = parseOrchestrationPlan({
@@ -55,6 +55,16 @@ describe('deterministic orchestration orchestrator', () => {
     store = undefined;
     if (directory) fs.rmSync(directory, { recursive: true, force: true });
     directory = '';
+  });
+
+  it('turns common dependency failures into bounded repair guidance', () => {
+    const guidance = repairGuidanceForFailure(
+      'FAIL tests/unit/App.spec.tsx\nIncompatible React versions: react and react-dom must match exactly.'
+    );
+
+    expect(guidance).toContain('align react, react-dom, and react-test-renderer');
+    expect(guidance).toContain('Do not skip or weaken the test');
+    expect(guidance).toContain('Incompatible React versions');
   });
 
   it('runs only the next task owner and waits for acceptance before dispatching dependent work', async () => {
