@@ -275,3 +275,55 @@ describe('read-only orchestration planner', () => {
     await expect(planner.createPlan(input)).rejects.toMatchObject({ code: 'invalid_scope' });
   });
 });
+
+describe('account storage before account APIs', () => {
+  const requirements = [{ id: 'REQ-AUTH', description: 'Users can sign up and log in.' }];
+  const auth = {
+    id: 'backend-auth', title: 'Implement signup and login API',
+    description: 'Implement POST /api/auth/signup and POST /api/auth/login with hashed passwords.', kind: 'backend',
+    ownerAgentId: 'backend-agent', repository: 'acme/api', dependsOn: [] as string[], requirementIds: ['REQ-AUTH'],
+    acceptanceCriteria: ['Accounts persist and passwords are never stored in plaintext.'], requiredChecks: ['test'],
+    scope: { includePaths: ['src/**', 'tests/**'], excludePaths: [] }, required: true
+  };
+  const store = {
+    id: 'account-store', title: 'Set up account storage',
+    description: 'Add repository-local SQLite account storage exposing createUser and findUserByEmail.', kind: 'database',
+    ownerAgentId: 'database-agent', repository: 'acme/api', dependsOn: [] as string[], requirementIds: ['REQ-AUTH'],
+    acceptanceCriteria: ['Accounts survive a restart.'], requiredChecks: ['test'],
+    scope: { includePaths: ['src/db/**', 'tests/**', 'package.json', 'package-lock.json'], excludePaths: [] }, required: true
+  };
+  const proposed = { schemaVersion: 1, goal: 'Add signup and login.', requirements, tasks: [auth] };
+  const corrected = { ...proposed, tasks: [store, { ...auth, dependsOn: ['account-store'] }] };
+  const agents = [{ id: 'backend-agent', role: 'Backend Agent' }, { id: 'database-agent', role: 'Database Agent' }] as const;
+
+  async function planFor(manifest: object, eligibleAgents: readonly { id: string; role: string }[] = agents) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-account-plan-'));
+    try {
+      fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify(manifest));
+      let calls = 0;
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(++calls === 1 ? proposed : corrected)));
+      const result = await new OrchestrationPlanner(turn).createPlan({ ...input, cwd: directory, goal: proposed.goal, exclusions: [], buildSteps: [],
+        repositories: [{ repository: 'acme/api', repositoryContext: 'Express starter scaffold.', availableScripts: ['test'] }],
+        repositoryRoots: [{ name: 'api', repo: 'acme/api', dir: directory }], eligibleAgents: eligibleAgents as any });
+      return { turn, result };
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  }
+
+  it('has the Orchestrator schedule the Database agent first when the backend has nowhere to keep accounts', async () => {
+    const { turn, result } = await planFor({ name: 'api', dependencies: { express: '^4.21.2', cors: '^2.8.5' } });
+    expect(turn).toHaveBeenCalledTimes(2);
+    expect(turn.mock.calls[1][0].prompt).toContain('has no data layer');
+    expect(result.plan.tasks.find(task => task.id === 'backend-auth')?.dependsOn).toEqual(['account-store']);
+  });
+
+  it('leaves a backend that already has a database driver alone', async () => {
+    const { turn, result } = await planFor({ name: 'api', dependencies: { express: '^4.21.2', pg: '^8.13.0' } });
+    expect(turn).toHaveBeenCalledTimes(1);
+    expect(result.plan.tasks.map(task => task.id)).toEqual(['backend-auth']);
+  });
+
+  it('does not ask for a Database task the team cannot staff', async () => {
+    const { turn } = await planFor({ name: 'api', dependencies: { express: '^4.21.2' } }, [agents[0]]);
+    expect(turn).toHaveBeenCalledTimes(1);
+  });
+});
