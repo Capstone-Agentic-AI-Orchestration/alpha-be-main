@@ -10,7 +10,7 @@ vi.mock('./processManager.js', () => ({
   processManager: { spawnProcess }
 }));
 
-import { discoverVerificationCommands, runVerification } from './verificationService.js';
+import { discoverVerificationCommands, runVerification, shouldRunRepositoryVerification } from './verificationService.js';
 
 const tempDirectories: string[] = [];
 
@@ -29,6 +29,19 @@ afterEach(() => {
 });
 
 describe('verificationService', () => {
+  it('does not run implicit repository checks for report-only tasks', () => {
+    expect(shouldRunRepositoryVerification('requirements')).toBe(false);
+    expect(shouldRunRepositoryVerification('architecture')).toBe(false);
+    expect(shouldRunRepositoryVerification('review')).toBe(false);
+    expect(shouldRunRepositoryVerification('delivery')).toBe(false);
+    expect(shouldRunRepositoryVerification('frontend')).toBe(true);
+    expect(shouldRunRepositoryVerification('validation')).toBe(true);
+  });
+
+  it('honors an explicitly assigned check even for a report-only task', () => {
+    expect(shouldRunRepositoryVerification('requirements', ['test'])).toBe(true);
+  });
+
   it('prefers one repository-owned combined verification script', () => {
     const cwd = fixture({
       verify: 'npm run test && npm run typecheck',

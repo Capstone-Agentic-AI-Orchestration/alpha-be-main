@@ -86,6 +86,28 @@ const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', '
 const NON_REPAIRABLE_AGENT_FAILURE = /\b(?:provider|429|rate.?limit|quota|network|connection|timed? ?out|credential|authentication|permission|access denied|eacces|eperm|enoent|eio|worktree|working tree|branch|checkpoint|workspace|runtime|not ready|executable|spawn|disk full|enospc|read.only file system|no such file or directory)\b/i;
 
 /**
+ * Turn common verification failures into instructions an implementation agent
+ * can act on without waiting for a person to translate the log. The raw,
+ * redacted failure is retained after the guidance so the repair remains
+ * evidence-driven and auditable.
+ */
+export function repairGuidanceForFailure(failureReason: string): string {
+  const evidence = safeRecoveryGuidance(failureReason);
+  const normalized = failureReason.toLowerCase();
+  let guidance = 'Inspect the failing verification output, repair the underlying cause within the assigned scope, and rerun the exact failed check before reporting success.';
+
+  if (/incompatible react versions|react(?:-dom|-test-renderer)?.{0,80}(?:exact same|incompatible|version)/i.test(normalized)) {
+    guidance = 'The verification output indicates incompatible React package versions. Inspect package.json and the lockfile, align react, react-dom, and react-test-renderer (when present) to one exact compatible version, regenerate the lockfile, then rerun the test and build. Do not skip or weaken the test.';
+  } else if (/no test files found|no tests found|could not find any test files/i.test(normalized)) {
+    guidance = 'The test runner found no tests. Add a focused smoke test for the implemented behavior, or correct the test script if the repository already contains tests. Do not make an empty test command pass silently.';
+  } else if (/cannot find module|module not found|module_not_found/i.test(normalized)) {
+    guidance = 'The test runner cannot resolve a module. Check the import path and package manifest, install only the required dependency, update the lockfile, and rerun the failed check.';
+  }
+
+  return `[orchestrator-repair] ${guidance} Failure evidence: ${evidence}`;
+}
+
+/**
  * Why a specialist run ended without a result, in words a person can act on.
  *
  * The reason used to be the last 4,000 characters of the run log, which on a long run is
@@ -1650,7 +1672,7 @@ export class OrchestrationService {
     );
     if (!reportCorrection && priorFailure?.failureReason) {
       taskPackage.corrections.push(
-        `[orchestrator-repair] Review the previous specialist failure and correct its cause before resubmitting. Evidence: ${safeRecoveryGuidance(priorFailure.failureReason).slice(0, 4_000)}`
+        repairGuidanceForFailure(priorFailure.failureReason)
       );
     }
     if (task.kind === 'review' && Buffer.byteLength(JSON.stringify(taskPackage), 'utf8') > MAX_REVIEW_CONTEXT_BYTES) {

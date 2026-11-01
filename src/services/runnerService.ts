@@ -28,7 +28,7 @@ import { updateIssueAndPush, addCommentAndShare } from './boardWriteThrough.js';
 import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
-import { runVerification, type VerificationResult } from './verificationService.js';
+import { runVerification, shouldRunRepositoryVerification, type VerificationResult } from './verificationService.js';
 import { describeRepositoryExecution } from './repositoryExecution.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
@@ -1074,17 +1074,26 @@ ${instructions}${remoteSection}${hostingSection}`;
       this.advanceStage(runId, 'implementation', 'success');
 
       this.advanceStage(runId, 'tests', 'running');
-      const verification: VerificationResult = orchestration?.taskPackage.task.kind === 'audit' && !orchestration.taskPackage.task.requiredChecks.length
-        ? { status: 'skipped', commands: [], missingScripts: [], summary: 'Dependency audit evidence is checked by Alpha task acceptance; no functional scripts were assigned.' }
-        : await runVerification({
-        runId,
-        cwd,
-        requiredScripts: orchestration?.taskPackage.task.requiredChecks,
-        shouldContinue: () => {
-          const latest = sqliteService.getPrototypeRuns().find(item => item.id === runId);
-          return !!latest && latest.status === 'running';
-        }
-      });
+      const taskPackage = orchestration?.taskPackage.task;
+      const requiredChecks = taskPackage?.requiredChecks ?? [];
+      const verification: VerificationResult = !shouldRunRepositoryVerification(taskPackage?.kind, requiredChecks)
+        ? {
+            status: 'skipped',
+            commands: [],
+            missingScripts: [],
+            summary: `Repository verification skipped for the ${taskPackage?.kind} task; no functional checks were assigned.`
+          }
+        : taskPackage?.kind === 'audit' && !requiredChecks.length
+          ? { status: 'skipped', commands: [], missingScripts: [], summary: 'Dependency audit evidence is checked by Alpha task acceptance; no functional scripts were assigned.' }
+          : await runVerification({
+              runId,
+              cwd,
+              requiredScripts: requiredChecks,
+              shouldContinue: () => {
+                const latest = sqliteService.getPrototypeRuns().find(item => item.id === runId);
+                return !!latest && latest.status === 'running';
+              }
+            });
 
       const statusAfterVerification = sqliteService.getPrototypeRuns().find(item => item.id === runId)?.status;
       if (statusAfterVerification !== 'running') return;
