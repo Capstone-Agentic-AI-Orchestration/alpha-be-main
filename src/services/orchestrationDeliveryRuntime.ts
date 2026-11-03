@@ -59,7 +59,7 @@ export function startOrchestrationDeliveryMonitor(intervalMs = 60_000): () => vo
           if (!context || !workspaceRegistry.can(context.role, 'squad.read') || !workspaceRegistry.canAccessProjectBuilds(context, record.projectId)) continue;
           const service = await deliveryServiceForActor(context);
           await service.refresh(record.workspaceId, record.runId);
-          if (workspaceRegistry.can(context.role, 'squad.run')) await service.advanceAuthorized(context, record.runId);
+          if (workspaceRegistry.can(context.role, 'project.promote_uat')) await service.advanceAuthorized(context, record.runId);
         } catch { /* Access revoked or evidence unavailable: no writes to GitHub. */ }
       }
     } finally { active = false; }
