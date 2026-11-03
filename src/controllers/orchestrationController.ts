@@ -26,7 +26,8 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/delivery', d
   res.set('Cache-Control', 'no-store');
   const record = orchestrationDeliveryService.ensure(snapshot);
   res.json({ delivery: record ? await orchestrationDeliveryService.refresh(req.workspace!.workspaceId, snapshot.run.id) : null,
-    canControl: workspaceRegistry.can(req.workspace!.role, 'squad.run'), canPromote: workspaceRegistry.can(req.workspace!.role, 'squad.run') });
+    canControl: workspaceRegistry.can(req.workspace!.role, 'project.promote_uat'),
+    canPromote: workspaceRegistry.can(req.workspace!.role, 'project.promote_uat') });
 }));
 
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/delivery/events', desktopOnly, route(async (req: Request, res: Response) => {
@@ -38,7 +39,7 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/delivery/eve
 }));
 
 orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/delivery/actions', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!authorizedProject(req, res)) return;
+  if (!authorizedProject(req, res, 'project.promote_uat')) return;
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   const { action, expectedRevision, key } = req.body ?? {};
@@ -75,8 +76,8 @@ function errorResponse(res: Response, error: unknown): void {
   res.status(status).json({ error: message });
 }
 
-function authorizedProject(req: Request, res: Response, capability = 'squad.run'): boolean {
-  if (!requireWorkspaceCapability(req, res, capability as 'squad.run' | 'deployment.manage')) return false;
+function authorizedProject(req: Request, res: Response, capability: Parameters<typeof workspaceRegistry.can>[1] = 'squad.run'): boolean {
+  if (!requireWorkspaceCapability(req, res, capability)) return false;
   if (!requireProjectWorkspace(req, res, req.params.projectId)) return false;
   if (!workspaceRegistry.canAccessProjectBuilds(req.workspace!, req.params.projectId)) {
     res.status(404).json({ error: 'This project build is not available to this account.' });
@@ -220,7 +221,7 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/events', des
 }));
 
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/diff', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!authorizedProject(req, res)) return;
+  if (!authorizedProject(req, res, 'squad.read')) return;
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   try {
@@ -232,7 +233,7 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/diff', deskt
 
 /** Live edits for the chat's side panel: what each worktree holds now, compared with where the build started. */
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/live-changes', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!authorizedProject(req, res)) return;
+  if (!authorizedProject(req, res, 'squad.read')) return;
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   try {
@@ -480,7 +481,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/cancel', de
 }));
 
 orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/approve', desktopOnly, route(async (req: Request, res: Response) => {
-  if (!authorizedProject(req, res, 'deployment.manage')) return;
+  if (!authorizedProject(req, res, 'build.publish')) return;
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   const expectedRevision = req.body?.expectedRevision;

@@ -10,7 +10,7 @@ export async function executeOrchestrationDecision(input: {
   threadId?: string; planVersion?: number;
 }) {
   const { context, projectId, runId, action, expectedRevision } = input;
-  if (!workspaceRegistry.can(context.role, action === 'start' ? 'squad.run' : 'deployment.manage') ||
+  if (!workspaceRegistry.can(context.role, action === 'start' ? 'squad.run' : 'build.publish') ||
       !workspaceRegistry.canAccessProjectBuilds(context, projectId)) throw new Error('Your workspace role cannot authorize this build action.');
   const snapshot = runWithWorkspace(context.workspaceId, () => sqliteService.getOrchestrationSnapshot(runId));
   if (!snapshot || snapshot.run.workspaceId !== context.workspaceId || snapshot.run.projectId !== projectId ||

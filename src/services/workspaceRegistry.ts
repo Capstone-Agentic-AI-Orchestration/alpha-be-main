@@ -54,6 +54,8 @@ export type WorkspaceCapability =
   | 'project.promote'
   /** Development delivery to UAT; production promotion remains separate. */
   | 'project.promote_uat'
+  /** Publish a reviewed Orchestrator build and open its code pull request(s). */
+  | 'build.publish'
   | 'issue.read'
   | 'issue.manage'
   | 'agent.read'
@@ -82,8 +84,6 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
   client: [
     'workspace.read',
     'project.read',
-    'chat.read',
-    'chat.write',
     'intake.submit'
   ],
   dev: [
@@ -117,6 +117,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'squad.manage',
     'chat.read',
     'chat.write',
+    'build.publish',
     'deployment.read',
     'deployment.env_preview',
     /*
@@ -143,7 +144,8 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'project.update',
     'project.manage',
     'project.provision_repository',
-    // Production promotion is a release decision; UAT is developer delivery.
+    // Production promotion is a release decision; reviewed UAT delivery is
+    // available to the internal dev, PM, and admin roles.
     'project.promote',
     'issue.read',
     'issue.manage',
@@ -153,8 +155,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     // agent configuration, runtime access, and Orchestrator execution.
     'mcp.read',
     'squad.read',
-    'chat.read',
-    'chat.write',
+    'build.publish',
     'deployment.read',
     'analytics.read',
     'workspace.manage_settings',
@@ -183,8 +184,7 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'squad.read',
     'squad.run',
     'squad.manage',
-    'chat.read',
-    'chat.write',
+    'build.publish',
     'deployment.read',
     'deployment.env_preview',
     'deployment.manage',

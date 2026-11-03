@@ -3,6 +3,26 @@ import { describe, expect, it } from 'vitest';
 import { workspaceRegistry } from './workspaceRegistry.js';
 
 describe('workspace squad management capabilities', () => {
+  it('gives publication and UAT delivery authority to internal roles without granting chat to non-developers', () => {
+    for (const role of ['dev', 'pm', 'admin'] as const) {
+      expect(workspaceRegistry.can(role, 'build.publish')).toBe(true);
+      expect(workspaceRegistry.can(role, 'project.promote_uat')).toBe(true);
+    }
+    expect(workspaceRegistry.can('dev', 'chat.read')).toBe(true);
+    expect(workspaceRegistry.can('dev', 'chat.write')).toBe(true);
+    for (const role of ['client', 'pm', 'admin'] as const) {
+      expect(workspaceRegistry.can(role, 'chat.read')).toBe(false);
+      expect(workspaceRegistry.can(role, 'chat.write')).toBe(false);
+    }
+    expect(workspaceRegistry.can('client', 'build.publish')).toBe(false);
+  });
+
+  it('keeps unrestricted deployment management and manual merge authority admin-only', () => {
+    expect(workspaceRegistry.can('admin', 'deployment.manage')).toBe(true);
+    expect(workspaceRegistry.can('dev', 'deployment.manage')).toBe(false);
+    expect(workspaceRegistry.can('pm', 'deployment.manage')).toBe(false);
+  });
+
   it('allows developers to manage squads they own', () => {
     expect(workspaceRegistry.can('dev', 'squad.manage')).toBe(true);
   });

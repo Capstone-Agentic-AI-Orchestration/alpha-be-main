@@ -78,6 +78,14 @@ async function startApi(role = 'admin') {
   vi.doMock('./workspaceContext.js', () => ({
     requireWorkspaceCapability: (_req: any, res: any, capability: string) => {
       if (capability === 'project.promote' && role === 'dev') { res.status(403).json({ error: 'PM authorization required.' }); return false; }
+      const allowed: Record<string, string[]> = {
+        'build.publish': ['dev', 'pm', 'admin'],
+        'project.promote_uat': ['dev', 'pm', 'admin'],
+        'deployment.manage': ['admin'],
+        'squad.read': ['dev', 'pm', 'admin'],
+        'squad.run': ['dev', 'admin']
+      };
+      if (allowed[capability] && !allowed[capability].includes(role)) { res.status(403).json({ error: 'This role cannot perform the action.' }); return false; }
       return true;
     },
     requireProjectWorkspace: () => true
@@ -134,6 +142,14 @@ describe('task workflow project routes', () => {
     const result = await call(app, 'POST', `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/delivery/actions`,
       { action: 'merge_uat', expectedRevision: 1, key: 'delivery-key-1' });
     expect(result.status).toBe(200); expect(calls.deliveryAct).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ role: 'dev' }) }));
+  });
+  it('allows PMs to review and authorize publication and UAT delivery', async () => {
+    const { app, calls, awaitingSnapshot } = await startApi('pm');
+    const delivery = await call(app, 'GET', `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/delivery`);
+    expect(delivery).toMatchObject({ status: 200, body: { canControl: true, canPromote: true } });
+    const publication = await call(app, 'POST', `/api/projects/project-1/orchestrations/${awaitingSnapshot.run.id}/approve`, { expectedRevision: 4 });
+    expect(publication).toMatchObject({ status: 200, body: { status: 'completed' } });
+    expect(calls.approveAndPublish).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'user-1' }));
   });
   it('validates delivery action identity and passes the server-resolved actor', async () => {
     const { app, calls, awaitingSnapshot } = await startApi();
