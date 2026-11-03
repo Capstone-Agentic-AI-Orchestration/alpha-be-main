@@ -302,7 +302,7 @@ export async function syncBoardFromGitHub(workspaceId: string): Promise<SyncRepo
    * way in it also left the whole organisation looking PM-owned: 0015's
    * backfill gave everything imported on 2026-09-22 to the longest-standing
    * PM. Turning a repository into a project is a PM's decision, made by
-   * creating one; `importOrgRepositories` stays for an explicit importer.
+   * creating one.
    */
   for (const project of await projectStore().list(workspaceId)) {
     await syncProject(project, report, workspaceId);
