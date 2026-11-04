@@ -109,6 +109,10 @@ export interface IssueSubtask {
   id: string;
   title: string;
   completed: boolean;
+  /** 'spec' for an item written from an approved feature spec; absent for items a person added. */
+  source?: 'spec';
+  /** The approved requirement this item checks, when it came from a feature spec. */
+  requirementId?: string;
 }
 
 export interface IssueComment {

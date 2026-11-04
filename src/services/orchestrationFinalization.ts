@@ -1,8 +1,54 @@
+import type { IssueSubtask } from '../models/index.js';
 import type { IssueStore } from '../store/issueStore.js';
 import { issueStore } from '../store/stores.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { checklistRequirementId } from './issueChecklist.js';
 
 const PUBLISHED_COMMENT_SUFFIX = 'orchestration-published';
+
+/** Evidence must cover every current required task, including validation.
+ * Superseded work and earlier accepted attempts cannot prove the current work.
+ */
+function evidencedRequirementIds(snapshot: OrchestrationSnapshot): Set<string> {
+  const ids = new Set<string>();
+  for (const requirement of snapshot.run.plan.requirements) {
+    const tasks = snapshot.tasks.filter(task => task.required && task.status !== 'superseded' && task.requirementIds.includes(requirement.id));
+    if (!tasks.some(task => task.kind === 'validation') || !tasks.every(task => {
+      if (task.status !== 'accepted') return false;
+      const attempt = snapshot.attempts.filter(item => item.taskId === task.id)
+        .sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
+      if (attempt?.status !== 'accepted') return false;
+      const report = attempt.result?.agentReport;
+      const coverage = report && typeof report === 'object' ? (report as Record<string, unknown>).requirementCoverage : undefined;
+      return Array.isArray(coverage) && coverage.some(item => item && typeof item === 'object' &&
+        item.requirementId === requirement.id && typeof item.evidence === 'string' && item.evidence.trim());
+    })) continue;
+    ids.add(requirement.id);
+  }
+  return ids;
+}
+
+/**
+ * Tick unchanged checklist items whose requirement has accepted validation evidence.
+ * Runs once, in the same update that records the pull request, so a build never
+ * writes the shared task while it is running.
+ */
+export function tickSpecChecklist(subtasks: readonly IssueSubtask[], snapshot: OrchestrationSnapshot): IssueSubtask[] {
+  // Old persisted snapshots may predate task plans. Never infer completion.
+  if (!snapshot.run?.plan?.requirements || !snapshot.tasks?.length) return [...subtasks];
+  const evidenced = evidencedRequirementIds(snapshot);
+  return subtasks.map(item => {
+    const requirementId = item.source === 'spec' ? item.requirementId : checklistRequirementId(item);
+    const requirement = snapshot.run.plan.requirements.find(entry => entry.id === requirementId);
+    // Spec titles are a bounded rendering of the approved behavior. A person
+    // can edit them too, so check the wording before applying old evidence.
+    const specTitle = requirement ? `${requirement.id}: ${requirement.description.split(' Acceptance: ')[0]}` : '';
+    const unchanged = item.source !== 'spec' || item.title === (specTitle.length > 140 ? `${specTitle.slice(0, 137)}...` : specTitle);
+    return !item.completed && unchanged && requirementId && evidenced.has(requirementId)
+      ? { ...item, completed: true }
+      : item;
+  });
+}
 
 /** Synchronize durable completion (a published change or a read-only report) to the board. */
 export async function synchronizePublishedOrchestrationIssue(
@@ -21,7 +67,7 @@ export async function synchronizePublishedOrchestrationIssue(
       id: commentId, issueId: issue.id, authorType: 'system', authorName: 'Alpha Task Workflow',
       content: 'Read-only investigation completed. No repository files changed. Review the specialist reports in this conversation.', createdAt: snapshot.run.updatedAt
     });
-    if (issue.status !== 'done' && !await store.update(snapshot.run.workspaceId, issue.id, { status: 'done' })) throw new Error('The report is complete, but its project task could not be synchronized.');
+    if (issue.status !== 'done' && issue.status !== 'review' && !await store.update(snapshot.run.workspaceId, issue.id, { status: 'review' })) throw new Error('The report is complete, but its project task could not be synchronized.');
     return;
   }
   if (snapshot.run.status !== 'completed' || !publication) {
@@ -50,11 +96,14 @@ export async function synchronizePublishedOrchestrationIssue(
   // A human may have completed the issue after the PR was opened; do not move
   // it backwards, but always reconcile the durable branch and PR references.
   const status = issue.status === 'done' ? 'done' : 'review';
-  if (issue.status !== status || issue.prUrl !== publication.pullRequestUrl || issue.branchName !== publication.branchName) {
+  const subtasks = tickSpecChecklist(issue.subtasks ?? [], snapshot);
+  const checklistChanged = subtasks.some((item, index) => item.completed !== issue.subtasks[index]?.completed);
+  if (issue.status !== status || issue.prUrl !== publication.pullRequestUrl || issue.branchName !== publication.branchName || checklistChanged) {
     const savedIssue = await store.update(snapshot.run.workspaceId, issue.id, {
       status,
       prUrl: publication.pullRequestUrl,
-      branchName: publication.branchName
+      branchName: publication.branchName,
+      ...(checklistChanged ? { subtasks } : {})
     });
     if (!savedIssue) {
       throw new Error('The pull request is open, but the project task could not be synchronized. Retry to update it.');

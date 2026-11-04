@@ -84,6 +84,12 @@ export function workAttemptCount(snapshot: OrchestrationSnapshot, taskId: string
   // Alpha restarted before the launch) did no work, so it does not spend the repair budget.
   // Without this, a stalled launch and a refused preparation used the last retries and
   // left the build with no way forward.
+  const total = totalWorkAttemptCount(snapshot, taskId);
+  const boundary = Math.max(0, ...(snapshot.recoveryAuthorizations ?? []).filter(item => item.taskId === taskId).map(item => item.afterWorkAttempts));
+  return Math.max(0, total - boundary);
+}
+
+export function totalWorkAttemptCount(snapshot: OrchestrationSnapshot, taskId: string): number {
   return snapshot.attempts.filter(attempt => attempt.taskId === taskId &&
     attempt.contextManifest.reportOnlyReportRetry !== true &&
     !(!attempt.prototypeRunId && ['failed', 'cancelled'].includes(attempt.status))).length;
@@ -168,16 +174,17 @@ export function recoveryAvailableActions(input: {
         availableActions.push('provide_guidance');
         actionReasons.repair_and_continue = specialistBlockerDirectionMessage(latestFailedAttempt!.failureReason!);
       } else {
-        actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review the saved changes before starting a new build.';
+        actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
       }
     } else if (category === 'project_code') {
       if (repeatedFailure && attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
       else if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
       else if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
-      else actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review the saved changes before starting a new build.';
+      else actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
     } else if (category === 'provider' || category === 'configuration') {
       if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('recheck_prerequisite');
-      else actionReasons.recheck_prerequisite = 'The task has reached its two-attempt limit. Fix the runtime or access issue, then review the saved build before trying again.';
+      else if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
+      else actionReasons.recheck_prerequisite = `The task has used ${attempts} work attempts. Review the runtime or access issue and saved work before authorizing recovery.`;
     } else if (category === 'review_input') {
       if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('recheck_prerequisite');
       else actionReasons.recheck_prerequisite = 'The reviewer still cannot read the accepted source. Review the provider setup or saved work before trying again.';
@@ -197,7 +204,7 @@ export function recoveryAvailableActions(input: {
     } else if (category === 'final_validation') {
       actionReasons.recheck_prerequisite = 'Final checks need to be reviewed in the build plan before they can be repeated.';
     } else if (category === 'budget') {
-      actionReasons.recheck_prerequisite = 'The build reached a configured limit. Change the corresponding ALPHA_ORCHESTRATION limit in Alpha’s desktop configuration, restart Alpha, then recheck to continue.';
+      actionReasons.recheck_prerequisite = 'Execution budget reached. Review saved work and the configured desktop execution limit before retrying.';
     } else {
       if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
       else if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
@@ -227,7 +234,7 @@ export function recoveryAvailableActions(input: {
     actionReasons.recheck_prerequisite = actionReasons.recheck_prerequisite ?? 'The saved validation evidence is available in the build plan.';
   }
   if (!task && category === 'budget' && canAct) {
-    actionReasons.recheck_prerequisite = actionReasons.recheck_prerequisite ?? 'Change the corresponding ALPHA_ORCHESTRATION limit in Alpha’s desktop configuration, restart Alpha, then recheck to continue.';
+    actionReasons.recheck_prerequisite = actionReasons.recheck_prerequisite ?? 'Review saved work and the configured desktop execution limit before retrying.';
   }
   return { availableActions: [...new Set(availableActions)], actionReasons };
 }

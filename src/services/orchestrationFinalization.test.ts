@@ -3,6 +3,7 @@ import type { Issue } from '../models/index.js';
 import type { IssueStore } from '../store/issueStore.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { replayPublishedOrchestrationIssueEffects, synchronizePublishedOrchestrationIssue } from './orchestrationFinalization.js';
+import { manualChecklistRequirements } from './issueChecklist.js';
 
 function publishedSnapshot(): OrchestrationSnapshot {
   return {
@@ -62,6 +63,23 @@ function issueStoreFixture(initial = issueFixture()) {
 }
 
 describe('orchestration publication finalization', () => {
+  it('shares validated checklist progress with the PR in one idempotent task update', async () => {
+    const subtasks = [{ id: 'pm-email', title: 'Invalid email shows an error.', completed: false }];
+    const requirements = manualChecklistRequirements(subtasks);
+    const snapshot = publishedSnapshot();
+    snapshot.run.plan = { requirements } as typeof snapshot.run.plan;
+    snapshot.tasks = [{ id: 'validate', kind: 'validation', required: true, status: 'accepted', requirementIds: [requirements[0].id] }] as any;
+    snapshot.attempts = [{ taskId: 'validate', attemptNumber: 1, status: 'accepted', result: { agentReport: {
+      requirementCoverage: [{ requirementId: requirements[0].id, evidence: 'tests/email.test.ts passed.' }]
+    } } }] as any;
+    const fixture = issueStoreFixture({ ...issueFixture(), subtasks });
+    await synchronizePublishedOrchestrationIssue(snapshot, fixture.store);
+    await synchronizePublishedOrchestrationIssue(snapshot, fixture.store);
+    expect(fixture.issue).toMatchObject({ status: 'review', subtasks: [{ ...subtasks[0], completed: true }] });
+    expect(fixture.updateCount).toBe(1);
+    expect(fixture.issue.comments).toHaveLength(1);
+  });
+
   it('finishes a read-only issue without a PR and replays its completion idempotently', async () => {
     const snapshot = publishedSnapshot();
     delete snapshot.run.publication;
@@ -69,7 +87,7 @@ describe('orchestration publication finalization', () => {
     const fixture = issueStoreFixture(issueFixture('agent_running'));
     await synchronizePublishedOrchestrationIssue(snapshot, fixture.store);
     await replayPublishedOrchestrationIssueEffects([snapshot], fixture.store);
-    expect(fixture.issue.status).toBe('done');
+    expect(fixture.issue.status).toBe('review');
     expect(fixture.issue.prUrl).toBeUndefined();
     expect(fixture.issue.comments).toHaveLength(1);
     expect(fixture.updateCount).toBe(1);

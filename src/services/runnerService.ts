@@ -37,6 +37,8 @@ import { admitTicketExecution, stopTicketExecution, type TicketExecutionHandle }
 import type { DeveloperTicketWorkContext } from '../ticketing/developerContext.js';
 import type { OrchestrationTaskPackage } from './orchestrationService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
+import { EXECUTION_LIMITS } from '../config/constants.js';
+import { worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 
 export interface StartRunParams {
   issueId: string;
@@ -68,6 +70,7 @@ export interface StartRunParams {
     baseRef?: string;
     baseCommit?: string;
     startingCommit?: string;
+    resumedWorktreeHash?: string;
     planVersion: number;
     taskPackage: OrchestrationTaskPackage;
     personaHash: string;
@@ -128,6 +131,9 @@ export function appendOrchestrationTaskPolicy(
     `Assigned task: ${task.title}.`,
     `Task description: ${task.description}`,
     `Alpha-managed Git workspace (verified by the runner before execution): branch ${orchestration.branchName}; base ${orchestration.baseRef ?? 'recorded base'}; base commit ${orchestration.baseCommit ?? 'recorded checkpoint'}; attempt starts at ${orchestration.startingCommit ?? 'recorded checkpoint'}. Branch setup is already complete. Use this evidence for branch requirements; do not switch/create branches or report missing Git tools as a product-work blocker. Report an actual mismatch with this evidence instead.`,
+    orchestration.resumedWorktreeHash
+      ? 'This retry retains the same task\'s unfinished candidate edits. Inspect and continue the existing work rather than rebuilding it from scratch. These edits are not accepted evidence: verify their correctness, keep the original file scope, and rerun the required checks before submitting your report.'
+      : '',
     `Acceptance criteria:\n${task.acceptanceCriteria.map(item => `- ${item}`).join('\n')}`,
     `Return the exact shared Alpha task-report schema version ${orchestration.taskPackage.reportSchemaVersion}.`,
     task.dependencyAudit && !orchestration.taskPackage.reportCorrection
@@ -559,7 +565,13 @@ export class RunnerService extends EventEmitter {
         if (currentBranch !== branchName) {
           throw new Error(`Task worktree is on ${currentBranch}; expected the orchestration branch ${branchName}.`);
         }
-        if (!(await isGitWorkingTreeClean(cwd))) {
+        const clean = await isGitWorkingTreeClean(cwd);
+        if (ctx.orchestration.resumedWorktreeHash) {
+          if (ctx.orchestration.resumedWorktreeHash !== await worktreeChangesHash(cwd)) {
+            throw new Error('The saved task candidate changed after recovery was prepared. Review it before retrying.');
+          }
+          this.appendLog(runId, 'workspace', 'Resuming the same task\'s saved candidate edits. They remain unverified and must pass the task checks and review.');
+        } else if (!clean) {
           throw new Error('Task worktree contains uncheckpointed changes. Reconcile the previous attempt before dispatching another task.');
         }
         ctx.orchestration.startingCommit = await getHeadCommit(cwd);
@@ -762,6 +774,7 @@ export class RunnerService extends EventEmitter {
         runId,
         bin,
         args,
+        idleTimeoutMs: ctx.orchestration ? EXECUTION_LIMITS.BUILD_IDLE_TIMEOUT_MS : undefined,
         cwd: task ? taskTurnDir : cwd,
         // Agent env first, then the family's isolation overrides — see cliHome.
         // Then the credential isolation chat has always had: the run prompt tells

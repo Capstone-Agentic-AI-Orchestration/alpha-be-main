@@ -1,3 +1,4 @@
+import type { FeatureSpec, FeatureSpecRecord } from './featureSpecContract.js';
 import Database from 'better-sqlite3';
 import type { DeliveryRecord } from './orchestrationDelivery.js';
 import type { UsageEntry } from './chatUsage.js';
@@ -968,6 +969,18 @@ export class SQLiteService {
        * from entering the same project/repository before the immutable plan
        * has been activated as an orchestration run.
        */
+      CREATE TABLE IF NOT EXISTS board_build_requests (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        UNIQUE(workspace_id, owner_id, id)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_board_build_pending_issue
+        ON board_build_requests(workspace_id, issue_id)
+        WHERE json_extract(request_json, '$.status') IN ('waiting', 'planning');
       CREATE TABLE IF NOT EXISTS orchestration_planning_reservations (
         workspace_id TEXT NOT NULL,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1284,6 +1297,21 @@ export class SQLiteService {
         cli_session_id TEXT NOT NULL,
         updated_at     TEXT NOT NULL,
         PRIMARY KEY (thread_id, machine_id, agent_id)
+      );
+
+      -- A task's feature spec. Local to this desktop; the task's checklist items are what the team sees.
+      CREATE TABLE IF NOT EXISTS feature_specs (
+        workspace_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('draft', 'approved')),
+        spec_json TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        approved_by TEXT,
+        approved_at TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, issue_id)
       );
 
       CREATE TABLE IF NOT EXISTS chat_thread_memories (
@@ -3383,6 +3411,38 @@ export class SQLiteService {
   }
 
   /** Preserve history and checkpoints; replacement work cannot start before a new plan approval. */
+  replaceUnstartedPlan(input: { runId: string; expectedRevision: number; plan: OrchestrationPlan; actorId: string; reason: string }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      if (!snapshot || snapshot.run.status !== 'awaiting_plan_approval' || snapshot.run.revision !== input.expectedRevision || snapshot.attempts.length) {
+        throw new Error('The plan changed or execution has begun. Refresh before revising.');
+      }
+      const plan = parseOrchestrationPlan(input.plan);
+      const problems = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), {
+        initialPlan: true, repositories: snapshot.run.repositoryWorkspaces?.map(item => item.repository) ?? [snapshot.run.repository]
+      });
+      if (problems.length) throw new Error('The revised plan is invalid: ' + problems.map(item => item.detail).join(' '));
+      if (JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements) ||
+          (snapshot.run.plan.exclusions ?? []).some(item => !plan.exclusions?.includes(item))) throw new Error('Revise the task requirements separately; a plan revision must preserve approved requirements and exclusions.');
+      const version = snapshot.run.planVersion + 1;
+      this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(workspaceId, input.runId, version, plan.schemaVersion, JSON.stringify(plan), 'model', now, now);
+      // No attempt exists. Previous versions remain immutable in orchestration_plans.
+      this.db.prepare('DELETE FROM orchestration_tasks WHERE workspace_id = ? AND run_id = ?').run(workspaceId, input.runId);
+      const insert = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const task of plan.tasks) insert.run(workspaceId, input.runId, version, task.id, task.title, task.description, task.kind, task.ownerAgentId,
+        JSON.stringify(task.dependsOn), JSON.stringify(task.requirementIds), JSON.stringify(task.acceptanceCriteria), JSON.stringify(task.requiredChecks), JSON.stringify(task.scope), task.required ? 1 : 0,
+        task.dependsOn.length ? 'pending' : 'ready', 0, 0, now);
+      this.db.prepare('UPDATE orchestration_runs SET plan_version = ?, workflow_version = ?, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ?')
+        .run(version, plan.schemaVersion, now, workspaceId, input.runId);
+      this.ensureOrchestrationPlanDocuments(input.runId);
+      this.appendOrchestrationEvent(input.runId, 'plan_amended', { planVersion: version, supersededPlanVersion: snapshot.run.planVersion, reason: input.reason, requiresApproval: true }, input.actorId, now);
+    })();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
   replaceBlockedAuditPlan(input: { runId: string; expectedRevision: number; plan: OrchestrationPlan; actorId: string }): OrchestrationSnapshot {
     const workspaceId = this.workspaceId();
     const now = new Date().toISOString();
@@ -3556,6 +3616,8 @@ export class SQLiteService {
     }
     return {
       run,
+      recoveryAuthorizations: (this.db.prepare("SELECT payload_json FROM orchestration_events WHERE workspace_id = ? AND run_id = ? AND event_type = 'recovery_restart_authorized' ORDER BY run_sequence")
+        .all(workspaceId, runId) as Array<{ payload_json: string }>).map(row => JSON.parse(row.payload_json)),
       tasks: tasks.map(row => orchestrationTaskFromRow(row, plan.tasks.find(task => task.id === row.task_id))),
       attempts: attempts.map(orchestrationAttemptFromRow),
       artifacts: artifacts.map(orchestrationArtifactFromRow),
@@ -3964,12 +4026,48 @@ export class SQLiteService {
     return row ? this.getOrchestrationSnapshot(row.id) : undefined;
   }
 
+  authorizeReviewedRecovery(input: { runId: string; taskId: string; expectedRevision: number; afterWorkAttempts: number; actorId: string; reason: string; candidateHash: string }): OrchestrationSnapshot {
+    this.db.transaction(() => {
+      const current = this.getOrchestrationSnapshot(input.runId);
+      if (!current || current.run.status !== 'blocked' || current.run.revision !== input.expectedRevision ||
+          current.attempts.some(item => ['starting', 'running', 'submitted', 'recovery_required'].includes(item.status)) ||
+          (current.recoveryAuthorizations ?? []).filter(item => item.taskId === input.taskId).length >= 2) throw new Error('The recovery changed, still has active work, or reached its reviewed-restart limit.');
+      this.appendOrchestrationEvent(input.runId, 'recovery_restart_authorized', input, input.actorId);
+      this.db.prepare('UPDATE orchestration_runs SET revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ?')
+        .run(new Date().toISOString(), this.workspaceId(), input.runId);
+    })();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  recordArchiveRestore(input: { runId: string; expectedRevision: number; actorId: string; archiveId: string; archiveHash: string; candidateHash: string }): void {
+    this.db.transaction(() => {
+      const row = this.db.prepare('UPDATE orchestration_runs SET revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND revision = ? AND status = ?')
+        .run(new Date().toISOString(), this.workspaceId(), input.runId, input.expectedRevision, 'blocked');
+      if (row.changes !== 1) throw new Error('The build changed while saved work was being restored.');
+      this.appendOrchestrationEvent(input.runId, 'saved_candidate_restored', input, input.actorId);
+    })();
+  }
+
+  saveBoardBuildRequest(record: { id: string; workspaceId: string; ownerId: string; projectId: string; issueId: string; [key: string]: unknown }): void {
+    this.db.prepare(`INSERT INTO board_build_requests (id, workspace_id, owner_id, project_id, issue_id, request_json)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET request_json = excluded.request_json
+      WHERE workspace_id = excluded.workspace_id AND owner_id = excluded.owner_id`)
+      .run(record.id, record.workspaceId, record.ownerId, record.projectId, record.issueId, JSON.stringify(record));
+  }
+
+  listBoardBuildRequests(workspaceId?: string): Array<Record<string, unknown>> {
+    const rows = workspaceId
+      ? this.db.prepare('SELECT request_json FROM board_build_requests WHERE workspace_id = ? ORDER BY rowid').all(workspaceId)
+      : this.db.prepare('SELECT request_json FROM board_build_requests ORDER BY rowid').all();
+    return (rows as Array<{ request_json: string }>).map(row => JSON.parse(row.request_json));
+  }
+
   /** The newest Orchestrator build for each issue in the given projects, for the board's status chips. */
   listLatestIssueBuilds(projectIds: string[]): Array<{ issueId: string; projectId: string; runId: string; status: string; updatedAt: string }> {
     if (!projectIds.length) return [];
     const placeholders = projectIds.map(() => '?').join(', ');
     const rows = this.db.prepare(`SELECT issue_id, project_id, id, status, updated_at FROM orchestration_runs
-      WHERE workspace_id = ? AND project_id IN (${placeholders}) ORDER BY created_at DESC`)
+      WHERE workspace_id = ? AND project_id IN (${placeholders}) ORDER BY CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN 1 ELSE 0 END, created_at DESC`)
       .all(this.workspaceId(), ...projectIds) as Array<{ issue_id: string; project_id: string; id: string; status: string; updated_at: string }>;
     const latest = new Map<string, { issueId: string; projectId: string; runId: string; status: string; updatedAt: string }>();
     for (const row of rows) {
@@ -4030,14 +4128,17 @@ export class SQLiteService {
       }
       const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
       const placeholders = activeStatuses.map(() => '?').join(', ');
-      const active = this.db.prepare(`SELECT id, repository, repository_workspaces_json FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders})`)
-        .all(workspaceId, input.projectId, ...activeStatuses) as Array<{ id: string; repository: string; repository_workspaces_json: string }>;
+      const active = this.db.prepare(`SELECT id, repository, repository_workspaces_json FROM orchestration_runs WHERE workspace_id = ? AND status IN (${placeholders})`)
+        .all(workspaceId, ...activeStatuses) as Array<{ id: string; repository: string; repository_workspaces_json: string }>;
       const activeRepo = active.find(row => {
         const workspaces = parseJson<Array<{ repository?: string }>>(row.repository_workspaces_json, []);
         return canonicalOrchestrationRepository(row.repository) === repositoryKey ||
           workspaces.some(item => typeof item.repository === 'string' && canonicalOrchestrationRepository(item.repository) === repositoryKey);
       });
       if (activeRepo) throw new Error('A task-based build already owns this project repository. Follow or resolve it before planning another.');
+      if (this.db.prepare('SELECT 1 FROM orchestration_planning_reservations WHERE workspace_id = ? AND repository_key = ?').get(workspaceId, repositoryKey)) {
+        throw new Error('Another task build is already being planned for this repository.');
+      }
 
       const codeCallLock = this.db.prepare('SELECT owner_call_id FROM project_code_execution_locks WHERE workspace_id = ? AND project_id = ? AND repository_key = ?')
         .get(workspaceId, input.projectId, repositoryKey) as { owner_call_id: string } | undefined;
@@ -4306,23 +4407,30 @@ export class SQLiteService {
   /** Active local workflow ownership for an attached project repository. */
   getActiveOrchestrationForProject(projectId: string, repository?: string): {
     runId: string;
+    projectId?: string;
+    issueId?: string;
     repository: string;
     status: OrchestrationRunRecord['status'];
     branchName?: string;
   } | undefined {
     const activeStatuses = ['planning', 'awaiting_plan_approval', 'executing', 'paused', 'validating', 'awaiting_approval', 'publishing', 'blocked', 'recovery_required', 'cancelling'];
     const placeholders = activeStatuses.map(() => '?').join(', ');
-    const rows = this.db.prepare(`SELECT id, repository, repository_workspaces_json, status, branch_name, created_at FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND status IN (${placeholders}) ORDER BY created_at DESC`)
-      .all(this.workspaceId(), projectId, ...activeStatuses) as any[];
+    const rows = this.db.prepare(`SELECT id, project_id, issue_id, repository, repository_workspaces_json, status, branch_name, created_at FROM orchestration_runs WHERE workspace_id = ? ${repository ? '' : 'AND project_id = ?'} AND status IN (${placeholders}) ORDER BY created_at DESC`)
+      .all(this.workspaceId(), ...(repository ? [] : [projectId]), ...activeStatuses) as any[];
     const normalize = canonicalOrchestrationRepository;
     const matching = repository ? rows.find(row => normalize(row.repository) === normalize(repository) ||
       parseJson<Array<{ repository?: string }>>(row.repository_workspaces_json, []).some(item => item.repository && normalize(item.repository) === normalize(repository))) : rows[0];
-    const reservation = this.getOrchestrationPlanningReservation(projectId, repository);
+    const reservation = repository
+      ? (() => { const row = this.db.prepare('SELECT run_id, repository, branch_name, created_at FROM orchestration_planning_reservations WHERE workspace_id = ? AND repository_key = ? ORDER BY created_at DESC LIMIT 1').get(this.workspaceId(), normalize(repository)) as any;
+        return row ? { runId: row.run_id, repository: row.repository, branchName: row.branch_name, createdAt: row.created_at } : undefined; })()
+      : this.getOrchestrationPlanningReservation(projectId, repository);
     if (reservation && (!matching || Date.parse(reservation.createdAt) >= Date.parse(matching.created_at))) return {
       runId: reservation.runId, repository: reservation.repository, status: 'planning', branchName: reservation.branchName
     };
     return matching ? {
       runId: matching.id,
+      projectId: matching.project_id,
+      issueId: matching.issue_id,
       repository: matching.repository,
       status: matching.status,
       branchName: matching.branch_name ?? undefined
@@ -5262,20 +5370,28 @@ export class SQLiteService {
     plan: OrchestrationPlan;
     addedTasks: readonly OrchestrationTaskRecord[];
     findings: readonly PersistedReviewFinding[];
+    /** Failed final checks (blocked build) or a reviewer sending finished work back (awaiting approval). */
+    source?: 'final_validation' | 'human_review';
     now?: string;
   }): OrchestrationSnapshot {
+    const amendmentSource = input.source ?? 'final_validation';
+    const fromStatus = amendmentSource === 'human_review' ? 'awaiting_approval' : 'blocked';
     const workspaceId = this.workspaceId();
     const now = input.now ?? new Date().toISOString();
     if (input.findings.length > 20) throw new Error('Final validation can route at most 20 code-owner findings.');
     const amend = this.db.transaction(() => {
       const snapshot = this.getOrchestrationSnapshot(input.runId);
-      if (!snapshot || snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId ||
+      if (!snapshot || snapshot.run.status !== fromStatus || snapshot.run.currentTaskId ||
           snapshot.run.revision !== input.expectedRunRevision || snapshot.run.planVersion !== input.expectedPlanVersion) {
-        throw new Error('The build changed since final validation was reviewed. Refresh before creating correction tasks.');
+        throw new Error(amendmentSource === 'human_review'
+          ? 'The build changed since it was reviewed. Refresh before sending it back.'
+          : 'The build changed since final validation was reviewed. Refresh before creating correction tasks.');
       }
       if (!snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted')) {
         throw new Error('Final-validation corrections require all existing required tasks to remain accepted.');
       }
+      const evidence = input.evidence;
+      if (amendmentSource === 'final_validation') {
       const latestValidation = this.listOrchestrationEvents(input.runId, 0, 500).slice().reverse().find(event =>
         ['run_blocked', 'run_recovery_required'].includes(event.type) && event.payload.evidence &&
         typeof event.payload.evidence === 'object' &&
@@ -5283,11 +5399,13 @@ export class SQLiteService {
       if (!latestValidation || !isDeepStrictEqual(latestValidation.payload.evidence, input.evidence)) {
         throw new Error('The saved final-check evidence changed. Refresh the recovery details before assigning corrections.');
       }
-      const evidence = input.evidence;
       const checks = evidence.checks && typeof evidence.checks === 'object' ? evidence.checks as Record<string, unknown> : undefined;
       const observed = Array.isArray(checks?.observed) ? checks.observed as Array<Record<string, unknown>> : [];
       if (evidence.check !== undefined || checks?.status !== 'failed' || !observed.some(check => check.exitCode !== 0 || check.signal != null)) {
         throw new Error('This blocker is not a failed final repository check that can be routed safely. Review the workspace and saved evidence first.');
+      }
+      } else if (typeof evidence.request !== 'string' || !evidence.request.trim()) {
+        throw new Error('Sending work back needs the reviewer\'s request.');
       }
 
       const plan = parseOrchestrationPlan(input.plan);
@@ -5364,7 +5482,7 @@ export class SQLiteService {
       for (const finding of input.findings) {
         const target = snapshot.tasks.find(task => task.id === finding.taskId);
         const source = snapshot.tasks.find(task => task.id === finding.sourceTaskId);
-        const finalValidationOrigin = finding.evidence?.origin === 'final_validation';
+        const finalValidationOrigin = finding.evidence?.origin === amendmentSource;
         if (!target || target.status !== 'accepted' || !['database', 'backend', 'frontend', 'mobile'].includes(target.kind) ||
             !source || source.status !== 'accepted' || (!finalValidationOrigin && source.kind !== 'review') ||
             (finalValidationOrigin && source.id !== target.id) ||
@@ -5374,18 +5492,24 @@ export class SQLiteService {
         findingRows.run(randomUUID(), workspaceId, input.runId, finding.taskId, finding.sourceTaskId, finding.severity,
           finding.requirementId ?? null, finding.path ?? null, JSON.stringify(finding.evidence), 'open', finding.correctionTaskId, now);
       }
-      const runUpdate = this.db.prepare("UPDATE orchestration_runs SET plan_version = ?, status = 'executing', current_task_id = NULL, stopped_reason = NULL, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND status = 'blocked' AND revision = ? AND plan_version = ? AND current_task_id IS NULL")
-        .run(nextPlanVersion, now, workspaceId, input.runId, input.expectedRunRevision, input.expectedPlanVersion);
+      const runUpdate = this.db.prepare("UPDATE orchestration_runs SET plan_version = ?, status = 'executing', current_task_id = NULL, stopped_reason = NULL, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND status = ? AND revision = ? AND plan_version = ? AND current_task_id IS NULL")
+        .run(nextPlanVersion, now, workspaceId, input.runId, fromStatus, input.expectedRunRevision, input.expectedPlanVersion);
       if (runUpdate.changes !== 1) throw new Error('The build changed before its final-validation correction plan could be saved.');
       this.appendOrchestrationEvent(input.runId, 'plan_amended', {
         planVersion: nextPlanVersion,
-        reason: 'Final repository checks failed; scoped corrections were routed to their accepted code owners.',
+        reason: amendmentSource === 'human_review'
+          ? 'The reviewer sent the finished work back; scoped corrections were routed to their accepted code owners.'
+          : 'Final repository checks failed; scoped corrections were routed to their accepted code owners.',
         addedTaskIds: input.addedTasks.map(task => task.id),
-        validationEvidence: { repository: evidence.repository, resultCommit: evidence.resultCommit, checks: evidence.checks },
+        ...(amendmentSource === 'human_review'
+          ? { reviewRequest: { request: evidence.request, requestedBy: input.actorId } }
+          : { validationEvidence: { repository: evidence.repository, resultCommit: evidence.resultCommit, checks: evidence.checks } }),
         supersedesValidationTaskIds: [...currentPlanTasks.values()].filter(task => task.kind === 'validation' && task.required).map(task => task.id)
       }, input.actorId, now);
       this.appendOrchestrationEvent(input.runId, 'run_resumed', {
-        reason: 'A versioned, scope-preserving correction plan was accepted after final validation failed.', planVersion: nextPlanVersion
+        reason: amendmentSource === 'human_review'
+          ? 'A versioned, scope-preserving correction plan was accepted after the reviewer requested changes.'
+          : 'A versioned, scope-preserving correction plan was accepted after final validation failed.', planVersion: nextPlanVersion
       }, input.actorId, now);
     });
     amend();
@@ -5888,6 +6012,61 @@ export class SQLiteService {
   }
 
   /** Read only this owner's notes for a thread in the active workspace. */
+  // --- Feature specs ---
+  getFeatureSpec(issueId: string): FeatureSpecRecord | null {
+    const row = this.db.prepare('SELECT * FROM feature_specs WHERE workspace_id = ? AND issue_id = ?')
+      .get(this.workspaceId(), issueId) as any;
+    if (!row) return null;
+    return {
+      issueId: row.issue_id,
+      version: Number(row.version),
+      status: row.status === 'approved' ? 'approved' : 'draft',
+      spec: JSON.parse(row.spec_json),
+      sourceHash: row.source_hash,
+      updatedBy: row.updated_by,
+      approvedBy: row.approved_by ?? undefined,
+      approvedAt: row.approved_at ?? undefined,
+      updatedAt: row.updated_at
+    };
+  }
+
+  /** Save a task's spec if nobody saved it since expectedVersion (0 for the first save). */
+  saveFeatureSpec(input: {
+    issueId: string;
+    expectedVersion: number;
+    spec: FeatureSpec;
+    status: 'draft' | 'approved';
+    sourceHash: string;
+    actorId: string;
+    now?: string;
+  }): FeatureSpecRecord {
+    const now = input.now ?? new Date().toISOString();
+    const workspaceId = this.workspaceId();
+    this.db.transaction(() => {
+      const current = this.getFeatureSpec(input.issueId);
+      if ((current?.version ?? 0) !== input.expectedVersion) {
+        throw new Error('The feature spec changed since you opened it. Refresh and try again.');
+      }
+      const approved = input.status === 'approved';
+      this.db.prepare(`INSERT INTO feature_specs (workspace_id, issue_id, version, status, spec_json, source_hash, updated_by, approved_by, approved_at, updated_at)
+        VALUES (@workspaceId, @issueId, @version, @status, @specJson, @sourceHash, @actorId, @approvedBy, @approvedAt, @now)
+        ON CONFLICT(workspace_id, issue_id) DO UPDATE SET version = excluded.version, status = excluded.status, spec_json = excluded.spec_json,
+          source_hash = excluded.source_hash, updated_by = excluded.updated_by, approved_by = excluded.approved_by,
+          approved_at = excluded.approved_at, updated_at = excluded.updated_at`).run({
+        workspaceId, issueId: input.issueId, version: input.expectedVersion + 1, status: input.status,
+        specJson: JSON.stringify(input.spec), sourceHash: input.sourceHash, actorId: input.actorId,
+        approvedBy: approved ? input.actorId : null, approvedAt: approved ? now : null, now
+      });
+    })();
+    return this.getFeatureSpec(input.issueId)!;
+  }
+
+  deleteFeatureSpec(issueId: string): boolean {
+    return this.db.prepare('DELETE FROM feature_specs WHERE workspace_id = ? AND issue_id = ?')
+      .run(this.workspaceId(), issueId).changes > 0;
+  }
+
+
   getChatThreadMemory(threadId: string, ownerId: string): ChatThreadMemory | null {
     const workspaceId = this.workspaceId();
     const thread = this.db.prepare(`

@@ -1,7 +1,9 @@
 import { chatBuildDecisionSchema } from '../services/chatBuildDecision.js';
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
-import { agentStore, chatStore, projectStore } from '../store/stores.js';
+import { agentStore, chatStore, issueStore, projectStore } from '../store/stores.js';
+import { isAskThreadId, isBoardThreadId } from '../services/boardThreads.js';
+import { ensureBoardThread } from '../services/boardThreadService.js';
 import { chatService, ChatRouteError } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
@@ -83,7 +85,9 @@ chatRouter.get('/chat/threads', route(async (req: Request, res: Response) => {
   res.json(
     workspaceRegistry.scope(
       'chat_threads',
-      await chatStore().listThreads(req.workspace!.workspaceId, req.workspace!.userId),
+      (await chatStore().listThreads(req.workspace!.workspaceId, req.workspace!.userId))
+        // Task build and Ask Alpha conversations belong to the board, not the Chat list.
+        .filter(thread => !isBoardThreadId(thread.id)),
       req.workspace!.workspaceId
     )
   );
@@ -403,6 +407,40 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
   res.json({ success: true, removed });
 });
 
+/**
+ * The caller's private board conversation for a task, or for the project.
+ *
+ * With an issueId this is the task's build conversation: the board starts and
+ * follows that task's builds through it. Without one it is the project's
+ * answer-only "Ask Alpha" thread. Either way it belongs to the caller alone,
+ * like every chat thread, and the Chat tab leaves it out of its list.
+ * Idempotent: the id is derived, so a second call returns the same thread.
+ */
+chatRouter.post('/projects/:projectId/board-thread', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (req.workspace!.role === 'client') {
+    return res.status(403).json({ error: 'Project builds are available to the internal project team.' });
+  }
+  if (!requireProjectWorkspace(req, res, req.params.projectId)) return;
+  const issueId = req.body?.issueId;
+  if (issueId !== undefined && (typeof issueId !== 'string' || !issueId.trim() || issueId.length > 200)) {
+    return res.status(400).json({ error: 'issueId must be a task identifier or omitted' });
+  }
+  const workspaceId = req.workspace!.workspaceId;
+  let issue: { id: string; identifier: string } | undefined;
+  if (issueId) {
+    if (!requireEntityWorkspace(req, res, 'issues', issueId)) return;
+    const found = await issueStore().get(workspaceId, issueId);
+    if (!found || found.projectId !== req.params.projectId) {
+      return res.status(404).json({ error: 'Task not found in this project.' });
+    }
+    issue = found;
+  }
+  const { thread, created } = ensureBoardThread({ workspaceId, ownerId: req.workspace!.userId, projectId: req.params.projectId, issue });
+  res.status(created ? 201 : 200).json(thread);
+}));
+
+
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
@@ -479,8 +517,12 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
      */
     const isInternal = req.workspace!.role !== 'client';
     const override = parseChatOverride(content).override;
+    const askThread = isAskThreadId(threadId);
+    if (askThread && (intent === 'build' || override === 'build' || issueId || decision)) {
+      return res.status(400).json({ error: 'Ask Alpha answers questions only. Start a build from a task card.' });
+    }
     const forcedBuild = intent === 'build' || override === 'build';
-    const answerOnly = intent === 'ask' || override === 'ask';
+    const answerOnly = askThread || intent === 'ask' || override === 'ask';
     if (forcedBuild && !workspaceRegistry.can(req.workspace!.role, 'agent.run')) {
       return res.status(403).json({ error: 'Your workspace role cannot start builds. Ask a developer or admin to run this task.' });
     }

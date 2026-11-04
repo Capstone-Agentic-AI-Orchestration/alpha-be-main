@@ -23,8 +23,16 @@ import { assignedWorkTicketSubject } from './ticketRequestAuth.js';
 import { supabaseService } from '../services/supabaseService.js';
 import type { PrototypeRun } from '../models/index.js';
 import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
+import { isManagedTask, MANAGED_TASK_ACTION_ERROR } from '../services/managedTaskExecution.js';
 
 export const runRouter = Router();
+async function refuseManagedAction(req: Request, res: Response, run: PrototypeRun): Promise<boolean> {
+  const issue = await issueStore().get(req.workspace!.workspaceId, run.issueId);
+  if (!isManagedTask(issue ?? undefined, run)) return false;
+  res.status(409).json({ error: MANAGED_TASK_ACTION_ERROR, issueId: run.issueId, projectId: run.projectId,
+    ...(run.orchestrationRunId ? { orchestrationRunId: run.orchestrationRunId } : {}) });
+  return true;
+}
 let ticketLifecycleRuntime: TicketLifecycleRuntime | null = null;
 
 /** The runtime is built after the database/environment are resolved in index. */
@@ -166,6 +174,7 @@ runRouter.post('/runs/start', desktopOnly, async (req: Request, res: Response) =
     const issue = await issueStore().get(req.workspace!.workspaceId, issueId);
     if (!issue) return res.status(404).json({ error: 'Task not found' });
     if (!requireProjectWorkspace(req, res, issue.projectId)) return;
+    if (isManagedTask(issue)) return res.status(409).json({ error: MANAGED_TASK_ACTION_ERROR, issueId: issue.id, projectId: issue.projectId });
     const workspaceId = req.workspace!.workspaceId;
     const runId = `run-${randomUUID()}`;
     ticketExecution = await reserveTicketExecution({
@@ -200,6 +209,7 @@ runRouter.post('/runs/:id/cancel', desktopOnly, async (req: Request, res: Respon
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const run = await scopedRun(req, res, req.params.id);
     if (!run) return;
+    if (await refuseManagedAction(req, res, run)) return;
     await runnerService.cancelRun(req.params.id);
     res.json({ success: true });
   } catch (err: any) {
@@ -238,6 +248,7 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
   if (!requireWorkspaceCapability(req, res, 'deployment.manage')) return;
   const run = await scopedRun(req, res, req.params.id);
   if (!run) return;
+  if (await refuseManagedAction(req, res, run)) return;
   const { approved } = req.body ?? {};
   if (typeof approved !== 'boolean') {
     return res.status(400).json({ error: 'approved must be a boolean' });
@@ -426,6 +437,7 @@ runRouter.post('/runs/:id/retry', desktopOnly, async (req: Request, res: Respons
     if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
     const existing = await scopedRun(req, res, req.params.id);
     if (!existing) return;
+    if (await refuseManagedAction(req, res, existing)) return;
 
     if (!['failed', 'cancelled', 'changes_requested'].includes(existing.status)) {
       return res.status(409).json({ error: `Only a failed, cancelled, or returned run can be retried. This run is ${existing.status}.` });

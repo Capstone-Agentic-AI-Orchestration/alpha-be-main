@@ -19,6 +19,7 @@ import { operationsRouter } from './controllers/operationsController.js';
 import { runtimeRouter } from './controllers/runtimeController.js';
 import { githubRouter } from './controllers/githubController.js';
 import { chatRouter } from './controllers/chatController.js';
+import { featureSpecRouter } from './controllers/featureSpecController.js';
 import { mcpRouter } from './controllers/mcpController.js';
 import { projectBuildSnapshotRouter } from './controllers/projectBuildSnapshotController.js';
 import { orchestrationRouter } from './controllers/orchestrationController.js';
@@ -315,6 +316,7 @@ app.use('/api', operationsRouter);
 app.use('/api', runtimeRouter);
 app.use('/api', githubRouter);
 app.use('/api', chatRouter);
+app.use('/api', featureSpecRouter);
 app.use('/api', localPreviewRouter);
 app.use('/api', mcpRouter);
 app.use('/api', workspaceRouter);
@@ -595,6 +597,9 @@ function onListening(): void {
   // Without this, a restarted daemon could leave a task marked running with no
   // process behind it, or miss a completed submission waiting for acceptance.
   if (!IS_CLOUD) {
+    void import('./services/boardBuildRequests.js').then(({ startBoardBuildQueue }) => {
+      server.once('close', startBoardBuildQueue());
+    }).catch(err => logError('Could not start local planning queue:', err));
     void import('./services/orchestrationRuntime.js')
       .then(({ reconcileInterruptedOrchestrations, startOrchestrationEventDelivery }) => {
         const stopEventDelivery = startOrchestrationEventDelivery(

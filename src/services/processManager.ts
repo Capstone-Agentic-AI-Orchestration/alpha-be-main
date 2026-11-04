@@ -16,6 +16,8 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   /** A bounded operation may shorten, but never extend, the global deadline. */
   timeoutMs?: number;
+  /** Internal callers may allow longer quiet work, still bounded by the hard deadline. */
+  idleTimeoutMs?: number;
   /**
    * Text to write to the child's stdin, then close it.
    *
@@ -55,6 +57,9 @@ export class ProcessManager {
     const timeoutMs = options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
       ? Math.min(options.timeoutMs, EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS)
       : EXECUTION_LIMITS.WALL_CLOCK_TIMEOUT_MS;
+    const idleTimeoutMs = Math.min(timeoutMs,
+      options.idleTimeoutMs !== undefined && Number.isFinite(options.idleTimeoutMs) && options.idleTimeoutMs > 0
+        ? options.idleTimeoutMs : EXECUTION_LIMITS.IDLE_TIMEOUT_MS);
 
     // 1. Verify working directory allowlist
     if (!sqliteService.isPathAllowed(cwd)) {
@@ -126,12 +131,12 @@ export class ProcessManager {
       if (entry?.idleTimer) clearTimeout(entry.idleTimer);
       if (entry) {
         entry.idleTimer = setTimeout(() => {
-          logError(`Run ${runId} timed out due to idle output (no output for ${EXECUTION_LIMITS.IDLE_TIMEOUT_MS / 1000}s)`);
+          logError(`Run ${runId} timed out due to idle output (no output for ${idleTimeoutMs / 1000}s)`);
           logAudit('PROCESS_IDLE_TIMEOUT', { runId, bin });
           void this.terminateProcessAndWait(runId, 'timeout').catch(error =>
             logError(`Could not confirm timeout termination for run ${runId}:`, error)
           );
-        }, EXECUTION_LIMITS.IDLE_TIMEOUT_MS);
+        }, idleTimeoutMs);
       }
     };
 

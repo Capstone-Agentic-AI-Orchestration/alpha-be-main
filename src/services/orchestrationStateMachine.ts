@@ -123,6 +123,7 @@ export interface OrchestrationFindingRecord {
 }
 
 export interface OrchestrationSnapshot {
+  recoveryAuthorizations?: Array<{ taskId: string; afterWorkAttempts: number; actorId: string; reason: string; candidateHash: string }>;
   run: OrchestrationRunRecord;
   tasks: OrchestrationTaskRecord[];
   attempts: OrchestrationAttemptRecord[];

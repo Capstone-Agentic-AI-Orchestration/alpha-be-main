@@ -17,7 +17,7 @@ export { parseAgentReport } from './orchestrationAgentReport.js';
 import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
-import type { OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
+import { buildHumanReviewAmendment, type OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
 import type { PlanNextMilestone } from './orchestrationMilestonePlanner.js';
 import { getCurrentBranch, getGitChangedPaths, getGitDiffNumstat, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
@@ -25,13 +25,13 @@ import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
-import { preserveAndRestoreWorktree } from './orchestrationWorktreeRecovery.js';
+import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 import {
   ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS,
   ALPHA_ORCHESTRATION_MAX_COST_USD,
   ALPHA_ORCHESTRATION_MAX_TOKENS
 } from '../config/env.js';
-import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount } from './orchestrationRecoveryPolicy.js';
+import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount, totalWorkAttemptCount } from './orchestrationRecoveryPolicy.js';
 
 // The reviewer reads every accepted patch in one prompt, sent through stdin. 64 KiB
 // stopped a first feature build on a starter project (72 KB of real code), so the
@@ -606,6 +606,7 @@ export class OrchestrationService {
   }
 
   async retryTask(input: {
+    reviewedCandidateHash?: string;
     workspaceId: string;
     runId: string;
     taskId: string;
@@ -631,10 +632,24 @@ export class OrchestrationService {
       const task = snapshot.tasks.find(item => item.id === input.taskId);
       if (!task) throw new Error('Orchestration task not found.');
       if (!['failed', 'blocked'].includes(task.status)) throw new Error('Only a failed or blocked task can be retried.');
-      const executionAttempts = taskExecutionAttemptCount(snapshot, task.id);
+      let executionAttempts = taskExecutionAttemptCount(snapshot, task.id);
       const developerGuidance = input.developerGuidance?.trim();
       if (developerGuidance && developerGuidance.length > MAX_RECOVERY_GUIDANCE_CHARS) {
         throw new Error(`Keep developer guidance under ${MAX_RECOVERY_GUIDANCE_CHARS.toLocaleString()} characters.`);
+      }
+      if (input.reviewedCandidateHash) {
+        if (snapshot.run.status !== 'blocked' || (executionAttempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE && reportFormatCorrectionCount(snapshot, task.id) < MAX_REPORT_FORMAT_CORRECTIONS) || !developerGuidance || developerGuidance.length < 20 || input.reportCorrection ||
+            snapshot.run.pauseRequestedAt) throw new Error('Review the exhausted step and describe the changed condition before authorizing recovery.');
+        const budget = this.recoveryBudgetStop(snapshot);
+        if (budget) throw new Error(budget.reason);
+        const recoveryIssueId = snapshot.run.issueId;
+        if (this.store.getPrototypeRuns().some(run => run.issueId === recoveryIssueId && ['running', 'queued', 'validating'].includes(run.status))) throw new Error('A task process may still be active. Confirm it stopped before authorizing recovery.');
+        await this.assertRecoverableCheckpoint(snapshot);
+        const workspace = repositoryWorkspaceForTask(snapshot, task.id);
+        if (!workspace || await worktreeChangesHash(workspace.worktreePath) !== input.reviewedCandidateHash) throw new Error('The saved candidate changed since inspection. Review it again.');
+        snapshot = this.store.authorizeReviewedRecovery({ runId: input.runId, taskId: task.id, expectedRevision: snapshot.run.revision,
+          afterWorkAttempts: totalWorkAttemptCount(snapshot, task.id), actorId: input.actorId, reason: developerGuidance, candidateHash: input.reviewedCandidateHash });
+        executionAttempts = taskExecutionAttemptCount(snapshot, task.id);
       }
       if (input.reportCorrection) {
         if (reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) {
@@ -643,7 +658,7 @@ export class OrchestrationService {
       } else if (executionAttempts >= MAX_REPAIR_ATTEMPTS_PER_EPISODE ||
           (executionAttempts >= AUTO_REPAIR_ATTEMPT_LIMIT && !developerGuidance)) {
         throw new Error(executionAttempts >= MAX_REPAIR_ATTEMPTS_PER_EPISODE
-          ? 'This recovery reached its four-work-attempt limit. Review the saved changes before starting a fresh build.'
+          ? 'This recovery reached its four-work-attempt limit. Review saved work on this task before authorizing a bounded recovery restart.'
           : 'This task reached its automatic retry limit. Provide clear direction to authorize one bounded recovery retry.');
       }
       snapshot = this.store.transitionOrchestrationTask({
@@ -671,6 +686,20 @@ export class OrchestrationService {
     }));
   }
 
+  async restoreArchivedCandidate(input: { workspaceId: string; runId: string; expectedRevision: number; taskId: string; archiveId: string; archiveHash: string; candidateHash: string; actorId: string }) {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const snapshot = this.store.getOrchestrationSnapshot(input.runId);
+      const task = snapshot?.tasks.find(item => item.id === input.taskId);
+      if (!snapshot || !task || snapshot.run.status !== 'blocked' || snapshot.run.revision !== input.expectedRevision ||
+          !['failed', 'blocked'].includes(task.status) || snapshot.attempts.some(item => ['starting', 'running', 'submitted', 'recovery_required'].includes(item.status))) throw new Error('The build changed or still has active work. Refresh before restoring.');
+      if (this.store.getPrototypeRuns().some(run => run.issueId === snapshot.run.issueId && ['running', 'queued', 'validating'].includes(run.status))) throw new Error('A task process may still be writing. Confirm it stopped before restoring.');
+      const { restoreSavedArchive } = await import('./orchestrationSavedArchives.js');
+      const candidateHash = await restoreSavedArchive(snapshot, task, input);
+      this.store.recordArchiveRestore({ ...input, candidateHash });
+      return { candidateHash };
+    }));
+  }
+
   async resume(input: {
     workspaceId: string;
     runId: string;
@@ -695,7 +724,7 @@ export class OrchestrationService {
         }
         const interruptedTask = interruptedTasks[0];
         if (interruptedTask && taskExecutionAttemptCount(snapshot, interruptedTask.id) >= MAX_REPAIR_ATTEMPTS_PER_EPISODE) {
-          throw new Error(`The interrupted task reached its ${MAX_REPAIR_ATTEMPTS_PER_EPISODE}-attempt limit. Review the saved changes before starting a fresh build.`);
+          throw new Error(`The interrupted task reached its ${MAX_REPAIR_ATTEMPTS_PER_EPISODE}-attempt limit. Review saved work on this task before authorizing a bounded recovery restart.`);
         }
         if (interruptedTask) {
           const interruptedAttempt = [...ready.attempts].reverse().find(attempt =>
@@ -770,7 +799,7 @@ export class OrchestrationService {
       if (!clean) {
         // The checks above proved the interrupted specialist is no longer running, so its
         // leftovers are saved aside and the worktree returns to the checkpoint.
-        await preserveAndRestoreWorktree({ worktree, runId: snapshot.run.id, label: interruptedTask?.id ?? 'resume' });
+        await preserveAndRestoreWorktree({ worktree, runId: snapshot.run.id, label: interruptedTask?.id ?? 'resume', keepChanges: true });
       }
       const latestAccepted = [...snapshot.attempts].reverse().find(attempt => {
         const task = snapshot.tasks.find(item => item.id === attempt.taskId);
@@ -920,6 +949,48 @@ export class OrchestrationService {
     }));
   }
 
+  /**
+   * A reviewer sends finished work back before publication.
+   *
+   * The request becomes scoped corrections for the accepted implementation
+   * owners, followed by a fresh independent review and validation, on the same
+   * branch and worktree. Nothing is published; the build returns to final
+   * review when the corrections pass. Correction-cycle limits still apply.
+   */
+  async requestReviewChanges(input: {
+    workspaceId: string;
+    runId: string;
+    expectedRunRevision: number;
+    actorId: string;
+    feedback: string;
+    /** Agents this project may still run; correction owners and reviewers come only from these. */
+    eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[];
+    now?: string;
+  }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const current = this.store.getOrchestrationSnapshot(input.runId);
+      if (!current) throw new Error('Orchestration run not found.');
+      if (current.run.revision !== input.expectedRunRevision) {
+        throw new Error('The build changed since it was reviewed. Refresh before sending it back.');
+      }
+      const amendment = buildHumanReviewAmendment(current, input.feedback, input.eligibleAgents);
+      const snapshot = this.store.appendOrchestrationFinalValidationAmendment({
+        runId: input.runId,
+        expectedRunRevision: input.expectedRunRevision,
+        expectedPlanVersion: current.run.planVersion,
+        actorId: input.actorId,
+        evidence: { request: input.feedback.trim() },
+        plan: amendment.plan,
+        addedTasks: amendment.addedTasks,
+        findings: amendment.findings,
+        source: 'human_review',
+        now: input.now
+      });
+      return this.dispatchNextUnlocked(snapshot, input.actorId, undefined, input.now);
+    }));
+  }
+
+
   async amendFinalValidation(input: {
     workspaceId: string;
     runId: string;
@@ -1040,7 +1111,7 @@ export class OrchestrationService {
         ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
         : describeRunnerFailure(run, failedStage?.logs ?? []);
       return this.failActiveAttempt(snapshot, task.id, attempt.id, reason,
-        (isVerificationFailure || isRepairableImplementationFailure) && CODE_TASK_KINDS.has(task.kind));
+        (isVerificationFailure || isRepairableImplementationFailure || /Process timed out/i.test(run.testSummary ?? '')) && CODE_TASK_KINDS.has(task.kind));
     }));
   }
 

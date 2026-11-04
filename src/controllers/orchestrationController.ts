@@ -2,7 +2,7 @@ import { executeOrchestrationDecision } from '../services/orchestrationDecision.
 import { localPreviewService } from '../services/localPreviewService.js';
 import { Request, Response, Router } from 'express';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
-import { projectStore } from '../store/stores.js';
+import { issueStore, projectStore } from '../store/stores.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { getOrchestrationDiffPreview, getOrchestrationLiveChanges } from '../services/orchestrationReviewService.js';
 import { inspectOrchestrationPlanningWorktree, getOrchestrationPlanningRecoveryPreview, removeStaleOrchestrationPlanningWorktree } from '../services/orchestrationPlanningRecovery.js';
@@ -12,11 +12,82 @@ import { runWithWorkspace } from '../services/workspaceContext.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { orchestrationRecoveryService } from '../services/orchestrationRecoveryService.js';
 import type { OrchestrationSnapshot } from '../services/orchestrationStateMachine.js';
+import { MAX_REVIEW_FEEDBACK_CHARS } from '../services/orchestrationReviewWorkflow.js';
+import { createHash } from 'node:crypto';
+import { boardBuildBlocker, requestBoardBuild, type BoardBuildRequest } from '../services/boardBuildRequests.js';
 import { route } from './asyncRoute.js';
 import { desktopOnly } from './desktopOnly.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
 export const orchestrationRouter = Router();
+
+orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery-candidate', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'squad.read')) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  if (!['blocked', 'recovery_required', 'paused'].includes(snapshot.run.status)) return res.status(409).json({ error: 'Saved-work inspection is available for stopped builds.' });
+  const task = [...snapshot.tasks].reverse().find(item => ['failed', 'blocked'].includes(item.status));
+  if (!task) return res.status(409).json({ error: 'There is no failed step to restart.' });
+  const { repositoryWorkspaceForTask } = await import('../services/orchestrationWorkspace.js');
+  const { worktreeChangesHash } = await import('../services/orchestrationWorktreeRecovery.js');
+  const { workAttemptCount, reportFormatCorrectionCount, MAX_REPORT_FORMAT_CORRECTIONS } = await import('../services/orchestrationRecoveryPolicy.js');
+  const workspace = repositoryWorkspaceForTask(snapshot, task.id);
+  if (!workspace) return res.status(409).json({ error: 'The saved workspace is unavailable.' });
+  const changes = await getOrchestrationLiveChanges(snapshot);
+  const { listSavedArchives } = await import('../services/orchestrationSavedArchives.js');
+  res.json({ runRevision: snapshot.run.revision, taskId: task.id, taskRevision: task.revision,
+    candidateHash: await worktreeChangesHash(workspace.worktreePath), changes, archives: listSavedArchives(snapshot, task),
+    restartAvailable: req.workspace!.role === 'dev' && snapshot.run.status === 'blocked' && (workAttemptCount(snapshot, task.id) >= 4 || reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) &&
+      (snapshot.recoveryAuthorizations ?? []).filter(item => item.taskId === task.id).length < 2 });
+}));
+
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/restore-archive', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'agent.run') || !requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const { expectedRevision, taskId, archiveId, archiveHash, candidateHash } = req.body ?? {};
+  if (req.workspace!.role !== 'dev' || !Number.isSafeInteger(expectedRevision) || typeof taskId !== 'string' || typeof archiveId !== 'string' || archiveId.length > 200 ||
+      typeof archiveHash !== 'string' || !/^[a-f0-9]{64}$/.test(archiveHash) || typeof candidateHash !== 'string' || !/^[a-f0-9]{64}$/.test(candidateHash)) return res.status(400).json({ error: 'Inspect the archive and current candidate before restoring.' });
+  const task = snapshot.tasks.find(item => item.id === taskId);
+  if (!task || !await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, req.params.projectId, task.ownerAgentId)) return res.status(404).json({ error: 'Task not found in this project.' });
+  try {
+    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
+    res.json(await orchestrationService.restoreArchivedCandidate({ workspaceId: req.workspace!.workspaceId, runId: snapshot.run.id, expectedRevision, taskId, archiveId, archiveHash, candidateHash, actorId: req.workspace!.userId }));
+  } catch (error) { errorResponse(res, error); }
+}));
+
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/restart-recovery', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'agent.run') || !requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  const { expectedRevision, taskId, taskRevision, candidateHash, guidance } = req.body ?? {};
+  if (req.workspace!.role !== 'dev' || !Number.isSafeInteger(expectedRevision) || !Number.isSafeInteger(taskRevision) || typeof taskId !== 'string' ||
+      typeof candidateHash !== 'string' || !/^[a-f0-9]{64}$/.test(candidateHash) || typeof guidance !== 'string' || guidance.trim().length < 20 || guidance.length > 2000) {
+    return res.status(400).json({ error: 'Review the candidate and describe the changed condition in 20–2,000 characters.' });
+  }
+  const task = snapshot.tasks.find(item => item.id === taskId);
+  if (!task || !await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, req.params.projectId, task.ownerAgentId)) return res.status(404).json({ error: 'Task not found in this project.' });
+  try {
+    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
+    const next = await orchestrationService.retryTask({ workspaceId: req.workspace!.workspaceId, runId: snapshot.run.id,
+      expectedRunRevision: expectedRevision, taskId, expectedTaskRevision: taskRevision, actorId: req.workspace!.userId,
+      developerGuidance: guidance.trim(), reviewedCandidateHash: candidateHash });
+    await reconcileRecovery(next);
+    res.json({ runId: next.run.id, status: next.run.status });
+  } catch (error) { errorResponse(res, error); }
+}));
+
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/revise-plan', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'agent.run') || !requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!scopedSnapshot(req, res)) return;
+  const { expectedRevision, instruction } = req.body ?? {};
+  if (!Number.isSafeInteger(expectedRevision) || typeof instruction !== 'string' || !instruction.trim() || instruction.length > 2000) return res.status(400).json({ error: 'Supply the current revision and a revision request under 2,000 characters.' });
+  try {
+    const { reviseBoardPlan } = await import('../services/boardPlanRevision.js');
+    const snapshot = await reviseBoardPlan(req.workspace!, req.params.runId, expectedRevision, instruction.trim());
+    res.json({ runId: snapshot.run.id, revision: snapshot.run.revision, planVersion: snapshot.run.planVersion });
+  } catch (error) { errorResponse(res, error); }
+}));
 
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/delivery', desktopOnly, route(async (req: Request, res: Response) => {
   if (!authorizedProject(req, res, 'squad.read')) return;
@@ -101,10 +172,56 @@ function scopedSnapshot(req: Request, res: Response) {
  */
 orchestrationRouter.get('/issues/build-status', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'squad.read')) return;
-  const projectIds = (await projectStore().list(req.workspace!.workspaceId))
-    .map(project => project.id)
-    .filter(projectId => workspaceRegistry.canAccessProjectBuilds(req.workspace!, projectId));
-  res.json(runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.listLatestIssueBuilds(projectIds)));
+  const projects = (await projectStore().list(req.workspace!.workspaceId))
+    .filter(project => workspaceRegistry.canAccessProjectBuilds(req.workspace!, project.id));
+  const issues = await issueStore().list(req.workspace!.workspaceId);
+  const rows = runWithWorkspace(req.workspace!.workspaceId, () => {
+    const latest = sqliteService.listLatestIssueBuilds(projects.map(project => project.id));
+    const requests = sqliteService.listBoardBuildRequests(req.workspace!.workspaceId) as BoardBuildRequest[];
+    const blockers = new Map(projects.map(project => [project.id, boardBuildBlocker(project)]));
+    return issues.filter(issue => projects.some(project => project.id === issue.projectId)).map(issue => {
+      const project = projects.find(item => item.id === issue.projectId)!;
+      const build = latest.find(item => item.issueId === issue.id);
+      const owner = blockers.get(project.id);
+      const blocker = owner && owner.issueId !== issue.id ? {
+        status: owner.status, repository: owner.repository,
+        ...(owner.projectId && workspaceRegistry.canAccessProjectBuilds(req.workspace!, owner.projectId)
+          ? { projectId: owner.projectId, issueId: owner.issueId, runId: owner.runId,
+            identifier: issues.find(item => item.id === owner.issueId)?.identifier } : {})
+      } : undefined;
+      const latestRequest = [...requests].reverse().find(item => item.issueId === issue.id && item.ownerId === req.workspace!.userId);
+      const request = latestRequest && !['accepted', 'cancelled'].includes(latestRequest.status) ? latestRequest : undefined;
+      return { ...(build ?? { issueId: issue.id, projectId: issue.projectId, runId: '', status: 'none', updatedAt: issue.updatedAt }),
+        blocker, request: request ? { id: request.id, status: request.status, reason: request.reason } : undefined,
+        fresh: true, observedAt: new Date().toISOString() };
+    });
+  });
+  res.json(rows);
+}));
+
+orchestrationRouter.post('/projects/:projectId/issues/:issueId/build-request', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'agent.run') || !requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (req.workspace!.role !== 'dev') return res.status(403).json({ error: 'Only developers can request AI builds.' });
+  const [project, issue] = await Promise.all([projectStore().get(req.workspace!.workspaceId, req.params.projectId), issueStore().get(req.workspace!.workspaceId, req.params.issueId)]);
+  if (!project || !issue || issue.projectId !== project.id) return res.status(404).json({ error: 'Task not found in this project.' });
+  const { requestId, instructions = '', queue = false } = req.body ?? {};
+  if (typeof requestId !== 'string' || !/^[\w-]{8,100}$/.test(requestId) || typeof instructions !== 'string' || instructions.length > 2000 || typeof queue !== 'boolean') {
+    return res.status(400).json({ error: 'Supply a request ID and at most 2,000 characters of developer instructions.' });
+  }
+  try {
+    const id = 'board-request-' + createHash('sha256').update(JSON.stringify([req.workspace!.workspaceId, req.workspace!.userId, requestId])).digest('hex');
+    const result = await requestBoardBuild({ context: req.workspace!, issue, project, requestId: id, instructions: instructions.trim(), queue });
+    res.status(202).json({ id: result.id, threadId: result.threadId, status: result.status, reason: result.reason });
+  } catch (error) { errorResponse(res, error); }
+}));
+
+orchestrationRouter.post('/projects/:projectId/build-requests/:requestId/cancel', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'agent.run')) return;
+  const record = sqliteService.listBoardBuildRequests(req.workspace!.workspaceId).find(item => item.id === req.params.requestId && item.ownerId === req.workspace!.userId && item.projectId === req.params.projectId);
+  if (!record) return res.status(404).json({ error: 'Planning request not found.' });
+  if (record.status !== 'waiting') return res.status(409).json({ error: 'Only a waiting request can be removed. Open the task build for accepted work.' });
+  sqliteService.saveBoardBuildRequest({ ...record, status: 'cancelled', updatedAt: new Date().toISOString() } as BoardBuildRequest);
+  res.json({ status: 'cancelled' });
 }));
 
 orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/plans', desktopOnly, route(async (req: Request, res: Response) => {
@@ -470,7 +587,9 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/cancel', de
     const cancelled = await orchestrationService.cancelRun({
       workspaceId: req.workspace!.workspaceId,
       runId: snapshot.run.id,
-      actorId: req.workspace!.userId
+      actorId: req.workspace!.userId,
+      expectedRevision: Number.isSafeInteger(req.body?.expectedRevision) ? req.body.expectedRevision : snapshot.run.revision,
+      reason: 'Stopped by the developer after confirmation. Saved work remains available for review.'
     });
     await localPreviewService.stopForBuild(req.workspace!.workspaceId, snapshot.run.id);
     await reconcileRecovery(cancelled);
@@ -503,6 +622,55 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/approve', d
       action: 'approve', expectedRevision: Number.isSafeInteger(expectedRevision) ? expectedRevision : undefined
     });
     res.json({ runId: published.run.id, status: published.run.status, issueId: published.run.issueId, publication: published.run.publication });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+}));
+
+/**
+ * Send finished work back from final review with the reviewer's requested changes.
+ *
+ * Same permission as publishing, because both are the final-review decision.
+ * The engine routes the request to the accepted implementation owners inside
+ * their original scopes, then reviews and validates again on the same branch.
+ */
+orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/request-changes', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!authorizedProject(req, res, 'build.publish')) return;
+  // This action dispatches agent corrections, unlike normal PM review comments.
+  if (!requireWorkspaceCapability(req, res, 'agent.run') || !requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const snapshot = scopedSnapshot(req, res);
+  if (!snapshot) return;
+  if (!ALPHA_ORCHESTRATION_ENABLED) {
+    return res.status(409).json({ error: 'The Orchestrator is unavailable in this desktop version. Update the app before sending work back.' });
+  }
+  const expectedRevision = req.body?.expectedRevision;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return res.status(400).json({ error: 'expectedRevision must be a non-negative integer.' });
+  }
+  const feedback = typeof req.body?.feedback === 'string' ? req.body.feedback.trim() : '';
+  if (!feedback) return res.status(400).json({ error: 'Describe what should change before sending the work back.' });
+  if (feedback.length > MAX_REVIEW_FEEDBACK_CHARS) {
+    return res.status(400).json({ error: `Keep the requested changes under ${MAX_REVIEW_FEEDBACK_CHARS.toLocaleString()} characters.` });
+  }
+  if (snapshot.run.status !== 'awaiting_approval') {
+    return res.status(409).json({ error: 'Only a build that is waiting for final review can be sent back.' });
+  }
+  const workspaceId = req.workspace!.workspaceId;
+  const agents = runWithWorkspace(workspaceId, () => sqliteService.getAgents()).filter(agent => !agent.isArchived);
+  const visible = await Promise.all(agents.map(agent =>
+    workspaceRegistry.canAccessProjectAgentRun(req.workspace!, req.params.projectId, agent.id)));
+  try {
+    const { orchestrationService } = await import('../services/orchestrationRuntime.js');
+    const next = await orchestrationService.requestReviewChanges({
+      workspaceId,
+      runId: snapshot.run.id,
+      expectedRunRevision: expectedRevision,
+      actorId: req.workspace!.userId,
+      feedback,
+      eligibleAgents: agents.filter((_agent, index) => visible[index]).map(agent => ({ id: agent.id, role: agent.role }))
+    });
+    await reconcileRecovery(next);
+    res.json({ runId: next.run.id, status: next.run.status, currentTaskId: next.run.currentTaskId, planVersion: next.run.planVersion });
   } catch (error) {
     errorResponse(res, error);
   }

@@ -128,6 +128,14 @@ afterEach(() => {
   vi.resetModules();
 });
 
+describe('developer-only board planning admission', () => {
+  it.each(['pm', 'admin', 'client'])('refuses %s before creating a queued request or invoking a planner', async role => {
+    const { app } = await startApi(role);
+    const response = await call(app, 'POST', '/api/projects/project-1/issues/issue-1/build-request', { requestId: 'test-request-one', queue: true });
+    expect(response.status).toBe(403);
+  });
+});
+
 describe('task workflow project routes', () => {
   it('exposes delivery only for the matching project and workspace', async () => {
     const { app, calls, awaitingSnapshot } = await startApi();

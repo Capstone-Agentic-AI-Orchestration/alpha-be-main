@@ -19,6 +19,7 @@ const steps = [
 
 let checkoutDir: string;
 let issueRows: any[];
+let featureSpecRows: Map<string, any>;
 let squadRuns: any[];
 let createdIssue: ReturnType<typeof vi.fn>;
 let startSquadRun: ReturnType<typeof vi.fn>;
@@ -45,6 +46,7 @@ async function load(
   if (runtimeOrchestrationAvailable) process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
   else delete process.env.ALPHA_ORCHESTRATION_ENABLED;
   issueRows = [];
+  featureSpecRows = new Map();
   squadRuns = [];
   createdIssue = vi.fn(async (_workspaceId: string, input: any) => {
     const issueNumber = issueRows.length + 1;
@@ -213,6 +215,7 @@ async function load(
       getIssues: () => issueRows,
       getActiveOrchestrationForProject: activeWorkflow,
       getOrchestrationByRequestKey: () => undefined,
+      getFeatureSpec: (issueId: string) => featureSpecRows.get(issueId) ?? null,
       getOrchestrationPlanningReservation: () => staleReservation,
       getOrchestrationPlanningReservationByRun: () => staleReservation ? { ...staleReservation, repositoryKey: selectedRepo } : undefined,
       recordOrchestrationPlanningRecovery: recordPlanningRecovery,
@@ -441,6 +444,78 @@ describe('project builds triggered from chat', () => {
     expect(createdIssue).not.toHaveBeenCalled();
     expect(issueRows).toHaveLength(1);
   });
+
+  describe('with a feature spec on the task', () => {
+    const spec = {
+      schemaVersion: 1, epicTitle: 'Keyboard input', summary: 'Type numbers with the keyboard.',
+      personas: [{ id: 'P1', name: 'Developer', goal: 'Enter numbers quickly.' }],
+      journeys: [{ id: 'J1', personaId: 'P1', title: 'Type a sum', steps: ['Focus the calculator', 'Type 2+2', 'Press Enter'] }],
+      requirements: [{ id: 'REQ-1', behavior: 'Digits typed on the keyboard appear in the display.', acceptanceCriteria: ['Typing 7 shows 7.'], journeyIds: ['J1'] }],
+      exclusions: ['No scientific functions.'], openQuestions: []
+    };
+    const request = (issueId: string) => ({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'thread-issue', messageId: 'message-' + crypto.randomUUID(),
+      content: '/build Keyboard input', repositories: [selectedRepo], issueId
+    });
+
+    it('turns the saved manual checklist into fixed requirements without an AI spec', async () => {
+      const service = await load();
+      const { manualChecklistRequirements } = await import('./issueChecklist.js');
+      const subtasks = [{ id: 'pm-1', title: 'Typing 7 shows 7.', completed: false }, { id: 'pm-2', title: 'Copy reviewed.', completed: true }];
+      issueRows.push({ id: 'manual', identifier: 'CALC-8', projectId: project.id, title: 'Keyboard input', description: '', status: 'todo', labels: [], subtasks });
+      await service.startProjectBuildBatch(request('manual'));
+      expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
+        approvedSpec: expect.objectContaining({ requirements: manualChecklistRequirements(subtasks), exclusions: [] })
+      }));
+    });
+
+    it('refuses an oversized checklist before reserving a workspace instead of dropping items', async () => {
+      const service = await load();
+      issueRows.push({ id: 'large', identifier: 'CALC-8', projectId: project.id, title: 'Large', status: 'todo', labels: [],
+        subtasks: Array.from({ length: 21 }, (_, i) => ({ id: `pm-${i}`, title: `Criterion ${i}`, completed: false })) });
+      const [result] = await service.startProjectBuildBatch(request('large'));
+      expect(result).toMatchObject({ status: 'blocked', reason: expect.stringMatching(/Split it into smaller tasks/) });
+      expect(plannerCreatePlan).not.toHaveBeenCalled();
+      expect(reservePlanning).not.toHaveBeenCalled();
+    });
+
+    it('gives the planner the approved requirements and exclusions', async () => {
+      const service = await load();
+      const { featureSpecSourceHash } = await import('./featureSpecContract.js');
+      const issue = { id: 'issue-9', identifier: 'CALC-9', projectId: project.id, title: 'Keyboard input', description: 'Type numbers.', status: 'todo', labels: [] };
+      issueRows.push(issue);
+      featureSpecRows.set(issue.id, { issueId: issue.id, version: 2, status: 'approved', spec, sourceHash: featureSpecSourceHash(issue), updatedBy: 'user-1', updatedAt: 'now' });
+
+      await service.startProjectBuildBatch(request(issue.id));
+
+      expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
+        approvedSpec: expect.objectContaining({
+          requirements: [{ id: 'REQ-1', description: 'Digits typed on the keyboard appear in the display. Acceptance: (1) Typing 7 shows 7.' }],
+          exclusions: ['No scientific functions.'],
+          brief: expect.stringContaining('Type a sum')
+        })
+      }));
+    });
+
+    it('ignores a draft spec and stops before planning when the approved spec is stale', async () => {
+      const service = await load();
+      const draft = { id: 'issue-10', identifier: 'CALC-10', projectId: project.id, title: 'Keyboard input', description: 'Type numbers.', status: 'todo', labels: [] };
+      const stale = { ...draft, id: 'issue-11', identifier: 'CALC-11', description: 'Type numbers and letters.' };
+      issueRows.push(draft, stale);
+      featureSpecRows.set(draft.id, { issueId: draft.id, version: 1, status: 'draft', spec, sourceHash: 'x', updatedBy: 'user-1', updatedAt: 'now' });
+      featureSpecRows.set(stale.id, { issueId: stale.id, version: 2, status: 'approved', spec, sourceHash: 'approved-against-older-text', updatedBy: 'user-1', updatedAt: 'now' });
+
+      await service.startProjectBuildBatch(request(draft.id));
+      expect(plannerCreatePlan).toHaveBeenLastCalledWith(expect.objectContaining({ approvedSpec: undefined }));
+
+      plannerCreatePlan.mockClear();
+      const [blocked] = await service.startProjectBuildBatch(request(stale.id));
+      expect(blocked).toMatchObject({ status: 'blocked', reason: expect.stringMatching(/changed after its feature spec was approved/) });
+      expect(plannerCreatePlan).not.toHaveBeenCalled();
+    });
+  });
+
 
   it.each([
     ['belongs to another project', { projectId: 'project-other', status: 'todo' }, /not part of this project/],
