@@ -40,4 +40,3 @@ export function isBoardThreadId(threadId: string): boolean {
 export function isAskThreadId(threadId: string): boolean {
   return threadId.startsWith(ASK_THREAD_PREFIX);
 }
-

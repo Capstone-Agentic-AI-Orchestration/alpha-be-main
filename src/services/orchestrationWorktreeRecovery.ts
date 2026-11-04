@@ -114,4 +114,3 @@ export async function preserveAndRestoreWorktree(input: {
   }
   return { folder, patchFile, movedPaths };
 }
-

@@ -33,4 +33,3 @@ export function ensureBoardThread(input: {
   workspaceRegistry.bind('chat_threads', thread.id, input.workspaceId);
   return { thread, created: true };
 }
-

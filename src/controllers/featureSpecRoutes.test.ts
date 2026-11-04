@@ -199,4 +199,3 @@ describe('feature spec routes', () => {
     expect(svc.getChatThreads('octocat').some((thread: any) => thread.id.startsWith('task-ask-'))).toBe(true);
   });
 });
-

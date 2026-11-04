@@ -191,4 +191,3 @@ describe('sending finished work back from final review', () => {
     )).toThrow(/Requested changes require an available reviewer/);
   });
 });
-

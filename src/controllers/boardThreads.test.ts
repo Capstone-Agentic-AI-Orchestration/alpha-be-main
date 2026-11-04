@@ -188,4 +188,3 @@ describe('POST /projects/:projectId/board-thread', () => {
     expect(forced.body.error).toMatch(/answers questions only/);
   });
 });
-

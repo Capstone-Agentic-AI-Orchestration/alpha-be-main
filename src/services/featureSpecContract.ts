@@ -173,4 +173,3 @@ export function checklistFromSpec(spec: FeatureSpec, current: readonly IssueSubt
   });
   return [...fromSpec, ...human];
 }
-

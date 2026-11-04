@@ -191,5 +191,3 @@ featureSpecRouter.post('/projects/:projectId/system-proposal', desktopOnly, rout
     fail(res, error);
   }
 }));
-
-

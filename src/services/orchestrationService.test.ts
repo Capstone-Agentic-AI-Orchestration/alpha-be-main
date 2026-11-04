@@ -899,4 +899,3 @@ describe('specialist launch safety', () => {
     expect(launches).toHaveLength(0);
   });
 });
-

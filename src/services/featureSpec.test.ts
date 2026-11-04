@@ -110,4 +110,3 @@ describe('planning from an approved feature spec', () => {
     expect(result.plan.milestones).toHaveLength(2);
   });
 });
-

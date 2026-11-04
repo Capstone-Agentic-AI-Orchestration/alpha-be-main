@@ -135,4 +135,3 @@ describe('runner failure reasons', () => {
     expect(reason).not.toMatch(/Tool Call|"command"/);
   });
 });
-

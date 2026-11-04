@@ -386,4 +386,3 @@ CAP-103's backend step now has four recorded attempts, exhausting its existing r
 ### Build reliability and wording audit — 2026-11-04
 
 The follow-up [Kanban build reliability and wording plan](KANBAN_BUILD_RELIABILITY_AND_COPY_PLAN.md) records verified state/control inconsistencies, a copy inventory, phased implementation and acceptance gates. It supersedes conflicting proposals here about build controls, status wording, retries and plan revision. This follow-up is a documentation-only audit; its proposed queue, canonical controls and reviewed recovery restart are not implemented by writing the plan.
-
