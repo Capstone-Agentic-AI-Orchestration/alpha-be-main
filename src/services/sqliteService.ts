@@ -4063,16 +4063,16 @@ export class SQLiteService {
   }
 
   /** The newest Orchestrator build for each issue in the given projects, for the board's status chips. */
-  listLatestIssueBuilds(projectIds: string[]): Array<{ issueId: string; projectId: string; runId: string; status: string; updatedAt: string }> {
+  listLatestIssueBuilds(projectIds: string[]): Array<{ issueId: string; projectId: string; runId: string; status: string; updatedAt: string; branchName?: string }> {
     if (!projectIds.length) return [];
     const placeholders = projectIds.map(() => '?').join(', ');
-    const rows = this.db.prepare(`SELECT issue_id, project_id, id, status, updated_at FROM orchestration_runs
+    const rows = this.db.prepare(`SELECT issue_id, project_id, id, status, updated_at, branch_name FROM orchestration_runs
       WHERE workspace_id = ? AND project_id IN (${placeholders}) ORDER BY CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN 1 ELSE 0 END, created_at DESC`)
-      .all(this.workspaceId(), ...projectIds) as Array<{ issue_id: string; project_id: string; id: string; status: string; updated_at: string }>;
-    const latest = new Map<string, { issueId: string; projectId: string; runId: string; status: string; updatedAt: string }>();
+      .all(this.workspaceId(), ...projectIds) as Array<{ issue_id: string; project_id: string; id: string; status: string; updated_at: string; branch_name: string | null }>;
+    const latest = new Map<string, { issueId: string; projectId: string; runId: string; status: string; updatedAt: string; branchName?: string }>();
     for (const row of rows) {
       if (!latest.has(row.issue_id)) {
-        latest.set(row.issue_id, { issueId: row.issue_id, projectId: row.project_id, runId: row.id, status: row.status, updatedAt: row.updated_at });
+        latest.set(row.issue_id, { issueId: row.issue_id, projectId: row.project_id, runId: row.id, status: row.status, updatedAt: row.updated_at, ...(row.branch_name ? { branchName: row.branch_name } : {}) });
       }
     }
     return [...latest.values()];

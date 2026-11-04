@@ -15,9 +15,10 @@ const safeName = (value: string) => value.replace(/[^a-z0-9._-]+/gi, '-').slice(
 const MAX_BYTES = 4 * 1024 * 1024;
 
 function archive(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord, id: string) {
-  if (path.basename(id) !== id || !/^[\w.-]+$/.test(id)) throw new Error('Invalid archive identifier.');
+  if (id === '.' || id === '..' || path.basename(id) !== id || !/^[\w.-]+$/.test(id)) throw new Error('Invalid archive identifier.');
   const root = path.resolve(process.env.ALPHA_HOME || path.join(os.homedir(), '.alpha'), 'preserved', safeName(snapshot.run.id));
-  const folder = path.join(root, id);
+  const folder = path.resolve(root, id);
+  if (!folder.startsWith(root + path.sep)) throw new Error('Archive must stay inside this build’s preserved directory.');
   if (!fs.existsSync(folder) || [path.dirname(root), root, folder, path.join(folder, 'README.json')].some(item => fs.lstatSync(item).isSymbolicLink())) throw new Error('Saved archive unavailable.');
   const workspace = repositoryWorkspaceForTask(snapshot, task.id);
   if (!workspace) throw new Error('The recorded workspace is unavailable.');
@@ -42,6 +43,7 @@ function archive(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord,
   };
   walk(folder);
   const patch = files.find(item => item.relative === 'tracked-changes.patch');
+  if (patch && /^(?:new file mode|old mode|new mode) 120000$/m.test(fs.readFileSync(patch.file, 'utf8'))) throw new Error('A symbolic-link patch needs manual review.');
   const untracked = files.filter(item => item.relative.startsWith('untracked/'));
   const allows = (relative: string) => relative && !path.isAbsolute(relative) && !relative.split(/[\\/]/).includes('..') && !relative.startsWith('.git') &&
     task.scope.includePaths.some(pattern => pathMatchesScope(relative, pattern)) && !task.scope.excludePaths.some(pattern => pathMatchesScope(relative, pattern));

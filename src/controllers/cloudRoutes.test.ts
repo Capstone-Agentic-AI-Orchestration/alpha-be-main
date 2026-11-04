@@ -214,7 +214,7 @@ describe('the cloud, without SQLite', () => {
 
     for (const url of STARTUP_READS) {
       const res = await call(app, 'GET', url);
-      expect({ url, status: res.status }).toEqual({ url, status: 200 });
+      expect({ url, status: res.status }).toEqual({ url, status: url === '/api/chat/threads' ? 403 : 200 });
     }
   });
 
@@ -280,6 +280,7 @@ describe('a person’s own conversations, on the web', () => {
    * and nobody else's: there is no project-manager bypass, by design.
    */
   async function seedThreads() {
+    session = { login: 'Admin1', role: 'dev' };
     await db.exec(`insert into workspaces (id, name, slug) values ('ws-default', 'Alpha', 'alpha')`);
     await db.exec(`insert into chat_threads (id, workspace_id, owner_id, title, last_message_at) values
       ('t-mine', 'ws-default', 'Admin1', 'Mine', now()),
@@ -461,7 +462,11 @@ describe('approving a run on the web', () => {
       prUrl: 'https://github.com/acme/checkout/pull/12', createdAt: now, updatedAt: now
     } as any, 'Admin1');
 
-    const res = await call(app, 'POST', '/api/runs/run-1/approve', { approved: true });
+    const denied = await call(app, 'POST', '/api/runs/run-1/approve', { approved: true });
+    expect(denied.status).toBe(403);
+    session = { login: 'Admin1', role: 'admin' };
+    const authorized = await startCloudApi();
+    const res = await call(authorized, 'POST', '/api/runs/run-1/approve', { approved: true });
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('completed');
