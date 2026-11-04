@@ -284,6 +284,28 @@ describe('orchestration runner adapter', () => {
     await expect(adapter.prepare(request)).rejects.toThrow('expected alpha/orchestration/');
   });
 
+  it('backs up and retains unfinished edits only for the same failed task', async () => {
+    await adapter.prepare(request);
+    baseCommit = git(worktree, 'rev-parse', 'HEAD');
+    attempts.push({ ...acceptedAttempt(request.taskId, ''), status: 'failed' });
+    request.attemptNumber = 2;
+    fs.writeFileSync(path.join(worktree, 'unfinished.ts'), 'export const pending = true;');
+    const previousHome = process.env.ALPHA_HOME;
+    process.env.ALPHA_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-retained-'));
+    try {
+      const prepared = await adapter.prepare(request);
+      expect(fs.readFileSync(path.join(worktree, 'unfinished.ts'), 'utf8')).toContain('pending');
+      expect(prepared.startingCommit).toBe(baseCommit);
+      expect(prepared.contextManifest?.resumedWorktreeHash).toMatch(/^[a-f0-9]{64}$/);
+      const saved = prepared.contextManifest?.preservedLeftovers as { folder: string };
+      expect(fs.readFileSync(path.join(saved.folder, 'untracked', 'unfinished.ts'), 'utf8')).toContain('pending');
+      await adapter.launch({ ...request, workingDir: worktree, branchName: prepared.branchName, contextManifest: prepared.contextManifest! });
+      expect(startRun.mock.calls[0][0].orchestration.resumedWorktreeHash).toBe(prepared.contextManifest?.resumedWorktreeHash);
+    } finally {
+      if (previousHome === undefined) delete process.env.ALPHA_HOME; else process.env.ALPHA_HOME = previousHome;
+    }
+  });
+
   it('preserves checkpointed work for a failed task retry', async () => {
     await adapter.prepare(request);
     baseCommit = git(source, 'rev-parse', 'HEAD');

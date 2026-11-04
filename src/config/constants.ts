@@ -1,6 +1,7 @@
 export const EXECUTION_LIMITS = {
   WALL_CLOCK_TIMEOUT_MS: 15 * 60 * 1000, // 15 minutes hard timeout
   IDLE_TIMEOUT_MS: 120 * 1000, // 120 seconds no-output idle timeout
+  BUILD_IDLE_TIMEOUT_MS: 5 * 60 * 1000, // Code tasks may reason or wait on tools without console output.
   MAX_TURNS: 25, // 25 turns per task
   MAX_OUTPUT_LINES_FOR_CONTEXT: 100, // Compaction threshold
   MAX_OUTPUT_CHARS_FOR_CONTEXT: 2000

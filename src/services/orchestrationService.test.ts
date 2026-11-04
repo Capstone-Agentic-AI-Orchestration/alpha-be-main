@@ -518,6 +518,34 @@ describe('deterministic orchestration orchestrator', () => {
     expect(launches).toHaveLength(0);
   });
 
+  it('automatically retries a timed-out code task once and stops when the same timeout repeats', async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-timeout-repair-'));
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestrator = new OrchestrationService(store, {
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const input = {
+      workspaceId: 'workspace-test', projectId: 'project-test', issueId: 'issue-test', repository: 'example/tasks',
+      requestKey: 'request-timeout-repair', requestFingerprint: 'fingerprint-timeout-repair', createdBy: 'user-test',
+      executorId: 'desktop-test', eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    };
+    let snapshot = await startAndApprove(orchestrator, input);
+    for (let index = 0; index < 2; index++) {
+      const request = launches[index];
+      snapshot = (await orchestrator.handleRunnerFailed({
+        id: `prototype-${request.attemptId}`, workspaceId: input.workspaceId,
+        orchestrationRunId: snapshot.run.id, orchestrationTaskId: request.taskId,
+        orchestrationAttemptId: request.attemptId, status: 'failed', testSummary: 'Run failed: Process timed out.',
+        stages: [{ id: 'analyze', status: 'failed', logs: ['Error: Process timed out.'] }]
+      } as any))!;
+      expect(snapshot.run.status).toBe(index === 0 ? 'executing' : 'blocked');
+    }
+    expect(launches).toHaveLength(2);
+    expect(launches[1].taskId).toBe(launches[0].taskId);
+    expect(snapshot.tasks.find(task => task.id === 'complete-endpoint')?.status).toBe('pending');
+  });
+
   it('assigns bounded verification repairs, gives each the failure evidence, then stops for human review', async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-verification-repair-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
@@ -871,4 +899,3 @@ describe('specialist launch safety', () => {
     expect(launches).toHaveLength(0);
   });
 });
-

@@ -1112,6 +1112,12 @@ function isIssueStatus(value: unknown): value is IssueStatus {
   return typeof value === 'string' && ISSUE_STATUSES.includes(value as IssueStatus);
 }
 
+function hasUnfinishedManagedBuild(workspaceId: string, issue: Issue): boolean {
+  if (IS_CLOUD) return false;
+  const latest = runWithWorkspace(workspaceId, () => sqliteService.listLatestIssueBuilds([issue.projectId]).find(item => item.issueId === issue.id));
+  return Boolean(latest && !['completed', 'failed', 'cancelled'].includes(latest.status));
+}
+
 async function activeRunForIssue(workspaceId: string, issueId: string) {
   return (await runStore().listSummaries(workspaceId)).find(run =>
     run.issueId === issueId && ACTIVE_RUN_STATUSES.has(run.status)
@@ -1131,6 +1137,7 @@ async function statusTransitionError(workspaceId: string, issue: Issue, requeste
   if (!isIssueStatus(requestedStatus)) {
     return 'status must be one of: ' + ISSUE_STATUSES.join(', ') + '.';
   }
+  if (hasUnfinishedManagedBuild(workspaceId, issue)) return 'This task has an unfinished build. Open its Build tab before changing the task status.';
 
   const activeRun = await activeRunForIssue(workspaceId, issue.id);
 
@@ -1319,6 +1326,7 @@ dataRouter.post('/issues/:id/complete', route(async (req: Request, res: Response
   }
 
   if (before.status === 'done') return res.json(before);
+  if (hasUnfinishedManagedBuild(req.workspace!.workspaceId, before)) return res.status(409).json({ error: 'Review or recover the unfinished task build before completing this task.' });
 
   const activeRun = await activeRunForIssue(req.workspace!.workspaceId, before.id);
   if (activeRun) {

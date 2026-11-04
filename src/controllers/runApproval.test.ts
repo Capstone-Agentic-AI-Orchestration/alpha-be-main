@@ -153,6 +153,14 @@ afterEach(() => {
 });
 
 describe('POST /runs/:id/approve', () => {
+  it('rejects legacy review for a managed task instead of merging independently', async () => {
+    const { svc, app } = await startApi();
+    plantAwaitingRun(svc);
+    svc.updateIssue('iss-1', { labels: ['alpha:task-orchestration'] });
+    const res = await post(app, '/api/runs/run-1/approve', { approved: true });
+    expect(res.status).toBe(409); expect(res.body.error).toContain('Build tab');
+    expect(merge).not.toHaveBeenCalled(); expect(svc.getPrototypeRuns()[0].status).toBe('awaiting_approval');
+  });
   it('merges the pull request and completes the run', async () => {
     const { svc, app } = await startApi();
     plantAwaitingRun(svc);

@@ -27,6 +27,41 @@ function fakeChild() {
 }
 
 describe('ProcessManager termination reasons', () => {
+  it('allows a build to be quiet beyond two minutes but still enforces its bounded idle limit', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    treeKillMock.mockImplementationOnce((_pid: number, _signal: string, done: (error?: Error | null) => void) => {
+      child.emit('exit', null, 'SIGTERM'); done(null);
+    });
+    const manager = new ProcessManager();
+    const onExit = vi.fn();
+    try {
+      manager.spawnProcess({ runId: 'quiet-build', bin: 'node', args: [], cwd: process.cwd(), idleTimeoutMs: 300_000, onExit });
+      await vi.advanceTimersByTimeAsync(120_001);
+      expect(onExit).not.toHaveBeenCalled();
+      child.stdout.emit('data', Buffer.from('tool result'));
+      await vi.advanceTimersByTimeAsync(299_999);
+      expect(onExit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(onExit).toHaveBeenCalledWith(null, 'SIGTERM', 'timeout');
+    } finally { child.emit('exit', 0, null); vi.useRealTimers(); }
+  });
+
+  it('never extends the hard deadline when a caller asks for a long idle window', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild(); spawnMock.mockReturnValueOnce(child);
+    treeKillMock.mockImplementationOnce((_pid: number, _signal: string, done: (error?: Error | null) => void) => {
+      child.emit('exit', null, 'SIGTERM'); done(null);
+    });
+    const onExit = vi.fn(); const manager = new ProcessManager();
+    try {
+      manager.spawnProcess({ runId: 'hard-cap', bin: 'node', args: [], cwd: process.cwd(), timeoutMs: 500, idleTimeoutMs: 300_000, onExit });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(onExit).toHaveBeenCalledWith(null, 'SIGTERM', 'timeout');
+    } finally { child.emit('exit', 0, null); vi.useRealTimers(); }
+  });
+
   it('enforces a shorter operation deadline even while output continues', async () => {
     vi.useFakeTimers();
     const child = fakeChild();

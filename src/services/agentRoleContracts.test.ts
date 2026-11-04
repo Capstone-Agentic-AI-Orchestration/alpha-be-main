@@ -12,7 +12,8 @@ describe('official role boundaries', () => {
       for (const kind of orchestrationTaskKindSchema.options) expect(roleCanOwnTask(kind, template.role), `${template.key}/${kind}`).toBe((contract.tasks as readonly string[]).includes(kind));
       for (const part of ['Trigger:', 'You own:', 'Outside your role:', 'Scope and tools:', 'When blocked:']) expect(template.systemPrompt).toContain(part);
       expect(template.systemPrompt).not.toContain('undefined');
-      expect(template.version).toBe(5);
+      // The Manager moved to v6 when it began writing feature specs.
+      expect(template.version).toBe(template.key === 'manager' ? 6 : 5);
       expect(PREVIOUS_TEMPLATE_PROMPTS[template.key].length).toBeGreaterThanOrEqual(3);
     }
   });

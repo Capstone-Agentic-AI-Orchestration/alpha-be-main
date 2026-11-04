@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { isGitWorkingTreeClean } from '../utils/gitUtils.js';
 
@@ -18,6 +19,26 @@ export interface PreservedWorktreeChanges {
 
 const safeName = (value: string) => value.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'attempt';
 
+/** Fence the exact unverified edits a same-task retry is allowed to continue.
+ * Symlinks are hashed as links, never followed outside the workspace.
+ */
+export async function worktreeChangesHash(worktree: string): Promise<string> {
+  const git = async (args: string[]) => (await execFileAsync('git', args, {
+    cwd: worktree, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, windowsHide: true
+  })).stdout;
+  const hash = createHash('sha256').update(await git(['rev-parse', 'HEAD'])).update(await git(['diff', 'HEAD', '--binary']));
+  const paths = (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean).sort();
+  for (const relative of paths) {
+    const file = path.resolve(worktree, relative);
+    if (!file.startsWith(path.resolve(worktree) + path.sep)) throw new Error('A retry file is outside the task workspace.');
+    const stat = fs.lstatSync(file);
+    const contents = stat.isSymbolicLink() ? Buffer.from(fs.readlinkSync(file)) : fs.readFileSync(file);
+    hash.update(JSON.stringify([relative, stat.isSymbolicLink() ? 'link' : 'file', contents.length]));
+    hash.update(contents);
+  }
+  return hash.digest('hex');
+}
+
 /**
  * Clear what a failed or interrupted attempt left in a build worktree, without losing it.
  *
@@ -33,6 +54,8 @@ export async function preserveAndRestoreWorktree(input: {
   runId: string;
   label: string;
   now?: Date;
+  /** Only for a retry of the same failed task; keep its candidate edits for verification. */
+  keepChanges?: boolean;
 }): Promise<PreservedWorktreeChanges | undefined> {
   const worktree = path.resolve(input.worktree);
   if (await isGitWorkingTreeClean(worktree)) return undefined;
@@ -62,29 +85,32 @@ export async function preserveAndRestoreWorktree(input: {
     const target = path.join(folder, 'untracked', relative);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     try {
-      fs.renameSync(source, target);
+      if (input.keepChanges) fs.cpSync(source, target, { recursive: true });
+      else fs.renameSync(source, target);
     } catch {
       fs.cpSync(source, target, { recursive: true });
-      fs.rmSync(source, { recursive: true, force: true });
+      if (!input.keepChanges) fs.rmSync(source, { recursive: true, force: true });
     }
     movedPaths.push(relative);
   }
   // The patch is on disk before tracked files are restored.
-  if (patchFile) await git(['reset', '--hard', 'HEAD']);
+  if (patchFile && !input.keepChanges) await git(['reset', '--hard', 'HEAD']);
 
   fs.writeFileSync(path.join(folder, 'README.json'), JSON.stringify({
     runId: input.runId,
     worktree,
     savedAt,
-    reason: 'Left behind by a failed or interrupted specialist attempt; moved aside so the next attempt starts from the saved checkpoint.',
+    reason: input.keepChanges
+      ? 'Unverified changes from the same failed task; backed up and retained for a bounded retry. Required checks and review still apply.'
+      : 'Left behind by a failed or interrupted specialist attempt; moved aside so the next attempt starts from the saved checkpoint.',
+    changesRetained: Boolean(input.keepChanges),
     trackedChangesPatch: patchFile ? path.basename(patchFile) : null,
     movedPaths,
     restore: 'Run "git apply tracked-changes.patch" in the worktree and copy the untracked folder back to restore this state.'
   }, null, 2));
 
-  if (!(await isGitWorkingTreeClean(worktree))) {
+  if (!input.keepChanges && !(await isGitWorkingTreeClean(worktree))) {
     throw new Error(`Alpha saved the leftover changes to ${folder} but could not return the worktree to its checkpoint. Review the worktree before retrying.`);
   }
   return { folder, patchFile, movedPaths };
 }
-

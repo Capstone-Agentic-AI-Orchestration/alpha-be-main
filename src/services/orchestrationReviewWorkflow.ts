@@ -287,15 +287,7 @@ export function buildFinalValidationAmendment(
     checks
   });
 
-  const taskChanges = new Map<string, string[]>();
-  for (const task of snapshot.tasks.filter(candidate => candidate.status === 'accepted' && CODE_TASK_KINDS.has(candidate.kind))) {
-    const attempt = [...snapshot.attempts].reverse().find(candidate => candidate.taskId === task.id && candidate.status === 'accepted');
-    const acceptance = attempt?.result?.acceptanceEvidence;
-    const changedPaths = acceptance && typeof acceptance === 'object'
-      ? (acceptance as Record<string, unknown>).changedPaths
-      : undefined;
-    taskChanges.set(task.id, Array.isArray(changedPaths) ? changedPaths.filter((item): item is string => typeof item === 'string') : []);
-  }
+  const taskChanges = acceptedCodeChanges(snapshot);
 
   const reportFindings: OrchestrationReviewFinding[] = [];
   for (const [repositoryKey, repositoryEvidence] of evidenceByRepository) {
@@ -337,6 +329,43 @@ export function buildFinalValidationAmendment(
     throw new OrchestrationReviewPlanError('Final validation did not map to a bounded set of accepted code owners. Keep the build blocked for human review.');
   }
 
+  return routeOwnerFindings(snapshot, reportFindings, eligibleAgents, 'final_validation');
+}
+
+export type OwnerCorrectionOrigin = 'final_validation' | 'human_review';
+
+const OWNER_CORRECTION_COPY: Record<OwnerCorrectionOrigin, { label: string; keep: string }> = {
+  final_validation: { label: 'Final-check corrections', keep: 'Keep the build blocked for human review.' },
+  human_review: { label: 'Requested changes', keep: 'The build stays in review; describe the change as a new build instead.' }
+};
+
+/** Files each accepted implementation task changed, from its accepted attempt evidence. */
+function acceptedCodeChanges(snapshot: OrchestrationSnapshot): Map<string, string[]> {
+  const taskChanges = new Map<string, string[]>();
+  for (const task of snapshot.tasks.filter(candidate => candidate.status === 'accepted' && CODE_TASK_KINDS.has(candidate.kind))) {
+    const attempt = [...snapshot.attempts].reverse().find(candidate => candidate.taskId === task.id && candidate.status === 'accepted');
+    const acceptance = attempt?.result?.acceptanceEvidence;
+    const changedPaths = acceptance && typeof acceptance === 'object'
+      ? (acceptance as Record<string, unknown>).changedPaths
+      : undefined;
+    taskChanges.set(task.id, Array.isArray(changedPaths) ? changedPaths.filter((item): item is string => typeof item === 'string') : []);
+  }
+  return taskChanges;
+}
+
+/**
+ * Route owner findings through the shared correction chain: scoped owner
+ * corrections, a fresh independent review by a different specialist, then
+ * revalidation. Failed final checks and a reviewer sending finished work back
+ * both use it, so both obey the same plan, scope, and correction-cycle limits.
+ */
+function routeOwnerFindings(
+  snapshot: OrchestrationSnapshot,
+  reportFindings: readonly OrchestrationReviewFinding[],
+  eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[],
+  origin: OwnerCorrectionOrigin
+): OrchestrationReviewAmendment {
+  const copy = OWNER_CORRECTION_COPY[origin];
   const ownerIds = new Set(reportFindings.flatMap(finding => {
     const task = snapshot.tasks.find(candidate => candidate.id === finding.targetTaskId);
     return task ? [task.ownerAgentId] : [];
@@ -345,7 +374,7 @@ export function buildFinalValidationAmendment(
     snapshot.tasks.find(task => task.kind === 'review' && task.status === 'accepted' && !ownerIds.has(task.ownerAgentId))?.ownerAgentId;
   const reviewTemplate = snapshot.tasks.find(task => task.kind === 'review' && task.status === 'accepted');
   if (!reviewTemplate || !reviewAgentId) {
-    throw new OrchestrationReviewPlanError('Final-check corrections require an available reviewer who is different from every correction owner. Keep the build blocked for human review.');
+    throw new OrchestrationReviewPlanError(`${copy.label} require an available reviewer who is different from every correction owner. ${copy.keep}`);
   }
 
   const syntheticReview: OrchestrationTaskRecord = { ...reviewTemplate, ownerAgentId: reviewAgentId, status: 'submitted' };
@@ -359,11 +388,11 @@ export function buildFinalValidationAmendment(
     const validator = eligibleAgents.find(agent => roleCanOwnOrchestrationTask('validation', agent.role));
     const followupReview = amendment.addedTasks.find(task => task.kind === 'review');
     if (!validator || !followupReview) {
-      throw new OrchestrationReviewPlanError('Final-check corrections need an available validation specialist after independent review. Keep the build blocked for human review.');
+      throw new OrchestrationReviewPlanError(`${copy.label} need an available validation specialist after independent review. ${copy.keep}`);
     }
     const nextValidationId = `validation-${snapshot.run.planVersion + 1}`;
     if (amendment.plan.tasks.some(task => task.id === nextValidationId)) {
-      throw new OrchestrationReviewPlanError('A final-validation task with this identity already exists. Reconcile the current plan before retrying.');
+      throw new OrchestrationReviewPlanError('A validation task with this identity already exists. Reconcile the current plan before retrying.');
     }
     const validationTask: OrchestrationTaskDefinition = {
       id: nextValidationId,
@@ -390,7 +419,7 @@ export function buildFinalValidationAmendment(
         : task).concat(validationTask)
     });
     if (plan.tasks.length > MAX_PLAN_TASKS) {
-      throw new OrchestrationReviewPlanError(`The correction plan would exceed the ${MAX_PLAN_TASKS}-task limit. Keep the build blocked for a human plan decision.`);
+      throw new OrchestrationReviewPlanError(`The correction plan would exceed the ${MAX_PLAN_TASKS}-task limit. ${copy.keep}`);
     }
     const issues = validateOrchestrationPlan(plan, eligibleAgents);
     if (issues.length) {
@@ -407,7 +436,65 @@ export function buildFinalValidationAmendment(
     findings: amendment.findings.map(finding => ({
       ...finding,
       sourceTaskId: finding.taskId,
-      evidence: { ...finding.evidence, origin: 'final_validation' }
+      evidence: { ...finding.evidence, origin }
     }))
   };
+}
+
+export const MAX_REVIEW_FEEDBACK_CHARS = 2_000;
+
+/**
+ * Turn a reviewer's "send it back" into owner corrections on the same build.
+ *
+ * The build must be waiting for final review with every required task accepted.
+ * The feedback goes to each accepted implementation task that changed files,
+ * narrowed to the tasks whose files the reviewer named when they named any.
+ * Each owner keeps its original path scope; the corrections are reviewed and
+ * validated again before the build returns to review.
+ */
+export function buildHumanReviewAmendment(
+  snapshot: OrchestrationSnapshot,
+  feedback: string,
+  eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[]
+): OrchestrationReviewAmendment {
+  const request = feedback.trim();
+  if (!request) throw new OrchestrationReviewPlanError('Describe what should change before sending the work back.');
+  if (request.length > MAX_REVIEW_FEEDBACK_CHARS) {
+    throw new OrchestrationReviewPlanError(`Keep the requested changes under ${MAX_REVIEW_FEEDBACK_CHARS.toLocaleString()} characters.`);
+  }
+  if (snapshot.run.status !== 'awaiting_approval' || snapshot.run.currentTaskId) {
+    throw new OrchestrationReviewPlanError('Only a build that is waiting for final review can be sent back.');
+  }
+  if (!snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted')) {
+    throw new OrchestrationReviewPlanError('Every required task must be accepted before the work can be sent back.');
+  }
+  const taskChanges = acceptedCodeChanges(snapshot);
+  const owners = snapshot.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
+    (taskChanges.get(task.id)?.length ?? 0) > 0);
+  if (!owners.length) {
+    throw new OrchestrationReviewPlanError('No accepted implementation task changed files in this build, so there is no owner to correct. Describe the change as a new build instead.');
+  }
+  const lowered = request.toLowerCase();
+  const mentions = (filePath: string) => lowered.includes(filePath.toLowerCase()) ||
+    lowered.includes(path.posix.basename(filePath).toLowerCase());
+  const named = owners.filter(task => (taskChanges.get(task.id) ?? []).some(mentions));
+  // One finding per implementation root, on its most recent accepted correction when it has one.
+  const byRoot = new Map<string, OrchestrationTaskRecord>();
+  for (const task of named.length ? named : owners) {
+    const rootId = task.correctionOfTaskId ?? task.id;
+    const current = byRoot.get(rootId);
+    if (!current || (task.correctionCycle ?? 0) >= (current.correctionCycle ?? 0)) byRoot.set(rootId, task);
+  }
+  const findings: OrchestrationReviewFinding[] = [...byRoot.values()].map(target => {
+    const changed = taskChanges.get(target.id) ?? [];
+    return {
+      targetTaskId: target.id,
+      severity: 'blocking' as const,
+      title: `Reviewer requested changes: ${target.title}`.slice(0, 240),
+      path: changed.find(mentions) ?? changed[0],
+      evidence: `The reviewer sent the finished work back before publication with this request: ${request}`,
+      instruction: `Apply the parts of the reviewer's request that belong to task ${target.id}: "${request}". Keep every change inside this task's original path scope, rerun its required checks, and report any requested change outside this scope as a blocker instead of making it.`
+    };
+  });
+  return routeOwnerFindings(snapshot, findings, eligibleAgents, 'human_review');
 }

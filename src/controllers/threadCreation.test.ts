@@ -40,13 +40,13 @@ async function startApi() {
      * line in the permission system and has been removed, so the precondition
      * these tests always relied on now has to be written down.
      *
-     * Admin because the routes under test span capabilities no single lower
-     * role holds. RBAC itself is covered by teamAccess.test.ts.
+     * Developer because chat belongs to developers. Administrative access
+     * does not grant chat access. RBAC itself is covered by teamAccess.test.ts.
      */
     currentIdentity: async () => ({
       login: 'octocat',
       source: 'github',
-      role: 'admin',
+      role: 'dev',
       access: 'granted',
       github: 'ok',
       teams: []

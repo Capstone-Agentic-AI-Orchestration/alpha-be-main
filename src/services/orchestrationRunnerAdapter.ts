@@ -15,7 +15,7 @@ import { addBranchWorktree, fetchRemoteBranch, getCurrentBranch, getHeadCommit, 
 import { roleCanOwnSavedTask } from './orchestrationContract.js';
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
 import { logError, logInfo } from '../utils/logger.js';
-import { preserveAndRestoreWorktree, type PreservedWorktreeChanges } from './orchestrationWorktreeRecovery.js';
+import { preserveAndRestoreWorktree, worktreeChangesHash, type PreservedWorktreeChanges } from './orchestrationWorktreeRecovery.js';
 
 export interface RunnerEvents {
   on(event: 'run_completed' | 'run_failed' | 'run_cancelled', listener: (run: PrototypeRun) => void): unknown;
@@ -134,6 +134,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       }
       let baseRef = request.baseRef ?? repositoryWorkspace.baseRef ?? 'HEAD';
       let preserved: PreservedWorktreeChanges | undefined;
+      let resumedWorktreeHash: string | undefined;
       if (fs.existsSync(workingDir)) {
         if (!(await isGitRepo(workingDir))) {
           throw new Error('The orchestration worktree path exists but is not a Git worktree. Preserve it for recovery and inspect it before retrying.');
@@ -148,7 +149,13 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           if (snapshot!.run.currentTaskId || snapshot!.attempts.some(attempt => ['starting', 'running', 'submitted'].includes(attempt.status))) {
             throw new Error('The previous task left uncheckpointed changes. Preserve the worktree and reconcile those changes before dispatching another task.');
           }
-          preserved = await preserveAndRestoreWorktree({ worktree: workingDir, runId: request.runId, label: request.taskId });
+          const previous = [...snapshot!.attempts].reverse().find(attempt => attempt.taskId === request.taskId);
+          const sameTaskRetry = request.attemptNumber > 1 && previous && ['failed', 'rejected', 'cancelled'].includes(previous.status);
+          if (sameTaskRetry) resumedWorktreeHash = await worktreeChangesHash(workingDir);
+          preserved = await preserveAndRestoreWorktree({ worktree: workingDir, runId: request.runId, label: request.taskId, keepChanges: Boolean(sameTaskRetry) });
+          if (resumedWorktreeHash && resumedWorktreeHash !== await worktreeChangesHash(workingDir)) {
+            throw new Error('The saved task edits changed while recovery was being prepared. Review them before retrying.');
+          }
           if (preserved) logInfo(`${request.runId}: saved a stopped attempt's leftover changes to ${preserved.folder} before ${request.taskId} starts`);
         }
         if (request.attemptNumber === 1) {
@@ -210,6 +217,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           baseCommit: repositoryWorkspace.baseCommit ?? request.baseCommit ?? startingCommit,
           startingCommit,
           workspacePathHash: crypto.createHash('sha256').update(path.resolve(workingDir)).digest('hex'),
+          ...(resumedWorktreeHash ? { resumedWorktreeHash } : {}),
           ...(preserved ? { preservedLeftovers: { folder: preserved.folder, trackedChanges: Boolean(preserved.patchFile), movedPaths: preserved.movedPaths.slice(0, 20) } } : {})
         }
       };
@@ -272,6 +280,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
             baseCommit: repositoryWorkspace.baseCommit,
             planVersion: request.planVersion,
             taskPackage: request.taskPackage,
+            ...(typeof request.contextManifest.resumedWorktreeHash === 'string' ? { resumedWorktreeHash: request.contextManifest.resumedWorktreeHash } : {}),
             personaHash: request.personaHash ?? '',
             modelProvider: request.modelProvider ?? '',
             modelName: request.modelName ?? ''

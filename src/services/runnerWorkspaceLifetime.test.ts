@@ -9,6 +9,7 @@ import type { SpawnOptions } from './processManager.js';
  * are test doubles. No CLI, Git, provider, cloud or live user data is contacted.
  */
 let tmp: string;
+let dirtyWorktree = false;
 let runner: import('./runnerService.js').RunnerService;
 let queue: import('./workspaceQueue.js').WorkspaceQueue;
 let rows: Map<string, any>;
@@ -32,6 +33,7 @@ function deferred<T>() {
 const passedVerification = () => ({ status: 'passed', commands: [], summary: 'Fixture checks passed.' });
 
 beforeEach(async () => {
+  dirtyWorktree = false;
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-run-lifetime-'));
   vi.resetModules(); rows = new Map(); squads = new Map(); issues = []; projects = []; processes = []; stopWaiters = new Map();
   let time = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => ++time);
@@ -83,7 +85,7 @@ beforeEach(async () => {
     updateIssueAndPush: (id: string, changes: any) => Object.assign(issues.find(issue => issue.id === id), changes) }));
   vi.doMock('./workspaceService.js', () => ({ resolveProjectWorkspace: (project: any) => ({ dir: project.cwd }), allowAttachedWorkspace: vi.fn() }));
   vi.doMock('../utils/gitUtils.js', () => ({ createBranch, createBranchFrom: createBranch, checkoutBranch: createBranch,
-    getCurrentBranch: async () => 'alpha/orchestration/fixture', isGitWorkingTreeClean: async () => true,
+    getCurrentBranch: async () => 'alpha/orchestration/fixture', isGitWorkingTreeClean: async () => !dirtyWorktree,
     getHeadCommit: async () => 'a'.repeat(40),
     remoteHasDevBranch: async () => false, getGitDiffStats: diff, isGitRepo: async () => true }));
   vi.doMock('./githubService.js', () => ({ githubService: {} }));
@@ -102,6 +104,7 @@ beforeEach(async () => {
     return { bin: 'test-only-not-spawned', args: [], family: 'claude', env: {} };
   } }));
   vi.doMock('./mcpConfigService.js', () => ({ writeRunMcpConfig: () => ({ serverNames: [] }), cleanupRunMcpConfig: vi.fn(), hostingScopeFor: () => undefined }));
+  vi.doMock('./orchestrationWorktreeRecovery.js', () => ({ worktreeChangesHash: async () => 'verified-snapshot' }));
   vi.doMock('./customCliArgs.js', () => ({ buildEnv: () => ({ env: {} }), reportIgnoredProjectEnv: vi.fn() }));
   vi.doMock('./gitCredentialIsolation.js', () => ({ agentCredentialEnv: () => ({}) }));
   vi.doMock('../config/env.js', async () => ({ ...await vi.importActual('../config/env.js'), RUNS_DIR: path.join(tmp, 'runs') }));
@@ -133,20 +136,33 @@ async function exit(index: number, code = 0, reason?: Parameters<NonNullable<Spa
 }
 
 describe('RunnerService workspace ownership lifetime', () => {
-  it('launches an orchestrated task from an empty context with native tools disabled', async () => {
+  it.each([
+    ['clean', false, undefined, true],
+    ['retained candidate', true, 'verified-snapshot', true],
+    ['candidate removed after preparation', false, 'stale-snapshot', false],
+    ['candidate changed after preparation', true, 'stale-snapshot', false]
+  ] as const)('checks %s work and keeps native tools disabled', async (_label, dirty, resumedWorktreeHash, allowed) => {
+    dirtyWorktree = dirty;
     const fixture = work('scoped');
     fs.writeFileSync(path.join(fixture.cwd, 'package.json'), JSON.stringify({ packageManager: 'pnpm@9.0.0', scripts: { test: 'vitest run' } }));
     await runner.startRun({ issueId: 'scoped', agentId: 'agent-fixture', plan: [], workingDir: fixture.cwd,
       orchestration: { orchestrationRunId: 'workflow-1', taskId: 'brief', attemptId: 'attempt-1',
+        resumedWorktreeHash,
         branchName: 'alpha/orchestration/fixture', planVersion: 1, personaHash: 'fixture-hash', modelProvider: 'Anthropic', modelName: 'fixture-model',
         taskPackage: { packageVersion: 6, reportSchemaVersion: 1, goal: 'Clarify requirements', projectContext: '', exclusions: [],
           task: { id: 'brief', title: 'Requirements brief', kind: 'requirements', repository: 'test/repo', description: 'Clarify observable behavior.',
             acceptanceCriteria: ['Cites behavior'], requiredChecks: [], scope: { includePaths: [], excludePaths: [] } },
           requirements: [{ id: 'REQ-1', description: 'Explain behavior' }], acceptedDependencies: [], reviewInputs: [], corrections: [], findingIds: [] } as any } });
+    if (!allowed) {
+      await vi.waitFor(() => expect([...rows.values()][0]?.status).toBe('failed'));
+      expect(processes).toHaveLength(0);
+      return;
+    }
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
     expect(invocations[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', skills: [],
       projectRoots: [{ name: path.basename(fixture.cwd), repo: 'test/repo', dir: fixture.cwd }] });
     expect(processes[0].options.cwd).not.toBe(fixture.cwd);
+    expect(processes[0].options.idleTimeoutMs).toBe(300_000);
     expect(path.basename(processes[0].options.cwd)).toBe('context');
     expect(invocations[0].systemPrompt).toContain('Native file tools and terminal commands are disabled');
     expect(invocations[0].systemPrompt).toContain('Alpha-managed Git workspace (verified by the runner before execution)');

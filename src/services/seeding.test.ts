@@ -218,7 +218,8 @@ describe('official agent instruction upgrades', () => {
       .run('Semi-Autonomous (Requires Approval)', JSON.stringify(['sk-fs', 'sk-bash', 'sk-git']), JSON.stringify(['alpha-github', 'alpha-hosting']));
     db.close();
     const svc = await startDaemon();
-    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: 5, phase: 'Planning', skills: ['sk-browser'] });
+    // The latest previous Manager wording is v5, so this also proves an untouched v5 Manager reaches v6.
+    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: 6, phase: 'Planning', skills: ['sk-browser'] });
     expect(svc.getAgents().find(agent => agent.templateKey === 'github-finalization')).toMatchObject({ templateVersion: 5, autonomyLevel: 'Supervised', skills: [], mcpServers: ['alpha-github'] });
     expect(svc.getAgents()).toHaveLength(11);
   });
@@ -287,7 +288,7 @@ describe('official agent instruction upgrades', () => {
     const workspaces = new Set(versions.map(row => row.workspace_id));
     expect(workspaces.size).toBe(2);
     expect(workspaces.has(second.id)).toBe(true);
-    expect(versions.every(row => row.template_version === OFFICIAL_AGENT_TEMPLATES[0].version)).toBe(true);
+    expect(versions.every(row => row.template_version === OFFICIAL_AGENT_TEMPLATES.find(template => template.key === row.template_key)!.version)).toBe(true);
   });
 
   it('moves an untouched version 2 agent to the current instructions', async () => {
@@ -314,4 +315,3 @@ describe('official agent instruction upgrades', () => {
     }
   });
 });
-

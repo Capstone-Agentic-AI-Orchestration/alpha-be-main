@@ -1,3 +1,6 @@
+import { featureSpecSourceHash, plannerRequirementsFromSpec, specPlanningBrief } from './featureSpecContract.js';
+import { manualChecklistRequirements } from './issueChecklist.js';
+import { isBoardThreadId } from './boardThreads.js';
 import { roleCanPlan } from './agentRoleContracts.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -29,6 +32,7 @@ import { chatBuildRequestKey } from './chatBuildIdentity.js';
 import { repositoryFileOverview } from './repositoryOverview.js';
 
 export interface ProjectBuildStartResult {
+  blockingBuild?: { runId: string; projectId?: string; issueId?: string; status: string };
   status: 'started' | 'queued' | 'in_progress' | 'plan_ready' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';
   projectId?: string;
   projectName?: string;
@@ -87,15 +91,7 @@ function blocked(reason: string, project?: Project, repository?: string): Projec
 
 /** Says what is holding the repository, so the user knows whether to approve, wait, or stop it. */
 function activeBuildReason(status: string, repository: string): string {
-  if (status === 'awaiting_plan_approval') {
-    return `A build plan for ${repository} is waiting for your approval, so Alpha did not start another one. Review it in its conversation’s Build review tab and tell Alpha whether to start it, or stop it to plan this request instead.`;
-  }
-  if (status === 'planning') return `The Orchestrator is still planning a build for ${repository}. Wait for the plan, or stop it to plan this request instead.`;
-  if (status === 'awaiting_approval') return `The last build for ${repository} is finished and waiting for your review. Review or stop it in its conversation’s Build review tab before starting another one.`;
-  if (status === 'blocked' || status === 'recovery_required' || status === 'paused') {
-    return `A build for ${repository} is paused and needs you. Use its conversation’s Build review tab to continue or stop it before starting another one.`;
-  }
-  return `A build is already underway for ${repository}. Use its conversation’s Build review tab to see its plan and current progress.`;
+  return `Waiting for the existing ${status.replace(/_/g, ' ')} build using ${repository}. Open its task's Build tab to inspect it, or explicitly queue planning from this task. Waiting does not cancel either build.`;
 }
 
 /** Resolve an intentionally unpinned role to the first model in its live runtime catalog. */
@@ -265,6 +261,7 @@ async function startOrchestratedProjectBuild(input: {
   issueId?: string;
 }): Promise<ProjectBuildStartResult> {
   const { context, project, members, buildSteps } = input;
+  const fromBoard = isBoardThreadId(input.threadId);
   const repositories = input.repositories;
   const repository = repositories[0]?.repository ?? '';
   if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
@@ -310,7 +307,9 @@ async function startOrchestratedProjectBuild(input: {
       reservation.requestKey === expectedReservationKey && reservation.requestFingerprint === requestFingerprint &&
       reservation.ownerSessionId === orchestrationOwnerSessionId;
     if (activeWorkflow && !stillOwnsPlanning) {
-      return blocked(activeBuildReason(activeWorkflow.status, selected.repository), project, selected.repository);
+      return { ...blocked(activeBuildReason(activeWorkflow.status, selected.repository), project, selected.repository),
+        ...(activeWorkflow.projectId && workspaceRegistry.canAccessProjectBuilds(context, activeWorkflow.projectId)
+          ? { blockingBuild: { runId: activeWorkflow.runId, projectId: activeWorkflow.projectId, issueId: activeWorkflow.issueId, status: activeWorkflow.status } } : {}) };
     }
   }
 
@@ -322,6 +321,27 @@ async function startOrchestratedProjectBuild(input: {
   if (linkedIssueId) {
     if (!issue || issue.projectId !== project.id) return blocked('That issue is not part of this project. Open it from the project board and try again.', project, repository);
     if (issue.status === 'done') return blocked(`${issue.identifier} is already done. Reopen it before starting another build.`, project, repository);
+  }
+  // An approved feature spec fixes the requirements; a draft one does not guide the build.
+  const specRecord = linkedIssueId && issue ? runWithWorkspace(workspaceId, () => sqliteService.getFeatureSpec(issue!.id)) : null;
+  if (specRecord?.status === 'approved' && issue && specRecord.sourceHash !== featureSpecSourceHash(issue)) {
+    return blocked(`${issue.identifier} changed after its feature spec was approved. Review and approve the spec again before building.`, project, repository);
+  }
+  let approvedSpec = specRecord?.status === 'approved'
+    ? { requirements: plannerRequirementsFromSpec(specRecord.spec), exclusions: specRecord.spec.exclusions, brief: specPlanningBrief(specRecord.spec) }
+    : undefined;
+  // Read the saved card, not a truncated browser prompt. Every manual item is
+  // a fixed requirement, even when the task has no AI-generated feature spec.
+  const checklistRequirements = manualChecklistRequirements(issue?.subtasks ?? []);
+  if (checklistRequirements.length) {
+    approvedSpec = {
+      requirements: [...(approvedSpec?.requirements ?? []), ...checklistRequirements],
+      exclusions: approvedSpec?.exclusions ?? [],
+      brief: [approvedSpec?.brief, 'The task acceptance checklist must be satisfied in full.'].filter(Boolean).join('\n')
+    };
+  }
+  if (approvedSpec && (approvedSpec.requirements.length > 20 || approvedSpec.requirements.some(item => item.description.length > 4_000))) {
+    return blocked('This task has more acceptance criteria than one build can cover. Split it into smaller tasks (at most 20 requirements per build, each under 4,000 characters).', project, repository);
   }
   const previousLegacyRun = issue && sqliteService.getSquadRuns().find(run => run.issueId === issue!.id);
   if (previousLegacyRun && issue) {
@@ -489,6 +509,7 @@ async function startOrchestratedProjectBuild(input: {
       })),
       eligibleAgents: availableAgents,
       planner: plannerIdentity,
+      approvedSpec,
       buildSteps: orderedSteps.map(step => ({
         id: step.id, label: step.label, phase: step.phase,
         agentId: step.agentId, position: step.position, required: step.required,
@@ -526,14 +547,14 @@ async function startOrchestratedProjectBuild(input: {
       githubRepo: repository,
       title: issueTitle(cleanGoal),
       description: [
-        'Build requested from project chat using the task-driven orchestrator.', '',
+        fromBoard ? 'Build requested from the project board using the task-driven orchestrator.' : 'Build requested from project chat using the task-driven orchestrator.', '',
         'Original request:', cleanGoal, '',
         'Build expectations:',
         '- Work is assigned as separate, role-qualified tasks by Alpha’s validated plan.',
         '- Each specialist receives only its task package and repository path scope.',
         '- Alpha checks the result and required scripts before advancing to a dependent task.',
         '- A human remains responsible for final review and approval.',
-        '', `Source conversation: ${input.threadId}`
+        ...(fromBoard ? [] : ['', `Source conversation: ${input.threadId}`])
       ].join('\n'),
         status: 'todo', priority: 'medium',
         labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
@@ -549,7 +570,9 @@ async function startOrchestratedProjectBuild(input: {
       addCommentAndShare({
         id: `comm-${issue.id}-build-${requestKey}`, issueId: issue.id,
         authorType: 'system', authorName: 'Alpha Orchestrator',
-        content: `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it in project chat and its Build review tab.`,
+        content: fromBoard
+          ? `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it on this task.`
+          : `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it in project chat and its Build review tab.`,
         createdAt: new Date().toISOString()
       });
     }

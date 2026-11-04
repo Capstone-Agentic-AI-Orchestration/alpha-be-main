@@ -13,6 +13,26 @@ afterEach(() => {
 });
 
 describe('recovering a worktree a stopped attempt left dirty', () => {
+  it('can back up a candidate without clearing it and detects subsequent changes', async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-resume-worktree-'));
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-resume-home-'));
+    process.env.ALPHA_HOME = home;
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+    git('init', '-q'); fs.writeFileSync(path.join(dir, 'app.ts'), 'base\n'); git('add', '.');
+    git('-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base');
+    fs.writeFileSync(path.join(dir, 'app.ts'), 'unfinished tracked edit\n');
+    fs.writeFileSync(path.join(dir, 'email.ts'), 'unfinished mail integration\n');
+    const { preserveAndRestoreWorktree, worktreeChangesHash } = await import('./orchestrationWorktreeRecovery.js');
+    const before = await worktreeChangesHash(dir);
+    const saved = await preserveAndRestoreWorktree({ worktree: dir, runId: 'run-1', label: 'backend', keepChanges: true });
+    expect(await worktreeChangesHash(dir)).toBe(before);
+    expect(fs.readFileSync(path.join(dir, 'app.ts'), 'utf8')).toContain('unfinished');
+    expect(fs.readFileSync(path.join(dir, 'email.ts'), 'utf8')).toContain('unfinished');
+    expect(fs.readFileSync(path.join(saved!.folder, 'untracked', 'email.ts'), 'utf8')).toContain('unfinished');
+    fs.appendFileSync(path.join(dir, 'email.ts'), 'changed after preparation');
+    expect(await worktreeChangesHash(dir)).not.toBe(before);
+  });
+
   it('saves tracked edits and untracked files aside and returns the worktree to its checkpoint', async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-worktree-'));
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-home-'));
@@ -115,4 +135,3 @@ describe('runner failure reasons', () => {
     expect(reason).not.toMatch(/Tool Call|"command"/);
   });
 });
-
