@@ -87,6 +87,8 @@ export class PostgresAgentStore implements AgentStore {
     if (!existing) return null;
 
     const merged = withoutMachineConfig({ ...existing, ...updates });
+    // Alpha's official agents are never archived; an update cannot archive one.
+    if (existing.templateKey) merged.isArchived = false;
     const { rows } = await this.sql.query<AgentRow>(
       `update agents set
          name = $3, role = $4, avatar = $5, color = $6, description = $7, owner = $8, is_mine = $9,
@@ -211,6 +213,11 @@ export class PostgresAgentStore implements AgentStore {
    */
   async ensureOfficial(workspaceId: string): Promise<void> {
     const now = new Date().toISOString();
+    // Alpha's official agents are never archived. Restore any archived before this rule existed.
+    await this.sql.query(
+      'update agents set is_archived = false where workspace_id = $1 and template_key is not null and is_archived',
+      [workspaceId]
+    );
     for (const template of OFFICIAL_AGENT_TEMPLATES) {
       const agent = withoutMachineConfig(agentFromOfficialTemplate(template, now));
       const sharedKey = `official:${template.key}`;
@@ -310,7 +317,7 @@ export class PostgresAgentStore implements AgentStore {
           template_key, template_version, phase, is_seeded, created_at, shared_key)
        select $1, $2, name, role, avatar, color, description, owner, is_mine,
           model_provider, model_name, reasoning_effort, system_prompt, autonomy_level, temperature,
-          skills, '[]'::jsonb, concurrency_limit, is_archived, allowed_users,
+          skills, '[]'::jsonb, concurrency_limit, case when template_key is not null then false else is_archived end, allowed_users,
           template_key, template_version, phase, is_seeded, created_at, $3
        from agents where id = $4
        on conflict (workspace_id, shared_key) where shared_key is not null do nothing`,

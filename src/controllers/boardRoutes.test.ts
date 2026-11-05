@@ -531,6 +531,25 @@ describe('the cloud roster routes', () => {
     expect(rows[0]).toMatchObject({ name: 'Senior Reviewer', workspace_id: 'ws-default' });
   });
 
+  it('never archives or deletes an official agent, and restores one archived before the rule', async () => {
+    session = { login: 'Admin1', role: 'admin' };
+    const app = await startCloudApi();
+    const roster = await call(app, 'GET', '/api/agents');
+    const orchestrator = roster.body.find((agent: any) => agent.templateKey === 'orchestrator');
+    expect(orchestrator).toBeTruthy();
+
+    const archived = await call(app, 'PUT', '/api/agents/' + orchestrator.id, { isArchived: true });
+    expect(archived.status).toBe(409);
+    expect(archived.body.error).toMatch(/can't be archived/);
+    const deleted = await call(app, 'DELETE', '/api/agents/' + orchestrator.id);
+    expect(deleted.status).toBe(409);
+
+    // An agent archived by an older release comes back when the roster loads.
+    await db.query('update agents set is_archived = true where id = $1', [orchestrator.id]);
+    const restored = await call(app, 'GET', '/api/agents');
+    expect(restored.body.find((agent: any) => agent.id === orchestrator.id).isArchived).toBe(false);
+  });
+
   it('keeps agent staffing out of the PM review role', async () => {
     session = { login: 'PM1', role: 'pm' };
     const app = await startCloudApi();

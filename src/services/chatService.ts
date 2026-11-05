@@ -70,7 +70,23 @@ export interface ChatRoutingContext {
   canBuild: boolean;
   /** The user asked for an answer only (`/ask`). */
   answerOnly?: boolean;
+  /** Ask Alpha only: the board tasks the person selected, already checked against the project. */
+  scopeIssueIds?: string[];
 }
+
+/**
+ * How the Orchestrator answers in the board's Ask Alpha conversation.
+ *
+ * Appended to its own persona. Ask Alpha used to be answered by a generic
+ * assistant borrowing the Orchestrator's model; the Orchestrator now answers
+ * as itself, from the build records Alpha attaches to the message.
+ */
+const BOARD_ASK_INSTRUCTIONS = [
+  'This is the project board\'s Ask Alpha conversation, and you answer it as the Orchestrator.',
+  'It is answer-only: explain task and build status, plans, blockers and next steps. Do not plan, propose or start a build, do not delegate to other agents, and do not write an ALPHA_ROUTE line. A person starts a build from the task card.',
+  'Answer questions about tasks and builds from the orchestration records attached to the message. When they do not cover something, say so.',
+  'Use only alpha-project-files and read-only alpha-github, and only for repository facts. No edits, shell commands, deployment or publication are authorized.'
+].join(' ');
 
 /** A refusal the route endpoint reports with a specific HTTP status. */
 export class ChatRouteError extends Error {
@@ -79,7 +95,8 @@ export class ChatRouteError extends Error {
   }
 }
 import { runWithWorkspace } from './workspaceContext.js';
-import { describeProjectBuild } from './chatBuildContext.js';
+import { describeBoardTasks, describeProjectBuild, type BoardTaskRecord } from './chatBuildContext.js';
+import { isAskThreadId } from './boardThreads.js';
 
 export interface SendMessageParams {
   buildDecision?: ChatBuildDecision;
@@ -614,8 +631,23 @@ export class ChatService extends EventEmitter {
     let addressed = mentioned.length
       ? mentioned
       : resolveChatTarget(targetAgentId, agents);
-    if (params.routing && addressed.length === 1 &&
+    // The board's Ask Alpha conversation is answered by the Orchestrator Agent itself.
+    const boardAsk = Boolean(params.routing?.answerOnly && isAskThreadId(threadId));
+    if (params.routing && !boardAsk && addressed.length === 1 &&
         (addressed[0].templateKey === 'orchestrator' || addressed[0].role === 'Orchestrator Agent')) addressed = [];
+    let boardOrchestratorId: string | undefined;
+    if (boardAsk && !mentioned.length) {
+      const resolved = await this.boardAskOrchestrator(params.routing!, thread);
+      if ('refusal' in resolved) {
+        const refusal: ChatMessage = { id: `msg-${randomUUID()}`, threadId, senderType: 'system', senderName: 'Alpha',
+          content: resolved.refusal, timestamp: new Date().toISOString() };
+        saveChatMessageAndShare(refusal);
+        this.emit('chat_message', refusal);
+        return { userMessage, agentMessage: refusal, agentMessages: [refusal] };
+      }
+      addressed = [resolved.agent];
+      boardOrchestratorId = resolved.agent.id;
+    }
     let handoffs: SpecialistHandoff[] | undefined;
     let handoffRepositories: string[] | undefined;
     let coordinatorReply: ChatMessage | undefined;
@@ -716,7 +748,8 @@ export class ChatService extends EventEmitter {
     for (const [index, agent] of addressed.entries()) {
       if (turn.stopRequested) break;
       const handoff = handoffs?.find(item => item.agentId === agent.id);
-      if (params.routing && thread.projectId) {
+      // The Orchestrator is never a specialist; its access was checked when Ask Alpha chose it.
+      if (params.routing && thread.projectId && agent.id !== boardOrchestratorId) {
         const stillEligible = await this.eligibleChatSpecialists(params.routing, thread);
         if (!stillEligible.some(item => item.id === agent.id &&
             (!handoff || roleCanOwnOrchestrationTask(handoff.kind, resolveAgent(item, { includeMemory: false }).role)))) {
@@ -756,7 +789,9 @@ export class ChatService extends EventEmitter {
         const steeredReply = await this.runWithSteering(turn, agentRequest, async prompt =>
           this.generateAgentReply(agent, prompt, threadId, priorTurn, activityCallId, runId,
             'ask', handoff ? handoffRepositories : undefined, params.userId,
-            params.routing && !handoff ? await this.routingPromptFor(params.routing, thread) : undefined, params.routing?.context)
+            params.routing && !handoff && agent.id !== boardOrchestratorId ? await this.routingPromptFor(params.routing, thread) : undefined,
+            params.routing?.context,
+            agent.id === boardOrchestratorId ? { records: this.boardRecordsFor(params.routing!, thread) } : undefined)
         );
         if (!steeredReply || turn.stopRequested) {
           if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -961,6 +996,57 @@ export class ChatService extends EventEmitter {
       if (goal && !referencesAlphaRecords(goal)) return goal;
     }
     return undefined;
+  }
+
+  /**
+   * The Orchestrator Agent that answers this workspace's Ask Alpha conversation.
+   *
+   * Alpha's official agents are never archived: if this one is missing or was
+   * archived before that rule existed, the official roles are restored first.
+   * There is no fallback to a generic assistant.
+   */
+  private async boardAskOrchestrator(routing: ChatRoutingContext, thread: ChatThread): Promise<{ agent: Agent } | { refusal: string }> {
+    const workspaceId = routing.context.workspaceId;
+    const find = () => runWithWorkspace(workspaceId, () => sqliteService.getAgents())
+      .find(agent => agent.templateKey === 'orchestrator' && !agent.isArchived);
+    let orchestrator = find();
+    if (!orchestrator) {
+      runWithWorkspace(workspaceId, () => sqliteService.ensureOfficialAgents(workspaceId));
+      orchestrator = find();
+    }
+    if (!orchestrator) return { refusal: 'Alpha could not load the Orchestrator Agent for this workspace, so this question was not answered.' };
+    if (!thread.projectId || !await workspaceRegistry.canAccessProjectAgentRun(routing.context, thread.projectId, orchestrator.id)) {
+      return { refusal: 'You do not have access to run the Orchestrator Agent in this project, so this question was not answered. Ask a workspace admin to review its access.' };
+    }
+    return { agent: orchestrator };
+  }
+
+  /**
+   * The Orchestrator's records for the board tasks this Ask Alpha question is about.
+   *
+   * Builds are looked up by task. Without a selection, the ten most recently
+   * updated tasks stand in for "the board".
+   */
+  private boardRecordsFor(routing: ChatRoutingContext, thread: ChatThread): string | undefined {
+    const projectId = thread.projectId;
+    if (!projectId) return undefined;
+    return runWithWorkspace(routing.context.workspaceId, () => {
+      const issues = sqliteService.getIssues().filter(issue => issue.projectId === projectId);
+      const canSeeBuilds = workspaceRegistry.canAccessProjectBuilds(routing.context, projectId);
+      const latest = new Map((canSeeBuilds ? sqliteService.listLatestIssueBuilds([projectId]) : []).map(build => [build.issueId, build]));
+      const scoped = routing.scopeIssueIds?.length
+        ? routing.scopeIssueIds.map(id => issues.find(issue => issue.id === id)).filter((issue): issue is NonNullable<typeof issue> => Boolean(issue))
+        : undefined;
+      const updated = (issue: typeof issues[number]) => latest.get(issue.id)?.updatedAt ?? issue.updatedAt ?? '';
+      const chosen = scoped ?? [...issues].sort((a, b) => updated(b).localeCompare(updated(a))).slice(0, 10);
+      const records: BoardTaskRecord[] = chosen.map(issue => {
+        const build = latest.get(issue.id);
+        return { identifier: issue.identifier, title: issue.title, status: issue.status,
+          snapshot: build ? sqliteService.getOrchestrationSnapshot(build.runId) : undefined };
+      });
+      const names = new Map(sqliteService.getAgents().map(agent => [agent.id, agent.name]));
+      return describeBoardTasks(records, agentId => names.get(agentId) ?? agentId, { canSeeBuilds, scoped: Boolean(scoped) });
+    });
   }
 
   /** Orchestrator instructions describing what this conversation can build. */
@@ -1392,7 +1478,9 @@ export class ChatService extends EventEmitter {
     handoffRepositories?: string[],
     ownerId?: string,
     routingInstructions?: string,
-    previewContext?: WorkspaceContext
+    previewContext?: WorkspaceContext,
+    /** Set when the Orchestrator answers the board's Ask Alpha conversation. */
+    boardAsk?: { records?: string }
   ): Promise<{ content: string; thinking?: string; tools: any[]; activityCallId?: string; failed?: boolean }> {
     /**
      * Resume the CLI's own session so the agent remembers this thread.
@@ -1442,7 +1530,7 @@ export class ChatService extends EventEmitter {
     });
 
     // Never resume a session that previously held broader chat/tool authority.
-    const policyHash = createHash('sha256').update(`${persona.personaHash}:scoped-chat-v2:${preview.sourceKey}`).digest('hex');
+    const policyHash = createHash('sha256').update(`${persona.personaHash}:scoped-chat-v2${boardAsk ? ':board-ask-v1' : ''}:${preview.sourceKey}`).digest('hex');
     const priorSession = storedSession?.personaHash === policyHash ? storedSession : null;
 
     /**
@@ -1498,7 +1586,9 @@ export class ChatService extends EventEmitter {
         runtime.provider === persona.modelProvider && runtime.models.includes(persona.modelName)
       )?.endpoint,
       reasoningEffort: persona.reasoningEffort,
-      systemPrompt: `${persona.systemPrompt}\n\nThis is a read-only specialist chat. Use only alpha-project-files and read-only alpha-github. No edits, shell commands, deployment, publication or further delegation are authorized. Code changes require Alpha’s approved scoped build flow. ${routingInstructions ? 'For a requested code change, return the build/confirm_build routing decision below with a self-contained concrete goal. Do not return a delegate decision or claim implementation happened.\n' + routingInstructions : ''}`,
+      systemPrompt: boardAsk
+        ? `${persona.systemPrompt}\n\n${BOARD_ASK_INSTRUCTIONS}`
+        : `${persona.systemPrompt}\n\nThis is a read-only specialist chat. Use only alpha-project-files and read-only alpha-github. No edits, shell commands, deployment, publication or further delegation are authorized. Code changes require Alpha’s approved scoped build flow. ${routingInstructions ? 'For a requested code change, return the build/confirm_build routing decision below with a self-contained concrete goal. Do not return a delegate decision or claim implementation happened.\n' + routingInstructions : ''}`,
       personaName: persona.name,
       // What other agents said this turn rides with the message, not the system
       // prompt: it is true of this turn only, and putting it in the persona
@@ -1506,6 +1596,10 @@ export class ChatService extends EventEmitter {
       prompt: [
         preview.text,
         delegated ? undefined : sessionMemoryPrompt(threadId, ownerId),
+        // Live records ride with the message so a resumed session keeps a stable prefix.
+        boardAsk?.records,
+        // A first Orchestrator turn in an existing Ask thread cannot resume the old assistant's session.
+        boardAsk && !priorSession ? describeRecentConversation(threadId) : undefined,
         priorTurn ? `${prompt}
 
 ---
