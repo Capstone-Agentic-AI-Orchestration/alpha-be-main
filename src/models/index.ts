@@ -159,6 +159,11 @@ export interface Issue {
    */
   assignedSquadId?: string;
   assignedHuman?: string;
+  /** Planned task schedule for the project Gantt view (calendar dates, YYYY-MM-DD). */
+  plannedStartDate?: string;
+  plannedEndDate?: string;
+  /** Issue ids that must be completed before this task can begin. */
+  dependsOnIssueIds?: string[];
   labels: string[];
   subtasks: IssueSubtask[];
   comments: IssueComment[];
