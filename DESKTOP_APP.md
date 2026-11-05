@@ -83,16 +83,18 @@ in the app.
 
 | When | What happens |
 | :--- | :--- |
-| On launch | Checks for a newer release |
+| Before the workspace opens | Checks for a newer release |
 | 5 minutes after launch | Checks again, in case the first attempt hit a flat network |
 | Every 6 hours | Checks again, for a machine left open all week |
-| A newer version exists | Downloads it in the background, silently |
-| Download finishes | Asks you: **Restart now** or **Later** |
-| You choose Later | Installs the next time you quit Alpha |
+| A newer release is found at startup | Shows **Download and install** or **Quit Alpha**; the workspace stays closed |
+| The required download finishes | Installs the update and restarts Alpha |
+| A release is found while Alpha is already open | Downloads it and offers **Restart now** or **Later** |
 
-The download is silent and the restart is always your choice, because Alpha
-spawns agents that write to a git checkout. Restarting underneath one would
-leave a half-finished run and a branch nobody expected.
+Starting with desktop version 2.0.84, every newer release is required before
+the workspace can open. A known update cannot be skipped; you can install it
+or quit Alpha. If the private release feed cannot be reached or Alpha cannot
+authenticate to it, the current version opens and the update check retries
+later.
 
 ### Asking for an update yourself
 
@@ -104,8 +106,8 @@ release exists and would rather not wait.
 
 1. **Check the version.** Settings shows what you are running; compare it with
    the latest release. They may already match.
-2. **Quit Alpha completely and relaunch.** A downloaded update installs on quit.
-   Leaving the app open for days is the one state where an update sits waiting.
+2. **Quit Alpha completely and relaunch.** The next startup checks for a
+   required update before opening the workspace.
 3. **Read the log.** `%APPDATA%\Alpha\logs\main.log` records every check,
    download and failure, from version 2.0.3 onward.
 4. **Check you are signed in.** Releases are private, so a check needs a
