@@ -1172,6 +1172,64 @@ async function statusTransitionError(workspaceId: string, issue: Issue, requeste
   return null;
 }
 
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function normalizedScheduleDate(value: unknown): string | undefined {
+  return value === '' || value === null || value === undefined ? undefined : value as string;
+}
+
+/** Reject malformed schedules and dependency links that leave a project or form a cycle. */
+async function issueScheduleError(
+  workspaceId: string,
+  projectId: string,
+  issueId: string | undefined,
+  plannedStartDate: unknown,
+  plannedEndDate: unknown,
+  dependsOnIssueIds: unknown
+): Promise<string | null> {
+  const start = normalizedScheduleDate(plannedStartDate);
+  const end = normalizedScheduleDate(plannedEndDate);
+  if (start !== undefined && !isCalendarDate(start)) return 'Start date must be a valid calendar date.';
+  if (end !== undefined && !isCalendarDate(end)) return 'End date must be a valid calendar date.';
+  if (start && end && start > end) return 'End date must be on or after the start date.';
+
+  const dependencies = dependsOnIssueIds ?? [];
+  if (!Array.isArray(dependencies) || dependencies.some(id => typeof id !== 'string')) {
+    return 'Dependencies must be a list of task IDs.';
+  }
+  if (new Set(dependencies).size !== dependencies.length) return 'A dependency can only be selected once.';
+  if (dependencies.length === 0) return null;
+
+  const issues = await issueStore().list(workspaceId);
+  const byId = new Map(issues.map(issue => [issue.id, issue]));
+  for (const dependencyId of dependencies as string[]) {
+    if (dependencyId === issueId) return 'A task cannot depend on itself.';
+    const dependency = byId.get(dependencyId);
+    if (!dependency || dependency.projectId !== projectId) {
+      return 'Dependencies must be tasks in the same project.';
+    }
+  }
+
+  if (issueId) {
+    const reachesIssue = (candidateId: string, visited = new Set<string>()): boolean => {
+      if (candidateId === issueId) return true;
+      if (visited.has(candidateId)) return false;
+      visited.add(candidateId);
+      const candidate = byId.get(candidateId);
+      return (candidate?.dependsOnIssueIds ?? []).some(id => reachesIssue(id, visited));
+    };
+    if ((dependencies as string[]).some(id => reachesIssue(id))) {
+      return 'This dependency would create a circular task dependency.';
+    }
+  }
+
+  return null;
+}
+
 dataRouter.get('/issues', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.read')) return;
   const projects = await projectStore().list(req.workspace!.workspaceId);
@@ -1213,6 +1271,18 @@ dataRouter.post('/issues', route(async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'A project is required for a task in this workspace.' });
   }
   if (!requireProjectWorkspace(req, res, rest.projectId)) return;
+  const scheduleError = await issueScheduleError(
+    req.workspace!.workspaceId,
+    rest.projectId,
+    typeof rest.id === 'string' ? rest.id : undefined,
+    rest.plannedStartDate,
+    rest.plannedEndDate,
+    rest.dependsOnIssueIds
+  );
+  if (scheduleError) return res.status(400).json({ error: scheduleError });
+  rest.plannedStartDate = normalizedScheduleDate(rest.plannedStartDate);
+  rest.plannedEndDate = normalizedScheduleDate(rest.plannedEndDate);
+  rest.dependsOnIssueIds ??= [];
   if (rest.status === 'agent_running') {
     return res.status(409).json({
       error: 'Tasks enter Building only when a developer or admin starts an Orchestrator build.'
@@ -1273,6 +1343,37 @@ dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!before) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
+
+  const updates = req.body && typeof req.body === 'object' ? req.body : {};
+  const nextProjectId = typeof updates.projectId === 'string' ? updates.projectId : before.projectId;
+  if (nextProjectId !== before.projectId && !requireProjectWorkspace(req, res, nextProjectId)) return;
+  const scheduleTouched = nextProjectId !== before.projectId || [
+    'plannedStartDate', 'plannedEndDate', 'dependsOnIssueIds'
+  ].some(field => Object.prototype.hasOwnProperty.call(updates, field));
+  if (scheduleTouched) {
+    const plannedStartDate = Object.prototype.hasOwnProperty.call(updates, 'plannedStartDate')
+      ? updates.plannedStartDate
+      : before.plannedStartDate;
+    const plannedEndDate = Object.prototype.hasOwnProperty.call(updates, 'plannedEndDate')
+      ? updates.plannedEndDate
+      : before.plannedEndDate;
+    const dependsOnIssueIds = Object.prototype.hasOwnProperty.call(updates, 'dependsOnIssueIds')
+      ? updates.dependsOnIssueIds
+      : before.dependsOnIssueIds;
+    const scheduleError = await issueScheduleError(
+      req.workspace!.workspaceId,
+      nextProjectId,
+      before.id,
+      plannedStartDate,
+      plannedEndDate,
+      dependsOnIssueIds
+    );
+    if (scheduleError) return res.status(400).json({ error: scheduleError });
+    if (Object.prototype.hasOwnProperty.call(updates, 'plannedStartDate')) updates.plannedStartDate = normalizedScheduleDate(plannedStartDate);
+    if (Object.prototype.hasOwnProperty.call(updates, 'plannedEndDate')) updates.plannedEndDate = normalizedScheduleDate(plannedEndDate);
+    if (Object.prototype.hasOwnProperty.call(updates, 'dependsOnIssueIds')) updates.dependsOnIssueIds = dependsOnIssueIds ?? [];
+  }
+  req.body = updates;
 
   // Empty strings are explicit clears from the owner selector; normalize before either store writes foreign keys.
   if (req.body?.assignedSquadId) return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });

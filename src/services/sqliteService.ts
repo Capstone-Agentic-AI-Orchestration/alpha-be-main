@@ -679,6 +679,9 @@ export class SQLiteService {
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
         assigned_human TEXT,
+        planned_start_date TEXT,
+        planned_end_date TEXT,
+        depends_on_issue_ids TEXT NOT NULL DEFAULT '[]',
         labels TEXT DEFAULT '[]',
         subtasks TEXT DEFAULT '[]',
         branch_name TEXT,
@@ -1549,6 +1552,9 @@ export class SQLiteService {
       ['issues', 'github_repo TEXT'],
       ['issues', 'github_number INTEGER'],
       ['issues', 'github_url TEXT'],
+      ['issues', 'planned_start_date TEXT'],
+      ['issues', 'planned_end_date TEXT'],
+      ['issues', "depends_on_issue_ids TEXT NOT NULL DEFAULT '[]'"],
       // Identifies the local daemon that owns an in-progress read-only plan.
       // Null on older databases means the reservation predates this fence and
       // must be reconciled before another build can use the repository.
@@ -2964,6 +2970,9 @@ export class SQLiteService {
       githubNumber: r.github_number ?? undefined,
       githubUrl: r.github_url ?? undefined,
       assignedHuman: r.assigned_human ?? undefined,
+      plannedStartDate: r.planned_start_date ?? undefined,
+      plannedEndDate: r.planned_end_date ?? undefined,
+      dependsOnIssueIds: JSON.parse(r.depends_on_issue_ids || '[]'),
       labels: JSON.parse(r.labels || '[]'),
       subtasks: JSON.parse(r.subtasks || '[]'),
       branchName: r.branch_name ?? undefined,
@@ -3033,6 +3042,9 @@ export class SQLiteService {
       projectId,
       assignedAgentId: agentId,
       assignedSquadId: squadId,
+      plannedStartDate: issue.plannedStartDate || undefined,
+      plannedEndDate: issue.plannedEndDate || undefined,
+      dependsOnIssueIds: issue.dependsOnIssueIds || [],
       labels: issue.labels || [],
       subtasks: issue.subtasks || [],
       comments: issue.comments || [],
@@ -3041,8 +3053,8 @@ export class SQLiteService {
     } as Issue;
 
     const stmt = this.db.prepare(`
-      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
-      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
+      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, planned_start_date, planned_end_date, depends_on_issue_ids, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
+      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @plannedStartDate, @plannedEndDate, @dependsOnIssueIds, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
       ...complete,
@@ -3052,6 +3064,9 @@ export class SQLiteService {
       assignedAgentId: complete.assignedAgentId || null,
       assignedSquadId: complete.assignedSquadId || null,
       assignedHuman: complete.assignedHuman || null,
+      plannedStartDate: complete.plannedStartDate || null,
+      plannedEndDate: complete.plannedEndDate || null,
+      dependsOnIssueIds: JSON.stringify(complete.dependsOnIssueIds || []),
       branchName: complete.branchName || null,
       prUrl: complete.prUrl || null,
       createdBy: complete.createdBy || null,
@@ -3103,6 +3118,8 @@ export class SQLiteService {
         title = @title, description = @description, status = @status, priority = @priority,
         project_id = @projectId, assigned_agent_id = @assignedAgentId,
         assigned_squad_id = @assignedSquadId, assigned_human = @assignedHuman,
+        planned_start_date = @plannedStartDate, planned_end_date = @plannedEndDate,
+        depends_on_issue_ids = @dependsOnIssueIds,
         labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl,
         github_repo = @githubRepo, github_number = @githubNumber, github_url = @githubUrl,
         updated_at = @updatedAt
@@ -3115,6 +3132,9 @@ export class SQLiteService {
       githubRepo: merged.githubRepo || null,
       githubNumber: merged.githubNumber ?? null,
       githubUrl: merged.githubUrl || null,
+      plannedStartDate: merged.plannedStartDate || null,
+      plannedEndDate: merged.plannedEndDate || null,
+      dependsOnIssueIds: JSON.stringify(merged.dependsOnIssueIds || []),
       labels: JSON.stringify(merged.labels || []),
       subtasks: JSON.stringify(merged.subtasks || [])
     });
