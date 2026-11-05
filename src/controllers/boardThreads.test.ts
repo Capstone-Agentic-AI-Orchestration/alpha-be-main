@@ -187,4 +187,26 @@ describe('POST /projects/:projectId/board-thread', () => {
     expect(withTask.status).toBe(400);
     expect(forced.body.error).toMatch(/answers questions only/);
   });
+
+  it('lets Ask Alpha look only at tasks from its own project', async () => {
+    const { app, svc } = await startApi();
+    const { project, issue } = await seedTask(svc);
+    const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
+    const other = svc.createProject({ id: 'proj-other', name: 'Other', key: 'OTH' });
+    workspaceRegistry.bind('projects', other.id, 'ws-default');
+    const foreign = svc.createIssue({ id: 'issue-other', title: 'Elsewhere', projectId: other.id, status: 'todo', priority: 'medium' });
+    workspaceRegistry.bind('issues', foreign.id, 'ws-default');
+    const ask = await call(app, 'POST', '/api/projects/' + project.id + '/board-thread', {});
+    const task = await call(app, 'POST', '/api/projects/' + project.id + '/board-thread', { issueId: issue.id });
+
+    const elsewhere = await call(app, 'POST', '/api/chat/messages', { threadId: ask.body.id, content: 'status?', intent: 'ask', projectId: project.id, scopeIssueIds: [issue.id, foreign.id] });
+    const tooMany = await call(app, 'POST', '/api/chat/messages', { threadId: ask.body.id, content: 'status?', intent: 'ask', projectId: project.id, scopeIssueIds: Array.from({ length: 21 }, (_, i) => 'issue-' + i) });
+    const notAsk = await call(app, 'POST', '/api/chat/messages', { threadId: task.body.id, content: 'status?', projectId: project.id, scopeIssueIds: [issue.id] });
+
+    expect(elsewhere.status).toBe(400);
+    expect(elsewhere.body.error).toMatch(/only look at tasks from this project/);
+    expect(tooMany.status).toBe(400);
+    expect(notAsk.status).toBe(400);
+    expect(notAsk.body.error).toMatch(/only accepted in Ask Alpha/);
+  });
 });

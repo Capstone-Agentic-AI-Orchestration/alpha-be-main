@@ -892,6 +892,10 @@ dataRouter.put('/agents/:id', route(async (req: Request, res: Response) => {
   // cleared — and must not be validated as if they had been sent empty.
   const error = agentValidationError(req.body, { partial: true });
   if (error) return res.status(400).json({ error });
+  // Alpha's official agents run the orchestration, so none of them can be archived.
+  if (req.body?.isArchived === true && (await agentStore().get(req.workspace!.workspaceId, req.params.id))?.templateKey) {
+    return res.status(409).json({ error: 'Alpha\'s official agents can\'t be archived.' });
+  }
 
   const updated = await agentStore().update(req.workspace!.workspaceId, req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Agent not found' });
@@ -909,6 +913,9 @@ dataRouter.put('/agents/:id', route(async (req: Request, res: Response) => {
 dataRouter.delete('/agents/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'agent.manage')) return;
   if (!requireEntityWorkspace(req, res, 'agents', req.params.id)) return;
+  if ((await agentStore().get(req.workspace!.workspaceId, req.params.id))?.templateKey) {
+    return res.status(409).json({ error: 'Alpha\'s official agents can\'t be deleted.' });
+  }
   const deleted = await agentStore().remove(req.workspace!.workspaceId, req.params.id);
   if (deleted) {
     await workspaceRegistry.unbind('agents', req.params.id);

@@ -613,3 +613,96 @@ describe('durable main-chat approvals', () => {
     expect(result.agentMessage.content).toContain('blocked'); expect(result.agentMessage.content).not.toContain('in progress');
   });
 });
+
+describe('Ask Alpha is answered by the Orchestrator Agent', () => {
+  async function askFixture() {
+    const loaded = await specialistFixture();
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+    vi.spyOn(workspaceRegistry, 'canAccessProjectBuilds').mockReturnValue(true);
+    loaded.sqlite.ensureOfficialAgents('ws-default');
+    const orchestrator = loaded.sqlite.getAgents().find((agent: any) => agent.templateKey === 'orchestrator') as any;
+    loaded.sqlite.updateAgent(orchestrator.id, { modelProvider: 'Anthropic', modelName: 'claude-sonnet-5' });
+    const issue = loaded.sqlite.createIssue({ id: 'issue-101', title: 'Create a polished landing page', projectId: 'project-1', status: 'todo', priority: 'medium' } as any);
+    // A build started from the old project chat: matched by task, never by the Ask thread.
+    // Assigned through the service proxy, which forwards writes to the open instance.
+    (loaded.sqlite as any).listLatestIssueBuilds = vi.fn(() => [
+      { issueId: issue.id, projectId: 'project-1', runId: 'run-101', status: 'cancelled', updatedAt: '2026-11-01T10:36:16.419Z' }
+    ]);
+    (loaded.sqlite as any).getOrchestrationSnapshot = vi.fn(() => ({
+      run: { plan: { goal: 'Create a polished landing page' }, status: 'cancelled', stoppedReason: 'Build cancelled by an authorized project member.',
+        updatedAt: '2026-11-01T10:36:16.419Z', originChatThreadId: 'th-old-project-chat' },
+      tasks: [], attempts: [], findings: []
+    }));
+    const { projectAskThreadId } = await import('./boardThreads.js');
+    const threadId = projectAskThreadId('ws-default', 'user-1', 'project-1');
+    const ask = (content: string, over: Record<string, unknown> = {}) => send(loaded.chatService, content, {
+      threadId, projectId: 'project-1', routing: { context, canBuild: true, answerOnly: true, scopeIssueIds: [issue.id] }, ...over
+    });
+    return { ...loaded, orchestrator, issue, ask, workspaceRegistry };
+  }
+
+  it('answers as the Orchestrator Agent from the task build records', async () => {
+    const { ask, orchestrator, issue } = await askFixture();
+    cliReply = { content: 'The build for this task was cancelled on Nov 1.' };
+    const result = await ask('What is the update on this?');
+    expect(turnInputs).toHaveLength(1);
+    expect(turnInputs[0]).toMatchObject({ provider: 'Anthropic', modelName: 'claude-sonnet-5', mcpServers: ['alpha-project-files', 'alpha-github'] });
+    expect(turnInputs[0].systemPrompt).toContain('You are the Orchestrator Agent');
+    expect(turnInputs[0].systemPrompt).toContain('Ask Alpha conversation');
+    expect(turnInputs[0].systemPrompt).not.toContain('## You are Alpha');
+    expect(turnInputs[0].prompt).toContain(issue.identifier);
+    expect(turnInputs[0].prompt).toContain('Status: cancelled');
+    expect(turnInputs[0].prompt).toContain('Build cancelled by an authorized project member.');
+    expect(result.agentMessage).toMatchObject({ agentId: orchestrator.id, senderName: orchestrator.name });
+  });
+
+  it('summarizes the most recently updated tasks when none are selected', async () => {
+    const { ask, issue } = await askFixture();
+    cliReply = { content: 'One task, cancelled.' };
+    await ask('How is the board?', { routing: { context, canBuild: true, answerOnly: true } });
+    expect(turnInputs[0].prompt).toContain('most recently updated tasks');
+    expect(turnInputs[0].prompt).toContain(issue.identifier);
+  });
+
+  it('never starts a build, even if the Orchestrator writes a decision line', async () => {
+    const { ask } = await askFixture();
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search"}' };
+    const result = await ask('add search');
+    expect(startProjectBuildBatch).not.toHaveBeenCalled();
+    expect(result.agentMessage.content).not.toContain('ALPHA_ROUTE');
+  });
+
+  it('reports the usage limit instead of answering from another runtime', async () => {
+    const { ask, sqlite } = await askFixture();
+    sqlite.saveRuntimes([
+      { id: 'claude', name: 'Claude Code CLI', provider: 'Anthropic', status: 'online', type: 'cloud', latencyMs: 1, models: ['claude-sonnet-5'], isDefault: true },
+      { id: 'codex', name: 'OpenAI Codex CLI', provider: 'OpenAI', status: 'online', type: 'cloud', latencyMs: 1, models: ['gpt-6-luna'], isDefault: false }
+    ] as any);
+    cliReply = { content: '', failureKind: 'limit' };
+    const result = await ask('status?');
+    expect(turnInputs).toHaveLength(1);
+    expect(result.agentMessage.content).toMatch(/usage limit/);
+  });
+
+  it('refuses without a model call when the person cannot run the Orchestrator', async () => {
+    const { ask, access } = await askFixture();
+    access.mockResolvedValue(false);
+    const result = await ask('status?');
+    expect(turnInputs).toHaveLength(0);
+    expect(result.agentMessage).toMatchObject({ senderType: 'system' });
+    expect(result.agentMessage.content).toMatch(/do not have access to run the Orchestrator Agent/);
+  });
+
+  it('restores an archived Orchestrator, and an update can never archive an official agent', async () => {
+    const { ask, orchestrator, sqlite } = await askFixture();
+    sqlite.updateAgent(orchestrator.id, { isArchived: true });
+    expect(sqlite.getAgents().find((agent: any) => agent.id === orchestrator.id)?.isArchived).toBe(false);
+
+    // Archived by a release before the rule existed.
+    (sqlite as any).db.prepare('UPDATE agents SET is_archived = 1 WHERE id = ?').run(orchestrator.id);
+    cliReply = { content: 'Answered.' };
+    const result = await ask('status?');
+    expect(result.agentMessage.agentId).toBe(orchestrator.id);
+    expect(sqlite.getAgents().find((agent: any) => agent.id === orchestrator.id)?.isArchived).toBe(false);
+  });
+});

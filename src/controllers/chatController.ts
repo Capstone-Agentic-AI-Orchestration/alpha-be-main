@@ -444,7 +444,7 @@ chatRouter.post('/projects/:projectId/board-thread', desktopOnly, route(async (r
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId, approvalMode, buildDecision } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId, approvalMode, buildDecision, scopeIssueIds } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -521,6 +521,25 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (askThread && (intent === 'build' || override === 'build' || issueId || decision)) {
       return res.status(400).json({ error: 'Ask Alpha answers questions only. Start a build from a task card.' });
     }
+    /**
+     * The board tasks an Ask Alpha question is about. The Orchestrator reads
+     * their build records, so every id must be a task in this conversation's
+     * project and the caller's workspace.
+     */
+    let askScope: string[] | undefined;
+    if (scopeIssueIds !== undefined) {
+      if (!askThread) return res.status(400).json({ error: 'Task scope is only accepted in Ask Alpha.' });
+      if (!Array.isArray(scopeIssueIds) || scopeIssueIds.length > 20 ||
+          scopeIssueIds.some((id: unknown) => typeof id !== 'string' || !id.trim() || id.length > 200)) {
+        return res.status(400).json({ error: 'scopeIssueIds must be a list of up to 20 task ids' });
+      }
+      askScope = [...new Set(scopeIssueIds.map((id: string) => id.trim()))];
+      const projectTasks = new Set((await issueStore().list(req.workspace!.workspaceId))
+        .filter(issue => issue.projectId === scopedProjectId).map(issue => issue.id));
+      if (!scopedProjectId || askScope.some(id => !projectTasks.has(id))) {
+        return res.status(400).json({ error: 'Ask Alpha can only look at tasks from this project.' });
+      }
+    }
     const forcedBuild = intent === 'build' || override === 'build';
     const answerOnly = askThread || intent === 'ask' || override === 'ask';
     if (forcedBuild && !workspaceRegistry.can(req.workspace!.role, 'agent.run')) {
@@ -534,7 +553,8 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
           context: req.workspace!,
           repositories: requestedRepositories,
           canBuild: workspaceRegistry.can(req.workspace!.role, 'agent.run'),
-          answerOnly
+          answerOnly,
+          ...(askScope ? { scopeIssueIds: askScope } : {})
         }
       : undefined;
     if (decision && (!routing || answerOnly || !scopedProjectId)) return res.status(400).json({ error: 'Build decisions require the main project chat.' });

@@ -1831,6 +1831,10 @@ export class SQLiteService {
 
     linkLegacy();
 
+    // Alpha's official agents are never archived. Restore any archived before this rule existed.
+    this.db.prepare('UPDATE agents SET is_archived = 0 WHERE workspace_id = ? AND template_key IS NOT NULL AND is_archived = 1')
+      .run(workspaceId);
+
     const existing = new Set(
       (this.db.prepare('SELECT template_key FROM agents WHERE workspace_id = ? AND template_key IS NOT NULL').all(workspaceId) as Array<{ template_key: string }>)
         .map(row => row.template_key)
@@ -2011,7 +2015,7 @@ export class SQLiteService {
       SELECT @id, @workspaceId, name, role, avatar, color, description, owner, is_mine,
          model_provider, model_name, reasoning_effort, system_prompt, autonomy_level,
          temperature, skills, '[]', '', '[]', concurrency_limit,
-         is_archived, allowed_users, template_key, template_version, phase, is_seeded,
+         CASE WHEN template_key IS NOT NULL THEN 0 ELSE is_archived END, allowed_users, template_key, template_version, phase, is_seeded,
          @sharedKey, created_at
       FROM agents WHERE id = @sourceId
     `).run({ id: `agent-shared-${randomUUID()}`, workspaceId, sharedKey, sourceId });
@@ -2035,7 +2039,8 @@ export class SQLiteService {
         temperature = (SELECT temperature FROM agents WHERE id = @sourceId),
         skills = (SELECT skills FROM agents WHERE id = @sourceId),
         concurrency_limit = (SELECT concurrency_limit FROM agents WHERE id = @sourceId),
-        is_archived = (SELECT is_archived FROM agents WHERE id = @sourceId),
+        -- Official agents are never archived, whatever a shared copy says.
+        is_archived = CASE WHEN template_key IS NOT NULL THEN 0 ELSE (SELECT is_archived FROM agents WHERE id = @sourceId) END,
         allowed_users = (SELECT allowed_users FROM agents WHERE id = @sourceId)
       WHERE workspace_id = @workspaceId AND id = @targetId
     `).run({ sourceId, workspaceId, targetId });
@@ -2826,6 +2831,8 @@ export class SQLiteService {
     }
 
     const merged = { ...existing, ...overlay, ...updates };
+    // Alpha's official agents are never archived; an update cannot archive one.
+    const isArchived = merged.isArchived && !existing.templateKey ? 1 : 0;
     const sharedKey = this.db.prepare('SELECT shared_key FROM agents WHERE id = ? AND workspace_id = ?')
       .get(id, this.workspaceId()) as { shared_key: string | null } | undefined;
     const stmt = this.db.prepare(`
@@ -2841,7 +2848,7 @@ export class SQLiteService {
     stmt.run({
       ...merged,
       workspaceId: this.workspaceId(),
-      isArchived: merged.isArchived ? 1 : 0,
+      isArchived,
       allowedUsers: merged.allowedUsers ?? null,
       reasoningEffort: merged.reasoningEffort ?? null,
       skills: JSON.stringify(merged.skills || []),
@@ -2861,7 +2868,7 @@ export class SQLiteService {
       `).run({
         ...merged,
         sharedKey: sharedKey.shared_key,
-        isArchived: merged.isArchived ? 1 : 0,
+        isArchived,
         allowedUsers: merged.allowedUsers ?? null,
         reasoningEffort: merged.reasoningEffort ?? null,
         skills: JSON.stringify(merged.skills || [])
