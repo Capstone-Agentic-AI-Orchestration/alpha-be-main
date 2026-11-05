@@ -9,7 +9,7 @@ import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import { decodeTicketWorkflow } from './ticketPostgresCodec.js';
 
 interface ReceiptDbRow { operation_kind: string; fingerprint: string; receipt: Record<string, unknown> }
-interface ClientGrantDbRow { accepts_new_requests: boolean }
+interface ClientGrantDbRow { accepts_new_requests: boolean; write_mode: string }
 
 function invalid(): never { throw new TicketReadInvariantError(); }
 
@@ -187,7 +187,7 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
     const clientId = ticketRows[0]?.client_user_id;
     if (!clientId) throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
     const { rows: grants } = await this.sql.query<ClientGrantDbRow>(
-      `select accepts_new_requests from alpha_private.ticket_service_grants
+      `select accepts_new_requests,write_mode from alpha_private.ticket_service_grants
         where workspace_id=$1 and client_user_id=$2 and status='active' and revoked_at is null
         for update`, [target.workspaceId, clientId],
     );
@@ -197,18 +197,25 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
       throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
     }
     this.locked = ticket;
-    if (grants[0].accepts_new_requests === enabled) return enabled;
-    const { rows } = await this.sql.query<{ accepts_new_requests: boolean }>(
-      `update alpha_private.ticket_service_grants set accepts_new_requests=$3
+    // An explicit PM opt-in also enables an active client grant provisioned in disabled mode.
+    // Leave maintenance and other write modes unchanged.
+    const enableClientWriteMode = enabled && grants[0].write_mode === 'disabled';
+    if (grants[0].accepts_new_requests === enabled && !enableClientWriteMode) return enabled;
+    const { rows } = await this.sql.query<{ accepts_new_requests: boolean; write_mode: string }>(
+      `update alpha_private.ticket_service_grants
+          set accepts_new_requests=$3,
+              write_mode=case when $3 and write_mode='disabled' then 'enabled' else write_mode end
         where workspace_id=$1 and client_user_id=$2 and status='active' and revoked_at is null
-        returning accepts_new_requests`, [target.workspaceId, clientId, enabled],
+        returning accepts_new_requests,write_mode`, [target.workspaceId, clientId, enabled],
     );
-    if (rows.length !== 1 || rows[0].accepts_new_requests !== enabled) return invalid();
+    if (rows.length !== 1 || rows[0].accepts_new_requests !== enabled
+      || (enableClientWriteMode && rows[0].write_mode !== 'enabled')) return invalid();
     await this.sql.query(
       `insert into alpha_private.ticket_audit_events
          (id,workspace_id,ticket_id,actor_kind,actor_id,event_type,occurred_at,metadata)
        values ($1,$2,$3,'pm',$4,'client_request_access_changed',now(),$5::jsonb)`,
-      [randomUUID(), target.workspaceId, target.ticketId, subject.userId, JSON.stringify({ enabled })],
+      [randomUUID(), target.workspaceId, target.ticketId, subject.userId,
+        JSON.stringify({ enabled, clientWriteModeEnabled: enableClientWriteMode })],
     );
     return enabled;
   }
