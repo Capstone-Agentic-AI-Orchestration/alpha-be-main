@@ -84,6 +84,8 @@ export class PostgresIssueStore implements IssueStore {
       projectId,
       plannedStartDate: input.plannedStartDate || undefined,
       plannedEndDate: input.plannedEndDate || undefined,
+      dueDate: input.dueDate || undefined,
+      parentIssueId: input.parentIssueId || undefined,
       dependsOnIssueIds: input.dependsOnIssueIds ?? [],
       labels: input.labels || [],
       subtasks: input.subtasks || [],
@@ -97,9 +99,9 @@ export class PostgresIssueStore implements IssueStore {
       `insert into issues
          (id, workspace_id, identifier, title, description, status, priority, project_id,
           assigned_agent_id, assigned_squad_id, assigned_human, created_by, labels, subtasks,
-          planned_start_date, planned_end_date, depends_on_issue_ids,
+          planned_start_date, planned_end_date, due_date, parent_issue_id, depends_on_issue_ids,
           branch_name, pr_url, github_repo, github_number, github_url, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
       [
         issue.id,
         workspaceId,
@@ -117,6 +119,8 @@ export class PostgresIssueStore implements IssueStore {
         JSON.stringify(issue.subtasks),
         issue.plannedStartDate || null,
         issue.plannedEndDate || null,
+        issue.dueDate || null,
+        issue.parentIssueId || null,
         JSON.stringify(issue.dependsOnIssueIds ?? []),
         issue.branchName ?? null,
         issue.prUrl ?? null,
@@ -158,8 +162,8 @@ export class PostgresIssueStore implements IssueStore {
          assigned_agent_id = $8, assigned_squad_id = $9, assigned_human = $10,
          labels = $11, subtasks = $12, branch_name = $13, pr_url = $14,
          github_repo = $15, github_number = $16, github_url = $17,
-         planned_start_date = $18, planned_end_date = $19, depends_on_issue_ids = $20,
-         updated_at = $21
+         planned_start_date = $18, planned_end_date = $19, due_date = $20, parent_issue_id = $21, depends_on_issue_ids = $22,
+         updated_at = $23
        where workspace_id = $1 and id = $2`,
       [
         workspaceId,
@@ -181,6 +185,8 @@ export class PostgresIssueStore implements IssueStore {
         merged.githubUrl ?? null,
         merged.plannedStartDate || null,
         merged.plannedEndDate || null,
+        merged.dueDate || null,
+        merged.parentIssueId || null,
         JSON.stringify(merged.dependsOnIssueIds ?? []),
         merged.updatedAt
       ]
@@ -279,6 +285,8 @@ export interface IssueRow {
   assigned_human: string | null;
   planned_start_date: string | Date | null;
   planned_end_date: string | Date | null;
+  due_date: string | Date | null;
+  parent_issue_id: string | null;
   depends_on_issue_ids: string[] | null;
   created_by: string | null;
   labels: string[] | null;
@@ -330,6 +338,8 @@ export function issueRow(workspaceId: string, issue: Issue): Record<string, unkn
     assigned_human: issue.assignedHuman ?? null,
     planned_start_date: issue.plannedStartDate || null,
     planned_end_date: issue.plannedEndDate || null,
+    due_date: issue.dueDate || null,
+    parent_issue_id: issue.parentIssueId || null,
     depends_on_issue_ids: issue.dependsOnIssueIds ?? [],
     created_by: issue.createdBy ?? null,
     labels: issue.labels ?? [],
@@ -378,6 +388,10 @@ export function toIssue(row: IssueRow, comments: IssueComment[]): Issue {
     plannedEndDate: row.planned_end_date
       ? (typeof row.planned_end_date === 'string' ? row.planned_end_date.slice(0, 10) : row.planned_end_date.toISOString().slice(0, 10))
       : undefined,
+    dueDate: row.due_date
+      ? (typeof row.due_date === 'string' ? row.due_date.slice(0, 10) : row.due_date.toISOString().slice(0, 10))
+      : undefined,
+    parentIssueId: row.parent_issue_id ?? undefined,
     dependsOnIssueIds: row.depends_on_issue_ids ?? [],
     createdBy: row.created_by ?? undefined,
     labels: row.labels ?? [],

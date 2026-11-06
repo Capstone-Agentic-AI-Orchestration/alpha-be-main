@@ -1182,6 +1182,12 @@ function normalizedScheduleDate(value: unknown): string | undefined {
   return value === '' || value === null || value === undefined ? undefined : value as string;
 }
 
+function issueDueDateError(value: unknown): string | null {
+  return value === '' || value === null || value === undefined || isCalendarDate(value)
+    ? null
+    : 'Due date must be a valid calendar date.';
+}
+
 /** Reject malformed schedules and dependency links that leave a project or form a cycle. */
 async function issueScheduleError(
   workspaceId: string,
@@ -1227,6 +1233,26 @@ async function issueScheduleError(
     }
   }
 
+  return null;
+}
+
+/** Keep a suggested work package under one top-level task in the same project. */
+async function issueParentError(
+  workspaceId: string,
+  projectId: string,
+  issueId: string | undefined,
+  parentIssueId: unknown
+): Promise<string | null> {
+  if (parentIssueId === undefined || parentIssueId === null || parentIssueId === '') return null;
+  if (typeof parentIssueId !== 'string') return 'Parent task must be a task ID.';
+  if (parentIssueId === issueId) return 'A task cannot be its own parent.';
+
+  const issues = await issueStore().list(workspaceId);
+  const parent = issues.find(issue => issue.id === parentIssueId);
+  if (!parent || parent.projectId !== projectId) return 'Parent and child tasks must be in the same project.';
+  if (parent.parentIssueId || (issueId && issues.some(issue => issue.parentIssueId === issueId))) {
+    return 'Work packages can be grouped under a top-level task only.';
+  }
   return null;
 }
 
@@ -1282,6 +1308,17 @@ dataRouter.post('/issues', route(async (req: Request, res: Response) => {
   if (scheduleError) return res.status(400).json({ error: scheduleError });
   rest.plannedStartDate = normalizedScheduleDate(rest.plannedStartDate);
   rest.plannedEndDate = normalizedScheduleDate(rest.plannedEndDate);
+  const dueDateError = issueDueDateError(rest.dueDate);
+  if (dueDateError) return res.status(400).json({ error: dueDateError });
+  rest.dueDate = normalizedScheduleDate(rest.dueDate);
+  const parentError = await issueParentError(
+    req.workspace!.workspaceId,
+    rest.projectId,
+    typeof rest.id === 'string' ? rest.id : undefined,
+    rest.parentIssueId
+  );
+  if (parentError) return res.status(400).json({ error: parentError });
+  if (rest.parentIssueId === '') rest.parentIssueId = undefined;
   rest.dependsOnIssueIds ??= [];
   if (rest.status === 'agent_running') {
     return res.status(409).json({
@@ -1345,8 +1382,22 @@ dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
 
   const updates = req.body && typeof req.body === 'object' ? req.body : {};
+  if (Object.prototype.hasOwnProperty.call(updates, 'dueDate')) {
+    const dueDateError = issueDueDateError(updates.dueDate);
+    if (dueDateError) return res.status(400).json({ error: dueDateError });
+    updates.dueDate = normalizedScheduleDate(updates.dueDate);
+  }
   const nextProjectId = typeof updates.projectId === 'string' ? updates.projectId : before.projectId;
   if (nextProjectId !== before.projectId && !requireProjectWorkspace(req, res, nextProjectId)) return;
+  if (nextProjectId !== before.projectId && (await issueStore().list(req.workspace!.workspaceId)).some(issue => issue.parentIssueId === before.id)) {
+    return res.status(400).json({ error: 'Move child tasks before moving this task to another project.' });
+  }
+  const nextParentIssueId = Object.prototype.hasOwnProperty.call(updates, 'parentIssueId')
+    ? updates.parentIssueId
+    : before.parentIssueId;
+  const parentError = await issueParentError(req.workspace!.workspaceId, nextProjectId, before.id, nextParentIssueId);
+  if (parentError) return res.status(400).json({ error: parentError });
+  if (Object.prototype.hasOwnProperty.call(updates, 'parentIssueId') && (updates.parentIssueId === '' || updates.parentIssueId === null)) updates.parentIssueId = undefined;
   const scheduleTouched = nextProjectId !== before.projectId || [
     'plannedStartDate', 'plannedEndDate', 'dependsOnIssueIds'
   ].some(field => Object.prototype.hasOwnProperty.call(updates, field));
