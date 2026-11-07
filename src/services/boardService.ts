@@ -9,6 +9,8 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { randomUUID } from 'node:crypto';
 import type { Issue, IssueStatus } from '../models/index.js';
 import { BOARD_ACTIVITY_COMMENT_PREFIX } from './boardActivity.js';
+import { BOARD_SHARE_WARNING, shareCard, shareCardForReply } from './boardShareQueue.js';
+import { isManagedTask } from './managedTaskExecution.js';
 
 /**
  * The board's card rules, in one place.
@@ -263,9 +265,10 @@ export async function createCard(
 
   const saved = await issueStore().get(workspaceId, issue.id) ?? issue;
   // The issue first, since the database refuses a comment on an issue it does not have.
-  await supabaseService.shareIssue(saved);
+  const shared = await shareCard(saved, workspaceId);
   for (const comment of saved.comments ?? []) void supabaseService.shareComment(comment);
-  return publishError ? { saved, syncWarning: publishError } : { saved };
+  const syncWarning = [publishError, shared ? undefined : BOARD_SHARE_WARNING].filter(Boolean).join(' ');
+  return syncWarning ? { saved, syncWarning } : { saved };
 }
 
 /**
@@ -327,16 +330,24 @@ export async function saveCardUpdate(
   if (!updated) throw new BoardRuleError('Task not found', 404);
 
   // Only when a field GitHub owns actually moved: Alpha's own fields cost no GitHub request.
-  if (!needsPush(before, updated)) {
-    void supabaseService.shareIssue(updated);
-    return { saved: updated };
+  // Build cards live on Alpha's board only, so moving one never files it on GitHub;
+  // one that is already there stays in step.
+  if (!needsPush(before, updated) || publishesNothing(updated)) {
+    const boardWarning = await shareCardForReply(updated, workspaceId);
+    return boardWarning ? { saved: updated, syncWarning: boardWarning } : { saved: updated };
   }
 
   const push = await pushIssue(updated, workspaceId);
   if (push.patch) await issueStore().update(workspaceId, updated.id, push.patch);
   const saved = await issueStore().get(workspaceId, updated.id) ?? updated;
-  void supabaseService.shareIssue(saved);
-  return push.error ? { saved, syncWarning: push.error } : { saved };
+  const boardWarning = await shareCardForReply(saved, workspaceId);
+  const syncWarning = [push.error, boardWarning].filter(Boolean).join(' ');
+  return syncWarning ? { saved, syncWarning } : { saved };
+}
+
+/** A build card not yet on GitHub: a change to it is never a reason to file it there. */
+export function publishesNothing(issue: Issue): boolean {
+  return isManagedTask(issue) && !issue.githubNumber;
 }
 
 /** Why this card cannot be removed or archived right now, or null. */

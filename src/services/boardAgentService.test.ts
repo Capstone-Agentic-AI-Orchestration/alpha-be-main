@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
 vi.mock('../config/env.js', async importOriginal => ({ ...(await importOriginal<object>()), IS_CLOUD: false }));
 vi.mock('./workspaceContext.js', async importOriginal => ({ ...(await importOriginal<object>()), runWithWorkspace: (_id: string, fn: () => unknown) => fn() }));
 vi.mock('./supabaseService.js', () => ({ supabaseService: { shareIssue: vi.fn(), shareComment: vi.fn(), unshareIssue: vi.fn() } }));
+vi.mock('./boardShareQueue.js', () => ({ BOARD_SHARE_WARNING: 'not on the team board yet', shareCard: vi.fn(async () => true), shareCardForReply: vi.fn(async () => undefined) }));
 vi.mock('./githubBoardWrite.js', () => ({ needsPush: () => false, pushIssue: vi.fn(), publishNewIssue: async () => ({}), publishedFields: vi.fn() }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { bind: vi.fn(), unbind: vi.fn() } }));
 vi.mock('./boardGrant.js', () => ({ boardAgentRefusal: () => state.refusal }));

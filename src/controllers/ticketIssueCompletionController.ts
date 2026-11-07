@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
 import { issueStore } from '../store/stores.js';
 import { supabaseService } from '../services/supabaseService.js';
+import { shareCard } from '../services/boardShareQueue.js';
 import { needsPush, pushIssue } from '../services/githubBoardWrite.js';
 import { relayToCloud } from './cloudRelay.js';
 import { route } from './asyncRoute.js';
@@ -50,13 +51,13 @@ export function createTicketIssueCompletionRouter(runtime: TicketLifecycleRuntim
     const after = await issueStore().get(workspaceId, issueId);
     if (!after) return res.status(404).json({ error: 'Task not found' });
     if (!needsPush(localIssue, after)) {
-      void supabaseService.shareIssue(after);
+      void shareCard(after);
       return res.json(after);
     }
     const push = await pushIssue(after, workspaceId);
     if (push.patch) await issueStore().update(workspaceId, after.id, push.patch);
     const saved = await issueStore().get(workspaceId, issueId) ?? after;
-    void supabaseService.shareIssue(saved);
+    void shareCard(saved);
     return res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
   }));
   return router;

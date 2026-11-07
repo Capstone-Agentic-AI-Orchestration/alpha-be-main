@@ -34,6 +34,7 @@ import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { flushChatSyncOutbox, startChatSyncRetryLoop } from './services/chatSyncService.js';
 import { runtimeRefreshService } from './services/runtimeRefreshService.js';
+import { startBoardShareRetries } from './services/boardShareQueue.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
 import { currentIdentity, warmIdentity } from './services/identityService.js';
@@ -681,4 +682,7 @@ function onListening(): void {
 
   // Initial runtime scan plus periodic catalog refresh in background.
   runtimeRefreshService.start();
+
+  // Cards the team board refused in an earlier session are sent again.
+  startBoardShareRetries();
 }

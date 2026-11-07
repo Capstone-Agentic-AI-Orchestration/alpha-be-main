@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
 vi.mock('../config/env.js', async importOriginal => ({ ...(await importOriginal<object>()), IS_CLOUD: false }));
 vi.mock('./sqliteService.js', () => ({ sqliteService: { listLatestIssueBuilds: () => state.latest } }));
 vi.mock('./supabaseService.js', () => ({ supabaseService: { shareIssue: vi.fn(), shareComment: vi.fn(), unshareIssue: vi.fn() } }));
+vi.mock('./boardShareQueue.js', () => ({ BOARD_SHARE_WARNING: 'not on the team board yet', shareCard: vi.fn(async () => true), shareCardForReply: vi.fn(async () => undefined) }));
 vi.mock('./githubBoardWrite.js', () => ({ needsPush: () => false, pushIssue: vi.fn(), publishNewIssue: vi.fn(), publishedFields: vi.fn() }));
 vi.mock('./workspaceContext.js', async importOriginal => ({ ...(await importOriginal<object>()), runWithWorkspace: (_id: string, fn: () => unknown) => fn() }));
 vi.mock('../store/stores.js', () => ({
@@ -28,7 +29,7 @@ vi.mock('../store/stores.js', () => ({
   agentStore: () => ({ get: async () => null })
 }));
 
-import { BoardRuleError, archiveCard, cardRemovalBlocker, filterArchived, prepareCardCreate, prepareCardUpdate, restoreCard } from './boardService.js';
+import { BoardRuleError, archiveCard, cardRemovalBlocker, filterArchived, prepareCardCreate, prepareCardUpdate, publishesNothing, restoreCard } from './boardService.js';
 
 const card = { id: 'issue-1', identifier: 'CAP-1', projectId: 'project-1', status: 'todo', title: 'Card', description: '' } as Issue;
 
@@ -56,6 +57,13 @@ describe('board card rules', () => {
 
   it('allows an ordinary planning move', async () => {
     await expect(prepareCardUpdate('ws', card, { status: 'in_progress' })).resolves.toMatchObject({ status: 'in_progress' });
+  });
+
+  it('never files a build card on GitHub because it moved, but keeps one already there in step', () => {
+    const build = { ...card, labels: ['alpha:chat-build', 'alpha:task-orchestration'] } as Issue;
+    expect(publishesNothing(build)).toBe(true);
+    expect(publishesNothing({ ...build, githubNumber: 7 } as Issue)).toBe(false);
+    expect(publishesNothing(card)).toBe(false);
   });
 
   it('refuses status changes while a build is unfinished', async () => {

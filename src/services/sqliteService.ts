@@ -877,6 +877,17 @@ export class SQLiteService {
       CREATE INDEX IF NOT EXISTS idx_chat_sync_outbox_thread_order
         ON chat_sync_outbox(workspace_id, owner_id, thread_id, id);
 
+      /* Cards the team board refused, retried until it accepts them. One row per card: a retry sends the card as it is then. */
+      CREATE TABLE IF NOT EXISTS board_share_outbox (
+        workspace_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, issue_id)
+      );
+
       CREATE TABLE IF NOT EXISTS agent_calls (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -6327,6 +6338,40 @@ export class SQLiteService {
 
   markChatSyncDelivered(id: number): void {
     this.db.prepare('DELETE FROM chat_sync_outbox WHERE id = ?').run(id);
+  }
+
+  /** Remember a card the team board refused. A card already waiting keeps its backoff. */
+  queueBoardShare(workspaceId: string, issueId: string, error: string, nextAttemptAt: string): void {
+    this.db.prepare(`
+      INSERT INTO board_share_outbox (workspace_id, issue_id, next_attempt_at, last_error, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id, issue_id) DO UPDATE SET last_error = excluded.last_error
+    `).run(workspaceId, issueId, nextAttemptAt, error.slice(0, 300), new Date().toISOString());
+  }
+
+  getDueBoardShares(limit = 20, now = new Date().toISOString()): Array<{ workspaceId: string; issueId: string; attempts: number }> {
+    const rows = this.db.prepare(`
+      SELECT workspace_id, issue_id, attempts FROM board_share_outbox
+      WHERE next_attempt_at <= ? ORDER BY next_attempt_at ASC LIMIT ?
+    `).all(now, Math.max(1, Math.min(limit, 100))) as any[];
+    return rows.map(row => ({ workspaceId: row.workspace_id, issueId: row.issue_id, attempts: row.attempts }));
+  }
+
+  scheduleBoardShareRetry(workspaceId: string, issueId: string, nextAttemptAt: string, error: string): void {
+    this.db.prepare(`
+      UPDATE board_share_outbox SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
+      WHERE workspace_id = ? AND issue_id = ?
+    `).run(nextAttemptAt, error.slice(0, 300), workspaceId, issueId);
+  }
+
+  clearBoardShare(workspaceId: string, issueId: string): void {
+    this.db.prepare('DELETE FROM board_share_outbox WHERE workspace_id = ? AND issue_id = ?').run(workspaceId, issueId);
+  }
+
+  /** When the next waiting card is due, or null when none is waiting. */
+  nextBoardShareAt(): string | null {
+    const row = this.db.prepare('SELECT MIN(next_attempt_at) AS next FROM board_share_outbox').get() as { next: string | null } | undefined;
+    return row?.next ?? null;
   }
 
   scheduleChatSyncRetry(id: number, nextAttemptAt: string, errorCategory = 'network_error'): void {

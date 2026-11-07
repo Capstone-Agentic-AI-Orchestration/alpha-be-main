@@ -13,6 +13,7 @@ import {
 import { draftFeatureSpec, proposeSystemEpics } from '../services/featureSpecService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { supabaseService } from '../services/supabaseService.js';
+import { shareCard } from '../services/boardShareQueue.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { issueStore, projectStore } from '../store/stores.js';
 import { route } from './asyncRoute.js';
@@ -157,7 +158,7 @@ featureSpecRouter.post('/projects/:projectId/issues/:issueId/feature-spec/approv
       sourceHash: featureSpecSourceHash(task.issue), actorId: req.workspace!.userId
     }));
     const updated = await issueStore().update(workspaceId, task.issue.id, { subtasks: checklistFromSpec(saved.spec, task.issue.subtasks) });
-    if (updated) void supabaseService.shareIssue(updated);
+    if (updated) void shareCard(updated);
     res.json({ ...view(saved, updated ?? task.issue), issue: updated ?? task.issue });
   } catch (error) {
     fail(res, error);

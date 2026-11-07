@@ -20,6 +20,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
 import { supabaseService } from './supabaseService.js';
+import { shareCard } from './boardShareQueue.js';
 import { resolveAgent } from './personaService.js';
 import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
@@ -561,7 +562,7 @@ async function startOrchestratedProjectBuild(input: {
         labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
       });
       workspaceRegistry.bind('issues', issue.id, workspaceId);
-      await supabaseService.shareIssue(issue);
+      await shareCard(issue);
       addCommentAndShare({
         id: `comm-${issue.id}-chat-build`, issueId: issue.id,
         authorType: 'system', authorName: 'Alpha Orchestrator',
