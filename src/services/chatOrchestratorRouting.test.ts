@@ -746,6 +746,9 @@ describe('The Manager Agent keeps the board for a developer', () => {
     const result = await send(chatService, 'put the landing page card in todo', { projectId: 'project-1', routing: { context: developer, canBuild: true } });
     expect(turnInputs).toHaveLength(2);
     expect(turnInputs[0].systemPrompt).toContain('route":"board"');
+    // Board questions go to the Manager too, never answered from what the chat said earlier.
+    expect(turnInputs[0].systemPrompt).toContain('Always route these to the Manager, even when earlier messages already discussed the board');
+    expect(turnInputs[0].systemPrompt).toContain('the Gantt schedule (planned start, planned end and dependencies');
     expect(turnInputs[1].boardScope).toMatchObject({ access: 'write', actorLogin: 'lloyd' });
     expect(turnInputs[1].prompt).toContain('Alpha\'s reading of the board request: Move TASK-1 to Todo');
     expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', manager.name]);
