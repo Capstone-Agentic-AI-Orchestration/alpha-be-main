@@ -120,7 +120,9 @@ export class BoardChangeSync {
     // are then replayed from this point by the next page request.
     const value = await this.source.watermark(workspaceId);
     const state = await this.source.snapshot(workspaceId, this.access);
-    return { workspaceId, cursor: { workspaceId, value }, ...state };
+    // Archived cards, and their comments, stay out of the full load; the pages
+    // after it still carry the change that archives or restores one.
+    return { workspaceId, cursor: { workspaceId, value }, ...state, issues: (state.issues ?? []).filter(issue => !issue.archivedAt) };
   }
 
   async changes(workspaceId: string, cursor: BoardCursor, limit = 100): Promise<BoardChangePage> {
