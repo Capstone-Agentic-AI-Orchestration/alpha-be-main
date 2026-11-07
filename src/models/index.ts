@@ -896,6 +896,17 @@ export interface RuntimeEngine {
   catalogError?: string;
   /** Runtime-version update information, kept separate from model discovery. */
   updateAvailable?: boolean;
+  /**
+   * Whether agents on this runtime run without the operator's personal setup
+   * (instructions, skills, plugins, MCP servers). Stamped when runtimes are
+   * read; see runtimeIsolation.
+   */
+  isolation?: {
+    isolated: boolean;
+    detail: string;
+    /** What a developer can do to isolate it. */
+    action?: 'codex_sign_in';
+  };
   latestVersion?: string;
   updateCheckedAt?: string;
   updateError?: string;
