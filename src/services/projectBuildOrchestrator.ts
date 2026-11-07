@@ -20,6 +20,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { addCommentAndShare } from './boardWriteThrough.js';
 import { supabaseService } from './supabaseService.js';
+import { shareCard } from './boardShareQueue.js';
 import { resolveAgent } from './personaService.js';
 import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
@@ -321,6 +322,7 @@ async function startOrchestratedProjectBuild(input: {
   if (linkedIssueId) {
     if (!issue || issue.projectId !== project.id) return blocked('That issue is not part of this project. Open it from the project board and try again.', project, repository);
     if (issue.status === 'done') return blocked(`${issue.identifier} is already done. Reopen it before starting another build.`, project, repository);
+    if (issue.archivedAt) return blocked(`${issue.identifier} is archived. Restore it to the board before starting a build.`, project, repository);
   }
   // An approved feature spec fixes the requirements; a draft one does not guide the build.
   const specRecord = linkedIssueId && issue ? runWithWorkspace(workspaceId, () => sqliteService.getFeatureSpec(issue!.id)) : null;
@@ -560,7 +562,7 @@ async function startOrchestratedProjectBuild(input: {
         labels: ['alpha:chat-build', 'alpha:task-orchestration', idempotencyLabel], createdBy: context.userId
       });
       workspaceRegistry.bind('issues', issue.id, workspaceId);
-      await supabaseService.shareIssue(issue);
+      await shareCard(issue);
       addCommentAndShare({
         id: `comm-${issue.id}-chat-build`, issueId: issue.id,
         authorType: 'system', authorName: 'Alpha Orchestrator',

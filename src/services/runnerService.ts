@@ -14,7 +14,8 @@ import { resolveProjectWorkspace, allowAttachedWorkspace } from './workspaceServ
 import { agentReadiness } from './agentReadiness.js';
 import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
-import { writeRunMcpConfig, cleanupRunMcpConfig, hostingScopeFor } from './mcpConfigService.js';
+import { writeRunMcpConfig, cleanupRunMcpConfig, hostingScopeFor, type BoardRunScope } from './mcpConfigService.js';
+import { workspaceRegistry } from './workspaceRegistry.js';
 import { redactToolInput } from './toolInputRedaction.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { createLineBuffer } from '../utils/lineBuffer.js';
@@ -305,6 +306,25 @@ function formatAcceptedDependencies(dependencies: OrchestrationTaskPackage['acce
 
 /** Control-flow marker: this member is not the one that opens the PR. */
 class SkipPullRequest extends Error {}
+
+/**
+ * Board access for a specialist working one build task: read the board and
+ * comment on its own card, as the developer who started the build. None when
+ * that person cannot be resolved or is not a developer -- agents are for
+ * developers only -- and the board pass is checked again on every call.
+ */
+export async function specialistBoardScope(orchestrationRunId: string, agentId: string | null, agentName: string): Promise<BoardRunScope | undefined> {
+  try {
+    const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
+    if (!run?.createdBy || !run.issueId) return undefined;
+    const context = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
+    if (!context || context.role !== 'dev') return undefined;
+    return { agentId, agentName, context, actorLogin: run.createdBy, projectId: run.projectId, access: 'comment', ownIssueId: run.issueId };
+  } catch {
+    // A missing board note never stops a build task.
+    return undefined;
+  }
+}
 
 export class RunnerService extends EventEmitter {
   private readonly ticketExecutions = new Map<string, TicketExecutionHandle>();
@@ -664,6 +684,12 @@ export class RunnerService extends EventEmitter {
     const taskRepository = task?.repository ?? issue.githubRepo ?? 'task';
     const taskRoots = task ? [{ name: path.basename(cwd), repo: taskRepository, dir: cwd }] : undefined;
     const taskMcpServers = task ? ['alpha-task-files', ...(['audit', 'review', 'delivery'].includes(task.kind) ? ['alpha-github'] : [])] : persona.mcpServers;
+    /*
+     * A specialist in a build may read the board and comment on its own card,
+     * as the developer who started the build. Nothing else on the board: card
+     * changes are the Manager Agent's, for a developer who asks.
+     */
+    const boardScope = task ? await specialistBoardScope(ctx.orchestration!.orchestrationRunId, agent.id ?? null, persona.name) : undefined;
     const workspaceMcpRuntime = !ctx.orchestration && agent.id
       ? await supabaseService.workspaceMcpRuntime(agent.id, ctx.workspaceId ?? currentWorkspaceId())
       : null;
@@ -676,7 +702,7 @@ export class RunnerService extends EventEmitter {
      */
     const mcp = writeRunMcpConfig(
       runId,
-      workspaceMcpRuntime?.mcpServers ?? taskMcpServers,
+      workspaceMcpRuntime?.mcpServers ?? (boardScope ? [...taskMcpServers, 'alpha-board'] : taskMcpServers),
       env,
       cwd,
       access,
@@ -688,7 +714,8 @@ export class RunnerService extends EventEmitter {
         requiredChecks: task.requiredChecks, reportOnly: Boolean(ctx.orchestration?.taskPackage.reportCorrection),
         dependencyAudit: task.dependencyAudit, role: persona.role, auditDirectory: path.join(runDir, 'audits') } : undefined,
       workspaceMcpRuntime?.servers,
-      Boolean(!ctx.orchestration && agent.id && supabaseService.sharesBoard())
+      Boolean(!ctx.orchestration && agent.id && supabaseService.sharesBoard()),
+      boardScope
     );
 
     /**

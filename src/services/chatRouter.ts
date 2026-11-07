@@ -14,7 +14,7 @@ import { agentRoleContract } from './agentRoleContracts.js';
 import { z } from 'zod';
 
 const structuredDecisionSchema = z.object({
-  route: z.enum(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview']),
+  route: z.enum(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview', 'board']),
   goal: z.string().max(4000), repositories: z.array(z.string().min(1).max(300)).max(30),
   assignments: z.array(z.object({ agentId: z.string().min(1).max(200), kind: orchestrationTaskKindSchema,
     instruction: z.string().min(1).max(4000), reason: z.string().min(1).max(500) }).strict()).max(4)
@@ -28,7 +28,7 @@ export const alphaChatResponseSchema = {
     decision: { anyOf: [{ type: 'null' }, {
       type: 'object', additionalProperties: false, required: ['route', 'goal', 'repositories', 'assignments'],
       properties: {
-        route: { type: 'string', enum: ['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview'] },
+        route: { type: 'string', enum: ['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview', 'board'] },
         goal: { type: 'string' }, repositories: { type: 'array', items: { type: 'string' } },
         assignments: { type: 'array', items: { type: 'object', additionalProperties: false,
           required: ['agentId', 'kind', 'instruction', 'reason'], properties: {
@@ -48,7 +48,7 @@ export function readStructuredAlphaReply(reply: string) {
 
 export const ALPHA_ROUTE_MARKER = 'ALPHA_ROUTE';
 
-export type AlphaRoute = 'build' | 'confirm_build' | 'need_project' | 'delegate' | 'preview' | 'stop_preview';
+export type AlphaRoute = 'build' | 'confirm_build' | 'need_project' | 'delegate' | 'preview' | 'stop_preview' | 'board';
 
 export interface SpecialistHandoff {
   agentId: string;
@@ -74,7 +74,7 @@ export interface ParsedAlphaReply {
   malformed: boolean;
 }
 
-const ROUTES = new Set<AlphaRoute>(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview']);
+const ROUTES = new Set<AlphaRoute>(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview', 'board']);
 const MAX_GOAL_CHARS = 4_000;
 const MARKER_LINE = new RegExp(`^\\s*\`?\\s*${ALPHA_ROUTE_MARKER}\\b\\s*(.*?)\\s*\`?\\s*$`);
 
@@ -188,6 +188,8 @@ export interface OrchestratorPromptContext {
   /** The user asked for an answer only; no decision line is allowed. */
   answerOnly?: boolean;
   specialists?: readonly { id: string; name: string; role: string; description: string; expertise: OrchestrationTaskKind[] }[];
+  /** A developer in a project chat: board requests can go to the Manager Agent (route 6). */
+  canUseBoardAgent?: boolean;
 }
 
 /** Instructions that make the default assistant act as the Orchestrator. */
@@ -229,6 +231,11 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     'For task/security/dependency audits and independent code-quality review, Security & Code Quality is the lead specialist. Other specialists may inspect/self-audit their assigned domain; their self-check does not replace the Security assessment. You remain the decision maker for follow-up assignments. Live dependency scanning needs an approved repository-scoped audit task; for missing scanner evidence, propose that audit/build plan instead of claiming a scan ran or asking an unscoped chat worker to use terminal permissions.',
     '   {"route":"delegate","goal":"<concrete analysis goal>","repositories":[],"assignments":[{"agentId":"<eligible id>","kind":"<listed expertise>","instruction":"<self-contained read-only task and expected evidence>","reason":"<why this specialist fits>"}]}',
     '   Use one to four specialists, with no duplicate IDs. These handoffs are read-only. Code changes still use route 2 and its plan approval. Never claim an agent ran before the application dispatches it. If no suitable specialist is eligible, explain the missing expertise and availability instead of taking the specialist task yourself. Without a selected project, ask the user to select one.',
+    ...(context.canUseBoardAgent ? [
+      '6. A question about this project\'s board, or a request to change it: the Manager Agent reads and keeps the board for the developer. Questions include which cards exist, their columns and progress, the Gantt schedule (planned start, planned end and dependencies, which is all the Gantt is drawn from), and what can be done with the board. Changes include creating, editing, splitting, assigning, dating, moving, commenting on, archiving or restoring cards, or tidying the board. Always route these to the Manager, even when earlier messages already discussed the board: it may have changed since, and an earlier answer may be wrong. This comes before rule 1. Return {"route":"board","goal":"<the question or change, restated so it stands alone, naming the cards; say read-only when nothing should change>","repositories":[],"assignments":[]} with an empty message. Do not claim any card changed. A request to build what a card describes is route 2, not this.'
+    ] : [
+      'Board changes (cards) are made by the Manager Agent for developers only. If asked to change cards, say so; do not use a board route.'
+    ]),
     '',
     'Rules:',
     '- To stop the local website/dev server/preview, use {"route":"stop_preview","goal":"","repositories":[],"assignments":[]}. This stops only this user\'s preview in this conversation, not chat or the product build. Do not tell the user it stopped before the application confirms it.',

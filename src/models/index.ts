@@ -164,6 +164,13 @@ export interface Issue {
   plannedEndDate?: string;
   /** Expected finish date for this task, separate from its planned schedule. */
   dueDate?: string;
+  /**
+   * When the card was archived and by whom. An archived card is off the board
+   * but keeps its comments and history, and can be restored. Agents archive;
+   * only a person deletes permanently.
+   */
+  archivedAt?: string;
+  archivedBy?: string;
   /** Parent task for a planned work package. */
   parentIssueId?: string;
   /** Issue ids that must be completed before this task can begin. */
@@ -896,6 +903,17 @@ export interface RuntimeEngine {
   catalogError?: string;
   /** Runtime-version update information, kept separate from model discovery. */
   updateAvailable?: boolean;
+  /**
+   * Whether agents on this runtime run without the operator's personal setup
+   * (instructions, skills, plugins, MCP servers). Stamped when runtimes are
+   * read; see runtimeIsolation.
+   */
+  isolation?: {
+    isolated: boolean;
+    detail: string;
+    /** What a developer can do to isolate it. */
+    action?: 'codex_sign_in';
+  };
   latestVersion?: string;
   updateCheckedAt?: string;
   updateError?: string;

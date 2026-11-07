@@ -282,15 +282,28 @@ export class SupabaseService {
    * the cloud until this runs, and an upsert of the full row is both the insert
    * and the update. Awaited by callers that write comments next, which the
    * database refuses on an issue it does not have.
+   *
+   * Returns why the board refused it, or null once it is there (or when this
+   * desktop shares no board). Callers go through `shareCard`, which retries.
    */
-  async shareIssue(issue: Issue): Promise<void> {
-    if (!this.sharesBoard() || !this.client) return;
+  async shareIssue(issue: Issue): Promise<string | null> {
+    if (!this.sharesBoard() || !this.client) return null;
     try {
       const { error } = await this.client.from('issues').upsert(issueRow(currentWorkspaceId(), issue));
       if (error) throw error;
+      return null;
     } catch (err: any) {
       this.reportFailure(`share issue ${issue.identifier}`, err);
+      return String(err?.message ?? err);
     }
+  }
+
+  /** When the team board's copy of a card last changed; null when it has none. Throws when unreachable. */
+  async sharedIssueUpdatedAt(issueId: string): Promise<string | null> {
+    if (!this.sharesBoard() || !this.client) return null;
+    const { data, error } = await this.client.from('issues').select('updated_at').eq('id', issueId).maybeSingle();
+    if (error) throw error;
+    return (data as { updated_at?: string } | null)?.updated_at ?? null;
   }
 
   /**

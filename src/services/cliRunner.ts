@@ -5,14 +5,14 @@ import { StreamParser, StreamFamily, ParsedEvent } from './streamParser.js';
 import { TurnAccumulator, CliToolRecord } from './turnAccumulator.js';
 import { parseCustomCliArgs } from './customCliArgs.js';
 import { chatToolsFor, skillsForChatApproval, type ChatApprovalMode } from './toolPolicy.js';
-import { cliHomeEnv } from './cliHome.js';
+import { cliHomeEnv, codexAlphaHome, codexAlphaSignedIn, openCodeIsolationEnv } from './cliHome.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import type { ProjectRoot } from './projectFiles.js';
 import type { TaskFileScope } from './taskFileAccess.js';
 import { codexModelConfigArgs } from './codexModelConfig.js';
 import { sqliteService } from './sqliteService.js';
-import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig } from './mcpConfigService.js';
+import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig, type BoardRunScope } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
@@ -105,6 +105,17 @@ export interface CliTurnOptions {
   codexConfigArgs?: string[];
   /** The installed Codex accepts `--approve-for-me`; see RuntimeService.codexSupportsApproveForMe. */
   codexApproveForMe?: boolean;
+  /**
+   * Alpha's own Codex home, when someone has signed in there for Alpha. Codex
+   * then reads no global `AGENTS.md`, skills, memories or hooks of the operator's.
+   */
+  codexHome?: string;
+  /** `--disable` flags for the operator-facing Codex features this install has; see RuntimeService.codexIsolationArgs. */
+  codexIsolationArgs?: string[];
+  /** The installed OpenCode accepts `run --pure`; see RuntimeService.openCodeSupportsPure. */
+  openCodePure?: boolean;
+  /** Who this turn's board tools act for and what they may do; needs 'alpha-board' in mcpServers. */
+  boardScope?: BoardRunScope;
   /** Optional effort override; omitted means the model/runtime default. */
   reasoningEffort?: ReasoningEffort;
   systemPrompt?: string;
@@ -477,9 +488,12 @@ export function buildTurnInvocation(
   if (isCodex) {
     return {
       family: 'codex',
-      // Left on the real home: codex keeps auth.json under ~/.codex, so
-      // relocating it would sign the user out. See cliHome.
-      env: packageCache?.env ?? {},
+      // Alpha's own Codex home once someone signed in there for Alpha; the
+      // real home otherwise, because codex keeps auth.json in it. See cliHome.
+      env: {
+        ...(packageCache?.env ?? {}),
+        ...(options.codexHome ? { CODEX_HOME: options.codexHome } : {})
+      },
       bin: RuntimeService.codexPath(),
       // Flags MUST precede the positional prompt: `codex exec [OPTIONS] [PROMPT]`.
       // With the prompt first, codex silently ignores everything after it and
@@ -493,6 +507,10 @@ export function buildTurnInvocation(
       args: [
         'exec',
         '--json',
+        // The operator's apps (Notion and the like), plugins, memories, hooks
+        // and browser or computer control. Only names this install lists:
+        // codex refuses to start on an unknown feature flag.
+        ...(options.codexIsolationArgs ?? []),
         ...(options.responseSchemaPath ? ['--output-schema', options.responseSchemaPath] : []),
         ...(isLocalCodex ? ['--oss', '--local-provider', provider === 'Ollama' ? 'ollama' : 'lmstudio'] : []),
         // A run edits the repository it was given; so does a chat whose agent
@@ -698,10 +716,19 @@ export function buildTurnInvocation(
       // shared raw-text parser. The format=json stream needs its own parser.
       family: 'claude',
       bin: RuntimeService.opencodePath(),
-      env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission, mcp: openCodeMcpConfig(mcp) }) },
+      // Alpha's config is merged over OpenCode's global one, so the global one
+      // is moved out of reach rather than overridden key by key. See cliHome.
+      env: {
+        ...openCodeIsolationEnv(),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission, mcp: openCodeMcpConfig(mcp) })
+      },
       stdin: withPersona(prompt),
       args: [
         'run', '--dir', cwd,
+        // No external plugins: the operator's global plugin package lives in
+        // the config home that is replaced above, and a project's own plugins
+        // are code Alpha did not grant.
+        ...(options.openCodePure ? ['--pure'] : []),
         ...(modelName ? ['--model', modelName] : []),
         ...(priorSession ? ['--session', priorSession] : []),
         ...(approvalMode === 'full' ? ['--dangerously-skip-permissions'] : ['--auto']),
@@ -994,7 +1021,10 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
     undefined,
     options.projectRoots,
     options.projectFolder,
-    options.taskScope
+    options.taskScope,
+    undefined,
+    false,
+    options.boardScope
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
@@ -1007,11 +1037,17 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       fs.writeFileSync(responseSchemaPath, JSON.stringify(options.responseSchema));
     }
     const codexArgs = codexGatewayArgs(provider, modelName, options.codexBaseUrl);
+    const usesCodex = ['OpenAI', 'Ollama', 'LM Studio'].includes(provider);
     const invocation = buildTurnInvocation(
       {
         ...options,
         responseSchemaPath,
         codexConfigArgs: codexArgs,
+        ...(usesCodex ? {
+          codexHome: codexAlphaSignedIn() ? codexAlphaHome() : undefined,
+          codexIsolationArgs: await RuntimeService.codexIsolationArgs()
+        } : {}),
+        ...(provider === 'OpenCode' ? { openCodePure: await RuntimeService.openCodeSupportsPure() } : {}),
         personaFile: writeTurnPersona(runId, options.systemPrompt ?? '') ?? undefined
       },
       mcp

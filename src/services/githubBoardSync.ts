@@ -10,6 +10,7 @@ import {
   MappedIssue
 } from './githubIssueMapping.js';
 import { issueIdFor } from './githubRepoDiscovery.js';
+import { isBoardActivityComment } from './boardActivity.js';
 
 /**
  * Pull the shared board down from GitHub.
@@ -180,6 +181,8 @@ async function pushCommentsFor(issue: Issue, report: SyncReport, workspaceId: st
     // A thinking placeholder is a spinner, not a statement. Publishing it would
     // put "…" on the issue for everyone to read.
     if (comment.isThinking) continue;
+    // Board activity (archived, restored, changed by an agent) stays on the board.
+    if (isBoardActivityComment(comment)) continue;
 
     try {
       const created = await githubApi().post<{ id: number }>(

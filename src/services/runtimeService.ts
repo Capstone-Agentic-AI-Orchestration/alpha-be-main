@@ -8,6 +8,8 @@ import { enrichRuntimeUpdates } from './runtimeUpdateService.js';
 import { logInfo } from '../utils/logger.js';
 import { childProcessEnv } from './childProcessEnv.js';
 import { reconcileDetectedRuntimes } from './runtimeReconciliation.js';
+import { codexIsolationArgsFrom } from './runtimeIsolation.js';
+import { codexAlphaHome, codexAlphaSignedIn } from './cliHome.js';
 import {
   findClaude,
   findCodex,
@@ -74,6 +76,17 @@ type DetectedEngine = Omit<RuntimeEngine, 'type' | 'latencyMs'>;
 
 /** One `codex exec --help` check per Codex binary and version. */
 const codexApproveForMeProbes = new Map<string, Promise<boolean>>();
+/** One `codex features list` check per Codex binary and version. */
+const codexIsolationProbes = new Map<string, Promise<string[]>>();
+/** One `opencode run --help` check per OpenCode binary and version. */
+const openCodePureProbes = new Map<string, Promise<boolean>>();
+
+/** A cache key that changes when the binary is replaced by an update. */
+function binaryStamp(bin: string): string {
+  let stamp = '';
+  try { stamp = String(fs.statSync(bin).mtimeMs); } catch { /* a bare command name */ }
+  return bin + '|' + stamp;
+}
 
 type CatalogDiscovery = {
   models: string[];
@@ -586,6 +599,43 @@ export class RuntimeService {
     return probe;
   }
 
+  /**
+   * `--disable` flags that keep a Codex agent away from the operator's apps,
+   * plugins, memories, hooks and browser or computer control.
+   *
+   * Read from `codex features list` because codex exits on an unknown feature
+   * name, and the names change between releases. A check that could not run
+   * is not cached and yields no flags, so the turn still starts.
+   */
+  static codexIsolationArgs(): Promise<string[]> {
+    const bin = RuntimeService.codexPath();
+    const key = binaryStamp(bin);
+    let probe = codexIsolationProbes.get(key);
+    if (!probe) {
+      probe = runClosedStdin(bin, ['features', 'list'], 15_000).then(result => {
+        if (!result.ok) codexIsolationProbes.delete(key);
+        return result.ok ? codexIsolationArgsFrom(result.stdout) : [];
+      });
+      codexIsolationProbes.set(key, probe);
+    }
+    return probe;
+  }
+
+  /** Whether this machine's OpenCode accepts `run --pure` (no external plugins). */
+  static openCodeSupportsPure(): Promise<boolean> {
+    const bin = RuntimeService.opencodePath();
+    const key = binaryStamp(bin);
+    let probe = openCodePureProbes.get(key);
+    if (!probe) {
+      probe = runClosedStdin(bin, ['run', '--help'], 15_000).then(result => {
+        if (!result.ok) openCodePureProbes.delete(key);
+        return result.ok && /--pure\b/.test(result.stdout + result.stderr);
+      });
+      openCodePureProbes.set(key, probe);
+    }
+    return probe;
+  }
+
   static agyPath(): string {
     return findAntigravity();
   }
@@ -672,7 +722,10 @@ export class RuntimeService {
     }
 
     const version = versionProbe.stdout.trim();
-    const authProbe = await runClosedStdin(bin, ['login', 'status'], 15_000);
+    // Agents use Alpha's own Codex home once someone signed in there, so that
+    // sign-in is the one that decides whether Codex agents can run.
+    const alphaHomeEnv = codexAlphaSignedIn() ? { env: { CODEX_HOME: codexAlphaHome() } } : {};
+    const authProbe = await runClosedStdin(bin, ['login', 'status'], 15_000, alphaHomeEnv);
     const authOutput = `${authProbe.stdout}\n${authProbe.stderr}`.trim();
     const authText = authOutput.toLowerCase();
     const accountLogin = /logged in using chatgpt|logged in with chatgpt/.test(authText);
@@ -683,7 +736,7 @@ export class RuntimeService {
     // remains a fallback, but only positive auth evidence marks the runtime ready.
     let doctorText = '';
     if (!accountLogin && !apiKeyLogin && !signedOut) {
-      const doctorProbe = await runClosedStdin(bin, ['doctor'], 30_000);
+      const doctorProbe = await runClosedStdin(bin, ['doctor'], 30_000, alphaHomeEnv);
       doctorText = `${doctorProbe.stdout}\n${doctorProbe.stderr}`.toLowerCase();
     }
     const doctorAccountLogin = /stored auth mode\s*[: ]+chatgpt|stored chatgpt tokens\s*[: ]+true/.test(doctorText);

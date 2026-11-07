@@ -529,9 +529,12 @@ describe('isolation from the operator\'s own CLI configuration', () => {
     expect(env.HOME).not.toContain('.gemini');
   });
 
-  it('sets both HOME and USERPROFILE, since the CLIs are a mix of Go and Node', () => {
+  it('sets both HOME and USERPROFILE, since the CLIs are a mix of Go and Node, and pins ALPHA_HOME for Alpha\'s own tool servers', () => {
     const { env } = buildTurnInvocation(options({ provider: 'Antigravity' }), noMcp);
-    expect(Object.keys(env).sort()).toEqual(['HOME', 'USERPROFILE']);
+    expect(Object.keys(env).sort()).toEqual(['ALPHA_HOME', 'HOME', 'USERPROFILE']);
+    // Without it the tool servers resolved ~/.alpha inside the managed home
+    // and created a second, empty Alpha database there.
+    expect(env.ALPHA_HOME).not.toContain('cli-home');
   });
 
   it('disables slash commands so a message starting with / stays a message', () => {
@@ -543,13 +546,39 @@ describe('isolation from the operator\'s own CLI configuration', () => {
     expect(buildTurnInvocation(options(), noMcp).env).toEqual({});
   });
 
-  it('leaves Codex on the real home — auth.json lives under ~/.codex', () => {
+  it('leaves Codex on the real home until someone signs in for Alpha', () => {
     expect(buildTurnInvocation(options({ provider: 'OpenAI' }), noMcp).env).toEqual({});
+  });
+
+  it('runs Codex from Alpha\'s own home once signed in there, so ~/.codex/AGENTS.md and skills stay out', () => {
+    const { env } = buildTurnInvocation(options({ provider: 'OpenAI', codexHome: '/alpha/cli-home/codex' }), noMcp);
+    expect(env.CODEX_HOME).toBe('/alpha/cli-home/codex');
+  });
+
+  it('turns off the operator-facing Codex features before the prompt', () => {
+    const { args } = buildTurnInvocation(options({
+      provider: 'OpenAI', codexIsolationArgs: ['--disable', 'apps', '--disable', 'memories']
+    }), noMcp);
+    expect(args.slice(0, 6)).toEqual(['exec', '--json', '--disable', 'apps', '--disable', 'memories']);
+  });
+
+  it('moves OpenCode off the operator\'s global config, Claude skills and external skills', () => {
+    const { env, args } = buildTurnInvocation(options({ provider: 'OpenCode', openCodePure: true }), noMcp);
+    expect(env.XDG_CONFIG_HOME).toContain('cli-home');
+    expect(env.OPENCODE_DISABLE_CLAUDE_CODE).toBe('1');
+    expect(env.OPENCODE_DISABLE_EXTERNAL_SKILLS).toBe('1');
+    expect(args).toContain('--pure');
+  });
+
+  it('omits --pure on an OpenCode that does not support it', () => {
+    const { args } = buildTurnInvocation(options({ provider: 'OpenCode' }), noMcp);
+    expect(args).not.toContain('--pure');
   });
 
   it('still isolates Claude through --setting-sources', () => {
     const { args } = buildTurnInvocation(options(), noMcp);
     expect(args[args.indexOf('--setting-sources') + 1]).toBe('');
+    expect(args).toContain('--strict-mcp-config');
   });
 
   it('treats Google Gemini as Antigravity for isolation too', () => {

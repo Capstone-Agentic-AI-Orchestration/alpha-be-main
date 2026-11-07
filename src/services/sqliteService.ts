@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { DB_PATH, ALPHA_DIR, MEMORY_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
 import { MEMORY_LIMITS } from '../config/constants.js';
 import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
+import { boardAgentChangeFromRow, boardAgentChangeParams, type BoardAgentChangeRecord } from '../store/boardAgentChange.js';
 import {
   Project,
   Issue,
@@ -682,6 +683,8 @@ export class SQLiteService {
         planned_start_date TEXT,
         planned_end_date TEXT,
         due_date TEXT,
+        archived_at TEXT,
+        archived_by TEXT,
         parent_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
         depends_on_issue_ids TEXT NOT NULL DEFAULT '[]',
         labels TEXT DEFAULT '[]',
@@ -874,6 +877,17 @@ export class SQLiteService {
       CREATE INDEX IF NOT EXISTS idx_chat_sync_outbox_thread_order
         ON chat_sync_outbox(workspace_id, owner_id, thread_id, id);
 
+      /* Cards the team board refused, retried until it accepts them. One row per card: a retry sends the card as it is then. */
+      CREATE TABLE IF NOT EXISTS board_share_outbox (
+        workspace_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, issue_id)
+      );
+
       CREATE TABLE IF NOT EXISTS agent_calls (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -986,6 +1000,49 @@ export class SQLiteService {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_board_build_pending_issue
         ON board_build_requests(workspace_id, issue_id)
         WHERE json_extract(request_json, '$.status') IN ('waiting', 'planning');
+
+      /*
+       * Every board change an agent made or asked to make, on behalf of whom.
+       * Held rows wait for that person to confirm; applied rows keep before and
+       * after values for Undo. Local to this desktop, where agents run; the card
+       * itself carries a short comment that syncs to the team.
+       */
+      CREATE TABLE IF NOT EXISTS board_agent_changes (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        issue_id TEXT,
+        run_id TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        agent_id TEXT,
+        agent_name TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_login TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        before_json TEXT,
+        after_json TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT,
+        decided_at TEXT,
+        decided_by TEXT,
+        UNIQUE(workspace_id, run_id, request_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_board_agent_changes_project
+        ON board_agent_changes(workspace_id, project_id, created_at DESC);
+
+      /* Whether agents may work on the board; project '' is the whole workspace. */
+      CREATE TABLE IF NOT EXISTS board_assistant_settings (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, project_id)
+      );
       CREATE TABLE IF NOT EXISTS orchestration_planning_reservations (
         workspace_id TEXT NOT NULL,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1557,6 +1614,8 @@ export class SQLiteService {
       ['issues', 'planned_start_date TEXT'],
       ['issues', 'planned_end_date TEXT'],
       ['issues', 'due_date TEXT'],
+      ['issues', 'archived_at TEXT'],
+      ['issues', 'archived_by TEXT'],
       ['issues', 'parent_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL'],
       ['issues', "depends_on_issue_ids TEXT NOT NULL DEFAULT '[]'"],
       // Identifies the local daemon that owns an in-progress read-only plan.
@@ -2977,6 +3036,8 @@ export class SQLiteService {
       plannedStartDate: r.planned_start_date ?? undefined,
       plannedEndDate: r.planned_end_date ?? undefined,
       dueDate: r.due_date ?? undefined,
+      archivedAt: r.archived_at ?? undefined,
+      archivedBy: r.archived_by ?? undefined,
       parentIssueId: r.parent_issue_id ?? undefined,
       dependsOnIssueIds: JSON.parse(r.depends_on_issue_ids || '[]'),
       labels: JSON.parse(r.labels || '[]'),
@@ -3051,6 +3112,8 @@ export class SQLiteService {
       plannedStartDate: issue.plannedStartDate || undefined,
       plannedEndDate: issue.plannedEndDate || undefined,
       dueDate: issue.dueDate || undefined,
+      archivedAt: issue.archivedAt || undefined,
+      archivedBy: issue.archivedBy || undefined,
       parentIssueId: issue.parentIssueId || undefined,
       dependsOnIssueIds: issue.dependsOnIssueIds || [],
       labels: issue.labels || [],
@@ -3061,8 +3124,8 @@ export class SQLiteService {
     } as Issue;
 
     const stmt = this.db.prepare(`
-      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, planned_start_date, planned_end_date, due_date, parent_issue_id, depends_on_issue_ids, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
-      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @plannedStartDate, @plannedEndDate, @dueDate, @parentIssueId, @dependsOnIssueIds, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
+      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, planned_start_date, planned_end_date, due_date, archived_at, archived_by, parent_issue_id, depends_on_issue_ids, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
+      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @plannedStartDate, @plannedEndDate, @dueDate, @archivedAt, @archivedBy, @parentIssueId, @dependsOnIssueIds, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
       ...complete,
@@ -3075,6 +3138,8 @@ export class SQLiteService {
       plannedStartDate: complete.plannedStartDate || null,
       plannedEndDate: complete.plannedEndDate || null,
       dueDate: complete.dueDate || null,
+      archivedAt: complete.archivedAt || null,
+      archivedBy: complete.archivedBy || null,
       parentIssueId: complete.parentIssueId || null,
       dependsOnIssueIds: JSON.stringify(complete.dependsOnIssueIds || []),
       branchName: complete.branchName || null,
@@ -3130,6 +3195,8 @@ export class SQLiteService {
         assigned_squad_id = @assignedSquadId, assigned_human = @assignedHuman,
         planned_start_date = @plannedStartDate, planned_end_date = @plannedEndDate,
         due_date = @dueDate,
+        archived_at = @archivedAt,
+        archived_by = @archivedBy,
         parent_issue_id = @parentIssueId,
         depends_on_issue_ids = @dependsOnIssueIds,
         labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl,
@@ -3147,6 +3214,8 @@ export class SQLiteService {
       plannedStartDate: merged.plannedStartDate || null,
       plannedEndDate: merged.plannedEndDate || null,
       dueDate: merged.dueDate || null,
+      archivedAt: merged.archivedAt || null,
+      archivedBy: merged.archivedBy || null,
       parentIssueId: merged.parentIssueId || null,
       dependsOnIssueIds: JSON.stringify(merged.dependsOnIssueIds || []),
       labels: JSON.stringify(merged.labels || []),
@@ -4101,6 +4170,59 @@ export class SQLiteService {
       ? this.db.prepare('SELECT request_json FROM board_build_requests WHERE workspace_id = ? ORDER BY rowid').all(workspaceId)
       : this.db.prepare('SELECT request_json FROM board_build_requests ORDER BY rowid').all();
     return (rows as Array<{ request_json: string }>).map(row => JSON.parse(row.request_json));
+  }
+
+  /** Record an agent's board change; returns false when the same request was already recorded for this run. */
+  insertBoardAgentChange(change: BoardAgentChangeRecord): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO board_agent_changes
+      (id, workspace_id, project_id, issue_id, run_id, request_key, agent_id, agent_name, actor_user_id, actor_login,
+       action, status, summary, input_json, before_json, after_json, reason, created_at, expires_at, decided_at, decided_by)
+      VALUES (@id, @workspaceId, @projectId, @issueId, @runId, @requestKey, @agentId, @agentName, @actorUserId, @actorLogin,
+       @action, @status, @summary, @inputJson, @beforeJson, @afterJson, @reason, @createdAt, @expiresAt, @decidedAt, @decidedBy)`)
+      .run(boardAgentChangeParams(change));
+    return result.changes > 0;
+  }
+
+  updateBoardAgentChange(change: BoardAgentChangeRecord): void {
+    this.db.prepare(`UPDATE board_agent_changes SET issue_id = @issueId, status = @status, summary = @summary,
+      before_json = @beforeJson, after_json = @afterJson, reason = @reason, decided_at = @decidedAt, decided_by = @decidedBy
+      WHERE workspace_id = @workspaceId AND id = @id`).run(boardAgentChangeParams(change));
+  }
+
+  getBoardAgentChange(workspaceId: string, id: string): BoardAgentChangeRecord | null {
+    const row = this.db.prepare('SELECT * FROM board_agent_changes WHERE workspace_id = ? AND id = ?').get(workspaceId, id);
+    return row ? boardAgentChangeFromRow(row) : null;
+  }
+
+  findBoardAgentChange(workspaceId: string, runId: string, requestKey: string): BoardAgentChangeRecord | null {
+    const row = this.db.prepare('SELECT * FROM board_agent_changes WHERE workspace_id = ? AND run_id = ? AND request_key = ?')
+      .get(workspaceId, runId, requestKey);
+    return row ? boardAgentChangeFromRow(row) : null;
+  }
+
+  listBoardAgentChanges(workspaceId: string, filter: { projectId?: string; runId?: string; status?: string; limit?: number } = {}): BoardAgentChangeRecord[] {
+    const clauses = ['workspace_id = ?'];
+    const values: unknown[] = [workspaceId];
+    if (filter.projectId) { clauses.push('project_id = ?'); values.push(filter.projectId); }
+    if (filter.runId) { clauses.push('run_id = ?'); values.push(filter.runId); }
+    if (filter.status) { clauses.push('status = ?'); values.push(filter.status); }
+    const limit = Math.max(1, Math.min(200, Math.floor(filter.limit ?? 50)));
+    return this.db.prepare(`SELECT * FROM board_agent_changes WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, rowid DESC LIMIT ${limit}`)
+      .all(...values).map(boardAgentChangeFromRow);
+  }
+
+  /** Whether agents may work on this project's board: a project setting wins over the workspace one; on by default. */
+  boardAssistantEnabled(workspaceId: string, projectId: string): boolean {
+    const row = this.db.prepare(`SELECT enabled FROM board_assistant_settings WHERE workspace_id = ? AND project_id IN (?, '')
+      ORDER BY CASE WHEN project_id = '' THEN 1 ELSE 0 END LIMIT 1`).get(workspaceId, projectId) as { enabled: number } | undefined;
+    return row ? row.enabled === 1 : true;
+  }
+
+  setBoardAssistantEnabled(workspaceId: string, projectId: string, enabled: boolean, updatedBy: string): void {
+    this.db.prepare(`INSERT INTO board_assistant_settings (workspace_id, project_id, enabled, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(workspace_id, project_id) DO UPDATE SET
+      enabled = excluded.enabled, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+      .run(workspaceId, projectId, enabled ? 1 : 0, updatedBy, new Date().toISOString());
   }
 
   /** The newest Orchestrator build for each issue in the given projects, for the board's status chips. */
@@ -6216,6 +6338,45 @@ export class SQLiteService {
 
   markChatSyncDelivered(id: number): void {
     this.db.prepare('DELETE FROM chat_sync_outbox WHERE id = ?').run(id);
+  }
+
+  /** Remember a card the team board refused. A card already waiting keeps its backoff. */
+  queueBoardShare(workspaceId: string, issueId: string, error: string, nextAttemptAt: string): void {
+    this.db.prepare(`
+      INSERT INTO board_share_outbox (workspace_id, issue_id, next_attempt_at, last_error, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id, issue_id) DO UPDATE SET last_error = excluded.last_error
+    `).run(workspaceId, issueId, nextAttemptAt, error.slice(0, 300), new Date().toISOString());
+  }
+
+  getDueBoardShares(limit = 20, now = new Date().toISOString()): Array<{ workspaceId: string; issueId: string; attempts: number }> {
+    const rows = this.db.prepare(`
+      SELECT workspace_id, issue_id, attempts FROM board_share_outbox
+      WHERE next_attempt_at <= ? ORDER BY next_attempt_at ASC LIMIT ?
+    `).all(now, Math.max(1, Math.min(limit, 100))) as any[];
+    return rows.map(row => ({ workspaceId: row.workspace_id, issueId: row.issue_id, attempts: row.attempts }));
+  }
+
+  scheduleBoardShareRetry(workspaceId: string, issueId: string, nextAttemptAt: string, error: string): void {
+    this.db.prepare(`
+      UPDATE board_share_outbox SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
+      WHERE workspace_id = ? AND issue_id = ?
+    `).run(nextAttemptAt, error.slice(0, 300), workspaceId, issueId);
+  }
+
+  clearBoardShare(workspaceId: string, issueId: string): void {
+    this.db.prepare('DELETE FROM board_share_outbox WHERE workspace_id = ? AND issue_id = ?').run(workspaceId, issueId);
+  }
+
+  /** Make every waiting card due now, keeping its attempt count. Returns how many are waiting. */
+  makeBoardSharesDue(now = new Date().toISOString()): number {
+    return this.db.prepare('UPDATE board_share_outbox SET next_attempt_at = ? WHERE next_attempt_at > ?').run(now, now).changes;
+  }
+
+  /** When the next waiting card is due, or null when none is waiting. */
+  nextBoardShareAt(): string | null {
+    const row = this.db.prepare('SELECT MIN(next_attempt_at) AS next FROM board_share_outbox').get() as { next: string | null } | undefined;
+    return row?.next ?? null;
   }
 
   scheduleChatSyncRetry(id: number, nextAttemptAt: string, errorCategory = 'network_error'): void {

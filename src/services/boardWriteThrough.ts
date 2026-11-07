@@ -4,6 +4,8 @@ import { pushIssue } from './githubBoardWrite.js';
 import { logError } from '../utils/logger.js';
 import { Issue, IssueComment } from '../models/index.js';
 import { supabaseService } from './supabaseService.js';
+import { shareCard } from './boardShareQueue.js';
+import { isManagedTask } from './managedTaskExecution.js';
 
 /**
  * Move a card locally and tell the shared board.
@@ -41,6 +43,11 @@ export function addCommentAndShare(comment: IssueComment): IssueComment {
 export function updateIssueAndPush(issueId: string, updates: Partial<Issue>): void {
   const updated = sqliteService.updateIssue(issueId, updates);
   if (!updated) return;
+
+  // The team board first: a build card is on no GitHub issue, so the board is the only way teammates see it move.
+  void shareCard(updated, currentWorkspaceId());
+  // Build cards live on Alpha's board only; a run never files one on GitHub.
+  if (isManagedTask(updated) && !updated.githubNumber) return;
 
   /*
    * Deliberately not awaited. The local write has already happened and is what

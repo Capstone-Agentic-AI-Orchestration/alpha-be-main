@@ -26,6 +26,7 @@ import { orchestrationRouter } from './controllers/orchestrationController.js';
 import { projectRepoRouter } from './controllers/projectRepoController.js';
 import { hostingRouter } from './controllers/hostingController.js';
 import { agentBridgeRouter } from './controllers/agentBridgeController.js';
+import { boardAgentRouter } from './controllers/boardAgentController.js';
 import { setDaemonAddress } from './services/daemonAddress.js';
 import { agentCallRouter } from './controllers/agentCallController.js';
 import { agentCallService } from './services/agentCallService.js';
@@ -33,6 +34,7 @@ import { runnerService } from './services/runnerService.js';
 import { chatService } from './services/chatService.js';
 import { flushChatSyncOutbox, startChatSyncRetryLoop } from './services/chatSyncService.js';
 import { runtimeRefreshService } from './services/runtimeRefreshService.js';
+import { startBoardShareRetries } from './services/boardShareQueue.js';
 import { ensureCatalogSeed } from './services/mcpConfigService.js';
 import { reconcileOnStartup } from './services/startupReconcile.js';
 import { currentIdentity, warmIdentity } from './services/identityService.js';
@@ -310,6 +312,7 @@ app.use('/api', orchestrationRouter);
 app.use('/api', projectRepoRouter);
 app.use('/api', hostingRouter);
 app.use('/api', agentBridgeRouter);
+app.use('/api', boardAgentRouter);
 app.use('/api', agentCallRouter);
 app.use('/api', runRouter);
 app.use('/api', operationsRouter);
@@ -679,4 +682,7 @@ function onListening(): void {
 
   // Initial runtime scan plus periodic catalog refresh in background.
   runtimeRefreshService.start();
+
+  // Cards the team board refused in an earlier session are sent again.
+  startBoardShareRetries();
 }

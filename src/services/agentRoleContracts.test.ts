@@ -13,7 +13,8 @@ describe('official role boundaries', () => {
       for (const part of ['Trigger:', 'You own:', 'Outside your role:', 'Scope and tools:', 'When blocked:']) expect(template.systemPrompt).toContain(part);
       expect(template.systemPrompt).not.toContain('undefined');
       // The Manager moved to v6 when it began writing feature specs.
-      expect(template.version).toBe(template.key === 'manager' ? 6 : 5);
+      // Manager v7 adds board management for developers.
+      expect(template.version).toBe(template.key === 'manager' ? 7 : 5);
       expect(PREVIOUS_TEMPLATE_PROMPTS[template.key].length).toBeGreaterThanOrEqual(3);
     }
   });

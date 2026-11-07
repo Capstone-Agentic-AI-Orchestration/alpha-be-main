@@ -49,7 +49,7 @@ async function dispatch(request: BoardBuildRequest, context: WorkspaceContext): 
         throw new Error('Developer execution access is required. Review this request after access is restored.');
       }
       const [issue, project] = await Promise.all([issueStore().get(request.workspaceId, request.issueId), projectStore().get(request.workspaceId, request.projectId)]);
-      if (!issue || !project || issue.projectId !== project.id || issue.status === 'done') throw new Error('The task is no longer available for planning.');
+      if (!issue || !project || issue.projectId !== project.id || issue.status === 'done' || issue.archivedAt) throw new Error('The task is no longer available for planning.');
       const spec = sqliteService.getFeatureSpec(issue.id);
       if (boardBuildSourceHash(issue, project, spec?.version ?? 0) !== request.sourceHash) {
         request.status = 'needs_review'; request.reason = 'The task, checklist, specification or repositories changed. Review and submit a new plan request.';

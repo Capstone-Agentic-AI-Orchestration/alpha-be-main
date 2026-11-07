@@ -228,6 +228,7 @@ async function load(
   }));
   vi.doMock('./boardWriteThrough.js', () => ({ addCommentAndShare: vi.fn() }));
   vi.doMock('./supabaseService.js', () => ({ supabaseService: { shareIssue: vi.fn(async () => {}) } }));
+  vi.doMock('./boardShareQueue.js', () => ({ shareCard: vi.fn(async () => true) }));
 
   return await import('./projectBuildOrchestrator.js');
 }
@@ -238,7 +239,7 @@ afterEach(() => {
     '../store/stores.js', '../utils/gitUtils.js', './workspaceService.js', './projectBindings.js',
     '../services/workspaceContext.js', './workspaceRegistry.js', './squadRunner.js',
     '../services/agentReadiness.js', '../services/githubIssueMapping.js', './sqliteService.js',
-    './boardWriteThrough.js', './supabaseService.js', './personaService.js',
+    './boardWriteThrough.js', './supabaseService.js', './boardShareQueue.js', './personaService.js',
     './orchestrationPlanner.js', './orchestrationRuntime.js'
   ]) vi.doUnmock(mod);
   if (previousOrchestrationFlag === undefined) delete process.env.ALPHA_ORCHESTRATION_ENABLED;

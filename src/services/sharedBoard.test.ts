@@ -736,7 +736,8 @@ describe('the rows the desktop writes back', () => {
     await pg.exec(`insert into workspaces (id, name, slug) values ('ws-default', 'Alpha', 'alpha')`);
     await pg.exec(`insert into projects (id, workspace_id, name, key) values ('gh-repo-100', 'ws-default', 'checkout', 'CHK')`);
 
-    const issue = cloudIssue({ assignedHuman: 'octocat', labels: ['bug'] });
+    // Archived, so the archive columns are proven against the real migration too.
+    const issue = cloudIssue({ assignedHuman: 'octocat', labels: ['bug'], archivedAt: '2026-11-07T08:00:00.000Z', archivedBy: 'lloyd' });
     const comment = cloudComment({ githubId: 555 });
     const insert = async (table: string, row: Record<string, unknown>) => {
       const columns = Object.keys(row);
@@ -753,7 +754,8 @@ describe('the rows the desktop writes back', () => {
 
     const [back] = (await pg.query<any>('select * from issues')).rows;
     const [backComment] = (await pg.query<any>('select * from issue_comments')).rows;
-    expect(toIssue(back, [])).toEqual({ ...issue, comments: [] });
+    // A missing dependency list reads back as an empty one.
+    expect(toIssue(back, [])).toEqual({ ...issue, dependsOnIssueIds: [], comments: [] });
     expect(toComment(backComment)).toEqual({ ...comment, isThinking: false, authorAvatar: undefined, agentId: undefined });
   });
 });

@@ -411,6 +411,17 @@ describe('Alpha routes unaddressed chat messages', () => {
     expect(answered.agentMessage.content).toBe('Search would need an index on the title column.');
   });
 
+  it('never turns an answer into a build plan afterwards', async () => {
+    const { chatService } = await load();
+    cliReply = { content: 'The board has 10 cards: 6 in Todo and 4 in progress.' };
+    const first = await send(chatService, 'check the kanban', { projectId: 'project-1' });
+    await expect(chatService.routeMessage({
+      threadId: 'thread-1', messageId: first.userMessage.id, action: 'build', userId: 'user-1',
+      routing: { context, canBuild: true }
+    })).rejects.toMatchObject({ status: 409 });
+    expect(startProjectBuildBatch).not.toHaveBeenCalled();
+  });
+
   it('refuses to turn a build that specialists already started back into a question', async () => {
     const { chatService, sqlite } = await load();
     cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search"}' };
@@ -614,14 +625,15 @@ describe('durable main-chat approvals', () => {
   });
 });
 
-describe('Ask Alpha is answered by the Orchestrator Agent', () => {
+describe('The Manager Agent keeps the board for a developer', () => {
+  const developer = { ...context, userId: 'lloyd', role: 'dev' };
   async function askFixture() {
     const loaded = await specialistFixture();
     const { workspaceRegistry } = await import('./workspaceRegistry.js');
     vi.spyOn(workspaceRegistry, 'canAccessProjectBuilds').mockReturnValue(true);
     loaded.sqlite.ensureOfficialAgents('ws-default');
-    const orchestrator = loaded.sqlite.getAgents().find((agent: any) => agent.templateKey === 'orchestrator') as any;
-    loaded.sqlite.updateAgent(orchestrator.id, { modelProvider: 'Anthropic', modelName: 'claude-sonnet-5' });
+    const manager = loaded.sqlite.getAgents().find((agent: any) => agent.templateKey === 'manager') as any;
+    loaded.sqlite.updateAgent(manager.id, { modelProvider: 'Anthropic', modelName: 'claude-sonnet-5' });
     const issue = loaded.sqlite.createIssue({ id: 'issue-101', title: 'Create a polished landing page', projectId: 'project-1', status: 'todo', priority: 'medium' } as any);
     // A build started from the old project chat: matched by task, never by the Ask thread.
     // Assigned through the service proxy, which forwards writes to the open instance.
@@ -634,37 +646,38 @@ describe('Ask Alpha is answered by the Orchestrator Agent', () => {
       tasks: [], attempts: [], findings: []
     }));
     const { projectAskThreadId } = await import('./boardThreads.js');
-    const threadId = projectAskThreadId('ws-default', 'user-1', 'project-1');
+    const threadId = projectAskThreadId('ws-default', 'lloyd', 'project-1');
     const ask = (content: string, over: Record<string, unknown> = {}) => send(loaded.chatService, content, {
-      threadId, projectId: 'project-1', routing: { context, canBuild: true, answerOnly: true, scopeIssueIds: [issue.id] }, ...over
+      threadId, projectId: 'project-1', routing: { context: developer, canBuild: true, answerOnly: true, scopeIssueIds: [issue.id] }, ...over
     });
-    return { ...loaded, orchestrator, issue, ask, workspaceRegistry };
+    return { ...loaded, manager, issue, ask, workspaceRegistry };
   }
 
-  it('answers as the Orchestrator Agent from the task build records', async () => {
-    const { ask, orchestrator, issue } = await askFixture();
+  it('answers the board panel as the Manager Agent, with the board tools acting as the developer', async () => {
+    const { ask, manager, issue } = await askFixture();
     cliReply = { content: 'The build for this task was cancelled on Nov 1.' };
     const result = await ask('What is the update on this?');
     expect(turnInputs).toHaveLength(1);
-    expect(turnInputs[0]).toMatchObject({ provider: 'Anthropic', modelName: 'claude-sonnet-5', mcpServers: ['alpha-project-files', 'alpha-github'] });
-    expect(turnInputs[0].systemPrompt).toContain('You are the Orchestrator Agent');
-    expect(turnInputs[0].systemPrompt).toContain('Ask Alpha conversation');
+    expect(turnInputs[0]).toMatchObject({ provider: 'Anthropic', modelName: 'claude-sonnet-5', mcpServers: ['alpha-project-files', 'alpha-github', 'alpha-board'] });
+    expect(turnInputs[0].boardScope).toMatchObject({ access: 'write', actorLogin: 'lloyd', projectId: 'project-1', agentId: manager.id });
+    expect(turnInputs[0].systemPrompt).toContain('You are the Manager Agent');
+    expect(turnInputs[0].systemPrompt).toContain('You keep this project\'s board for the developer');
     expect(turnInputs[0].systemPrompt).not.toContain('## You are Alpha');
     expect(turnInputs[0].prompt).toContain(issue.identifier);
     expect(turnInputs[0].prompt).toContain('Status: cancelled');
     expect(turnInputs[0].prompt).toContain('Build cancelled by an authorized project member.');
-    expect(result.agentMessage).toMatchObject({ agentId: orchestrator.id, senderName: orchestrator.name });
+    expect(result.agentMessage).toMatchObject({ agentId: manager.id, senderName: manager.name });
   });
 
   it('summarizes the most recently updated tasks when none are selected', async () => {
     const { ask, issue } = await askFixture();
     cliReply = { content: 'One task, cancelled.' };
-    await ask('How is the board?', { routing: { context, canBuild: true, answerOnly: true } });
+    await ask('How is the board?', { routing: { context: developer, canBuild: true, answerOnly: true } });
     expect(turnInputs[0].prompt).toContain('most recently updated tasks');
     expect(turnInputs[0].prompt).toContain(issue.identifier);
   });
 
-  it('never starts a build, even if the Orchestrator writes a decision line', async () => {
+  it('never starts a build, even if the Manager writes a decision line', async () => {
     const { ask } = await askFixture();
     cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search"}' };
     const result = await ask('add search');
@@ -684,25 +697,70 @@ describe('Ask Alpha is answered by the Orchestrator Agent', () => {
     expect(result.agentMessage.content).toMatch(/usage limit/);
   });
 
-  it('refuses without a model call when the person cannot run the Orchestrator', async () => {
+  it('refuses without a model call when the developer cannot run the Manager', async () => {
     const { ask, access } = await askFixture();
     access.mockResolvedValue(false);
     const result = await ask('status?');
     expect(turnInputs).toHaveLength(0);
     expect(result.agentMessage).toMatchObject({ senderType: 'system' });
-    expect(result.agentMessage.content).toMatch(/do not have access to run the Orchestrator Agent/);
+    expect(result.agentMessage.content).toMatch(/do not have access to run the Manager Agent/);
   });
 
-  it('restores an archived Orchestrator, and an update can never archive an official agent', async () => {
-    const { ask, orchestrator, sqlite } = await askFixture();
-    sqlite.updateAgent(orchestrator.id, { isArchived: true });
-    expect(sqlite.getAgents().find((agent: any) => agent.id === orchestrator.id)?.isArchived).toBe(false);
+  it.each(['admin', 'pm'])('is for developers only: a %s gets no agent and no model call', async role => {
+    const { ask, issue } = await askFixture();
+    const result = await ask('Move this to Todo', { routing: { context: { ...context, role }, canBuild: true, answerOnly: true, scopeIssueIds: [issue.id] } });
+    expect(turnInputs).toHaveLength(0);
+    expect(result.agentMessage.content).toMatch(/only for developers/);
+  });
+
+  it('answers without board tools, and says why, when the assistant is turned off', async () => {
+    const { ask, sqlite } = await askFixture();
+    sqlite.setBoardAssistantEnabled('ws-default', 'project-1', false, 'admin');
+    cliReply = { content: 'I cannot change the board right now.' };
+    await ask('Archive the old cards');
+    expect(turnInputs[0].mcpServers).toEqual(['alpha-project-files', 'alpha-github']);
+    expect(turnInputs[0].boardScope).toBeUndefined();
+    expect(turnInputs[0].systemPrompt).toContain('You cannot change the board in this conversation: The board assistant is turned off');
+  });
+
+  it('restores an archived Manager, and an update can never archive an official agent', async () => {
+    const { ask, manager, sqlite } = await askFixture();
+    sqlite.updateAgent(manager.id, { isArchived: true });
+    expect(sqlite.getAgents().find((agent: any) => agent.id === manager.id)?.isArchived).toBe(false);
 
     // Archived by a release before the rule existed.
-    (sqlite as any).db.prepare('UPDATE agents SET is_archived = 1 WHERE id = ?').run(orchestrator.id);
+    (sqlite as any).db.prepare('UPDATE agents SET is_archived = 1 WHERE id = ?').run(manager.id);
     cliReply = { content: 'Answered.' };
     const result = await ask('status?');
-    expect(result.agentMessage.agentId).toBe(orchestrator.id);
-    expect(sqlite.getAgents().find((agent: any) => agent.id === orchestrator.id)?.isArchived).toBe(false);
+    expect(result.agentMessage.agentId).toBe(manager.id);
+    expect(sqlite.getAgents().find((agent: any) => agent.id === manager.id)?.isArchived).toBe(false);
+  });
+
+  it('hands a board request in a project chat to the Manager Agent', async () => {
+    const { chatService, manager, workspaceRegistry } = await askFixture();
+    vi.spyOn(workspaceRegistry, 'canAccessProjectBuilds').mockReturnValue(true);
+    cliReplies = [
+      'ALPHA_ROUTE ' + JSON.stringify({ route: 'board', goal: 'Move TASK-1 to Todo', repositories: [], assignments: [] }),
+      'Moved TASK-1 to Todo.'
+    ];
+    const result = await send(chatService, 'put the landing page card in todo', { projectId: 'project-1', routing: { context: developer, canBuild: true } });
+    expect(turnInputs).toHaveLength(2);
+    expect(turnInputs[0].systemPrompt).toContain('route":"board"');
+    // Board questions go to the Manager too, never answered from what the chat said earlier.
+    expect(turnInputs[0].systemPrompt).toContain('Always route these to the Manager, even when earlier messages already discussed the board');
+    expect(turnInputs[0].systemPrompt).toContain('the Gantt schedule (planned start, planned end and dependencies');
+    expect(turnInputs[1].boardScope).toMatchObject({ access: 'write', actorLogin: 'lloyd' });
+    expect(turnInputs[1].prompt).toContain('Alpha\'s reading of the board request: Move TASK-1 to Todo');
+    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', manager.name]);
+    expect(startProjectBuildBatch).not.toHaveBeenCalled();
+  });
+
+  it('gives other agents in a developer\'s project chat read-only board tools', async () => {
+    const { chatService } = await askFixture();
+    cliReply = { content: 'The API validates input.' };
+    await send(chatService, 'Explain the API', { projectId: 'project-1', targetAgentId: 'backend-specialist', routing: { context: developer, canBuild: true } });
+    expect(turnInputs[0].mcpServers).toEqual(['alpha-project-files', 'alpha-github', 'alpha-board']);
+    expect(turnInputs[0].boardScope).toMatchObject({ access: 'read' });
+    expect(turnInputs[0].systemPrompt).toContain('Only the Manager Agent changes cards');
   });
 });

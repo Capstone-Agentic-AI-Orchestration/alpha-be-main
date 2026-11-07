@@ -218,8 +218,8 @@ describe('official agent instruction upgrades', () => {
       .run('Semi-Autonomous (Requires Approval)', JSON.stringify(['sk-fs', 'sk-bash', 'sk-git']), JSON.stringify(['alpha-github', 'alpha-hosting']));
     db.close();
     const svc = await startDaemon();
-    // The latest previous Manager wording is v5, so this also proves an untouched v5 Manager reaches v6.
-    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: 6, phase: 'Planning', skills: ['sk-browser'] });
+    // The latest previous Manager wording is v6, so this also proves an untouched v6 Manager reaches v7 (board management).
+    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: 7, phase: 'Planning', skills: ['sk-browser'] });
     expect(svc.getAgents().find(agent => agent.templateKey === 'github-finalization')).toMatchObject({ templateVersion: 5, autonomyLevel: 'Supervised', skills: [], mcpServers: ['alpha-github'] });
     expect(svc.getAgents()).toHaveLength(11);
   });
