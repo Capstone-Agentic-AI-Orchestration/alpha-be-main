@@ -56,7 +56,7 @@ const FIELDS = {
 
 export const TOOLS: Record<string, ToolDef> = {
   board_list_cards: {
-    description: 'List cards on this project\'s board: ID, title, column, priority, assignee, labels, due date, checklist progress and updated_at. No comments. Use column or search to narrow a large board.',
+    description: 'List cards on this project\'s board: ID, title, column, priority, assignee, labels, due date, planned start and end, dependencies, checklist progress and updated_at. No comments. Use column or search to narrow a large board. The Gantt view is drawn from planned_start, planned_end and depends_on: you see that data, not the chart. A project with none of them has nothing scheduled.',
     inputSchema: schema({
       column: str('Only cards in this column.', { enum: ['backlog', 'todo', 'in_progress', 'agent_running', 'review', 'done'] }),
       search: str('Only cards whose ID, title or description contains this text.'),

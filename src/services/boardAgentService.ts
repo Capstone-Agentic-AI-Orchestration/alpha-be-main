@@ -76,8 +76,13 @@ export function requestKeyFor(action: string, args: Record<string, unknown>): st
 
 const actorLabel = (agentName: string, actorLogin: string) => agentName + ' for ' + actorLogin;
 
-/** A card as an agent sees it in a list: small, no comments, so a whole board fits in a turn. */
-export function compactCard(issue: Issue): Record<string, unknown> {
+/**
+ * A card as an agent sees it in a list: small, no comments, so a whole board fits in a turn.
+ * The schedule is here too, because the Gantt view is drawn from exactly these fields:
+ * one list answers a timeline question without opening every card. Each appears only when set.
+ */
+export function compactCard(issue: Issue, cards: Issue[] = []): Record<string, unknown> {
+  const identifierOf = (id: string) => cards.find(card => card.id === id)?.identifier ?? id;
   const open = (issue.subtasks ?? []).filter(item => !item.completed).length;
   return {
     card: issue.identifier,
@@ -87,6 +92,9 @@ export function compactCard(issue: Issue): Record<string, unknown> {
     ...(issue.assignedHuman ? { assignee: issue.assignedHuman } : {}),
     ...(issue.labels?.length ? { labels: issue.labels } : {}),
     ...(issue.dueDate ? { due: issue.dueDate } : {}),
+    ...(issue.plannedStartDate ? { planned_start: issue.plannedStartDate } : {}),
+    ...(issue.plannedEndDate ? { planned_end: issue.plannedEndDate } : {}),
+    ...(issue.dependsOnIssueIds?.length ? { depends_on: issue.dependsOnIssueIds.map(identifierOf) } : {}),
     ...(issue.subtasks?.length ? { checklist: (issue.subtasks.length - open) + '/' + issue.subtasks.length + ' done' } : {}),
     updated_at: issue.updatedAt
   };
@@ -96,13 +104,10 @@ export function compactCard(issue: Issue): Record<string, unknown> {
 export function fullCard(issue: Issue, cards: Issue[]): Record<string, unknown> {
   const identifierOf = (id?: string) => cards.find(card => card.id === id)?.identifier ?? id;
   return {
-    ...compactCard(issue),
+    ...compactCard(issue, cards),
     description: (issue.description ?? '').slice(0, 4000),
     checklist: (issue.subtasks ?? []).map(item => ({ title: item.title, done: item.completed })),
     ...(issue.parentIssueId ? { parent: identifierOf(issue.parentIssueId) } : {}),
-    ...(issue.dependsOnIssueIds?.length ? { depends_on: issue.dependsOnIssueIds.map(identifierOf) } : {}),
-    ...(issue.plannedStartDate ? { planned_start: issue.plannedStartDate } : {}),
-    ...(issue.plannedEndDate ? { planned_end: issue.plannedEndDate } : {}),
     ...(issue.githubUrl ? { github: issue.githubUrl } : {}),
     recent_comments: (issue.comments ?? []).filter(comment => !comment.isThinking).slice(-10)
       .map(comment => ({ by: comment.authorName, at: comment.createdAt, text: comment.content.slice(0, 500) }))
@@ -129,13 +134,14 @@ export async function resolveCard(grant: Pick<BoardGrant, 'context' | 'projectId
 
 export async function listCards(grant: BoardGrant, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   let cards = await projectCards(grant, args.archived === true);
+  const project = cards;
   if (args.archived === true) cards = cards.filter(card => card.archivedAt);
   const column = typeof args.column === 'string' ? args.column : undefined;
   if (column) cards = cards.filter(card => card.status === column || (COLUMN_LABEL[card.status] ?? '').toLowerCase() === column.toLowerCase());
   const search = text(args.search, 200)?.toLowerCase();
   if (search) cards = cards.filter(card => (card.identifier + ' ' + card.title + ' ' + (card.description ?? '')).toLowerCase().includes(search));
   const limit = Math.max(1, Math.min(100, Math.floor(Number(args.limit) || 50)));
-  return { total: cards.length, cards: cards.slice(0, limit).map(compactCard), ...(cards.length > limit ? { note: 'Shortened; narrow with column or search.' } : {}) };
+  return { total: cards.length, cards: cards.slice(0, limit).map(card => compactCard(card, project)), ...(cards.length > limit ? { note: 'Shortened; narrow with column or search.' } : {}) };
 }
 
 export async function getCard(grant: BoardGrant, args: Record<string, unknown>): Promise<Record<string, unknown>> {

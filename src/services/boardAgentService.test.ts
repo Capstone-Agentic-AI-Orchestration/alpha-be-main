@@ -85,6 +85,15 @@ describe('reading the board', () => {
     expect(result.total).toBe(8);
     expect(result.cards[0]).toEqual({ card: 'CAP-1', title: 'Card 1', column: 'Todo', priority: 'medium', updated_at: '2026-11-01T00:00:00.000Z' });
   });
+
+  it('lists the schedule the Gantt is drawn from, naming dependencies by card, only when a card has one', async () => {
+    state.issues[1] = card(2, { plannedStartDate: '2026-11-10', plannedEndDate: '2026-11-18', dependsOnIssueIds: ['issue-1'] });
+    const result = await listCards(grant({ access: 'read' }), { search: 'CAP-2' }) as { cards: Array<Record<string, unknown>> };
+    expect(result.cards[0]).toMatchObject({ card: 'CAP-2', planned_start: '2026-11-10', planned_end: '2026-11-18', depends_on: ['CAP-1'] });
+    const unscheduled = await listCards(grant({ access: 'read' }), { search: 'CAP-3' }) as { cards: Array<Record<string, unknown>> };
+    expect(Object.keys(unscheduled.cards[0])).not.toEqual(expect.arrayContaining(['planned_start']));
+    expect(unscheduled.cards[0]).not.toHaveProperty('depends_on');
+  });
 });
 
 describe('agent changes', () => {
