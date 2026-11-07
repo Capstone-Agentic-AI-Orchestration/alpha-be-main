@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { DB_PATH, ALPHA_DIR, MEMORY_DIR, WORKSPACES_DIR, IS_CLOUD } from '../config/env.js';
 import { MEMORY_LIMITS } from '../config/constants.js';
 import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
+import { boardAgentChangeFromRow, boardAgentChangeParams, type BoardAgentChangeRecord } from '../store/boardAgentChange.js';
 import {
   Project,
   Issue,
@@ -988,6 +989,49 @@ export class SQLiteService {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_board_build_pending_issue
         ON board_build_requests(workspace_id, issue_id)
         WHERE json_extract(request_json, '$.status') IN ('waiting', 'planning');
+
+      /*
+       * Every board change an agent made or asked to make, on behalf of whom.
+       * Held rows wait for that person to confirm; applied rows keep before and
+       * after values for Undo. Local to this desktop, where agents run; the card
+       * itself carries a short comment that syncs to the team.
+       */
+      CREATE TABLE IF NOT EXISTS board_agent_changes (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        issue_id TEXT,
+        run_id TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        agent_id TEXT,
+        agent_name TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_login TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        before_json TEXT,
+        after_json TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT,
+        decided_at TEXT,
+        decided_by TEXT,
+        UNIQUE(workspace_id, run_id, request_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_board_agent_changes_project
+        ON board_agent_changes(workspace_id, project_id, created_at DESC);
+
+      /* Whether agents may work on the board; project '' is the whole workspace. */
+      CREATE TABLE IF NOT EXISTS board_assistant_settings (
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, project_id)
+      );
       CREATE TABLE IF NOT EXISTS orchestration_planning_reservations (
         workspace_id TEXT NOT NULL,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -4115,6 +4159,59 @@ export class SQLiteService {
       ? this.db.prepare('SELECT request_json FROM board_build_requests WHERE workspace_id = ? ORDER BY rowid').all(workspaceId)
       : this.db.prepare('SELECT request_json FROM board_build_requests ORDER BY rowid').all();
     return (rows as Array<{ request_json: string }>).map(row => JSON.parse(row.request_json));
+  }
+
+  /** Record an agent's board change; returns false when the same request was already recorded for this run. */
+  insertBoardAgentChange(change: BoardAgentChangeRecord): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO board_agent_changes
+      (id, workspace_id, project_id, issue_id, run_id, request_key, agent_id, agent_name, actor_user_id, actor_login,
+       action, status, summary, input_json, before_json, after_json, reason, created_at, expires_at, decided_at, decided_by)
+      VALUES (@id, @workspaceId, @projectId, @issueId, @runId, @requestKey, @agentId, @agentName, @actorUserId, @actorLogin,
+       @action, @status, @summary, @inputJson, @beforeJson, @afterJson, @reason, @createdAt, @expiresAt, @decidedAt, @decidedBy)`)
+      .run(boardAgentChangeParams(change));
+    return result.changes > 0;
+  }
+
+  updateBoardAgentChange(change: BoardAgentChangeRecord): void {
+    this.db.prepare(`UPDATE board_agent_changes SET issue_id = @issueId, status = @status, summary = @summary,
+      before_json = @beforeJson, after_json = @afterJson, reason = @reason, decided_at = @decidedAt, decided_by = @decidedBy
+      WHERE workspace_id = @workspaceId AND id = @id`).run(boardAgentChangeParams(change));
+  }
+
+  getBoardAgentChange(workspaceId: string, id: string): BoardAgentChangeRecord | null {
+    const row = this.db.prepare('SELECT * FROM board_agent_changes WHERE workspace_id = ? AND id = ?').get(workspaceId, id);
+    return row ? boardAgentChangeFromRow(row) : null;
+  }
+
+  findBoardAgentChange(workspaceId: string, runId: string, requestKey: string): BoardAgentChangeRecord | null {
+    const row = this.db.prepare('SELECT * FROM board_agent_changes WHERE workspace_id = ? AND run_id = ? AND request_key = ?')
+      .get(workspaceId, runId, requestKey);
+    return row ? boardAgentChangeFromRow(row) : null;
+  }
+
+  listBoardAgentChanges(workspaceId: string, filter: { projectId?: string; runId?: string; status?: string; limit?: number } = {}): BoardAgentChangeRecord[] {
+    const clauses = ['workspace_id = ?'];
+    const values: unknown[] = [workspaceId];
+    if (filter.projectId) { clauses.push('project_id = ?'); values.push(filter.projectId); }
+    if (filter.runId) { clauses.push('run_id = ?'); values.push(filter.runId); }
+    if (filter.status) { clauses.push('status = ?'); values.push(filter.status); }
+    const limit = Math.max(1, Math.min(200, Math.floor(filter.limit ?? 50)));
+    return this.db.prepare(`SELECT * FROM board_agent_changes WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, rowid DESC LIMIT ${limit}`)
+      .all(...values).map(boardAgentChangeFromRow);
+  }
+
+  /** Whether agents may work on this project's board: a project setting wins over the workspace one; on by default. */
+  boardAssistantEnabled(workspaceId: string, projectId: string): boolean {
+    const row = this.db.prepare(`SELECT enabled FROM board_assistant_settings WHERE workspace_id = ? AND project_id IN (?, '')
+      ORDER BY CASE WHEN project_id = '' THEN 1 ELSE 0 END LIMIT 1`).get(workspaceId, projectId) as { enabled: number } | undefined;
+    return row ? row.enabled === 1 : true;
+  }
+
+  setBoardAssistantEnabled(workspaceId: string, projectId: string, enabled: boolean, updatedBy: string): void {
+    this.db.prepare(`INSERT INTO board_assistant_settings (workspace_id, project_id, enabled, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(workspace_id, project_id) DO UPDATE SET
+      enabled = excluded.enabled, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+      .run(workspaceId, projectId, enabled ? 1 : 0, updatedBy, new Date().toISOString());
   }
 
   /** The newest Orchestrator build for each issue in the given projects, for the board's status chips. */

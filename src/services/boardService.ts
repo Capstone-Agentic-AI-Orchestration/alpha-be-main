@@ -6,7 +6,9 @@ import { supabaseService } from './supabaseService.js';
 import { sqliteService } from './sqliteService.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { runWithWorkspace } from './workspaceContext.js';
+import { randomUUID } from 'node:crypto';
 import type { Issue, IssueStatus } from '../models/index.js';
+import { BOARD_ACTIVITY_COMMENT_PREFIX } from './boardActivity.js';
 
 /**
  * The board's card rules, in one place.
@@ -17,7 +19,7 @@ import type { Issue, IssueStatus } from '../models/index.js';
  * (workspace, project) first; these functions check the card itself.
  */
 export class BoardRuleError extends Error {
-  constructor(message: string, readonly status: 400 | 404 | 409 | 410) {
+  constructor(message: string, readonly status: 400 | 403 | 404 | 409 | 410 | 429) {
     super(message);
     this.name = 'BoardRuleError';
   }
@@ -228,7 +230,7 @@ export async function createCard(
   workspaceId: string,
   rest: Record<string, any>,
   creatorLogin: string,
-  openingComment?: string
+  openingComment?: (issue: Issue) => string
 ): Promise<{ saved: Issue; syncWarning?: string }> {
   const draft = { status: 'todo', priority: 'medium', labels: [], ...rest, createdBy: rest.createdBy || creatorLogin } as unknown as Issue;
 
@@ -255,7 +257,7 @@ export async function createCard(
     issueId: issue.id,
     authorType: 'system',
     authorName: 'Alpha',
-    content: openingComment ?? `${issue.identifier} created by ${creatorLogin}.`,
+    content: openingComment ? openingComment(issue) : `${issue.identifier} created by ${creatorLogin}.`,
     createdAt: issue.createdAt
   });
 
@@ -358,9 +360,10 @@ export async function removeCard(workspaceId: string, issueId: string): Promise<
   return deleted;
 }
 
-async function addSystemComment(workspaceId: string, issueId: string, content: string, kind: string): Promise<void> {
+/** A short system note on the card for the team. Not published to GitHub. */
+export async function addBoardActivityNote(workspaceId: string, issueId: string, content: string, kind: string): Promise<void> {
   const comment = await issueStore().addComment(workspaceId, {
-    id: `comm-${issueId}-${kind}-${Date.now()}`,
+    id: `${BOARD_ACTIVITY_COMMENT_PREFIX}${issueId}-${kind}-${Date.now()}-${randomUUID().slice(0, 8)}`,
     issueId,
     authorType: 'system',
     authorName: 'Alpha',
@@ -380,7 +383,7 @@ export async function archiveCard(workspaceId: string, before: Issue, archivedBy
   const blocker = await cardRemovalBlocker(workspaceId, before, 'archiving');
   if (blocker) throw new BoardRuleError(blocker, 409);
   const result = await saveCardUpdate(workspaceId, before, { archivedAt: new Date().toISOString(), archivedBy });
-  await addSystemComment(workspaceId, before.id, `Archived by ${archivedBy}.`, 'archived');
+  await addBoardActivityNote(workspaceId, before.id, `Archived by ${archivedBy}.`, 'archived');
   return result;
 }
 
@@ -388,7 +391,7 @@ export async function archiveCard(workspaceId: string, before: Issue, archivedBy
 export async function restoreCard(workspaceId: string, before: Issue, restoredBy: string): Promise<{ saved: Issue; syncWarning?: string }> {
   if (!before.archivedAt) return { saved: before };
   const result = await saveCardUpdate(workspaceId, before, { archivedAt: undefined, archivedBy: undefined });
-  await addSystemComment(workspaceId, before.id, `Restored by ${restoredBy}.`, 'restored');
+  await addBoardActivityNote(workspaceId, before.id, `Restored by ${restoredBy}.`, 'restored');
   return result;
 }
 

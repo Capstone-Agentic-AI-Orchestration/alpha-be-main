@@ -68,7 +68,7 @@ export function requireLoopbackHost(req: Request, res: Response, next: NextFunct
  * (see agentBridgeController). Giving it the full local token instead would
  * hand the whole API to every agent.
  */
-const OWN_CREDENTIAL_ROUTES = [/^\/agent-bridge\/hosting\//];
+const OWN_CREDENTIAL_ROUTES = [/^\/agent-bridge\/hosting\//, /^\/agent-bridge\/board\//];
 
 /** Express middleware for /api: the token, except on /health and run-token routes. */
 export function requireLocalToken(expected: string) {

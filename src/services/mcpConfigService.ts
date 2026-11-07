@@ -4,9 +4,10 @@ import path from 'node:path';
 import { ALPHA_DIR, RUNS_DIR } from '../config/env.js';
 import { mcpCredentialEnv } from './gitCredentialIsolation.js';
 import { McpAccess } from './autonomyPolicy.js';
-import { logError } from '../utils/logger.js';
+import { logError, logInfo } from '../utils/logger.js';
 import { daemonApiUrl } from './daemonAddress.js';
 import { mintRunGrant, revokeRunGrant, type RunGrant } from './runBridge.js';
+import { BoardGrantRefused, mintBoardGrant, revokeBoardGrant, type BoardGrant } from './boardGrant.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { hostingHintsFor } from './hosting/hostingService.js';
 import type { Project } from '../models/index.js';
@@ -234,6 +235,9 @@ export interface HostingRunScope {
   repos: RunGrant['repos'];
 }
 
+/** What a turn's `alpha-board` tools may do, and for whom; see boardGrant. */
+export type BoardRunScope = Omit<BoardGrant, 'runId' | 'touched' | 'writes'>;
+
 /** The scope for a run on `project`: its repositories, with what the project knows about each. */
 export function hostingScopeFor(project: Project | null | undefined, agentId: string | null, workspaceId: string | null): HostingRunScope | undefined {
   if (!project) return undefined;
@@ -317,7 +321,9 @@ export function writeRunMcpConfig(
   /** Internal task authority, never accepted from a tool call or agent environment. */
   taskScope?: TaskFileScope,
   workspaceCatalog?: Record<string, McpServerSpec>,
-  workspaceCatalogAuthoritative = false
+  workspaceCatalogAuthoritative = false,
+  /** Who the board tools act for and what they may do. Without it `alpha-board` is left out. */
+  board?: BoardRunScope
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
 
@@ -325,6 +331,13 @@ export function writeRunMcpConfig(
     ...(workspaceCatalogAuthoritative ? BUILTIN_SERVERS : availableServers()),
     ...(workspaceCatalog ?? {}),
     'alpha-task-files': builtinServer('projectFilesMcpServer'),
+    /*
+     * The project's board, as the developer the agent acts for -- see
+     * boardMcpServer and boardGrant. Not a catalog entry anyone can assign:
+     * Alpha adds it to a turn itself, and a catalog entry of the same name
+     * must not stand in for it.
+     */
+    'alpha-board': builtinServer('boardMcpServer'),
     ...(projectRoots !== undefined ? { 'alpha-project-files': BUILTIN_SERVERS['alpha-project-files'], 'alpha-github': BUILTIN_SERVERS['alpha-github'] } : {}) };
   const mcpServers: Record<string, McpServerSpec> = {};
 
@@ -382,6 +395,30 @@ export function writeRunMcpConfig(
         ...resolved,
         env: { ...resolved.env, ALPHA_DAEMON_URL: daemonUrl, ALPHA_RUN_TOKEN: token, ALPHA_MCP_ACCESS: access }
       };
+      continue;
+    }
+
+    /**
+     * The board server gets a pass for this turn naming the developer the
+     * agent acts for. No pass -- not a developer, no project, assistant off --
+     * means no board tools rather than tools that fail.
+     */
+    if (name === 'alpha-board') {
+      const daemonUrl = daemonApiUrl();
+      if (!board || !daemonUrl || isHttpSpec(resolved)) {
+        logError(`MCP server "alpha-board" needs a project, a developer and a listening daemon for ${runId} — skipping.`);
+        continue;
+      }
+      try {
+        const token = mintBoardGrant({ ...board, runId });
+        mcpServers[name] = {
+          ...resolved,
+          env: { ...resolved.env, ALPHA_DAEMON_URL: daemonUrl, ALPHA_RUN_TOKEN: token, ALPHA_BOARD_ACCESS: board.access }
+        };
+      } catch (err) {
+        if (!(err instanceof BoardGrantRefused)) throw err;
+        logInfo(`Board tools withheld for ${runId}: ${err.message}`);
+      }
       continue;
     }
 
@@ -550,6 +587,7 @@ export function expandEnvRefs(
 export function cleanupRunMcpConfig(runId: string): void {
   // The run is over, so is everything its tools were allowed to do.
   revokeRunGrant(runId);
+  revokeBoardGrant(runId);
   const dir = path.resolve(RUNS_DIR, runId);
   if (path.dirname(dir) !== path.resolve(RUNS_DIR)) return;
   // Audits and task context are consumed after CLI exit, including on recovery.
