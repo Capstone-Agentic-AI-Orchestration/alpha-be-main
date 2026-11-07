@@ -6368,6 +6368,11 @@ export class SQLiteService {
     this.db.prepare('DELETE FROM board_share_outbox WHERE workspace_id = ? AND issue_id = ?').run(workspaceId, issueId);
   }
 
+  /** Make every waiting card due now, keeping its attempt count. Returns how many are waiting. */
+  makeBoardSharesDue(now = new Date().toISOString()): number {
+    return this.db.prepare('UPDATE board_share_outbox SET next_attempt_at = ? WHERE next_attempt_at > ?').run(now, now).changes;
+  }
+
   /** When the next waiting card is due, or null when none is waiting. */
   nextBoardShareAt(): string | null {
     const row = this.db.prepare('SELECT MIN(next_attempt_at) AS next FROM board_share_outbox').get() as { next: string | null } | undefined;

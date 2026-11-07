@@ -23,6 +23,10 @@ vi.mock('./sqliteService.js', () => ({
       state.queue.set(`${workspaceId}:${issueId}`, { ...entry, attempts: entry.attempts + 1, nextAttemptAt, lastError });
     },
     clearBoardShare: (workspaceId: string, issueId: string) => { state.queue.delete(`${workspaceId}:${issueId}`); },
+    makeBoardSharesDue: (now: string = new Date().toISOString()) => {
+      for (const [key, entry] of state.queue) if (entry.nextAttemptAt > now) state.queue.set(key, { ...entry, nextAttemptAt: now });
+      return state.queue.size;
+    },
     nextBoardShareAt: () => null
   }
 }));
@@ -39,7 +43,7 @@ vi.mock('./supabaseService.js', () => ({
 vi.mock('./workspaceContext.js', () => ({ currentWorkspaceId: () => state.workspace }));
 vi.mock('../store/stores.js', () => ({ issueStore: () => ({ get: async (_ws: string, id: string) => state.issues.get(id) ?? null }) }));
 
-import { BOARD_SHARE_WARNING, boardShareRetryDelayMs, resetBoardShareQueue, retryBoardShares, shareCard, shareCardForReply } from './boardShareQueue.js';
+import { BOARD_SHARE_WARNING, boardShareRetryDelayMs, resetBoardShareQueue, retryBoardShares, shareCard, shareCardForReply, startBoardShareRetries } from './boardShareQueue.js';
 
 const card = (status = 'todo', updatedAt = '2026-11-07T15:04:00.000Z') =>
   ({ id: 'card-1', identifier: 'MON-106', status, updatedAt }) as Issue;
@@ -90,6 +94,19 @@ describe('getting a card onto the team board', () => {
     expect([...state.queue.values()][0]).toMatchObject({ attempts: 1, lastError: 'still offline' });
     expect(boardShareRetryDelayMs(1)).toBe(60_000);
     expect(boardShareRetryDelayMs(20)).toBe(15 * 60_000);
+  });
+
+  it('makes every waiting card due at once when the app starts, keeping its attempts', async () => {
+    state.refusals = ['offline', 'offline'];
+    await shareCard(card(), 'ws-1');
+    state.issues.set('card-1', card());
+    await retryBoardShares(DUE);
+    const waiting = [...state.queue.values()][0];
+    expect(Date.parse(waiting.nextAttemptAt)).toBeGreaterThan(Date.now());
+    startBoardShareRetries();
+    const after = [...state.queue.values()][0];
+    expect(Date.parse(after.nextAttemptAt)).toBeLessThanOrEqual(Date.now());
+    expect(after.attempts).toBe(1);
   });
 
   it('waits to send a card from another workspace until the desktop is in it', async () => {

@@ -116,9 +116,14 @@ export async function retryBoardShares(now: number = Date.now()): Promise<void> 
   }
 }
 
-/** Pick up cards still waiting from an earlier session. */
+/**
+ * Pick up cards still waiting from an earlier session, at once. A restart is
+ * often what someone does when a card will not stick, and the board may have
+ * been repaired meanwhile; the backoff resumes from here if it still refuses.
+ */
 export function startBoardShareRetries(): void {
-  if (sqliteService.nextBoardShareAt()) scheduleRetry(15_000);
+  sqliteService.makeBoardSharesDue();
+  if (sqliteService.nextBoardShareAt()) scheduleRetry(5_000);
 }
 
 /** Test seam. */
