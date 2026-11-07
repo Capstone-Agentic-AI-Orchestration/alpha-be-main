@@ -156,6 +156,15 @@ describe('buildProjectScaffold', () => {
     expect(pkg.dependencies.rxjs).toBeDefined();
   });
 
+  it('keeps nestjs past the multer release its framework pins', () => {
+    const nest = JSON.parse(read(buildProjectScaffold({ serviceName: 'orders', stack: 'nestjs' }), 'package.json'));
+    const node = JSON.parse(read(buildProjectScaffold({ serviceName: 'orders', stack: 'nodejs' }), 'package.json'));
+
+    // Without it, npm audit --audit-level=high fails the generated CI on the first push.
+    expect(nest.overrides).toEqual({ multer: '^2.5.0' });
+    expect(node.overrides).toBeUndefined();
+  });
+
   it('gives react a component and its own spec', () => {
     const files = buildProjectScaffold({ serviceName: 'dashboard', stack: 'react' });
     const p = paths(files);

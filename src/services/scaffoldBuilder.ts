@@ -130,6 +130,16 @@ const SCAFFOLD_DEV_DEPENDENCIES: Record<string, string> = {
 const COVERAGE_SCRIPT = 'jest --coverage --coverageReporters=json-summary --coverageReporters=text';
 
 /**
+ * Versions forced beneath a framework that pins a vulnerable release.
+ *
+ * The newest NestJS 11 `@nestjs/platform-express` (11.2.8) pins multer 2.4.0,
+ * which carries a high-severity advisory (GHSA-q7qp-rjg7-q26m). The generated
+ * CI runs `npm audit --audit-level=high`, so every new NestJS repository failed
+ * its first push. multer 2.5.0 fixes it within the same major.
+ */
+const NEST_OVERRIDES: Record<string, string> = { multer: '^2.5.0' };
+
+/**
  * The scaffolded backend's default port, everywhere one is quoted.
  *
  * A frontend's `.env.example` and a backend's CORS allowlist have to agree on
@@ -208,7 +218,8 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
     private: true,
     scripts,
     dependencies: {} as Record<string, string>,
-    devDependencies: { ...SCAFFOLD_DEV_DEPENDENCIES } as Record<string, string>
+    devDependencies: { ...SCAFFOLD_DEV_DEPENDENCIES } as Record<string, string>,
+    ...(stack === 'nestjs' ? { overrides: { ...NEST_OVERRIDES } } : {})
   };
 
   if (stack === 'nestjs') {
