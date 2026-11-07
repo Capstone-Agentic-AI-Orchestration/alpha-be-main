@@ -1,15 +1,13 @@
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentLearningService, AgentLessonError } from '../services/agentLearningService.js';
-import { agentStore, boardChangeStore, issueStore, projectStore, runStore, squadStore } from '../store/stores.js';
+import { agentStore, boardChangeStore, issueStore, projectStore, squadStore } from '../store/stores.js';
 import { currentIdentity, refreshIdentity } from '../services/identityService.js';
 import { ALPHA_ORCHESTRATION_ENABLED, ALPHA_ORG, IS_CLOUD } from '../config/env.js';
 import { githubService } from '../services/githubService.js';
 import { mintSupabaseToken } from '../services/supabaseTokenService.js';
 import { exchangeGitHubToken } from '../services/databaseTokenExchange.js';
 import { syncBoardFromGitHub } from '../services/githubBoardSync.js';
-import { pushIssue, needsPush, publishNewIssue, publishedFields } from '../services/githubBoardWrite.js';
-import { issueIdFor } from '../services/githubRepoDiscovery.js';
 import { supabaseService } from '../services/supabaseService.js';
 import { pullSharedBoard, applySharedBoardChanges, asSyncReport } from '../services/sharedBoard.js';
 import { sqliteService } from '../services/sqliteService.js';
@@ -52,7 +50,7 @@ import {
 } from '../services/agentFileService.js';
 import { resolveAgent } from '../services/personaService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
-import { Agent, Issue, IssueStatus } from '../models/index.js';
+import { Agent, Issue } from '../models/index.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { SKILL_TOOLS } from '../services/toolPolicy.js';
 import {
@@ -67,6 +65,17 @@ import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
 import { BoardChangeSync, BoardCursorError, boardStateRowCount, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
 import { recordBoardSyncMetric } from '../services/boardSyncMetrics.js';
+import {
+  BoardRuleError,
+  activeRunForIssue,
+  cardRemovalBlocker,
+  createCard,
+  hasUnfinishedManagedBuild,
+  prepareCardCreate,
+  prepareCardUpdate,
+  removeCard,
+  saveCardUpdate
+} from '../services/boardService.js';
 
 export const dataRouter = Router();
 
@@ -1099,161 +1108,11 @@ dataRouter.post('/agents/builder/message', desktopOnly, async (req: Request, res
 
 // --- Issues ---
 
-const ISSUE_STATUSES: readonly IssueStatus[] = [
-  'backlog',
-  'todo',
-  'in_progress',
-  'agent_running',
-  'review',
-  'done'
-];
-
-const ACTIVE_RUN_STATUSES = new Set([
-  'queued',
-  'running',
-  'awaiting_approval',
-  'validating'
-]);
-
-function isIssueStatus(value: unknown): value is IssueStatus {
-  return typeof value === 'string' && ISSUE_STATUSES.includes(value as IssueStatus);
-}
-
-function hasUnfinishedManagedBuild(workspaceId: string, issue: Issue): boolean {
-  if (IS_CLOUD) return false;
-  const latest = runWithWorkspace(workspaceId, () => sqliteService.listLatestIssueBuilds([issue.projectId]).find(item => item.issueId === issue.id));
-  return Boolean(latest && !['completed', 'failed', 'cancelled'].includes(latest.status));
-}
-
-async function activeRunForIssue(workspaceId: string, issueId: string) {
-  return (await runStore().listSummaries(workspaceId)).find(run =>
-    run.issueId === issueId && ACTIVE_RUN_STATUSES.has(run.status)
-  );
-}
-
-/**
- * Status is writable through the generic issue endpoint only for ordinary
- * planning moves. Starting an agent and completing reviewed work are commands
- * with their own endpoints; otherwise a caller could skip the preparation or
- * review gate by sending { status: 'agent_running' } or { status: 'done' } to
- * PUT /issues/:id.
- */
-async function statusTransitionError(workspaceId: string, issue: Issue, requestedStatus: unknown): Promise<string | null> {
-  if (requestedStatus === undefined || requestedStatus === issue.status) return null;
-
-  if (!isIssueStatus(requestedStatus)) {
-    return 'status must be one of: ' + ISSUE_STATUSES.join(', ') + '.';
-  }
-  if (hasUnfinishedManagedBuild(workspaceId, issue)) return 'This task has an unfinished build. Open its Build tab before changing the task status.';
-
-  const activeRun = await activeRunForIssue(workspaceId, issue.id);
-
-  if (requestedStatus === 'agent_running') {
-    return 'Start an agent run through POST /api/runs/start; direct status changes to Agent Running are not allowed.';
-  }
-
-  if (requestedStatus === 'done') {
-    if (activeRun?.status === 'awaiting_approval') {
-      return 'Run ' + activeRun.id + ' is awaiting approval; approve it through POST /api/runs/' + activeRun.id + '/approve.';
-    }
-    if (activeRun) {
-      return 'Run ' + activeRun.id + ' is still ' + activeRun.status + '; wait for it to reach review before completing the task.';
-    }
-    if (issue.status === 'agent_running') {
-      return 'A task with an agent running must reach review before it can be completed.';
-    }
-    return 'Complete the task only after a person has reviewed it; direct status changes to Done are not allowed.';
-  }
-
-  if (activeRun) {
-    return 'This task has an active agent run (' + activeRun.id + ') still ' + activeRun.status + '; use the run controls before changing this task.';
-  }
-
-  return null;
-}
-
-function isCalendarDate(value: unknown): value is string {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T00:00:00.000Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
-}
-
-function normalizedScheduleDate(value: unknown): string | undefined {
-  return value === '' || value === null || value === undefined ? undefined : value as string;
-}
-
-function issueDueDateError(value: unknown): string | null {
-  return value === '' || value === null || value === undefined || isCalendarDate(value)
-    ? null
-    : 'Due date must be a valid calendar date.';
-}
-
-/** Reject malformed schedules and dependency links that leave a project or form a cycle. */
-async function issueScheduleError(
-  workspaceId: string,
-  projectId: string,
-  issueId: string | undefined,
-  plannedStartDate: unknown,
-  plannedEndDate: unknown,
-  dependsOnIssueIds: unknown
-): Promise<string | null> {
-  const start = normalizedScheduleDate(plannedStartDate);
-  const end = normalizedScheduleDate(plannedEndDate);
-  if (start !== undefined && !isCalendarDate(start)) return 'Start date must be a valid calendar date.';
-  if (end !== undefined && !isCalendarDate(end)) return 'End date must be a valid calendar date.';
-  if (start && end && start > end) return 'End date must be on or after the start date.';
-
-  const dependencies = dependsOnIssueIds ?? [];
-  if (!Array.isArray(dependencies) || dependencies.some(id => typeof id !== 'string')) {
-    return 'Dependencies must be a list of task IDs.';
-  }
-  if (new Set(dependencies).size !== dependencies.length) return 'A dependency can only be selected once.';
-  if (dependencies.length === 0) return null;
-
-  const issues = await issueStore().list(workspaceId);
-  const byId = new Map(issues.map(issue => [issue.id, issue]));
-  for (const dependencyId of dependencies as string[]) {
-    if (dependencyId === issueId) return 'A task cannot depend on itself.';
-    const dependency = byId.get(dependencyId);
-    if (!dependency || dependency.projectId !== projectId) {
-      return 'Dependencies must be tasks in the same project.';
-    }
-  }
-
-  if (issueId) {
-    const reachesIssue = (candidateId: string, visited = new Set<string>()): boolean => {
-      if (candidateId === issueId) return true;
-      if (visited.has(candidateId)) return false;
-      visited.add(candidateId);
-      const candidate = byId.get(candidateId);
-      return (candidate?.dependsOnIssueIds ?? []).some(id => reachesIssue(id, visited));
-    };
-    if ((dependencies as string[]).some(id => reachesIssue(id))) {
-      return 'This dependency would create a circular task dependency.';
-    }
-  }
-
-  return null;
-}
-
-/** Keep a suggested work package under one top-level task in the same project. */
-async function issueParentError(
-  workspaceId: string,
-  projectId: string,
-  issueId: string | undefined,
-  parentIssueId: unknown
-): Promise<string | null> {
-  if (parentIssueId === undefined || parentIssueId === null || parentIssueId === '') return null;
-  if (typeof parentIssueId !== 'string') return 'Parent task must be a task ID.';
-  if (parentIssueId === issueId) return 'A task cannot be its own parent.';
-
-  const issues = await issueStore().list(workspaceId);
-  const parent = issues.find(issue => issue.id === parentIssueId);
-  if (!parent || parent.projectId !== projectId) return 'Parent and child tasks must be in the same project.';
-  if (parent.parentIssueId || (issueId && issues.some(issue => issue.parentIssueId === issueId))) {
-    return 'Work packages can be grouped under a top-level task only.';
-  }
-  return null;
+/** Send a card-rule refusal as the same status and message the board always got. */
+function sendBoardRuleError(res: Response, err: unknown): boolean {
+  if (!(err instanceof BoardRuleError)) return false;
+  res.status(err.status).json({ error: err.message });
+  return true;
 }
 
 dataRouter.get('/issues', route(async (req: Request, res: Response) => {
@@ -1269,201 +1128,52 @@ dataRouter.get('/issues', route(async (req: Request, res: Response) => {
   ));
 }));
 
-/**
- * Create an issue. The daemon owns the identifier and the author.
- *
- * The browser used to send both: an identifier built as `issues.length + 101`
- * — a count of every issue in every project — and a system comment quoting it.
- * `createIssue` honours a supplied identifier, so `nextIssueIdentifier`, which
- * numbers per project correctly, never ran for anything made in the UI. The
- * first issue of a new project came out as TES-107 because six issues happened
- * to exist elsewhere, and two creates at the same count would collide against
- * a UNIQUE column.
- *
- * Dropping both here rather than trusting the client keeps one authority for
- * each, and the numbering stays right no matter who is calling.
- */
+
 dataRouter.post('/issues', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
-  const { identifier: _ignored, comments: _alsoIgnored, ...rest } = req.body ?? {};
-
-  if (rest.assignedSquadId) {
+  const body = req.body ?? {};
+  if (body.assignedSquadId) {
     return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
   }
-  delete rest.assignedSquadId;
-
-  const identity = await currentIdentity();
-  if (!rest.projectId || typeof rest.projectId !== 'string') {
+  if (!body.projectId || typeof body.projectId !== 'string') {
     return res.status(400).json({ error: 'A project is required for a task in this workspace.' });
   }
-  if (!requireProjectWorkspace(req, res, rest.projectId)) return;
-  const scheduleError = await issueScheduleError(
-    req.workspace!.workspaceId,
-    rest.projectId,
-    typeof rest.id === 'string' ? rest.id : undefined,
-    rest.plannedStartDate,
-    rest.plannedEndDate,
-    rest.dependsOnIssueIds
-  );
-  if (scheduleError) return res.status(400).json({ error: scheduleError });
-  rest.plannedStartDate = normalizedScheduleDate(rest.plannedStartDate);
-  rest.plannedEndDate = normalizedScheduleDate(rest.plannedEndDate);
-  const dueDateError = issueDueDateError(rest.dueDate);
-  if (dueDateError) return res.status(400).json({ error: dueDateError });
-  rest.dueDate = normalizedScheduleDate(rest.dueDate);
-  const parentError = await issueParentError(
-    req.workspace!.workspaceId,
-    rest.projectId,
-    typeof rest.id === 'string' ? rest.id : undefined,
-    rest.parentIssueId
-  );
-  if (parentError) return res.status(400).json({ error: parentError });
-  if (rest.parentIssueId === '') rest.parentIssueId = undefined;
-  rest.dependsOnIssueIds ??= [];
-  if (rest.status === 'agent_running') {
-    return res.status(409).json({
-      error: 'Tasks enter Building only when a developer or admin starts an Orchestrator build.'
-    });
-  }
+  if (!requireProjectWorkspace(req, res, body.projectId)) return;
   const workspaceId = req.workspace!.workspaceId;
-  const draft = { status: 'todo', priority: 'medium', labels: [], ...rest, createdBy: rest.createdBy || identity.login } as Issue;
-
-  /**
-   * Published first, so the card is born under GitHub's id.
-   *
-   * It used to be created and then pushed, keeping the id it was created with,
-   * while the cloud's sync and every teammate's desktop met the same issue on
-   * GitHub and named it after GitHub's id instead: one issue, two cards, and a
-   * run on either unknown to the other. Awaited because the response carries
-   * the issue number, and a card that does not know which GitHub issue it is
-   * cannot be updated later. A project with no repository publishes nothing.
-   */
-  const { published, error: publishError } = await publishNewIssue(draft, workspaceId);
-  const issue = await issueStore().create(workspaceId, {
-    ...draft,
-    ...(published ? { id: issueIdFor(published.githubIssueId), ...publishedFields(published) } : {})
-  });
-  workspaceRegistry.bind('issues', issue.id, workspaceId);
-
-  /**
-   * The opening comment, written where the real identifier is known.
-   *
-   * Composed by the browser before, against the identifier it had guessed — so
-   * it named an issue that did not exist under that name.
-   */
-  await issueStore().addComment(req.workspace!.workspaceId, {
-    id: `comm-${issue.id}-created`,
-    issueId: issue.id,
-    authorType: 'system',
-    authorName: 'Alpha',
-    content: `${issue.identifier} created by ${identity.login}.`,
-    createdAt: issue.createdAt
-  });
-
-  // Re-read so the response carries the comment rather than making the client
-  // guess at one.
-  const saved = await issueStore().get(workspaceId, issue.id) ?? issue;
-
-  // On a team's desktop, the card goes on the team's board -- the issue first,
-  // since the database refuses a comment on an issue it does not have.
-  await supabaseService.shareIssue(saved);
-  for (const comment of saved.comments ?? []) void supabaseService.shareComment(comment);
-
-  // 201 with a warning rather than an error: the issue exists locally and
-  // refusing it now would lose work the person already did.
-  res.status(201).json(publishError ? { ...saved, syncWarning: publishError } : saved);
+  try {
+    const rest = await prepareCardCreate(workspaceId, body);
+    const identity = await currentIdentity();
+    const { saved, syncWarning } = await createCard(workspaceId, rest, identity.login);
+    // 201 with a warning rather than an error: the issue exists locally and
+    // refusing it now would lose work the person already did.
+    res.status(201).json(syncWarning ? { ...saved, syncWarning } : saved);
+  } catch (err) {
+    if (!sendBoardRuleError(res, err)) throw err;
+  }
 }));
 
 dataRouter.put('/issues/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
   if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
-  const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
+  const workspaceId = req.workspace!.workspaceId;
+  const before = await issueStore().get(workspaceId, req.params.id);
   if (!before) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, before.projectId)) return;
-
-  const updates = req.body && typeof req.body === 'object' ? req.body : {};
-  if (Object.prototype.hasOwnProperty.call(updates, 'dueDate')) {
-    const dueDateError = issueDueDateError(updates.dueDate);
-    if (dueDateError) return res.status(400).json({ error: dueDateError });
-    updates.dueDate = normalizedScheduleDate(updates.dueDate);
-  }
-  const nextProjectId = typeof updates.projectId === 'string' ? updates.projectId : before.projectId;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const nextProjectId = typeof body.projectId === 'string' ? body.projectId : before.projectId;
   if (nextProjectId !== before.projectId && !requireProjectWorkspace(req, res, nextProjectId)) return;
-  if (nextProjectId !== before.projectId && (await issueStore().list(req.workspace!.workspaceId)).some(issue => issue.parentIssueId === before.id)) {
-    return res.status(400).json({ error: 'Move child tasks before moving this task to another project.' });
+  try {
+    const updates = await prepareCardUpdate(workspaceId, before, body);
+    const { saved, syncWarning } = await saveCardUpdate(workspaceId, before, updates);
+    /*
+     * A failed push is reported, never swallowed. The local write already
+     * happened, so this is not a 4xx -- but the browser has to know, or the
+     * board shows a state GitHub never accepted and the next sync reverts it.
+     */
+    res.json(syncWarning ? { ...saved, syncWarning } : saved);
+  } catch (err) {
+    if (!sendBoardRuleError(res, err)) throw err;
   }
-  const nextParentIssueId = Object.prototype.hasOwnProperty.call(updates, 'parentIssueId')
-    ? updates.parentIssueId
-    : before.parentIssueId;
-  const parentError = await issueParentError(req.workspace!.workspaceId, nextProjectId, before.id, nextParentIssueId);
-  if (parentError) return res.status(400).json({ error: parentError });
-  if (Object.prototype.hasOwnProperty.call(updates, 'parentIssueId') && (updates.parentIssueId === '' || updates.parentIssueId === null)) updates.parentIssueId = undefined;
-  const scheduleTouched = nextProjectId !== before.projectId || [
-    'plannedStartDate', 'plannedEndDate', 'dependsOnIssueIds'
-  ].some(field => Object.prototype.hasOwnProperty.call(updates, field));
-  if (scheduleTouched) {
-    const plannedStartDate = Object.prototype.hasOwnProperty.call(updates, 'plannedStartDate')
-      ? updates.plannedStartDate
-      : before.plannedStartDate;
-    const plannedEndDate = Object.prototype.hasOwnProperty.call(updates, 'plannedEndDate')
-      ? updates.plannedEndDate
-      : before.plannedEndDate;
-    const dependsOnIssueIds = Object.prototype.hasOwnProperty.call(updates, 'dependsOnIssueIds')
-      ? updates.dependsOnIssueIds
-      : before.dependsOnIssueIds;
-    const scheduleError = await issueScheduleError(
-      req.workspace!.workspaceId,
-      nextProjectId,
-      before.id,
-      plannedStartDate,
-      plannedEndDate,
-      dependsOnIssueIds
-    );
-    if (scheduleError) return res.status(400).json({ error: scheduleError });
-    if (Object.prototype.hasOwnProperty.call(updates, 'plannedStartDate')) updates.plannedStartDate = normalizedScheduleDate(plannedStartDate);
-    if (Object.prototype.hasOwnProperty.call(updates, 'plannedEndDate')) updates.plannedEndDate = normalizedScheduleDate(plannedEndDate);
-    if (Object.prototype.hasOwnProperty.call(updates, 'dependsOnIssueIds')) updates.dependsOnIssueIds = dependsOnIssueIds ?? [];
-  }
-  req.body = updates;
-
-  // Empty strings are explicit clears from the owner selector; normalize before either store writes foreign keys.
-  if (req.body?.assignedSquadId) return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
-  if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'assignedSquadId')) req.body.assignedSquadId = undefined;
-  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'assignedAgentId') && !req.body.assignedAgentId) req.body.assignedAgentId = undefined;
-  if (req.body?.assignedAgentId && !(await agentStore().get(req.workspace!.workspaceId, req.body.assignedAgentId))) return res.status(400).json({ error: 'The selected agent is unavailable in this workspace.' });
-  const transitionError = await statusTransitionError(req.workspace!.workspaceId, before, req.body?.status);
-  if (transitionError) {
-    const status = isIssueStatus(req.body?.status) ? 409 : 400;
-    return res.status(status).json({ error: transitionError });
-  }
-
-  const updated = await issueStore().update(req.workspace!.workspaceId, req.params.id, req.body);
-  if (!updated) return res.status(404).json({ error: 'Task not found' });
-
-  /**
-   * Only when a field GitHub owns actually moved.
-   *
-   * Assigning an agent or attaching a branch is Alpha's own business, and
-   * calling GitHub for it would spend a request to change nothing.
-   */
-  if (!needsPush(before, updated)) {
-    void supabaseService.shareIssue(updated);
-    return res.json(updated);
-  }
-
-  const push = await pushIssue(updated, req.workspace!.workspaceId);
-  if (push.patch) await issueStore().update(req.workspace!.workspaceId, updated.id, push.patch);
-
-  const saved = await issueStore().get(req.workspace!.workspaceId, updated.id) ?? updated;
-  void supabaseService.shareIssue(saved);
-  /**
-   * A failed push is reported, never swallowed.
-   *
-   * The local write already happened, so this is not a 4xx — but the browser
-   * has to know, or the board shows a state GitHub never accepted and the next
-   * sync silently reverts it.
-   */
-  res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
 }));
 
 /**
@@ -1505,20 +1215,12 @@ dataRouter.post('/issues/:id/complete', route(async (req: Request, res: Response
     });
   }
 
-  const updated = await issueStore().update(req.workspace!.workspaceId, before.id, { status: 'done' });
-  if (!updated) return res.status(404).json({ error: 'Task not found' });
-
-  if (!needsPush(before, updated)) {
-    void supabaseService.shareIssue(updated);
-    return res.json(updated);
+  try {
+    const { saved, syncWarning } = await saveCardUpdate(req.workspace!.workspaceId, before, { status: 'done' });
+    res.json(syncWarning ? { ...saved, syncWarning } : saved);
+  } catch (err) {
+    if (!sendBoardRuleError(res, err)) throw err;
   }
-
-  const push = await pushIssue(updated, req.workspace!.workspaceId);
-  if (push.patch) await issueStore().update(req.workspace!.workspaceId, updated.id, push.patch);
-
-  const saved = await issueStore().get(req.workspace!.workspaceId, updated.id) ?? updated;
-  void supabaseService.shareIssue(saved);
-  res.json(push.error ? { ...saved, syncWarning: push.error } : saved);
 }));
 
 dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
@@ -1527,18 +1229,9 @@ dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   const issue = await issueStore().get(req.workspace!.workspaceId, req.params.id);
   if (!issue) return res.status(404).json({ error: 'Task not found' });
   if (!requireProjectWorkspace(req, res, issue.projectId)) return;
-  const activeRun = await activeRunForIssue(req.workspace!.workspaceId, issue.id);
-  if (activeRun) {
-    return res.status(409).json({
-      error: 'This task has an active agent run; wait for it to stop before removing the task.'
-    });
-  }
-  const deleted = await issueStore().remove(req.workspace!.workspaceId, req.params.id);
-  if (deleted) {
-    await workspaceRegistry.unbind('issues', req.params.id);
-    void supabaseService.unshareIssue(req.params.id);
-  }
-  res.json({ success: deleted });
+  const blocker = await cardRemovalBlocker(req.workspace!.workspaceId, issue);
+  if (blocker) return res.status(409).json({ error: blocker });
+  res.json({ success: await removeCard(req.workspace!.workspaceId, req.params.id) });
 }));
 
 dataRouter.post('/issues/:id/comments', route(async (req: Request, res: Response) => {
