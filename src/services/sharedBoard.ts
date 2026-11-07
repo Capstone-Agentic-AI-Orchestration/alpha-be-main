@@ -486,7 +486,10 @@ function sharedIssueFields(cloud: Issue, running: boolean): Partial<Issue> {
     subtasks: cloud.subtasks,
     githubRepo: cloud.githubRepo,
     githubNumber: cloud.githubNumber,
-    githubUrl: cloud.githubUrl
+    githubUrl: cloud.githubUrl,
+    // A card a teammate archived leaves this board too, and comes back when restored.
+    archivedAt: cloud.archivedAt,
+    archivedBy: cloud.archivedBy
   };
   if (!running) {
     fields.status = cloud.status;

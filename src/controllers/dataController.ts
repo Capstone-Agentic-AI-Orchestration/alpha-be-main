@@ -68,12 +68,15 @@ import { recordBoardSyncMetric } from '../services/boardSyncMetrics.js';
 import {
   BoardRuleError,
   activeRunForIssue,
+  archiveCard,
   cardRemovalBlocker,
   createCard,
+  filterArchived,
   hasUnfinishedManagedBuild,
   prepareCardCreate,
   prepareCardUpdate,
   removeCard,
+  restoreCard,
   saveCardUpdate
 } from '../services/boardService.js';
 
@@ -1119,13 +1122,15 @@ dataRouter.get('/issues', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'issue.read')) return;
   const projects = await projectStore().list(req.workspace!.workspaceId);
   const allowedProjectIds = workspaceRegistry.projectIdsFor(req.workspace!, projects.map(project => project.id));
-  res.json(workspaceRegistry.scopeProjectChildrenFromIds(
+  // Archived cards are left out unless asked for (?archived=only|include), so
+  // a board load does not carry them.
+  res.json(filterArchived(workspaceRegistry.scopeProjectChildrenFromIds(
     'issues',
     await issueStore().list(req.workspace!.workspaceId),
     req.workspace!,
     allowedProjectIds,
     issue => issue.projectId
-  ));
+  ), req.query.archived));
 }));
 
 
@@ -1232,6 +1237,35 @@ dataRouter.delete('/issues/:id', route(async (req: Request, res: Response) => {
   const blocker = await cardRemovalBlocker(req.workspace!.workspaceId, issue);
   if (blocker) return res.status(409).json({ error: blocker });
   res.json({ success: await removeCard(req.workspace!.workspaceId, req.params.id) });
+}));
+
+/** Take a card off the board, keeping its history. Any GitHub issue is left as it is. */
+dataRouter.post('/issues/:id/archive', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
+  if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
+  const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!before) return res.status(404).json({ error: 'Task not found' });
+  if (!requireProjectWorkspace(req, res, before.projectId)) return;
+  try {
+    const { saved, syncWarning } = await archiveCard(req.workspace!.workspaceId, before, (await currentIdentity()).login);
+    res.json(syncWarning ? { ...saved, syncWarning } : saved);
+  } catch (err) {
+    if (!sendBoardRuleError(res, err)) throw err;
+  }
+}));
+
+dataRouter.post('/issues/:id/restore', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'issue.manage')) return;
+  if (!requireEntityWorkspace(req, res, 'issues', req.params.id)) return;
+  const before = await issueStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!before) return res.status(404).json({ error: 'Task not found' });
+  if (!requireProjectWorkspace(req, res, before.projectId)) return;
+  try {
+    const { saved, syncWarning } = await restoreCard(req.workspace!.workspaceId, before, (await currentIdentity()).login);
+    res.json(syncWarning ? { ...saved, syncWarning } : saved);
+  } catch (err) {
+    if (!sendBoardRuleError(res, err)) throw err;
+  }
 }));
 
 dataRouter.post('/issues/:id/comments', route(async (req: Request, res: Response) => {

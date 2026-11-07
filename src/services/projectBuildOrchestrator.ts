@@ -321,6 +321,7 @@ async function startOrchestratedProjectBuild(input: {
   if (linkedIssueId) {
     if (!issue || issue.projectId !== project.id) return blocked('That issue is not part of this project. Open it from the project board and try again.', project, repository);
     if (issue.status === 'done') return blocked(`${issue.identifier} is already done. Reopen it before starting another build.`, project, repository);
+    if (issue.archivedAt) return blocked(`${issue.identifier} is archived. Restore it to the board before starting a build.`, project, repository);
   }
   // An approved feature spec fixes the requirements; a draft one does not guide the build.
   const specRecord = linkedIssueId && issue ? runWithWorkspace(workspaceId, () => sqliteService.getFeatureSpec(issue!.id)) : null;

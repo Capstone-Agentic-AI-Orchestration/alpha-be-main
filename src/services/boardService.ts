@@ -337,13 +337,13 @@ export async function saveCardUpdate(
   return push.error ? { saved, syncWarning: push.error } : { saved };
 }
 
-/** Why this card cannot be removed right now, or null. */
-export async function cardRemovalBlocker(workspaceId: string, issue: Issue): Promise<string | null> {
+/** Why this card cannot be removed or archived right now, or null. */
+export async function cardRemovalBlocker(workspaceId: string, issue: Issue, action: 'removing' | 'archiving' = 'removing'): Promise<string | null> {
   if (await activeRunForIssue(workspaceId, issue.id)) {
-    return 'This task has an active agent run; wait for it to stop before removing the task.';
+    return `This task has an active agent run; wait for it to stop before ${action} the task.`;
   }
   if (hasUnfinishedManagedBuild(workspaceId, issue)) {
-    return 'This task has an unfinished build. Finish, cancel or recover it in the Build tab before removing the task.';
+    return `This task has an unfinished build. Finish, cancel or recover it in the Build tab before ${action} the task.`;
   }
   return null;
 }
@@ -356,5 +356,46 @@ export async function removeCard(workspaceId: string, issueId: string): Promise<
     void supabaseService.unshareIssue(issueId);
   }
   return deleted;
+}
+
+async function addSystemComment(workspaceId: string, issueId: string, content: string, kind: string): Promise<void> {
+  const comment = await issueStore().addComment(workspaceId, {
+    id: `comm-${issueId}-${kind}-${Date.now()}`,
+    issueId,
+    authorType: 'system',
+    authorName: 'Alpha',
+    content,
+    createdAt: new Date().toISOString()
+  });
+  void supabaseService.shareComment(comment);
+}
+
+/**
+ * Take a card off the board, keeping its comments and history. Leaves any
+ * GitHub issue untouched. `archivedBy` names who did it, or the agent and the
+ * person it acted for.
+ */
+export async function archiveCard(workspaceId: string, before: Issue, archivedBy: string): Promise<{ saved: Issue; syncWarning?: string }> {
+  if (before.archivedAt) return { saved: before };
+  const blocker = await cardRemovalBlocker(workspaceId, before, 'archiving');
+  if (blocker) throw new BoardRuleError(blocker, 409);
+  const result = await saveCardUpdate(workspaceId, before, { archivedAt: new Date().toISOString(), archivedBy });
+  await addSystemComment(workspaceId, before.id, `Archived by ${archivedBy}.`, 'archived');
+  return result;
+}
+
+/** Put an archived card back on the board where it was. */
+export async function restoreCard(workspaceId: string, before: Issue, restoredBy: string): Promise<{ saved: Issue; syncWarning?: string }> {
+  if (!before.archivedAt) return { saved: before };
+  const result = await saveCardUpdate(workspaceId, before, { archivedAt: undefined, archivedBy: undefined });
+  await addSystemComment(workspaceId, before.id, `Restored by ${restoredBy}.`, 'restored');
+  return result;
+}
+
+/** Which cards a board read returns: on the board (default), archived only, or both. */
+export function filterArchived<T extends Pick<Issue, 'archivedAt'>>(issues: T[], which: unknown): T[] {
+  if (which === 'include') return issues;
+  if (which === 'only') return issues.filter(issue => issue.archivedAt);
+  return issues.filter(issue => !issue.archivedAt);
 }
 

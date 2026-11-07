@@ -100,8 +100,9 @@ export class PostgresIssueStore implements IssueStore {
          (id, workspace_id, identifier, title, description, status, priority, project_id,
           assigned_agent_id, assigned_squad_id, assigned_human, created_by, labels, subtasks,
           planned_start_date, planned_end_date, due_date, parent_issue_id, depends_on_issue_ids,
-          branch_name, pr_url, github_repo, github_number, github_url, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+          branch_name, pr_url, github_repo, github_number, github_url, created_at, updated_at,
+          archived_at, archived_by)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
       [
         issue.id,
         workspaceId,
@@ -128,7 +129,9 @@ export class PostgresIssueStore implements IssueStore {
         issue.githubNumber ?? null,
         issue.githubUrl ?? null,
         issue.createdAt,
-        issue.updatedAt
+        issue.updatedAt,
+        issue.archivedAt || null,
+        issue.archivedBy || null
       ]
     );
 
@@ -163,7 +166,7 @@ export class PostgresIssueStore implements IssueStore {
          labels = $11, subtasks = $12, branch_name = $13, pr_url = $14,
          github_repo = $15, github_number = $16, github_url = $17,
          planned_start_date = $18, planned_end_date = $19, due_date = $20, parent_issue_id = $21, depends_on_issue_ids = $22,
-         updated_at = $23
+         updated_at = $23, archived_at = $24, archived_by = $25
        where workspace_id = $1 and id = $2`,
       [
         workspaceId,
@@ -188,7 +191,9 @@ export class PostgresIssueStore implements IssueStore {
         merged.dueDate || null,
         merged.parentIssueId || null,
         JSON.stringify(merged.dependsOnIssueIds ?? []),
-        merged.updatedAt
+        merged.updatedAt,
+        merged.archivedAt || null,
+        merged.archivedBy || null
       ]
     );
     return merged;
@@ -298,6 +303,8 @@ export interface IssueRow {
   github_url: string | null;
   created_at: Timestamp;
   updated_at: Timestamp;
+  archived_at?: Timestamp | null;
+  archived_by?: string | null;
 }
 
 export interface CommentRow {
@@ -350,7 +357,9 @@ export function issueRow(workspaceId: string, issue: Issue): Record<string, unkn
     github_number: issue.githubNumber ?? null,
     github_url: issue.githubUrl ?? null,
     created_at: issue.createdAt,
-    updated_at: issue.updatedAt
+    updated_at: issue.updatedAt,
+    archived_at: issue.archivedAt || null,
+    archived_by: issue.archivedBy || null
   };
 }
 
@@ -392,6 +401,8 @@ export function toIssue(row: IssueRow, comments: IssueComment[]): Issue {
       ? (typeof row.due_date === 'string' ? row.due_date.slice(0, 10) : row.due_date.toISOString().slice(0, 10))
       : undefined,
     parentIssueId: row.parent_issue_id ?? undefined,
+    archivedAt: row.archived_at ? iso(row.archived_at) : undefined,
+    archivedBy: row.archived_by ?? undefined,
     dependsOnIssueIds: row.depends_on_issue_ids ?? [],
     createdBy: row.created_by ?? undefined,
     labels: row.labels ?? [],

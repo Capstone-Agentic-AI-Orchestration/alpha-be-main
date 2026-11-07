@@ -164,6 +164,13 @@ export interface Issue {
   plannedEndDate?: string;
   /** Expected finish date for this task, separate from its planned schedule. */
   dueDate?: string;
+  /**
+   * When the card was archived and by whom. An archived card is off the board
+   * but keeps its comments and history, and can be restored. Agents archive;
+   * only a person deletes permanently.
+   */
+  archivedAt?: string;
+  archivedBy?: string;
   /** Parent task for a planned work package. */
   parentIssueId?: string;
   /** Issue ids that must be completed before this task can begin. */

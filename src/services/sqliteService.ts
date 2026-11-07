@@ -682,6 +682,8 @@ export class SQLiteService {
         planned_start_date TEXT,
         planned_end_date TEXT,
         due_date TEXT,
+        archived_at TEXT,
+        archived_by TEXT,
         parent_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
         depends_on_issue_ids TEXT NOT NULL DEFAULT '[]',
         labels TEXT DEFAULT '[]',
@@ -1557,6 +1559,8 @@ export class SQLiteService {
       ['issues', 'planned_start_date TEXT'],
       ['issues', 'planned_end_date TEXT'],
       ['issues', 'due_date TEXT'],
+      ['issues', 'archived_at TEXT'],
+      ['issues', 'archived_by TEXT'],
       ['issues', 'parent_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL'],
       ['issues', "depends_on_issue_ids TEXT NOT NULL DEFAULT '[]'"],
       // Identifies the local daemon that owns an in-progress read-only plan.
@@ -2977,6 +2981,8 @@ export class SQLiteService {
       plannedStartDate: r.planned_start_date ?? undefined,
       plannedEndDate: r.planned_end_date ?? undefined,
       dueDate: r.due_date ?? undefined,
+      archivedAt: r.archived_at ?? undefined,
+      archivedBy: r.archived_by ?? undefined,
       parentIssueId: r.parent_issue_id ?? undefined,
       dependsOnIssueIds: JSON.parse(r.depends_on_issue_ids || '[]'),
       labels: JSON.parse(r.labels || '[]'),
@@ -3051,6 +3057,8 @@ export class SQLiteService {
       plannedStartDate: issue.plannedStartDate || undefined,
       plannedEndDate: issue.plannedEndDate || undefined,
       dueDate: issue.dueDate || undefined,
+      archivedAt: issue.archivedAt || undefined,
+      archivedBy: issue.archivedBy || undefined,
       parentIssueId: issue.parentIssueId || undefined,
       dependsOnIssueIds: issue.dependsOnIssueIds || [],
       labels: issue.labels || [],
@@ -3061,8 +3069,8 @@ export class SQLiteService {
     } as Issue;
 
     const stmt = this.db.prepare(`
-      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, planned_start_date, planned_end_date, due_date, parent_issue_id, depends_on_issue_ids, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
-      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @plannedStartDate, @plannedEndDate, @dueDate, @parentIssueId, @dependsOnIssueIds, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
+      INSERT INTO issues (id, workspace_id, identifier, title, description, status, priority, project_id, assigned_agent_id, assigned_squad_id, assigned_human, planned_start_date, planned_end_date, due_date, archived_at, archived_by, parent_issue_id, depends_on_issue_ids, labels, subtasks, branch_name, pr_url, created_by, github_repo, github_number, github_url, created_at, updated_at)
+      VALUES (@id, @workspaceId, @identifier, @title, @description, @status, @priority, @projectId, @assignedAgentId, @assignedSquadId, @assignedHuman, @plannedStartDate, @plannedEndDate, @dueDate, @archivedAt, @archivedBy, @parentIssueId, @dependsOnIssueIds, @labels, @subtasks, @branchName, @prUrl, @createdBy, @githubRepo, @githubNumber, @githubUrl, @createdAt, @updatedAt)
     `);
     stmt.run({
       ...complete,
@@ -3075,6 +3083,8 @@ export class SQLiteService {
       plannedStartDate: complete.plannedStartDate || null,
       plannedEndDate: complete.plannedEndDate || null,
       dueDate: complete.dueDate || null,
+      archivedAt: complete.archivedAt || null,
+      archivedBy: complete.archivedBy || null,
       parentIssueId: complete.parentIssueId || null,
       dependsOnIssueIds: JSON.stringify(complete.dependsOnIssueIds || []),
       branchName: complete.branchName || null,
@@ -3130,6 +3140,8 @@ export class SQLiteService {
         assigned_squad_id = @assignedSquadId, assigned_human = @assignedHuman,
         planned_start_date = @plannedStartDate, planned_end_date = @plannedEndDate,
         due_date = @dueDate,
+        archived_at = @archivedAt,
+        archived_by = @archivedBy,
         parent_issue_id = @parentIssueId,
         depends_on_issue_ids = @dependsOnIssueIds,
         labels = @labels, subtasks = @subtasks, branch_name = @branchName, pr_url = @prUrl,
@@ -3147,6 +3159,8 @@ export class SQLiteService {
       plannedStartDate: merged.plannedStartDate || null,
       plannedEndDate: merged.plannedEndDate || null,
       dueDate: merged.dueDate || null,
+      archivedAt: merged.archivedAt || null,
+      archivedBy: merged.archivedBy || null,
       parentIssueId: merged.parentIssueId || null,
       dependsOnIssueIds: JSON.stringify(merged.dependsOnIssueIds || []),
       labels: JSON.stringify(merged.labels || []),
