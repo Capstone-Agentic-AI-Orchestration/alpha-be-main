@@ -5,6 +5,7 @@ const state = vi.hoisted(() => ({
   queue: new Map<string, { workspaceId: string; issueId: string; attempts: number; nextAttemptAt: string; lastError: string }>(),
   issues: new Map<string, any>(),
   refusals: [] as Array<string | null>,
+  sharesBoard: true,
   boardCopy: null as string | null,
   shared: [] as string[],
   workspace: 'ws-1'
@@ -32,6 +33,7 @@ vi.mock('./sqliteService.js', () => ({
 }));
 vi.mock('./supabaseService.js', () => ({
   supabaseService: {
+    sharesBoard: () => state.sharesBoard,
     shareIssue: async (issue: Issue) => {
       const refused = state.refusals.length ? state.refusals.shift()! : null;
       if (!refused) state.shared.push(`${issue.id}:${issue.status}`);
@@ -51,9 +53,17 @@ const DUE = Date.parse('2030-01-01T00:00:00.000Z');
 
 describe('getting a card onto the team board', () => {
   beforeEach(() => {
-    state.queue.clear(); state.issues.clear(); state.refusals = []; state.boardCopy = null; state.shared = []; state.workspace = 'ws-1';
+    state.queue.clear(); state.issues.clear(); state.refusals = []; state.boardCopy = null; state.shared = []; state.workspace = 'ws-1'; state.sharesBoard = true;
   });
   afterEach(() => resetBoardShareQueue());
+
+  it('does nothing where there is no team board to send to, such as the cloud itself', async () => {
+    state.sharesBoard = false;
+    state.refusals = ['would be refused'];
+    expect(await shareCard(card(), 'ws-1')).toBe(true);
+    expect(state.shared).toEqual([]);
+    expect(state.queue.size).toBe(0);
+  });
 
   it('sends a card and remembers nothing when the board accepts it', async () => {
     expect(await shareCard(card(), 'ws-1')).toBe(true);

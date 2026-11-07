@@ -51,6 +51,9 @@ function later(ms: number): string {
 
 /** Send a card to the team board, queueing a retry when it is refused. True once the board has it. */
 export async function shareCard(issue: Issue, workspaceId: string = currentWorkspaceId()): Promise<boolean> {
+  // The cloud is the board, and a desktop on its own shares none: nothing to send or remember.
+  // Returning before the queue matters in the cloud, which keeps no local database at all.
+  if (!supabaseService.sharesBoard()) return true;
   const refused = await supabaseService.shareIssue(issue);
   if (!refused) {
     sqliteService.clearBoardShare(workspaceId, issue.id);
@@ -79,7 +82,7 @@ export async function shareCardForReply(issue: Issue, workspaceId: string): Prom
 
 /** Send the cards whose retry is due. Exported for tests and startup. */
 export async function retryBoardShares(now: number = Date.now()): Promise<void> {
-  if (retrying) return;
+  if (retrying || !supabaseService.sharesBoard()) return;
   retrying = true;
   try {
     for (const entry of sqliteService.getDueBoardShares(20, new Date(now).toISOString())) {
@@ -122,6 +125,7 @@ export async function retryBoardShares(now: number = Date.now()): Promise<void> 
  * been repaired meanwhile; the backoff resumes from here if it still refuses.
  */
 export function startBoardShareRetries(): void {
+  if (!supabaseService.sharesBoard()) return;
   sqliteService.makeBoardSharesDue();
   if (sqliteService.nextBoardShareAt()) scheduleRetry(5_000);
 }
