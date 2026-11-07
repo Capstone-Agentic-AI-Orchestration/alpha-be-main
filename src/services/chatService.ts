@@ -1270,6 +1270,12 @@ export class ChatService extends EventEmitter {
         throw new ChatRouteError('Your workspace role cannot start builds. Ask a developer or admin to run this task.', 403);
       }
       if (!thread.projectId) throw new ChatRouteError('Choose a project for this conversation before planning a build.', 409);
+      // A plan comes only from Alpha's own offer to build: a question, a board read, or any other
+      // answer is never turned into a build afterwards. Repeating an accepted offer returns its build.
+      const alreadyBuilt = messages.some(message => message.id === `${userMessage.id}-build`);
+      if (!proposals.length && !alreadyBuilt) {
+        throw new ChatRouteError('Alpha did not offer a build for that message. Ask for the build directly if you want one.', 409);
+      }
       const proposal = proposals.at(-1)?.routeProposal;
       const result = await this.startChatBuild({
         threadId: thread.id, thread, userMessage, context: input.routing.context,

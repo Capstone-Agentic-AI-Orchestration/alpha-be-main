@@ -411,6 +411,17 @@ describe('Alpha routes unaddressed chat messages', () => {
     expect(answered.agentMessage.content).toBe('Search would need an index on the title column.');
   });
 
+  it('never turns an answer into a build plan afterwards', async () => {
+    const { chatService } = await load();
+    cliReply = { content: 'The board has 10 cards: 6 in Todo and 4 in progress.' };
+    const first = await send(chatService, 'check the kanban', { projectId: 'project-1' });
+    await expect(chatService.routeMessage({
+      threadId: 'thread-1', messageId: first.userMessage.id, action: 'build', userId: 'user-1',
+      routing: { context, canBuild: true }
+    })).rejects.toMatchObject({ status: 409 });
+    expect(startProjectBuildBatch).not.toHaveBeenCalled();
+  });
+
   it('refuses to turn a build that specialists already started back into a question', async () => {
     const { chatService, sqlite } = await load();
     cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search"}' };
