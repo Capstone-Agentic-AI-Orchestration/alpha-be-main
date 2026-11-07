@@ -12,7 +12,7 @@ import type { ProjectRoot } from './projectFiles.js';
 import type { TaskFileScope } from './taskFileAccess.js';
 import { codexModelConfigArgs } from './codexModelConfig.js';
 import { sqliteService } from './sqliteService.js';
-import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig } from './mcpConfigService.js';
+import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig, type BoardRunScope } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
@@ -114,6 +114,8 @@ export interface CliTurnOptions {
   codexIsolationArgs?: string[];
   /** The installed OpenCode accepts `run --pure`; see RuntimeService.openCodeSupportsPure. */
   openCodePure?: boolean;
+  /** Who this turn's board tools act for and what they may do; needs 'alpha-board' in mcpServers. */
+  boardScope?: BoardRunScope;
   /** Optional effort override; omitted means the model/runtime default. */
   reasoningEffort?: ReasoningEffort;
   systemPrompt?: string;
@@ -1019,7 +1021,10 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
     undefined,
     options.projectRoots,
     options.projectFolder,
-    options.taskScope
+    options.taskScope,
+    undefined,
+    false,
+    options.boardScope
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
