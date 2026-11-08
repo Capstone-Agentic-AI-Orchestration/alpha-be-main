@@ -13,6 +13,12 @@ export const PIPELINE_BRANCHES = ['dev', 'uat', 'main'] as const;
 /** Branches only a pull request should change: promotion targets. */
 export const PROTECTED_PIPELINE_BRANCHES = ['uat', 'main'] as const;
 
+/**
+ * The GitHub Actions app. Required checks are pinned to it, so a status some
+ * other integration posts under the same name cannot satisfy them.
+ */
+const GITHUB_ACTIONS_APP_ID = 15368;
+
 export interface RepoFile {
   path: string;
   content: string;
@@ -27,6 +33,11 @@ export interface ProvisionRepositoryInput {
   description?: string;
   files: RepoFile[];
   message: string;
+  /**
+   * CI check names a pull request into `uat` or `main` must pass. Empty
+   * means the branches are PR-only with no check required.
+   */
+  requiredChecks?: string[];
 }
 
 export interface ProvisionedRepository {
@@ -130,7 +141,7 @@ export async function provisionRepository(
       await api.post(`/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: commit.sha });
     }
 
-    const { protectedBranches, protectionUnavailable } = await protectPipelineBranches(api, repo);
+    const { protectedBranches, protectionUnavailable } = await protectPipelineBranches(api, repo, input.requiredChecks ?? []);
 
     logInfo(
       `Provisioned ${repo}: ${input.files.length} files in one commit on ${PIPELINE_BRANCHES.join('/')}` +
@@ -156,7 +167,8 @@ export async function provisionRepository(
 }
 
 /**
- * Ask GitHub to make `uat` and `main` pull-request only.
+ * Ask GitHub to make `uat` and `main` pull-request only, and to hold a pull
+ * request until `requiredChecks` pass, so a red CI cannot be promoted.
  *
  * Not fatal when GitHub declines. A private repository on an organization's
  * free plan cannot be protected at all, and the answer then is Alpha's own
@@ -164,13 +176,18 @@ export async function provisionRepository(
  */
 async function protectPipelineBranches(
   api: GitHubApi,
-  repo: string
+  repo: string,
+  requiredChecks: string[]
 ): Promise<{ protectedBranches: string[]; protectionUnavailable?: string }> {
   const protectedBranches: string[] = [];
   for (const branch of PROTECTED_PIPELINE_BRANCHES) {
     try {
       await api.put(`/repos/${repo}/branches/${branch}/protection`, {
-        required_status_checks: null,
+        // strict stays off: a promotion PR's head is the branch below, and
+        // requiring it to be up to date with the target would block promotion.
+        required_status_checks: requiredChecks.length
+          ? { strict: false, checks: requiredChecks.map(context => ({ context, app_id: GITHUB_ACTIONS_APP_ID })) }
+          : null,
         enforce_admins: false,
         required_pull_request_reviews: { required_approving_review_count: 0 },
         restrictions: null,

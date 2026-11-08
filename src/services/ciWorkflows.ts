@@ -28,13 +28,25 @@ export type DeployTarget = 'render' | 'vercel';
 interface StackPipeline {
   template: string;
   deployTarget: DeployTarget;
+  requiredChecks: readonly string[];
 }
 
+/**
+ * The checks a pull request into `uat` or `main` has to pass, by the names
+ * GitHub gives the template's jobs: `<caller job> / <reusable workflow job>`,
+ * or the caller job alone when it runs its own steps. Jobs that only run when
+ * configured (Docker, integration tests) are left out, because a required
+ * check that never reports blocks every merge.
+ */
+const SHARED_CHECKS = ['lint / Lint & Style Check', 'security / Dependency Audit', 'security / License Compliance'];
+const BACKEND_CHECKS = ['unit-tests / Backend Unit Tests', ...SHARED_CHECKS];
+const FRONTEND_CHECKS = ['unit-tests / Frontend Unit Tests', ...SHARED_CHECKS, 'build'];
+
 const PIPELINES: Record<CanonicalStack, StackPipeline> = {
-  nodejs: { template: 'be-nodejs.yml', deployTarget: 'render' },
-  nestjs: { template: 'be-nestjs.yml', deployTarget: 'render' },
-  nextjs: { template: 'fe-nextjs.yml', deployTarget: 'vercel' },
-  react: { template: 'fe-react.yml', deployTarget: 'vercel' }
+  nodejs: { template: 'be-nodejs.yml', deployTarget: 'render', requiredChecks: BACKEND_CHECKS },
+  nestjs: { template: 'be-nestjs.yml', deployTarget: 'render', requiredChecks: BACKEND_CHECKS },
+  nextjs: { template: 'fe-nextjs.yml', deployTarget: 'vercel', requiredChecks: FRONTEND_CHECKS },
+  react: { template: 'fe-react.yml', deployTarget: 'vercel', requiredChecks: FRONTEND_CHECKS }
 };
 
 const TEMPLATE_DIR = 'workflow-templates/product';
@@ -51,6 +63,8 @@ export interface CiWorkflowPlan {
   files: RepoFile[];
   /** Which platform Alpha hosts this stack on -- informational; nothing here gates on it. */
   deployTarget: DeployTarget;
+  /** CI checks a pull request into a protected pipeline branch must pass. */
+  requiredChecks: string[];
   /** Always empty: hosting deploys through the platform's own GitHub App, not a repository secret. */
   requiredSecrets: string[];
   /** Always null, for the same reason. */
@@ -105,6 +119,7 @@ export async function buildCiWorkflows(
       { path: '.github/workflows/post-deploy-verify.yml', content: `${header(verify.source)}${verify.yaml}` }
     ],
     deployTarget: pipeline.deployTarget,
+    requiredChecks: [...pipeline.requiredChecks],
     requiredSecrets: [],
     deployVariable: null,
     source: ci.source
