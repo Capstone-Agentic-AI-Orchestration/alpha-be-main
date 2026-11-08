@@ -79,6 +79,26 @@ describe('the CI a new repository gets', () => {
     expect(plan.files.map(file => file.path)).toEqual(['.github/workflows/ci.yml', '.github/workflows/post-deploy-verify.yml']);
     // Hosting deploys through Vercel's own GitHub App now, never a repository secret.
     expect(plan).toMatchObject({ deployTarget: 'vercel', requiredSecrets: [], deployVariable: null });
+    expect(plan.requiredChecks).toEqual([
+      'unit-tests / Frontend Unit Tests',
+      'lint / Lint & Style Check',
+      'security / Dependency Audit',
+      'security / License Compliance',
+      'build'
+    ]);
+  });
+
+  it('requires the backend checks, and no optional job, for a backend stack', async () => {
+    const ci = await load();
+
+    const plan = await ci.buildCiWorkflows({ stack: 'nestjs' }, fakeFetch().impl);
+
+    expect(plan.requiredChecks).toEqual([
+      'unit-tests / Backend Unit Tests',
+      'lint / Lint & Style Check',
+      'security / Dependency Audit',
+      'security / License Compliance'
+    ]);
   });
 
   it.each([

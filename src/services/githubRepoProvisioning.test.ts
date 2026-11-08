@@ -104,6 +104,33 @@ describe('provisioning a repository', () => {
     ]);
   });
 
+  it('holds promotion PRs until the CI checks pass, when given the checks', async () => {
+    const { api, calls } = github();
+    const requiredChecks = ['unit-tests / Backend Unit Tests', 'lint / Lint & Style Check'];
+
+    await provisionRepository({ org: 'acme', name: 'shop', files, message: 'm', requiredChecks }, api);
+
+    const protections = calls.filter(call => call.path.endsWith('/protection'));
+    expect(protections).toHaveLength(2);
+    for (const call of protections) {
+      expect(call.body.required_status_checks).toEqual({
+        strict: false,
+        checks: requiredChecks.map(context => ({ context, app_id: 15368 }))
+      });
+      expect(call.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 0 });
+    }
+  });
+
+  it('requires no check when none are given', async () => {
+    const { api, calls } = github();
+
+    await provisionRepository({ org: 'acme', name: 'shop', files, message: 'm' }, api);
+
+    for (const call of calls.filter(c => c.path.endsWith('/protection'))) {
+      expect(call.body.required_status_checks).toBeNull();
+    }
+  });
+
   /** The organisation's free plan: GitHub will not protect a private repository. */
   it('still provisions when GitHub will not protect the branches, and says why', async () => {
     const { api } = github(call => {

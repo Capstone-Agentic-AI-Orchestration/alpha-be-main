@@ -303,6 +303,7 @@ export async function createScaffoldedRepository(
       visibility,
       files,
       message: `chore: scaffold ${serviceName}`,
+      requiredChecks: ci.requiredChecks,
       ...(description ? { description } : {})
     });
   } catch (err: any) {

@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * keys, which is exactly what "the repo is still created" means to test.
  */
 
-type Provisioned = { name: string; files: Array<{ path: string; content: string }> };
+type Provisioned = { name: string; files: Array<{ path: string; content: string }>; requiredChecks?: string[] };
 
 async function load(options: { failFor?: string } = {}) {
   process.env.ALPHA_MODE = 'cloud';
@@ -21,9 +21,14 @@ async function load(options: { failFor?: string } = {}) {
   const deleted: string[] = [];
 
   vi.doMock('./githubRepoProvisioning.js', () => ({
-    provisionRepository: async (input: { org: string; name: string; files: Provisioned['files'] }) => {
+    provisionRepository: async (input: {
+      org: string;
+      name: string;
+      files: Provisioned['files'];
+      requiredChecks?: string[];
+    }) => {
       if (input.name === options.failFor) throw new Error(`GitHub refused ${input.name}`);
-      provisioned.push({ name: input.name, files: input.files });
+      provisioned.push({ name: input.name, files: input.files, requiredChecks: input.requiredChecks });
       return {
         url: `https://github.com/${input.org}/${input.name}`,
         nameWithOwner: `${input.org}/${input.name}`,
@@ -39,6 +44,7 @@ async function load(options: { failFor?: string } = {}) {
       return {
         files: [{ path: '.github/workflows/ci.yml', content: `# ci for ${stack}\n` }],
         deployTarget: target,
+        requiredChecks: [`ci checks for ${stack}`],
         requiredSecrets: [],
         deployVariable: null,
         source: `alphaorch-workflow@v1:${stack}`
@@ -75,6 +81,8 @@ describe('a scaffolded repository', () => {
 
     const files = provisioned[0].files;
     expect(files.map(file => file.path)).toContain('.github/workflows/ci.yml');
+    // The protected branches wait for the stack's own CI checks.
+    expect(provisioned[0].requiredChecks).toEqual(['ci checks for nestjs']);
     const readme = files.find(file => file.path === 'README.md')!.content;
     expect(readme).toContain('## CI/CD');
     expect(readme).toContain('**Render**');
