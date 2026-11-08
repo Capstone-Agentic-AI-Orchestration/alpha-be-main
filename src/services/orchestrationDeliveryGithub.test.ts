@@ -37,11 +37,23 @@ describe('delivery GitHub evidence', () => {
     const f = apiFixture(); f.setRequired([]);
     await expect(f.github.checks('acme/shop', 'a', 'dev')).rejects.toThrow(/no required CI checks/);
   });
-  it('requires strict branch integration checks to close the base-advance race', async () => {
+  it('requires strict checks on dev to close the base-advance race', async () => {
     const f = apiFixture(); const original = f.api.get.getMockImplementation()!;
     f.api.get.mockImplementation(async path => path.endsWith('/protection') ?
-      { required_status_checks: { checks: [{ context: 'CI', app_id: 10 }], strict: false } } : original(path));
-    await expect(f.github.required('acme/shop', 'uat')).rejects.toThrow(/strict required checks/);
+      { required_status_checks: { checks: [{ context: 'CI', app_id: 10 }], strict: false }, enforce_admins: { enabled: true } } : original(path));
+    await expect(f.github.required('acme/shop', 'dev')).rejects.toThrow(/strict required checks/);
+  });
+  it('accepts non-strict checks on uat, which a merge-commit promotion can never keep up to date', async () => {
+    const f = apiFixture(); const original = f.api.get.getMockImplementation()!;
+    f.api.get.mockImplementation(async path => path.endsWith('/protection') ?
+      { required_status_checks: { checks: [{ context: 'CI', app_id: 10 }], strict: false }, enforce_admins: { enabled: true } } : original(path));
+    expect((await f.github.checks('acme/shop', 'a', 'uat')).state).toBe('passed');
+  });
+  it('still refuses non-strict uat checks that administrators can bypass', async () => {
+    const f = apiFixture(); const original = f.api.get.getMockImplementation()!;
+    f.api.get.mockImplementation(async path => path.endsWith('/protection') ?
+      { required_status_checks: { checks: [{ context: 'CI', app_id: 10 }], strict: false }, enforce_admins: { enabled: false } } : original(path));
+    await expect(f.github.required('acme/shop', 'uat')).rejects.toThrow(/administrators/);
   });
   it('refuses a policy whose strict checks can be bypassed by an administrator', async () => {
     const f = apiFixture(); const original = f.api.get.getMockImplementation()!;

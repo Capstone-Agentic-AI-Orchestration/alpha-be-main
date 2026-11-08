@@ -10,8 +10,13 @@ import { logError, logInfo } from '../utils/logger.js';
  */
 export const PIPELINE_BRANCHES = ['dev', 'uat', 'main'] as const;
 
-/** Branches only a pull request should change: promotion targets. */
-export const PROTECTED_PIPELINE_BRANCHES = ['uat', 'main'] as const;
+/**
+ * Branches only a pull request should change: all three. People and agents
+ * work on their own branches (agents on `agent/*`) and arrive by pull request,
+ * so an agent with a shell and a person's token still cannot push into the
+ * pipeline directly.
+ */
+export const PROTECTED_PIPELINE_BRANCHES = ['dev', 'uat', 'main'] as const;
 
 /**
  * The GitHub Actions app. Required checks are pinned to it, so a status some
@@ -183,10 +188,13 @@ async function protectPipelineBranches(
   for (const branch of PROTECTED_PIPELINE_BRANCHES) {
     try {
       await api.put(`/repos/${repo}/branches/${branch}/protection`, {
-        // strict stays off: a promotion PR's head is the branch below, and
-        // requiring it to be up to date with the target would block promotion.
+        // Strict (up to date with the target) only on dev, whose PRs come from
+        // work branches that can take dev in. A promotion PR's head is dev or
+        // uat itself, which can never take in the merge commit promotion leaves
+        // on the target, so strict there would block every promotion after the
+        // first.
         required_status_checks: requiredChecks.length
-          ? { strict: false, checks: requiredChecks.map(context => ({ context, app_id: GITHUB_ACTIONS_APP_ID })) }
+          ? { strict: branch === 'dev', checks: requiredChecks.map(context => ({ context, app_id: GITHUB_ACTIONS_APP_ID })) }
           : null,
         // Administrators included. Agents act with a developer's GitHub
         // account, often an administrator's; without this, a red check could
