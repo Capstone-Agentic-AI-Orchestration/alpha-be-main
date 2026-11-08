@@ -16,6 +16,7 @@ import { getRepoArchitecture } from '../services/githubRepoArchitecture.js';
 import { actionsRuns, actionsWorkflows, actionsRun, actionsJobs, actionsJobLogs, actionsArtifacts,
   actionsArtifactDownload, type ActionsOptions } from '../services/projectActionsService.js';
 import { deleteProjectRepository, RepoDeletionError } from '../services/repoDeletionService.js';
+import { productionReadiness } from '../services/productionReadiness.js';
 import type { Project } from '../models/index.js';
 import { requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 
@@ -175,17 +176,41 @@ projectRepoRouter.get('/projects/:id/repos/:owner/:name/runs/:runId/artifacts/:a
 /**
  * Open the next promotion PR: `{ from: 'dev', to: 'uat' }` or `{ from: 'uat', to: 'main' }`.
  * Answers 201 opened, 200 with the PR already open, or 200 nothing to promote.
+ *
+ * Production also needs the client: for a project a client can see, the
+ * client's latest UAT round for the commit now on uat must have passed, or the
+ * promotion is refused with 409 and the reason.
  */
 projectRepoRouter.post(
   '/projects/:id/repos/:owner/:name/promote',
-  withProjectRepo(async (req, res, repo) => {
+  withProjectRepo(async (req, res, repo, project) => {
     const { from, to } = req.body ?? {};
     if (!requireWorkspaceCapability(req, res, from === 'dev' && to === 'uat' ? 'project.promote_uat' : 'project.promote')) return;
     if (typeof from !== 'string' || typeof to !== 'string') {
       return res.status(400).json({ error: '"from" and "to" branches are required.' });
     }
+    if (from === 'uat' && to === 'main') {
+      const readiness = await productionReadiness(req.workspace!.workspaceId, project.id, repo);
+      if (readiness.state === 'not_approved') return res.status(409).json({ error: readiness.reason, readiness });
+      const result = await promote(repo, from, to);
+      return res.status(result.status === 'opened' ? 201 : 200).json({ ...result, readiness });
+    }
     const result = await promote(repo, from, to);
     return res.status(result.status === 'opened' ? 201 : 200).json(result);
+  })
+);
+
+/**
+ * Whether this repository's uat commit (or `?sha=`) may go to production:
+ * `approved`, `not_approved` with the reason, or `no_client`. For the
+ * production promotion screen, and how a desktop asks the cloud.
+ */
+projectRepoRouter.get(
+  '/projects/:id/repos/:owner/:name/production-readiness',
+  withProjectRepo(async (req, res, repo, project) => {
+    if (!requireWorkspaceCapability(req, res, 'project.promote')) return;
+    const sha = typeof req.query.sha === 'string' && req.query.sha ? req.query.sha : undefined;
+    return res.json(await productionReadiness(req.workspace!.workspaceId, project.id, repo, sha));
   })
 );
 
