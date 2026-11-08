@@ -61,6 +61,7 @@ import {
   listPullRequests
 } from '../services/githubRepoWorkspace.js';
 import { sqliteService } from '../services/sqliteService.js';
+import { createIssue, rerunFailedJobs } from '../services/agentCiActions.js';
 
 /**
  * Record a mutation where the UI can find it.
@@ -198,6 +199,32 @@ const SCOPED_REPOS: string[] | undefined = process.env.ALPHA_SCOPED_REPOS === un
   try { const value: unknown = JSON.parse(process.env.ALPHA_SCOPED_REPOS!); return Array.isArray(value) && value.every(repo => typeof repo === 'string') ? value : []; } catch { return []; }
 })();
 
+/**
+ * A repository this turn may change: one of the project's, or the one its
+ * working copy belongs to. Read tools may look anywhere the account can; a
+ * write that names some other repository is refused rather than guessed at.
+ */
+async function writableRepo(repo: unknown): Promise<string> {
+  const value = typeof repo === 'string' ? repo.trim() : '';
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) throw new Error('Pass the repository as owner/name.');
+  if (PROJECT_REPOS.length) {
+    if (PROJECT_REPOS.some(item => item.toLowerCase() === value.toLowerCase())) return value;
+    throw new Error(`${value} is not one of this project's repositories.`);
+  }
+  const cwd = process.env.ALPHA_WORKSPACE;
+  if (cwd) {
+    const { ownerRepo } = await githubService.inspectLocalRepo(cwd).catch(() => ({ ownerRepo: undefined as string | undefined }));
+    if (ownerRepo && ownerRepo.toLowerCase() === value.toLowerCase()) return value;
+  }
+  throw new Error(`${value} is outside the repositories this turn works on.`);
+}
+
+/** Who opened something, written into it, so GitHub's record says an agent did. */
+function agentAttribution(): string {
+  const runId = process.env.ALPHA_RUN_ID;
+  return runId ? `Opened by an Alpha agent during run ${runId}.` : 'Opened by an Alpha agent.';
+}
+
 const str = (description: string) => ({ type: 'string', description });
 const int = (description: string, min: number, max: number) => ({
   type: 'integer',
@@ -284,6 +311,59 @@ const TOOLS: Record<string, ToolDef> = {
       ['repo', 'runId']
     ),
     run: ({ repo, runId }) => githubService.getFailedWorkflowLogs(repo, runId)
+  },
+
+  github_rerun_failed_jobs: {
+    access: 'write',
+    description:
+      'Retry the failed jobs of a finished GitHub Actions run, once. Read github_failed_run_logs first: retry only when the failure ' +
+      'looks transient (a runner, network or registry error). A failing test, lint, audit or build is a real finding: fix the cause ' +
+      'on your branch instead. A run that has already been retried is refused.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        runId: str('Workflow run id from github_workflow_runs')
+      },
+      ['repo', 'runId']
+    ),
+    run: async ({ repo, runId }) => {
+      const target = `${String(repo)}#${String(runId)}`;
+      try {
+        const result = await rerunFailedJobs(await api(), await writableRepo(repo), runId);
+        audit('rerun_failed_jobs', target, true, `attempt ${result.attempt}`);
+        return result;
+      } catch (err: any) {
+        audit('rerun_failed_jobs', target, false, String(err?.message ?? err));
+        throw err;
+      }
+    }
+  },
+
+  github_create_issue: {
+    access: 'write',
+    description:
+      'Open a GitHub issue in one of this project\'s repositories, for a problem you found and cannot fix in this turn: a failing ' +
+      'check, a vulnerable dependency, a broken deployment. Say what fails, the evidence (run link, log excerpt) and what you tried. ' +
+      'Never put secrets, tokens or personal data in an issue. The issue records that an agent opened it.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        title: str('Short summary of the problem'),
+        body: str('Details in markdown: what fails, evidence, what you tried'),
+        labels: { type: 'array', items: { type: 'string' }, maxItems: 10, description: 'Optional labels that already exist in the repository' }
+      },
+      ['repo', 'title']
+    ),
+    run: async ({ repo, title, body, labels }) => {
+      try {
+        const issue = await createIssue(await api(), await writableRepo(repo), { title, body, labels }, agentAttribution());
+        audit('create_issue', issue.url, true, String(title).slice(0, 120));
+        return issue;
+      } catch (err: any) {
+        audit('create_issue', String(repo), false, String(err?.message ?? err));
+        throw err;
+      }
+    }
   },
 
   github_push_branch: {

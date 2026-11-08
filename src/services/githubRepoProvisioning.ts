@@ -188,7 +188,10 @@ async function protectPipelineBranches(
         required_status_checks: requiredChecks.length
           ? { strict: false, checks: requiredChecks.map(context => ({ context, app_id: GITHUB_ACTIONS_APP_ID })) }
           : null,
-        enforce_admins: false,
+        // Administrators included. Agents act with a developer's GitHub
+        // account, often an administrator's; without this, a red check could
+        // be merged past by anyone, or any agent, holding admin rights.
+        enforce_admins: true,
         required_pull_request_reviews: { required_approving_review_count: 0 },
         restrictions: null,
         allow_force_pushes: false,

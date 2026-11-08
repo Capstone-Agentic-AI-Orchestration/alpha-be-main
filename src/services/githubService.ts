@@ -18,7 +18,8 @@ import {
   IS_DESKTOP
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
-import { tokenForThisRequest } from './githubApi.js';
+import { githubApiWithToken, tokenForThisRequest } from './githubApi.js';
+import { failedRunLogs } from './agentCiActions.js';
 import {
   DeviceFlowError,
   activeProfile,
@@ -1700,16 +1701,9 @@ export class RestGitHubService implements IGitHubService {
       if (!ownerRepo) return 'Owner/Repo not resolved for workflow log inspection.';
       assertOwnerRepo(ownerRepo);
 
-      const jobsData = await this.request(`/repos/${ownerRepo}/actions/runs/${runId}/jobs`);
-      const failedJob = (jobsData.jobs || []).find((j: any) => j.conclusion === 'failure');
-      if (failedJob) {
-        const stepsSummary = (failedJob.steps || [])
-          .filter((s: any) => s.conclusion === 'failure')
-          .map((s: any) => `Step Failed: ${s.name} (Conclusion: ${s.conclusion})`)
-          .join('\n');
-        return `Job ${failedJob.name} failed.\n${stepsSummary}\nHTML URL: ${failedJob.html_url}`;
-      }
-      return 'No failed job steps found in workflow run.';
+      // The log text itself, as the desktop's `gh run view --log-failed` gives:
+      // step names and a link alone left a hosted agent unable to see the error.
+      return await failedRunLogs(githubApiWithToken(await this.getAuthToken()), ownerRepo, runId);
     } catch (err: any) {
       return `Failed to fetch logs: ${err?.message || err}`;
     }

@@ -37,6 +37,8 @@ export interface GitHubApi {
   patch<T>(path: string, body: unknown): Promise<T>;
   put<T>(path: string, body: unknown): Promise<T>;
   delete(path: string): Promise<void>;
+  /** A plain-text answer, such as a job log. Optional so test doubles can leave it out. */
+  getText?(path: string): Promise<string>;
 }
 
 /** A GitHub answer that was not a success, with its status for callers that branch on it. */
@@ -162,7 +164,9 @@ function restApiFor(token?: string): GitHubApi {
     },
 
     async post<T>(path: string, body: unknown): Promise<T> {
-      return (await call('POST', path, body, token)).json() as Promise<T>;
+      // Some writes answer 201 or 204 with no body (re-running jobs, for one).
+      const text = await (await call('POST', path, body, token)).text();
+      return (text ? JSON.parse(text) : undefined) as T;
     },
 
     async patch<T>(path: string, body: unknown): Promise<T> {
@@ -176,6 +180,10 @@ function restApiFor(token?: string): GitHubApi {
     async delete(path: string): Promise<void> {
       // 204 No Content: there is no body to read.
       await call('DELETE', path, undefined, token);
+    },
+
+    async getText(path: string): Promise<string> {
+      return (await call('GET', path, undefined, token)).text();
     }
   };
 }
