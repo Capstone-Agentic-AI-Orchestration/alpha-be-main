@@ -62,6 +62,7 @@ import {
 } from '../services/githubRepoWorkspace.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { createIssue, rerunFailedJobs } from '../services/agentCiActions.js';
+import { deliveryStatusFor } from '../services/agentDeliveryStatus.js';
 
 /**
  * Record a mutation where the UI can find it.
@@ -311,6 +312,19 @@ const TOOLS: Record<string, ToolDef> = {
       ['repo', 'runId']
     ),
     run: ({ repo, runId }) => githubService.getFailedWorkflowLogs(repo, runId)
+  },
+
+  github_delivery_status: {
+    description:
+      'Where a build stands in delivery to dev and UAT: stage, why it is waiting, failed and pending checks with links, the UAT ' +
+      'deployment, repair attempts and recent events. Alpha merges and promotes by itself once a person enables delivery and the ' +
+      'checks pass; you cannot merge. When a check failed, read it with github_failed_run_logs and fix the cause on your branch.',
+    inputSchema: schema({ runId: str('The build (orchestration run) id.') }, ['runId']),
+    run: async ({ runId }) => {
+      const record = sqliteService.getOrchestrationDelivery(String(runId ?? '').trim());
+      if (!record) return 'This build has no delivery yet: it starts once the build is approved and its pull requests are published.';
+      return deliveryStatusFor(record, PROJECT_REPOS);
+    }
   },
 
   github_rerun_failed_jobs: {
