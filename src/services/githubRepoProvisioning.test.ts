@@ -96,9 +96,10 @@ describe('provisioning a repository', () => {
       nameWithOwner: 'acme/shop',
       commitSha: 'commit-sha',
       branches: ['dev', 'uat', 'main'],
-      protectedBranches: ['uat', 'main']
+      protectedBranches: ['dev', 'uat', 'main']
     });
     expect(calls.filter(call => call.path.endsWith('/protection')).map(call => call.path)).toEqual([
+      '/repos/acme/shop/branches/dev/protection',
       '/repos/acme/shop/branches/uat/protection',
       '/repos/acme/shop/branches/main/protection'
     ]);
@@ -111,10 +112,11 @@ describe('provisioning a repository', () => {
     await provisionRepository({ org: 'acme', name: 'shop', files, message: 'm', requiredChecks }, api);
 
     const protections = calls.filter(call => call.path.endsWith('/protection'));
-    expect(protections).toHaveLength(2);
+    expect(protections).toHaveLength(3);
     for (const call of protections) {
       expect(call.body.required_status_checks).toEqual({
-        strict: false,
+        // Up to date with the target on dev only; promotion PRs could never be.
+        strict: call.path.includes('/branches/dev/'),
         checks: requiredChecks.map(context => ({ context, app_id: 15368 }))
       });
       expect(call.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 0 });

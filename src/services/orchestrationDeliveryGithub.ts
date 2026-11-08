@@ -20,6 +20,14 @@ export class DeliveryGithub {
   async required(repo: string, branch: 'dev' | 'uat'): Promise<RequiredCheck[]> {
     // GitHub resolves active branch rules, including rulesets. Legacy protection
     // is read too because older repositories only configure that API.
+    //
+    // Strict (up to date) checks are required on dev only. Work branches can
+    // take dev in, so strict closes the race where dev advances between the
+    // checks and the merge. A dev -> uat promotion cannot: dev can never take in
+    // the merge commit each promotion leaves on uat, so strict on uat blocks
+    // every promotion after the first. There the race is bounded instead by the
+    // pinned base below, the checks on the PR's merge commit, and delivery
+    // waiting for CI on the merged uat commit before UAT is ready.
     const required = new Map<string, RequiredCheck>();
     let strict = false;
     let nonBypassable = false;
@@ -36,7 +44,7 @@ export class DeliveryGithub {
       if (rules.length === 100) throw new DeliveryError('Branch rules exceed the bounded policy inspection. Review the repository policy before delivery.');
       for (const rule of rules.filter(rule => rule.type === 'required_status_checks')) {
         strict ||= rule.parameters?.strict_required_status_checks_policy === true;
-        if (rule.parameters?.strict_required_status_checks_policy && rule.ruleset_id) {
+        if (rule.ruleset_id) {
           const policy = await this.api.get<{ enforcement: string; bypass_actors?: unknown[] }>(`/repos/${repo}/rulesets/${rule.ruleset_id}?includes_parents=true`);
           nonBypassable ||= policy.enforcement === 'active' && Array.isArray(policy.bypass_actors) && policy.bypass_actors.length === 0;
         }
@@ -49,15 +57,15 @@ export class DeliveryGithub {
       const policy = await this.api.get<{ enforce_admins?: { enabled: boolean }; required_status_checks: { strict?: boolean; contexts?: string[]; checks?: RequiredCheck[] } | null }>(
         `/repos/${repo}/branches/${branch}/protection`);
       strict ||= policy.required_status_checks?.strict === true;
-      nonBypassable ||= policy.required_status_checks?.strict === true && policy.enforce_admins?.enabled === true;
+      nonBypassable ||= Boolean(policy.required_status_checks) && policy.enforce_admins?.enabled === true;
       for (const check of policy.required_status_checks?.checks ?? []) add(check);
       for (const context of policy.required_status_checks?.contexts ?? []) {
         if (!required.has(context)) required.set(context, { context });
       }
     } catch (error) { if (!(error instanceof GitHubApiError) || error.status !== 404) throw error; }
     if (!required.size) throw new DeliveryError(`${repo}: no required CI checks are configured for ${branch}. Configure branch protection or a ruleset first.`);
-    if (!strict) throw new DeliveryError(`${repo}: ${branch} must require branches to be up to date before merging (strict required checks).`);
-    if (!nonBypassable) throw new DeliveryError(`${repo}: ${branch} strict checks must also apply to administrators, or use an active ruleset with a verified empty bypass list.`);
+    if (branch === 'dev' && !strict) throw new DeliveryError(`${repo}: dev must require branches to be up to date before merging (strict required checks).`);
+    if (!nonBypassable) throw new DeliveryError(`${repo}: ${branch} required checks must also apply to administrators, or use an active ruleset with a verified empty bypass list.`);
     return [...required.values()];
   }
   private async readCheckRuns(repo: string, commit: string) {
