@@ -118,6 +118,8 @@ describe('provisioning a repository', () => {
         checks: requiredChecks.map(context => ({ context, app_id: 15368 }))
       });
       expect(call.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 0 });
+      // Administrators too: an agent acting with an admin's account must not merge past a red check.
+      expect(call.body.enforce_admins).toBe(true);
     }
   });
 
