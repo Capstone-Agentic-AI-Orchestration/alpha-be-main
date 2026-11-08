@@ -19,9 +19,15 @@ const project = {
   ]
 };
 
-async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; actionsAnswer?: (path: string) => unknown } = {}) {
+async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; actionsAnswer?: (path: string) => unknown; readiness?: unknown } = {}) {
   vi.resetModules();
   const calls: string[] = [];
+  vi.doMock('../services/productionReadiness.js', () => ({
+    productionReadiness: async (_ws: string, projectId: string, repo: string) => {
+      calls.push(`readiness ${projectId} ${repo}`);
+      return options.readiness ?? { state: 'approved', repository: repo, sha: 'a'.repeat(40), round: 1, submittedAt: 't' };
+    }
+  }));
   vi.doMock('../store/stores.js', () => ({
     projectStore: () => ({ get: async (_ws: string, id: string) => (id === 'p1' ? project : null) })
   }));
@@ -108,6 +114,7 @@ afterEach(() => {
   vi.doUnmock('./workspaceContext.js');
   vi.doUnmock('../services/githubRepoWorkspace.js');
   vi.doUnmock('../services/githubRepoArchitecture.js');
+  vi.doUnmock('../services/productionReadiness.js');
   vi.resetModules();
 });
 
@@ -241,7 +248,44 @@ describe('promotion', () => {
 
     const res = await call(app, 'POST', '/api/projects/p1/repos/acme/shop-be/promote', { from: 'uat', to: 'main' });
 
-    expect(res).toEqual({ status: 200, body: { status: 'existing', url: 'u', number: 4 } });
+    expect(res).toEqual({ status: 200, body: { status: 'existing', url: 'u', number: 4,
+      readiness: { state: 'approved', repository: 'acme/shop-be', sha: 'a'.repeat(40), round: 1, submittedAt: 't' } } });
+  });
+
+  it('refuses production until the client passes UAT for the commit on uat, and opens nothing', async () => {
+    const readiness = { state: 'not_approved', repository: 'acme/shop-fe', sha: 'a'.repeat(40), reason: 'The client has not passed UAT.' };
+    const { app, calls } = await startApi({ role: 'pm', readiness });
+
+    const res = await call(app, 'POST', '/api/projects/p1/repos/acme/shop-fe/promote', { from: 'uat', to: 'main' });
+
+    expect(res).toEqual({ status: 409, body: { error: 'The client has not passed UAT.', readiness } });
+    expect(calls).toEqual(['readiness p1 acme/shop-fe']);
+  });
+
+  it('opens production for a project manager once the client passed UAT', async () => {
+    const { app, calls } = await startApi({ role: 'pm' });
+
+    const res = await call(app, 'POST', '/api/projects/p1/repos/acme/shop-fe/promote', { from: 'uat', to: 'main' });
+
+    expect(res.status).toBe(201);
+    expect(calls).toEqual(['readiness p1 acme/shop-fe', 'promote acme/shop-fe uat->main']);
+  });
+
+  it('does not check client UAT for a dev -> uat promotion', async () => {
+    const { app, calls } = await startApi({ role: 'dev', readiness: { state: 'not_approved', reason: 'x' } });
+
+    expect((await call(app, 'POST', '/api/projects/p1/repos/acme/shop-be/promote', { from: 'dev', to: 'uat' })).status).toBe(201);
+    expect(calls).toEqual(['promote acme/shop-be dev->uat']);
+  });
+
+  it('shows production readiness to a project manager, not a developer', async () => {
+    const dev = await startApi({ role: 'dev' });
+    expect((await call(dev.app, 'GET', '/api/projects/p1/repos/acme/shop-fe/production-readiness')).status).toBe(403);
+
+    const pm = await startApi({ role: 'pm' });
+    const res = await call(pm.app, 'GET', '/api/projects/p1/repos/acme/shop-fe/production-readiness');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('approved');
   });
 });
 
