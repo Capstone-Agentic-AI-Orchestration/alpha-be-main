@@ -77,5 +77,11 @@ describe('runtimeDiscovery', () => {
       expect(findGemini()).toBeTruthy();
       expect(findOpenCode()).toBeTruthy();
     });
+
+    it('does not resolve the Windows desktop GUI launcher for Gemini', () => {
+      delete process.env.GEMINI_PATH;
+      const resolved = findGemini();
+      expect(resolved).not.toContain(path.join('Google', 'Gemini', 'gemini.exe'));
+    });
   });
 });
