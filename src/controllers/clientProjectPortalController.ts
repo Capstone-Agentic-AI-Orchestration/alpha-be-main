@@ -8,7 +8,7 @@ import { pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 export function createPmClientProjectRouter(app: PostgresClientProjectPortal, relay = relayPmTicketRequest) {
   const router = Router();
   const path = '/projects/:projectId/client-preview';
-  for (const [method, suffix] of [['put', ''], ['get', '/clients'], ['get', '/messages'], ['post', '/messages'], ['get', '/messages/operations/:operationId']] as const) {
+  for (const [method, suffix] of [['get', ''], ['put', ''], ['get', '/clients'], ['get', '/messages'], ['post', '/messages'], ['get', '/messages/operations/:operationId']] as const) {
     router[method](path + suffix, route(async (req, res) => {
       res.setHeader('Cache-Control', 'no-store, private');
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -17,6 +17,7 @@ export function createPmClientProjectRouter(app: PostgresClientProjectPortal, re
       if (!subject) return;
       const target: ProjectTarget = { workspaceId: req.workspace!.workspaceId, projectId: req.params.projectId };
       if (method === 'put') return res.json(await app.setPreview(target, subject, req.body));
+      if (suffix === '') return res.json(await app.getPreview(target, subject));
       if (suffix === '/clients') return res.json(await app.clients(target, subject));
       const { clientId, ...page } = req.query;
       if (req.params.operationId) return res.json(await app.operation(target, subject, req.params.operationId, clientId));

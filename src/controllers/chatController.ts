@@ -1,3 +1,4 @@
+import { chatBuildDecisionSchema } from '../services/chatBuildDecision.js';
 import { Request, Response, Router } from 'express';
 import { route } from './asyncRoute.js';
 import { agentStore, chatStore, projectStore } from '../store/stores.js';
@@ -405,7 +406,7 @@ chatRouter.delete('/chat/threads/:id/messages', desktopOnly, (req: Request, res:
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId, approvalMode } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId, approvalMode, buildDecision } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -442,6 +443,8 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (repositories !== undefined && (!Array.isArray(repositories) || repositories.length > 30 || repositories.some((item: unknown) => typeof item !== 'string' || !item.trim()))) {
       return res.status(400).json({ error: 'repositories must be a list of up to 30 repository names' });
     }
+    const decision = buildDecision === undefined ? undefined : chatBuildDecisionSchema.safeParse(buildDecision);
+    if (decision && !decision.success) return res.status(400).json({ error: 'Invalid build decision reference.' });
     const requestedRepositories = Array.isArray(repositories)
       ? [...new Set(repositories.map((item: string) => item.trim()))]
       : typeof repository === 'string' && repository.trim() ? [repository.trim()] : undefined;
@@ -489,7 +492,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
           answerOnly
         }
       : undefined;
+    if (decision && (!routing || answerOnly || !scopedProjectId)) return res.status(400).json({ error: 'Build decisions require the main project chat.' });
     const result = await chatService.sendMessage({
+      buildDecision: decision?.success ? decision.data : undefined,
       threadId,
       content,
       approvalMode,

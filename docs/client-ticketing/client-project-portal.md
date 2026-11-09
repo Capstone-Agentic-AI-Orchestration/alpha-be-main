@@ -44,6 +44,8 @@ authorized project records; no internal task data is returned.
 
 ## PM API (selected authenticated workspace)
 
+- `GET /api/tickets/projects/:projectId/client-preview`
+  -> `{preview:{repository,branch,url}|null}`.
 - `PUT /api/tickets/projects/:projectId/client-preview`
   body `{preview:{repository,branch,url}|null}` -> `{preview}`.
   Uses existing HTTPS Vercel URL and `main`/`uat` constraints. A null value

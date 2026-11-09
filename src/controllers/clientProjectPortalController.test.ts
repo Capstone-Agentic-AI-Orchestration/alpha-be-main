@@ -10,7 +10,7 @@ const receipt = {messageId:'message',operationId:'operation'};
 function fixture() {
   const projectPortal = {projects:vi.fn(async(..._args:unknown[])=>({items:[]})),requests:vi.fn(async(..._args:unknown[])=>({items:[],nextCursor:null,counters:{kind:'client',open:0,needsClient:0}})),
     messages:vi.fn(async(..._args:unknown[])=>({items:[],nextCursor:null})),reply:vi.fn(async(..._args:unknown[])=>receipt),operation:vi.fn(async(..._args:unknown[])=>receipt),setPreview:vi.fn(async(..._args:unknown[])=>({preview:null})),
-    clients:vi.fn(async(..._args:unknown[])=>({items:[{clientId:'client-a',displayName:'Client A'}]}))};
+    clients:vi.fn(async(..._args:unknown[])=>({items:[{clientId:'client-a',displayName:'Client A'}]})),getPreview:vi.fn(async(..._args:unknown[])=>({preview:null}))};
   const authenticate = vi.fn(async (session:unknown,csrf:unknown,header:unknown,write:boolean) =>
     session!=='session' ? {kind:'expired'} : write && (csrf!=='csrf'||header!=='csrf') ? {kind:'csrf_invalid'} : {kind:'authenticated',subject});
   const client = createTicketClientApiRouter({projectPortal,authenticate} as unknown as TicketClientApiApplication,
@@ -68,6 +68,12 @@ describe('PM project feedback boundary',()=>{
   const session={ticketAuthentication:{kind:'verified_github_bearer',verificationId:'verified'}};
   it('requires a PM context and binds management to the selected workspace',async()=>{
     const f=fixture();
+    expect(await invoke(f.pm,'GET',path)).toMatchObject({status:401});
+    expect(await invoke(f.pm,'GET',path,{workspace:{...workspace,role:'dev'},session})).toMatchObject({status:403});
+    expect(f.projectPortal.getPreview).not.toHaveBeenCalled();
+    expect(await invoke(f.pm,'GET',path,{workspace,session,query:{workspaceId:'untrusted'}})).toMatchObject({status:200,body:{preview:null}});
+    expect(f.projectPortal.getPreview).toHaveBeenCalledWith({workspaceId:'selected-workspace',projectId:'project-a'},
+      {kind:'internal',userId:'pm',authentication:session.ticketAuthentication});
     expect(await invoke(f.pm,'PUT',path)).toMatchObject({status:401});
     expect(await invoke(f.pm,'PUT',path,{workspace:{...workspace,role:'dev'},session})).toMatchObject({status:403});
     expect(f.projectPortal.setPreview).not.toHaveBeenCalled();

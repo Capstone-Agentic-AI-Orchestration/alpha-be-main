@@ -217,6 +217,20 @@ export class PostgresClientProjectPortal {
     });
   }
 
+  async getPreview(target: ProjectTarget, subject: TicketSubject) {
+    if (subject.kind !== 'internal') missing();
+    return this.db.transaction(async sql => {
+      await this.lockProject(sql, target, subject);
+      const { rows } = await sql.query<{ repository: string; branch: 'main' | 'uat'; url: string }>(
+        'select repository,branch,url from alpha_private.client_project_previews where workspace_id=$1 and project_id=$2',
+        [target.workspaceId, target.projectId],
+      );
+      const preview = rows[0]?.url ? rows[0] : null;
+      if (!validTicketProjectPreview(preview)) throw new TicketReadInvariantError();
+      return { preview };
+    });
+  }
+
   async setPreview(target: ProjectTarget, subject: TicketSubject, input: unknown) {
     if (subject.kind !== 'internal') missing();
     const { preview } = parse(previewSchema, input);
