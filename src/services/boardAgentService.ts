@@ -62,10 +62,16 @@ export interface BoardToolResult {
 const text = (value: unknown, max: number): string | undefined =>
   typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
 
+/** Code-unit order, as `sort()` with no compare function gives, so request keys stay the same. */
+function byCodeUnit(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
   if (value && typeof value === 'object') {
-    return '{' + Object.keys(value as object).sort().map(key => JSON.stringify(key) + ':' + stableStringify((value as Record<string, unknown>)[key])).join(',') + '}';
+    return '{' + Object.keys(value as object).sort(byCodeUnit).map(key => JSON.stringify(key) + ':' + stableStringify((value as Record<string, unknown>)[key])).join(',') + '}';
   }
   return JSON.stringify(value ?? null);
 }
@@ -216,7 +222,11 @@ function describe(change: BoardAgentChangeRecord): BoardToolResult {
   if (change.status === 'held') {
     return { status: 'held', changeId: change.id, summary: 'Waiting for ' + change.actorLogin + ' to confirm: ' + change.summary + '. ' + (change.reason ?? '') };
   }
-  if (change.status === 'applied') return { status: 'done', changeId: change.id, summary: change.summary + '.' };
+  if (change.status === 'applied') {
+    // An applied change's reason is a sync warning: saved in Alpha, but GitHub
+    // or the team board did not take it. The agent must say so, not "done".
+    return { status: 'done', changeId: change.id, summary: change.summary + '.' + (change.reason ? ' Saved in Alpha, but not synced: ' + change.reason : '') };
+  }
   return { status: 'unchanged', changeId: change.id, summary: change.summary + ' was ' + change.status + (change.reason ? ': ' + change.reason : '') + '.' };
 }
 
@@ -265,7 +275,15 @@ function cardUpdates(args: Record<string, unknown>, cards: Issue[], current?: Is
   return { updates, fields };
 }
 
-/** Apply a recorded change to the board. Used straight away, or when the developer confirms a held one. */
+/** The record with a sync warning, when the board saved the change but GitHub or the team board did not take it. */
+const withSyncWarning = (change: BoardAgentChangeRecord, syncWarning?: string): BoardAgentChangeRecord =>
+  syncWarning ? { ...change, reason: syncWarning } : change;
+
+/**
+ * Apply a recorded change to the board. Used straight away, or when the developer confirms a held one.
+ * The board's own sync warning is kept as the applied change's reason, so the agent and the
+ * developer hear that GitHub or the team board did not take it, as the board screen does.
+ */
 async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentChangeRecord> {
   const workspaceId = change.workspaceId;
   const by = actorLabel(change.agentName, change.actorLogin);
@@ -274,8 +292,8 @@ async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentCh
 
   if (change.action === 'create') {
     const rest = await prepareCardCreate(workspaceId, { ...(input.fields as object), projectId: change.projectId });
-    const { saved } = await createCard(workspaceId, rest, change.actorLogin, issue => issue.identifier + ' created by ' + by + '.');
-    return { ...change, issueId: saved.id, summary: 'Created ' + saved.identifier + ' "' + saved.title + '"', after: pick(saved, Object.keys(input.fields ?? {})) };
+    const { saved, syncWarning } = await createCard(workspaceId, rest, change.actorLogin, issue => issue.identifier + ' created by ' + by + '.');
+    return withSyncWarning({ ...change, issueId: saved.id, summary: 'Created ' + saved.identifier + ' "' + saved.title + '"', after: pick(saved, Object.keys(input.fields ?? {})) }, syncWarning);
   }
 
   const card = await resolveCard(grantLike, change.issueId, change.action === 'restore');
@@ -285,30 +303,38 @@ async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentCh
   }
 
   if (change.action === 'archive') {
-    const { saved } = await archiveCard(workspaceId, card, by);
-    return { ...change, after: pick(saved, ['archivedAt', 'archivedBy']) };
+    const { saved, syncWarning } = await archiveCard(workspaceId, card, by);
+    return withSyncWarning({ ...change, after: pick(saved, ['archivedAt', 'archivedBy']) }, syncWarning);
   }
   if (change.action === 'restore') {
-    const { saved } = await restoreCard(workspaceId, card, by);
-    return { ...change, after: pick(saved, ['archivedAt', 'archivedBy']) };
+    const { saved, syncWarning } = await restoreCard(workspaceId, card, by);
+    return withSyncWarning({ ...change, after: pick(saved, ['archivedAt', 'archivedBy']) }, syncWarning);
   }
-  if (change.action === 'comment') {
-    const comment = await issueStore().addComment(workspaceId, {
-      id: 'comm-' + card.id + '-agent-' + randomUUID().slice(0, 12),
-      issueId: card.id,
-      authorType: 'agent',
-      authorName: change.agentName,
-      ...(change.agentId ? { agentId: change.agentId } : {}),
-      content: String(input.text) + '\n\n(on behalf of ' + change.actorLogin + ')',
-      createdAt: new Date().toISOString()
-    });
-    void supabaseService.shareComment(comment);
-    return change;
-  }
+  if (change.action === 'comment') return applyComment(change, card);
+  return applyCardEdit(change, card, by);
+}
 
-  // update or move
+/** A comment signed as the agent, on behalf of the developer. */
+async function applyComment(change: BoardAgentChangeRecord, card: Issue): Promise<BoardAgentChangeRecord> {
+  const comment = await issueStore().addComment(change.workspaceId, {
+    id: 'comm-' + card.id + '-agent-' + randomUUID().slice(0, 12),
+    issueId: card.id,
+    authorType: 'agent',
+    authorName: change.agentName,
+    ...(change.agentId ? { agentId: change.agentId } : {}),
+    content: String((change.input as Record<string, unknown>).text) + '\n\n(on behalf of ' + change.actorLogin + ')',
+    createdAt: new Date().toISOString()
+  });
+  void supabaseService.shareComment(comment);
+  return change;
+}
+
+/** An update or move: the card's own rules, then one activity note per card per turn. */
+async function applyCardEdit(change: BoardAgentChangeRecord, card: Issue, by: string): Promise<BoardAgentChangeRecord> {
+  const workspaceId = change.workspaceId;
+  const input = change.input as Record<string, any>;
   const updates = await prepareCardUpdate(workspaceId, card, { ...(input.updates as object) });
-  const { saved } = await saveCardUpdate(workspaceId, card, updates);
+  const { saved, syncWarning } = await saveCardUpdate(workspaceId, card, updates);
   // One note per card per turn: the team sees who changed it and for whom,
   // and the full detail stays in this desktop's change log (less to sync).
   const notedThisTurn = store(workspaceId, () => sqliteService.listBoardAgentChanges(workspaceId, { runId: change.runId, limit: 200 }))
@@ -319,7 +345,7 @@ async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentCh
       'Changed by ' + by + ': ' + change.summary + '.' + (assignedElsewhere ? ' Assigned to ' + card.assignedHuman + '.' : ''),
       'agent');
   }
-  return { ...change, after: pick(saved, Object.keys(input.updates ?? {})) };
+  return withSyncWarning({ ...change, after: pick(saved, Object.keys(input.updates ?? {})) }, syncWarning);
 }
 
 /** The shared path for every agent write: access, repeat check, hold or apply, record. */
@@ -358,6 +384,13 @@ async function write(
       throw err;
     }
     throw err;
+  }
+  // A card created this turn is one card: count it under its real id from now
+  // on, so editing it later in the same reply does not count it twice toward
+  // BULK_LIMIT.
+  if (action === 'create' && change.issueId) {
+    grant.touched.delete(targetKey);
+    grant.touched.add(change.issueId);
   }
   store(grant.context.workspaceId, () => sqliteService.insertBoardAgentChange(change));
   return describe(change);
@@ -457,7 +490,9 @@ export async function approveAgentChange(context: WorkspaceContext, id: string):
   if (refusal) throw new BoardRuleError(refusal, 403);
   const decided = { decidedAt: new Date().toISOString(), decidedBy: context.userId };
   try {
-    const applied = { ...(await applyChange(change)), status: 'applied' as const, reason: undefined, ...decided };
+    // The hold's reason is answered by this decision; what remains is any sync warning from applying it.
+    const result = await applyChange({ ...change, reason: undefined });
+    const applied = { ...result, status: 'applied' as const, ...decided };
     store(context.workspaceId, () => sqliteService.updateBoardAgentChange(applied));
     return applied;
   } catch (err) {

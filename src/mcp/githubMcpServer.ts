@@ -61,7 +61,7 @@ import {
   listPullRequests
 } from '../services/githubRepoWorkspace.js';
 import { sqliteService } from '../services/sqliteService.js';
-import { createIssue, rerunFailedJobs } from '../services/agentCiActions.js';
+import { commentOnIssue, createIssue, rerunFailedJobs, updateIssue } from '../services/agentCiActions.js';
 import { deliveryStatusFor } from '../services/agentDeliveryStatus.js';
 
 /**
@@ -220,10 +220,10 @@ async function writableRepo(repo: unknown): Promise<string> {
   throw new Error(`${value} is outside the repositories this turn works on.`);
 }
 
-/** Who opened something, written into it, so GitHub's record says an agent did. */
-function agentAttribution(): string {
+/** Who opened or wrote something, written into it, so GitHub's record says an agent did. */
+function agentAttribution(verb: 'Opened' | 'Posted' = 'Opened'): string {
   const runId = process.env.ALPHA_RUN_ID;
-  return runId ? `Opened by an Alpha agent during run ${runId}.` : 'Opened by an Alpha agent.';
+  return runId ? `${verb} by an Alpha agent during run ${runId}.` : `${verb} by an Alpha agent.`;
 }
 
 const str = (description: string) => ({ type: 'string', description });
@@ -375,6 +375,66 @@ const TOOLS: Record<string, ToolDef> = {
         return issue;
       } catch (err: any) {
         audit('create_issue', String(repo), false, String(err?.message ?? err));
+        throw err;
+      }
+    }
+  },
+
+  github_comment_issue: {
+    access: 'write',
+    description:
+      'Comment on an issue in one of this project\'s repositories: progress on it, new evidence (run link, log excerpt), or the pull ' +
+      'request that fixes it. Works on any issue there; it adds to the record and changes nothing a person wrote. Not for pull ' +
+      'requests: use github_review_pull_request. Never put secrets, tokens or personal data in a comment. The comment records that an agent wrote it.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        issue: int('Issue number', 1, 1_000_000_000),
+        body: str('The comment, in markdown')
+      },
+      ['repo', 'issue', 'body']
+    ),
+    run: async ({ repo, issue, body }) => {
+      const target = `${String(repo)}#${String(issue)}`;
+      try {
+        const result = await commentOnIssue(await api(), await writableRepo(repo), issue, body, agentAttribution('Posted'));
+        audit('comment_issue', result.url, true, String(body).slice(0, 120));
+        return result;
+      } catch (err: any) {
+        audit('comment_issue', target, false, String(err?.message ?? err));
+        throw err;
+      }
+    }
+  },
+
+  github_update_issue: {
+    access: 'write',
+    description:
+      'Edit, close or reopen an issue that an Alpha agent opened (with github_create_issue) in one of this project\'s repositories: ' +
+      'correct its title or body, set its labels, or close it once it is fixed. An issue a person opened is refused; comment on it ' +
+      'instead. Closing needs a comment saying why, for example the pull request that fixed it. The body you pass replaces the old ' +
+      'one; the line saying an agent opened it is kept.',
+    inputSchema: schema(
+      {
+        repo: str('Repository as owner/name'),
+        issue: int('Issue number', 1, 1_000_000_000),
+        title: str('New title'),
+        body: str('New body in markdown (replaces the old one)'),
+        labels: { type: 'array', items: { type: 'string' }, maxItems: 10, description: 'Labels (replaces the list); they must already exist in the repository' },
+        state: { type: 'string', enum: ['open', 'closed'], description: 'closed to close it, open to reopen it' },
+        reason: { type: 'string', enum: ['completed', 'not_planned'], description: 'When closing: completed (default) or not_planned' },
+        comment: str('Why, posted as a comment first. Required to close; optional otherwise')
+      },
+      ['repo', 'issue']
+    ),
+    run: async ({ repo, issue, ...change }) => {
+      const target = `${String(repo)}#${String(issue)}`;
+      try {
+        const result = await updateIssue(await api(), await writableRepo(repo), issue, change, agentAttribution('Posted'));
+        audit('update_issue', result.url, true, result.changed.join(', ') || 'no change');
+        return result;
+      } catch (err: any) {
+        audit('update_issue', target, false, String(err?.message ?? err));
         throw err;
       }
     }

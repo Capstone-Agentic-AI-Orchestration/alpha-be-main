@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { GitHubApi } from './githubApi.js';
-import { createIssue, failedRunLogs, MAX_RUN_ATTEMPTS, rerunFailedJobs } from './agentCiActions.js';
+import { commentOnIssue, createIssue, failedRunLogs, MAX_RUN_ATTEMPTS, rerunFailedJobs, updateIssue } from './agentCiActions.js';
 
 /**
  * What an agent may do about CI by itself: read a failure, retry it once, and
@@ -145,3 +145,78 @@ describe('opening an issue', () => {
     expect(calls).toEqual([]);
   });
 });
+
+const ISSUE = '/repos/acme/shop/issues/7';
+const agentIssue = (extra: Record<string, unknown> = {}) => ({
+  number: 7, title: 'Audit fails', state: 'open', html_url: 'https://github.com/acme/shop/issues/7',
+  body: 'Run 42 fails Dependency Audit.\n\n---\n\n_Opened by an Alpha agent during run r1._', ...extra
+});
+const personIssue = (extra: Record<string, unknown> = {}) => ({ number: 7, title: 'Typo on login', state: 'open', html_url: 'u', body: 'Please fix.', ...extra });
+
+describe('commenting on an issue', () => {
+  it('comments on any issue in the repository, signed as an agent', async () => {
+    const { api, calls } = fakeApi({ [ISSUE]: personIssue(), [ISSUE + '/comments']: { id: 1, html_url: 'https://github.com/acme/shop/issues/7#c1' } });
+    const result = await commentOnIssue(api, 'acme/shop', 7, ' Fixed in #12. ', 'Posted by an Alpha agent during run r2.');
+    expect(result).toEqual({ issue: 7, url: 'https://github.com/acme/shop/issues/7#c1' });
+    expect(calls.at(-1)).toEqual({ method: 'POST', path: ISSUE + '/comments', body: { body: 'Fixed in #12.\n\n---\n\n_Posted by an Alpha agent during run r2._' } });
+  });
+
+  it('refuses pull requests, locked issues, empty text and bad numbers', async () => {
+    const pr = fakeApi({ [ISSUE]: personIssue({ pull_request: {} }) });
+    await expect(commentOnIssue(pr.api, 'acme/shop', 7, 'x', 'a')).rejects.toThrow('github_review_pull_request');
+    const locked = fakeApi({ [ISSUE]: personIssue({ locked: true }) });
+    await expect(commentOnIssue(locked.api, 'acme/shop', 7, 'x', 'a')).rejects.toThrow('locked');
+    const none = fakeApi({});
+    await expect(commentOnIssue(none.api, 'acme/shop', 7, '  ', 'a')).rejects.toThrow('needs text');
+    await expect(commentOnIssue(none.api, 'acme/shop', 0, 'x', 'a')).rejects.toThrow('Invalid issue number');
+    expect([...pr.calls, ...locked.calls, ...none.calls].some(call => call.method === 'POST')).toBe(false);
+  });
+});
+
+describe('editing, closing and reopening an issue', () => {
+  it('edits an agent\'s issue and keeps the line saying an agent opened it', async () => {
+    const { api, calls } = fakeApi({ [ISSUE]: agentIssue() });
+    (api as any).patch = async (path: string, body: unknown) => { calls.push({ method: 'PATCH', path, body }); return { ...agentIssue(), html_url: 'u2' }; };
+    const result = await updateIssue(api, 'acme/shop', 7, { title: 'Audit fails on multer', body: 'Run 43 too.', labels: ['ci'] }, 'Posted by an Alpha agent.');
+    expect(result).toMatchObject({ number: 7, changed: ['title', 'labels', 'body'] });
+    expect(calls.at(-1)).toEqual({ method: 'PATCH', path: ISSUE, body: {
+      title: 'Audit fails on multer', labels: ['ci'], body: 'Run 43 too.\n\n---\n\n_Opened by an Alpha agent during run r1._'
+    } });
+  });
+
+  it('closes an agent\'s issue only with a reason, posted before it closes', async () => {
+    const { api, calls } = fakeApi({ [ISSUE]: agentIssue(), [ISSUE + '/comments']: { id: 2, html_url: 'c' } });
+    (api as any).patch = async (path: string, body: unknown) => { calls.push({ method: 'PATCH', path, body }); return { ...agentIssue(), state: 'closed' }; };
+    await expect(updateIssue(api, 'acme/shop', 7, { state: 'closed' }, 'a')).rejects.toThrow('needs a comment');
+    expect(calls).toEqual([]);
+
+    const result = await updateIssue(api, 'acme/shop', 7, { state: 'closed', comment: 'Fixed in #12.' }, 'Posted by an Alpha agent.');
+    expect(result).toMatchObject({ state: 'closed', changed: ['state'] });
+    expect(calls.map(call => call.method + ' ' + call.path)).toEqual(['GET ' + ISSUE, 'POST ' + ISSUE + '/comments', 'PATCH ' + ISSUE]);
+    expect(calls.at(-1)?.body).toEqual({ state: 'closed', state_reason: 'completed' });
+  });
+
+  it('reopens an agent\'s issue', async () => {
+    const { api, calls } = fakeApi({ [ISSUE]: agentIssue({ state: 'closed' }) });
+    (api as any).patch = async (path: string, body: unknown) => { calls.push({ method: 'PATCH', path, body }); return agentIssue(); };
+    await expect(updateIssue(api, 'acme/shop', 7, { state: 'open' }, 'a')).resolves.toMatchObject({ state: 'open', changed: ['state'] });
+    expect(calls.at(-1)?.body).toEqual({ state: 'open' });
+  });
+
+  it('refuses to edit or close an issue a person opened', async () => {
+    const { api, calls } = fakeApi({ [ISSUE]: personIssue() });
+    await expect(updateIssue(api, 'acme/shop', 7, { state: 'closed', comment: 'Done.' }, 'a')).rejects.toThrow(/not opened by an Alpha agent[\s\S]*github_comment_issue/);
+    await expect(updateIssue(api, 'acme/shop', 7, { title: 'Mine now' }, 'a')).rejects.toThrow('not opened by an Alpha agent');
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+  });
+
+  it('refuses an empty change and bad values before asking GitHub', async () => {
+    const { api, calls } = fakeApi({});
+    await expect(updateIssue(api, 'acme/shop', 7, {}, 'a')).rejects.toThrow('Say what to change');
+    await expect(updateIssue(api, 'acme/shop', 7, { state: 'deleted' }, 'a')).rejects.toThrow('open or closed');
+    await expect(updateIssue(api, 'acme/shop', 7, { labels: [''] }, 'a')).rejects.toThrow('Labels');
+    await expect(updateIssue(api, 'acme/shop', 7, { title: ' ' }, 'a')).rejects.toThrow('title');
+    expect(calls).toEqual([]);
+  });
+});
+

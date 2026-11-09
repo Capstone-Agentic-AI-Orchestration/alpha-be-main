@@ -8,14 +8,16 @@ const state = vi.hoisted(() => ({
   comments: [] as IssueComment[],
   changes: [] as BoardAgentChangeRecord[],
   refusal: null as string | null,
-  clock: 0
+  clock: 0,
+  publishError: undefined as string | undefined,
+  boardWarning: undefined as string | undefined
 }));
 
 vi.mock('../config/env.js', async importOriginal => ({ ...(await importOriginal<object>()), IS_CLOUD: false }));
 vi.mock('./workspaceContext.js', async importOriginal => ({ ...(await importOriginal<object>()), runWithWorkspace: (_id: string, fn: () => unknown) => fn() }));
 vi.mock('./supabaseService.js', () => ({ supabaseService: { shareIssue: vi.fn(), shareComment: vi.fn(), unshareIssue: vi.fn() } }));
-vi.mock('./boardShareQueue.js', () => ({ BOARD_SHARE_WARNING: 'not on the team board yet', shareCard: vi.fn(async () => true), shareCardForReply: vi.fn(async () => undefined) }));
-vi.mock('./githubBoardWrite.js', () => ({ needsPush: () => false, pushIssue: vi.fn(), publishNewIssue: async () => ({}), publishedFields: vi.fn() }));
+vi.mock('./boardShareQueue.js', () => ({ BOARD_SHARE_WARNING: 'not on the team board yet', shareCard: vi.fn(async () => true), shareCardForReply: vi.fn(async () => state.boardWarning) }));
+vi.mock('./githubBoardWrite.js', () => ({ needsPush: () => false, pushIssue: vi.fn(), publishNewIssue: async () => (state.publishError ? { error: state.publishError } : {}), publishedFields: vi.fn() }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { bind: vi.fn(), unbind: vi.fn() } }));
 vi.mock('./boardGrant.js', () => ({ boardAgentRefusal: () => state.refusal }));
 vi.mock('./sqliteService.js', () => ({
@@ -76,6 +78,8 @@ beforeEach(() => {
   state.changes = [];
   state.refusal = null;
   state.clock = 0;
+  state.publishError = undefined;
+  state.boardWarning = undefined;
 });
 
 describe('reading the board', () => {
@@ -140,6 +144,28 @@ describe('agent changes', () => {
     state.refusal = 'Agents work on the board only for developers.';
     await expect(createCardForAgent(grant(), { title: 'Anything' })).rejects.toThrow(state.refusal);
   });
+
+  it('says so when GitHub or the team board did not take a change, instead of only "done"', async () => {
+    state.publishError = 'GitHub refused the new issue (403).';
+    const created = await createCardForAgent(grant(), { title: 'Login page' });
+    expect(created).toMatchObject({ status: 'done', summary: expect.stringContaining('Saved in Alpha, but not synced: GitHub refused the new issue (403).') });
+    expect(state.issues.some(issue => issue.title === 'Login page')).toBe(true);
+    expect(state.changes.at(-1)).toMatchObject({ action: 'create', status: 'applied', reason: 'GitHub refused the new issue (403).' });
+
+    state.boardWarning = 'not on the team board yet';
+    const moved = await moveCardForAgent(grant({ runId: 'turn-2' }), { card: 'CAP-1', column: 'review', expected_updated_at: '2026-11-01T00:00:00.000Z' });
+    expect(moved.summary).toContain('Saved in Alpha, but not synced: not on the team board yet');
+
+    // A repeated call reports the same thing, from the record.
+    const again = await moveCardForAgent(grant({ runId: 'turn-2' }), { card: 'CAP-1', column: 'review', expected_updated_at: '2026-11-01T00:00:00.000Z' });
+    expect(again.summary).toContain('not on the team board yet');
+  });
+
+  it('reports plain "done" when everything synced', async () => {
+    const created = await createCardForAgent(grant(), { title: 'Signup page' });
+    expect(created.summary).not.toContain('not synced');
+    expect(state.changes.at(-1)?.reason).toBeUndefined();
+  });
 });
 
 describe('changes that wait for the developer', () => {
@@ -171,11 +197,42 @@ describe('changes that wait for the developer', () => {
     await expect(updateCardForAgent(g, { card: 'CAP-1', priority: 'high', expected_updated_at: state.issues[0].updatedAt })).resolves.toMatchObject({ status: 'done' });
   });
 
+  it('counts a card created this turn once, when the same turn edits it', async () => {
+    const g = grant();
+    for (const title of ['One', 'Two', 'Three']) {
+      await expect(createCardForAgent(g, { title })).resolves.toMatchObject({ status: 'done' });
+    }
+    for (const title of ['One', 'Two', 'Three']) {
+      const created = state.issues.find(issue => issue.title === title)!;
+      await expect(updateCardForAgent(g, { card: created.identifier, priority: 'high', expected_updated_at: created.updatedAt })).resolves.toMatchObject({ status: 'done' });
+    }
+    expect(g.touched.size).toBe(3);
+    // The limit is unchanged: two more cards are fine, the sixth waits.
+    for (const n of [1, 2]) {
+      await expect(moveCardForAgent(g, { card: 'CAP-' + n, column: 'backlog', expected_updated_at: '2026-11-01T00:00:00.000Z' })).resolves.toMatchObject({ status: 'done' });
+    }
+    await expect(moveCardForAgent(g, { card: 'CAP-3', column: 'backlog', expected_updated_at: '2026-11-01T00:00:00.000Z' })).resolves.toMatchObject({ status: 'held' });
+  });
+
   it('does not apply a confirmed change to a card a person edited meanwhile', async () => {
     const held = await archiveForAgent(grant(), { card: 'CAP-3', expected_updated_at: '2026-11-01T00:00:00.000Z' });
     state.issues[2] = { ...state.issues[2], title: 'Edited by a person', updatedAt: '2026-11-07T09:00:00.000Z' };
     await expect(approveAgentChange(developer, held.changeId!)).rejects.toMatchObject({ status: 409 });
     expect(state.changes[0].status).toBe('failed');
+  });
+
+  it('drops the hold reason on confirmation and keeps a sync warning from applying it', async () => {
+    const held = await archiveForAgent(grant(), { card: 'CAP-3', expected_updated_at: '2026-11-01T00:00:00.000Z' });
+    expect(state.changes[0].reason).toMatch(/waits for lloyd/);
+    const clean = await approveAgentChange(developer, held.changeId!);
+    expect(clean).toMatchObject({ status: 'applied' });
+    expect(clean.reason).toBeUndefined();
+
+    state.boardWarning = 'not on the team board yet';
+    const second = await archiveForAgent(grant({ runId: 'turn-2' }), { card: 'CAP-5', expected_updated_at: '2026-11-01T00:00:00.000Z' });
+    const warned = await approveAgentChange(developer, second.changeId!);
+    expect(warned).toMatchObject({ status: 'applied', reason: 'not on the team board yet' });
+    expect(state.issues[4].archivedAt).toBeTruthy();
   });
 });
 
