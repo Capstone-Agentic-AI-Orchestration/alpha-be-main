@@ -45,10 +45,11 @@ its creation operation through the same ticket-scoped recovery path.
 6. New linked tickets require access to the exact same-workspace, same-client
    original. Closed history can be referenced but is not changed. A follow-up
    inherits no project, scope, Issue manifest, agreement or work authorization.
-7. Shared-project preferences resolve only through active explicitly published
-   client options. New project/Not sure needs no repository access. This records
-   a preference for PM review: it does not link/create projects, authorize work,
-   grant project access, start agents or promise a requested deadline.
+7. Shared-project choices resolve only through active explicitly published
+   client options and link the new ticket to that already-shared project in the
+   creation transaction. `new_project` and `not_sure` remain unlinked for PM
+   review. This organizational link does not grant project access, authorize
+   work, create a project, start agents or promise a requested deadline.
 8. Generate the opaque ticket ID and atomically allocate the reference on the
    server. Never use browser/list counts. Insert Received workflow/header and
    submitted preferences, create the exact client-ticket grant, and verify access

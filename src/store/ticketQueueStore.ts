@@ -31,7 +31,7 @@ export interface TicketQueueRow {
   } | null;
   /** PM-only identity grouping. Public inquiries without a verified client ID
    * use a ticket-specific key, never an email-derived key. */
-  pmClientGroup?: { key: string; displayName: string; acceptsNewRequests: boolean; accessActive: boolean };
+  pmClientGroup?: { key: string; displayName: string };
   /** PM-only project label. Never included in a client queue projection. */
   pmProjectName?: string | null;
   /** PM-only unread client-reply indicator. */

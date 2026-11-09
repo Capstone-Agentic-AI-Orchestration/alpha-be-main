@@ -42,8 +42,8 @@ export class PostgresTicketClientActivationStore implements TicketClientActivati
         if (workspaces.length !== 1) return false;
         await sql.query(
           `insert into alpha_private.ticket_service_grants
-             (id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode,time_zone,created_at)
-           values ($1,$2,$3,'active','Client portal',false,'disabled','UTC',$4)
+             (id,workspace_id,client_user_id,status,display_name,write_mode,time_zone,created_at)
+           values ($1,$2,$3,'active','Client portal','disabled','UTC',$4)
            on conflict (workspace_id,client_user_id) do nothing`,
           [randomUUID(), workspaceId, clientUserId, occurredAt],
         );

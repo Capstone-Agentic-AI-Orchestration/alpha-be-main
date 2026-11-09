@@ -10,8 +10,6 @@ import { PostgresTicketClientIntakeContextStore } from '../store/ticketClientInt
 import { createTicketClientIntakeContextService } from './ticketClientIntakeContextService.js';
 import { createTicketCreationService } from './ticketCreationService.js';
 import { PostgresTicketCreationStore } from '../store/ticketCreationPostgresStore.js';
-import { createTicketProjectManagementService } from './ticketProjectManagementService.js';
-import { PostgresTicketProjectManagementStore } from '../store/ticketProjectManagementPostgresStore.js';
 
 const client: TicketSubject = { kind: 'client', userId: 'client-a', sessionId: 'a'.repeat(64) };
 const other: TicketSubject = { kind: 'client', userId: 'client-b', sessionId: 'b'.repeat(64) };
@@ -41,8 +39,8 @@ beforeEach(async () => {
     ('project-a','workspace-a','Project A','A','active'),('project-b','workspace-b','Project B','B','active'),
     ('preference-only','workspace-a','Not shared','C','active')`);
   for (const [user, session] of [['client-a','a'.repeat(64)],['client-b','b'.repeat(64)]]) {
-    await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
-      values ($1,'workspace-a',$2,'active','Client',true,'enabled')`, [user,user]);
+    await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,write_mode)
+      values ($1,'workspace-a',$2,'active','Client','enabled')`, [user,user]);
     await db.query(`insert into alpha_private.ticket_client_sessions(session_id_hash,client_user_id,csrf_hash,created_at,expires_at)
       values ($1,$2,$3,now()-interval '1 minute',now()+interval '1 day')`, [session,user,'c'.repeat(64)]);
     const state = { ...newTicketWorkflow('ticket-'+user,'workspace-a',user), projectId: 'project-a' };
@@ -67,24 +65,24 @@ describe('client project portal on the complete migration schema', () => {
     await expect(app.messages(target,client,{})).rejects.toMatchObject({ status: 404 });
   });
 
-  it('keeps pending project preferences visible without granting access or changing actual project links', async () => {
+  it('automatically links requests created under a shared project and respects client grants', async () => {
     const context = await createTicketClientIntakeContextService(new PostgresTicketClientIntakeContextStore(db)).get('workspace-a',client);
     const creation = createTicketCreationService(new PostgresTicketCreationStore(db));
     const created = await creation.create(context.intakeContextId,client,{ schemaVersion:1,operationId:'create',title:'Additional work',description:'Details',
       projectPreference:{ kind:'shared_project',optionId:context.sharedProjects[0].optionId } });
     const result = await app.requests(client,{},target);
     expect(result.items.find(t => t.id === created.ticketId)).toMatchObject({ workspaceId:'workspace-a',status:'received',
-      projectId:null,projectName:null,requestedProjectName:'Project A',projectLinkStatus:'pending_review' });
+      projectId:'project-a',projectName:'Project A',requestedProjectName:null,projectLinkStatus:'linked' });
     expect((await app.requests(client,{})).items).toHaveLength(2);
     await db.query(`update alpha_private.ticket_client_grants set active=false where ticket_id='ticket-client-a'`);
-    await expect(app.requests(client,{},target)).rejects.toMatchObject({status:404});
-    expect((await app.requests(client,{})).items.find(t=>t.id===created.ticketId)).toMatchObject({projectId:null,requestedProjectName:null,projectLinkStatus:'pending_review'});
-    await db.query(`update alpha_private.ticket_client_grants set active=true where ticket_id='ticket-client-a'`);
-    const link = createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db));
-    await link.linkProject({workspaceId:'workspace-a',ticketId:created.ticketId},pm,
-      {schemaVersion:1,operationId:'link',expectedVersion:0,projectId:'project-a',clientVisible:true});
-    expect((await app.requests(client,{},target)).items.find(t => t.id === created.ticketId)).toMatchObject({
+    const scopedAfterRevocation = await app.requests(client,{},target);
+    expect(scopedAfterRevocation.items).toHaveLength(1);
+    expect(scopedAfterRevocation.items[0]?.id).toBe(created.ticketId);
+    const accessible = await app.requests(client,{});
+    expect(accessible.items).toHaveLength(1);
+    expect(accessible.items.find(t=>t.id===created.ticketId)).toMatchObject({
       projectId:'project-a',projectName:'Project A',requestedProjectName:null,projectLinkStatus:'linked' });
+    await db.query(`update alpha_private.ticket_client_grants set active=true where ticket_id='ticket-client-a'`);
     await db.query(`update alpha_private.tickets set project_client_visible=false where client_user_id='client-a'`);
     await expect(app.requests(client,{},target)).rejects.toMatchObject({status:404});
     const global = await app.requests(client,{});
@@ -204,8 +202,8 @@ describe('client project portal on the complete migration schema', () => {
   });
 
   it('paginates duplicate ticket IDs across workspaces without skipping or exposing other clients', async () => {
-    await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
-      values ('grant-b','workspace-b','client-a','active','Client',true,'enabled')`);
+    await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,write_mode)
+      values ('grant-b','workspace-b','client-a','active','Client','enabled')`);
     const state={...newTicketWorkflow('ticket-client-a','workspace-b','client-a'),projectId:'project-b'};
     await db.query(`insert into alpha_private.tickets(id,workspace_id,reference,title,description,client_safe_company_label,source,status,version,
       workflow_state,client_user_id,project_id,project_display_name,project_client_visible,created_at,client_updated_at,internal_updated_at)

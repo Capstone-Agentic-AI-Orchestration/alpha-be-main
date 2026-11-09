@@ -29,8 +29,8 @@ beforeEach(async()=>{
   await db.query(`insert into issues(id,workspace_id,project_id,identifier,title,status,priority) values
     ('workflow-i','workflow-w','workflow-p','WF-1','Unassigned Issue','todo','medium'),
     ('workflow-i2','workflow-w','workflow-p','WF-2','Another Issue','todo','medium')`);
-  await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
-    values('workflow-service','workflow-w','workflow-client','active','Client',false,'disabled')`);
+  await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,write_mode)
+    values('workflow-service','workflow-w','workflow-client','active','Client','disabled')`);
   await db.query(`insert into alpha_private.ticket_client_sessions(session_id_hash,client_user_id,csrf_hash,created_at,expires_at)
     values($1,'workflow-client',$2,now()-interval '1 minute',now()+interval '1 hour')`,[client.sessionId,'a'.repeat(64)]);
   const state=newTicketWorkflow(target.ticketId,target.workspaceId,client.userId);
@@ -81,7 +81,7 @@ describe('durable ticket lifecycle',()=>{
     expect((await db.query<{version:number}>(`select version from alpha_private.tickets where id='workflow-t'`)).rows[0].version).toBe(3);
     await expect(commands.execute(target,pm,{schemaVersion:1,operationId:'stale',expectedVersion:0,command:{type:'hold',reason:'Wait'}})).rejects.toMatchObject({status:409});
   });
-  it('keeps client workflow usable when new requests are disabled and denies revoked grants',async()=>{
+  it('keeps client workflow usable when new-ticket writes are disabled and denies revoked grants',async()=>{
     await agreed();
     await db.query(`update alpha_private.ticket_client_grants set active=false where ticket_id='workflow-t'`);
     await expect(createTicketCommandService(store).lookup(target,client,'agree')).rejects.toMatchObject({status:404});

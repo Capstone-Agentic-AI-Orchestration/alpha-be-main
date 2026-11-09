@@ -63,64 +63,21 @@ afterAll(async () => { await pg?.close(); objectBytes.clear(); });
 beforeEach(() => { objectBytes.clear(); putObject.mockClear(); getObject.mockClear(); });
 
 describe('Private ticket documents on PostgreSQL', () => {
-  it('keeps immutable versions, supports safe retries/downloads, and rejects cross-ticket or unauthenticated access', async () => {
-    const first = await submitTicket();
-    const second = await submitTicket();
-    const documents = createTicketDocumentService(new PostgresTicketDocumentStore(db), {
-      put: putObject, get: getObject,
-    });
-    const firstBytes = Buffer.from('%PDF-1.7\nticket communication document v1\n');
-    const original = await documents.upload(first, pm, {
-      operationId: 'ticket-communication-upload-v1', filename: 'brief.pdf', contentType: 'application/pdf', bytes: firstBytes,
-    });
-    expect(original).toMatchObject({ author: 'pm', version: 1, changeProposed: false, status: 'available' });
-    expect(original).not.toHaveProperty('storagePath');
-    expect(original).not.toHaveProperty('sha256');
-    expect(await documents.upload(first, pm, {
-      operationId: 'ticket-communication-upload-v1', filename: 'brief.pdf', contentType: 'application/pdf', bytes: firstBytes,
-    })).toEqual(original);
-    expect(putObject).toHaveBeenCalledTimes(1);
-
-    const replacementBytes = Buffer.from('%PDF-1.7\nticket communication document v2\n');
-    const replacement = await documents.upload(first, pm, {
-      operationId: 'ticket-communication-upload-v2', replacesDocumentId: original.id,
-      filename: 'brief.pdf', contentType: 'application/pdf', bytes: replacementBytes,
-    });
-    expect(replacement).toMatchObject({ groupId: original.groupId, version: 2,
-      replacesDocumentId: original.id, changeProposed: true, status: 'available' });
-    await expect(documents.list(first, pm)).resolves.toEqual([original, replacement]);
-    const originalDownload = await documents.download(first, pm, original.id);
-    expect(originalDownload.document).toEqual(original);
-    expect(Array.from(originalDownload.bytes)).toEqual(Array.from(firstBytes));
-    expect(objectBytes.size).toBe(2);
-
-    await expect(documents.upload(second, pm, {
-      operationId: 'ticket-communication-cross-ticket-replacement', replacesDocumentId: original.id,
-      filename: 'brief.pdf', contentType: 'application/pdf', bytes: replacementBytes,
-    })).rejects.toMatchObject({ status: 404 });
-    await expect(documents.list(first, { kind: 'client', userId: 'uninvited-client', sessionId: 'no-session' }))
-      .rejects.toMatchObject({ status: 404 });
-    expect((await db.query<{ count: number }>(
-      'select count(*)::int as count from alpha_private.ticket_documents where workspace_id=$1 and ticket_id=$2',
-      [workspaceId, first.ticketId],
-    )).rows[0].count).toBe(2);
-  }, 60_000);
-
-  it('rejects spoofed, unsafe, and oversized content before any storage write', async () => {
+  it('rejects PM uploads before checking file content or touching private storage', async () => {
     const target = await submitTicket();
     const documents = createTicketDocumentService(new PostgresTicketDocumentStore(db), { put: putObject, get: getObject });
     await expect(documents.upload(target, pm, {
-      operationId: 'ticket-communication-html-spoof', filename: 'payload.pdf', contentType: 'application/pdf',
+      operationId: 'ticket-communication-pm-html-spoof', filename: 'payload.pdf', contentType: 'application/pdf',
       bytes: Buffer.from('<html>not a PDF</html>'),
-    })).rejects.toMatchObject({ status: 400 });
+    })).rejects.toMatchObject({ status: 403 });
     await expect(documents.upload(target, pm, {
-      operationId: 'ticket-communication-path-traversal', filename: '../private.pdf', contentType: 'application/pdf',
+      operationId: 'ticket-communication-pm-path-traversal', filename: '../private.pdf', contentType: 'application/pdf',
       bytes: Buffer.from('%PDF-1.7\ncontent'),
-    })).rejects.toMatchObject({ status: 400 });
+    })).rejects.toMatchObject({ status: 403 });
     await expect(documents.upload(target, pm, {
-      operationId: 'ticket-communication-too-large', filename: 'large.pdf', contentType: 'application/pdf',
+      operationId: 'ticket-communication-pm-too-large', filename: 'large.pdf', contentType: 'application/pdf',
       bytes: Buffer.alloc(10 * 1024 * 1024 + 1, 1),
-    })).rejects.toMatchObject({ status: 400 });
+    })).rejects.toMatchObject({ status: 403 });
     expect(putObject).not.toHaveBeenCalled();
     expect((await db.query<{ count: number }>(
       'select count(*)::int as count from alpha_private.ticket_documents where workspace_id=$1 and ticket_id=$2',

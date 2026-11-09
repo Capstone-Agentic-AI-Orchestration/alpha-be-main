@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 
 import type { TicketDocumentsApplication } from './ticketDocumentController.js';
-import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
+import { safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
 import { route } from './asyncRoute.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 
@@ -44,10 +44,7 @@ export function createTicketPmDocumentRouter(
     if (!subject) return;
     const ticketTarget = target(req, res);
     if (!ticketTarget) return;
-    const metadata = parseTicketDocumentMetadata(req);
-    if (!metadata || !Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Choose a supported document.' });
-    const document = await application.upload(ticketTarget, subject, { ...metadata, bytes: req.body });
-    return res.json(safeTicketDocuments([document])[0]);
+    return res.status(403).json({ error: 'Only the client can upload documents to this ticket.' });
   }));
 
   router.get('/:ticketId/documents/:documentId/content', route(async (req, res) => {

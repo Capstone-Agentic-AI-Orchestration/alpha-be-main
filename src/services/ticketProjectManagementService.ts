@@ -121,19 +121,5 @@ export function createTicketProjectManagementService(
         return result;
       });
     },
-
-    async setClientRequestsEnabled(target: TicketTarget, subject: TicketSubject, input: unknown) {
-      if (subject.kind !== 'internal') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only a project manager can change client request access.');
-      if (!input || typeof input !== 'object' || Array.isArray(input)
-        || Object.keys(input as object).some(key => key !== 'acceptsNewRequests')
-        || typeof (input as Record<string, unknown>).acceptsNewRequests !== 'boolean') {
-        throw new TicketWorkflowError(400, 'invalid_client_request_access', 'This client request setting is invalid.');
-      }
-      const enabled = (input as { acceptsNewRequests: boolean }).acceptsNewRequests;
-      return store.transaction(async tx => ({
-        ticketId: target.ticketId,
-        acceptsNewRequests: await tx.setClientRequestsEnabled(target, subject, enabled),
-      }));
-    },
   };
 }

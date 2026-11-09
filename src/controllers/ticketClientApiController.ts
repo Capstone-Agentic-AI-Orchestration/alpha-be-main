@@ -284,6 +284,11 @@ export function createTicketClientApiRouter(
       const subject=await authenticate(req,res,true);
       if(subject) res.status(201).json(await proposals.submit(subject,await emailFor(subject),req.body));
     }));
+    router.post('/project-proposals/:proposalId/reply',route(async(req,res)=>{
+      if(!available(res) || !allowedWriteOrigin(req,res)) return;
+      const subject=await authenticate(req,res,true);
+      if(subject) res.json(await proposals.reply(subject,req.params.proposalId ?? '',req.body));
+    }));
   }
   if (application.projectPortal) {
     const projects = application.projectPortal;

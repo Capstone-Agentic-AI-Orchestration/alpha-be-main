@@ -36,7 +36,7 @@ export function createTicketCreationService(store: TicketCreationStore, now: () 
     async create(contextId: string, subject: TicketSubject, input: unknown): Promise<TicketCreationReceipt> {
       return store.transaction(async tx => {
         const context = await authorize(tx, contextId, subject);
-        if (context.mode !== 'enabled' || !context.acceptsNewRequests) {
+        if (context.mode !== 'enabled') {
           throw new TicketWorkflowError(503, 'ticket_writes_disabled', 'Ticket changes are unavailable right now.');
         }
         const parsed = parseTicketCreate(input);
@@ -68,13 +68,21 @@ export function createTicketCreationService(store: TicketCreationStore, now: () 
         const reference = await tx.allocateReference(context);
         if (!opaque(reference)) throw new Error('The server could not assign a ticket reference.');
         const target = { workspaceId: context.workspaceId, ticketId };
-        const state = newTicketWorkflow(ticketId, context.workspaceId, context.clientId);
+        const state = {
+          ...newTicketWorkflow(ticketId, context.workspaceId, context.clientId),
+          projectId: preferredProjectId,
+        };
+        const sharedProject = preferredProjectId && requestedProjectLabel ? {
+          projectId: preferredProjectId,
+          displayName: requestedProjectLabel,
+          clientVisible: true,
+        } : null;
         await tx.insertTicket({
           state,
           header: {
             ...target, reference, title: parsed.title, description: parsed.description, clientSafeCompanyLabel: context.companyLabel,
             createdAt: occurredAt, clientUpdatedAt: occurredAt, internalUpdatedAt: occurredAt,
-            closedAt: null, relatedTicketId: parsed.relatedTicketId, sharedProject: null,
+            closedAt: null, relatedTicketId: parsed.relatedTicketId, sharedProject,
           },
           request: {
             source: 'authenticated_client', intakeContextId: context.id, projectPreference: parsed.projectPreference,

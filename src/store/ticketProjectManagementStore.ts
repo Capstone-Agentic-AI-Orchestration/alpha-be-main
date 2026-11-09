@@ -22,7 +22,6 @@ export interface TicketProjectManagementTransaction {
   appendProjectLinkAudit(audit: TicketProjectLinkAudit): Promise<void>;
   enqueueChange(signal: { key: TicketOperationKey; version: number; occurredAt: string }): Promise<void>;
   insertOperation(operation: Extract<SavedTicketOperation, { kind: 'command' }>): Promise<void>;
-  setClientRequestsEnabled(target: TicketTarget, subject: TicketSubject, enabled: boolean): Promise<boolean>;
 }
 export interface TicketProjectManagementStore {
   transaction<T>(work: (tx: TicketProjectManagementTransaction) => Promise<T>): Promise<T>;

@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Sql, TransactionalSql } from './database.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import type {
-  CentralIntakeAcceptance, CentralIntakeCursor, CentralIntakeDeclineReceipt, CentralIntakeFingerprint, CentralIntakeItem,
+  CentralIntakeAcceptance, CentralIntakeClarificationMessage, CentralIntakeClarifyReceipt,
+  CentralIntakeCursor, CentralIntakeDeclineReceipt, CentralIntakeFingerprint, CentralIntakeItem,
   CentralIntakePage, CentralIntakeRatePolicy, TicketCentralIntakeStore,
 } from './ticketCentralIntakeStore.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
@@ -13,8 +14,9 @@ interface CentralIntakeDbRow {
   kind: 'public_inquiry' | 'project_proposal';
   id: string; public_reference: string; full_name: string; email: string; company: string | null; title: string;
   description: string; requested_deadline: string | null; submitted_at: Date | string;
-  status: 'pending' | 'accepted' | 'declined'; handled_at: Date | string | null;
+  status: 'pending' | 'awaiting_client' | 'accepted' | 'declined'; handled_at: Date | string | null;
   outcome_email_status: CentralIntakeItem['outcomeEmailStatus'];
+  clarification_messages: unknown;
 }
 interface SavedOperationDbRow {
   kind: string; client_user_id: string | null; email: string;
@@ -31,6 +33,24 @@ function iso(value: Date | string): string {
 function text(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 200 && value.trim() === value;
 }
+function clarificationMessages(value: unknown): CentralIntakeClarificationMessage[] {
+  let messages = value;
+  if (typeof messages === 'string') {
+    try { messages = JSON.parse(messages) as unknown; } catch { throw new Error('Central proposal messages are invalid.'); }
+  }
+  if (messages == null) return [];
+  if (!Array.isArray(messages) || messages.length > 100) throw new Error('Central proposal messages are invalid.');
+  return messages.map((raw): CentralIntakeClarificationMessage => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Central proposal message is invalid.');
+    const row = raw as Record<string, unknown>;
+    if (!text(row.id) || (row.author !== 'pm' && row.author !== 'client')
+      || typeof row.body !== 'string' || !row.body.trim() || row.body.length > 4000
+      || typeof row.createdAt !== 'string' || !Number.isFinite(Date.parse(row.createdAt))) {
+      throw new Error('Central proposal message is invalid.');
+    }
+    return { id: row.id, author: row.author, body: row.body, createdAt: iso(row.createdAt) };
+  });
+}
 function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
   if (!text(row.id) || typeof row.public_reference !== 'string' || !/^INQ-[A-F0-9]{32}$/.test(row.public_reference)
     || typeof row.full_name !== 'string' || !row.full_name.trim() || row.full_name.length > 160
@@ -43,7 +63,8 @@ function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
   }
   return { kind: row.kind, id: row.id, publicReference: row.public_reference, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
     description: row.description, requestedDeadline: row.requested_deadline, submittedAt: iso(row.submitted_at),
-    status: row.status, handledAt: row.handled_at ? iso(row.handled_at) : null, outcomeEmailStatus: row.outcome_email_status ?? null };
+    status: row.status, clarificationMessages: clarificationMessages(row.clarification_messages),
+    handledAt: row.handled_at ? iso(row.handled_at) : null, outcomeEmailStatus: row.outcome_email_status ?? null };
 }
 
 /** Server-only global intake persistence. Ticket rows are created only when a PM accepts. */
@@ -148,10 +169,15 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
       const { rows } = await tx.query<CentralIntakeDbRow>(
         `select i.kind,i.id,i.public_reference,i.full_name,i.email,i.company,i.title,i.description,i.requested_deadline,i.submitted_at,
-                i.status,coalesce(i.accepted_at,i.declined_at) as handled_at,o.status as outcome_email_status
+                i.status,coalesce(i.accepted_at,i.declined_at) as handled_at,o.status as outcome_email_status,
+                coalesce((select jsonb_agg(jsonb_build_object('id',e.id,'author',e.actor_kind,'body',e.metadata->>'body','createdAt',e.occurred_at)
+                    order by e.occurred_at,e.id)
+                  from alpha_private.ticket_central_intake_events e
+                 where e.organization_key=i.organization_key and e.intake_id=i.id
+                   and e.event_type in ('proposal_clarification_requested','proposal_clarification_replied')),'[]'::jsonb) as clarification_messages
            from alpha_private.ticket_central_intakes i
            left join alpha_private.ticket_central_intake_outcomes o on o.organization_key=i.organization_key and o.intake_id=i.id
-          where i.organization_key=$1 and (($5='pending' and i.status='pending') or ($5='handled' and i.status in ('accepted','declined')))
+          where i.organization_key=$1 and (($5='pending' and i.status in ('pending','awaiting_client')) or ($5='handled' and i.status in ('accepted','declined')))
             and ($2::timestamptz is null or (i.submitted_at,i.id collate "C")<($2::timestamptz,$3::text collate "C"))
           order by i.submitted_at desc,i.id collate "C" desc limit $4`,
         [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1, filter]);
@@ -159,6 +185,46 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       const items = rows.slice(0, limit).map(mapItem);
       const last = items.at(-1);
       return { items, nextCursor: hasMore && last ? { submittedAt: last.submittedAt, id: last.id } : null };
+    });
+  }
+
+  async clarify(input: {
+    organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
+    operationId: string; body: string; occurredAt: string;
+  }): Promise<CentralIntakeClarifyReceipt | 'not_found' | 'already_handled' | 'operation_conflict' | 'forbidden'> {
+    return this.db.transaction(async tx => {
+      const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(input.workspaceId, input.subject);
+      if (!scope || scope.principal.kind !== 'pm') return 'forbidden';
+      const { rows } = await tx.query<{ kind: string; status: string }>(
+        `select kind,status from alpha_private.ticket_central_intakes
+          where organization_key=$1 and id=$2 for update`, [input.organizationKey, input.intakeId]);
+      const existing = rows[0];
+      if (!existing || existing.kind !== 'project_proposal') return 'not_found';
+      const prior = await tx.query<{ event_type: string; actor_id: string | null; workspace_id: string | null; body: string | null }>(
+        `select event_type,actor_id,workspace_id,metadata->>'body' as body
+           from alpha_private.ticket_central_intake_events
+          where organization_key=$1 and intake_id=$2 and metadata->>'operationId'=$3`,
+        [input.organizationKey, input.intakeId, input.operationId]);
+      if (prior.rows[0]) {
+        const row = prior.rows[0];
+        return row.event_type === 'proposal_clarification_requested' && row.actor_id === input.subject.userId
+          && row.workspace_id === input.workspaceId && row.body === input.body
+          ? { intakeId: input.intakeId, operationId: input.operationId, status: 'awaiting_client' }
+          : 'operation_conflict';
+      }
+      if (existing.status !== 'pending') return 'already_handled';
+      const updated = await tx.query<{ id: string }>(
+        `update alpha_private.ticket_central_intakes set status='awaiting_client'
+          where organization_key=$1 and id=$2 and kind='project_proposal' and status='pending' returning id`,
+        [input.organizationKey, input.intakeId]);
+      if (updated.rows.length !== 1) return 'already_handled';
+      await tx.query(
+        `insert into alpha_private.ticket_central_intake_events
+          (id,organization_key,intake_id,event_type,actor_kind,actor_id,workspace_id,occurred_at,metadata)
+         values ($1,$2,$3,'proposal_clarification_requested','pm',$4,$5,$6,$7::jsonb)`,
+        [randomUUID(), input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
+          input.occurredAt, JSON.stringify({ operationId: input.operationId, body: input.body })]);
+      return { intakeId: input.intakeId, operationId: input.operationId, status: 'awaiting_client' };
     });
   }
 

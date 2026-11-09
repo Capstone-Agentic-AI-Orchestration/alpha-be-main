@@ -34,8 +34,8 @@ beforeEach(async()=>{
   await db.query(`insert into public.projects(id,workspace_id,name,key,status) values('project-a','workspace-a','A','A','active'),
     ('project-b','workspace-a','B','B','active'),('project-x','workspace-b','X','X','active')`);
   for(const [user,session] of [['client-a','a'.repeat(64)],['client-b','b'.repeat(64)]]){
-    await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
-      values($1,'workspace-a',$1,'active','Client',true,'enabled')`,[user]);
+    await db.query(`insert into alpha_private.ticket_service_grants(id,workspace_id,client_user_id,status,display_name,write_mode)
+      values($1,'workspace-a',$1,'active','Client','enabled')`,[user]);
     await db.query(`insert into alpha_private.ticket_client_sessions(session_id_hash,client_user_id,csrf_hash,created_at,expires_at)
       values($1,$2,$3,now()-interval '1 minute',now()+interval '1 day')`,[session,user,'c'.repeat(64)]);
     const state={...newTicketWorkflow(`ticket-${user}`,'workspace-a',user),projectId:'project-a'};

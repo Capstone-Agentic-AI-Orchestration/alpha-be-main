@@ -231,6 +231,28 @@ describe('authenticated project proposals',()=>{
   expect(pending.items[0]).toMatchObject({kind:'project_proposal',fullName:'verified@example.test',email:'verified@example.test'});
   expect(JSON.stringify(pending)).not.toContain('proposal-client');
  });
+ it('lets a PM request clarification and only the proposal owner reply idempotently',async()=>{
+  const {proposals,receipt}=await submitProposal();
+  const question={schemaVersion:1,operationId:'10000000-0000-4000-8000-000000000005',body:'Which customer group should the first release support?'};
+  const requested=await app.clarify(receipt.id,workspaceA,pmA,question);
+  expect(requested).toMatchObject({intakeId:receipt.id,operationId:question.operationId,status:'awaiting_client'});
+  expect(await app.clarify(receipt.id,workspaceA,pmA,question)).toEqual(requested);
+  expect((await proposals.list(proposalOwner)).items[0]).toMatchObject({status:'awaiting_client',clarificationMessages:[
+   {author:'pm',body:question.body},
+  ]});
+
+  const reply={schemaVersion:1 as const,operationId:'10000000-0000-4000-8000-000000000006',body:'Existing customers will be first.'};
+  await expect(proposals.reply({...proposalOwner,userId:'other-client'},receipt.id,reply)).rejects.toMatchObject({status:404});
+  const receiptReply=await proposals.reply(proposalOwner,receipt.id,reply);
+  expect(receiptReply).toEqual({id:receipt.id,operationId:reply.operationId,status:'pending'});
+  expect(await proposals.reply(proposalOwner,receipt.id,reply)).toEqual(receiptReply);
+  expect((await proposals.list(proposalOwner)).items[0]).toMatchObject({status:'pending',clarificationMessages:[
+   {author:'pm',body:question.body},
+   {author:'client',body:reply.body},
+  ]});
+  await expect(proposals.reply(proposalOwner,receipt.id,{...reply,operationId:'10000000-0000-4000-8000-000000000007'}))
+   .rejects.toMatchObject({status:409,code:'project_proposal_reply_not_requested'});
+ });
  it('accepts exactly once into an account-linked unlinked ticket with both grants',async()=>{
   const {proposals,receipt}=await submitProposal();
   const command={schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001'};
@@ -279,13 +301,13 @@ describe('authenticated project proposals',()=>{
  it('enables an existing disabled client grant when a PM accepts a proposal',async()=>{
   const {receipt}=await submitProposal();
   await db.query(`insert into alpha_private.ticket_service_grants
-    (id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
-    values('preexisting-grant',$1,$2,'active','Client portal',false,'disabled')`,[workspaceA,proposalOwner.userId]);
+    (id,workspace_id,client_user_id,status,display_name,write_mode)
+    values('preexisting-grant',$1,$2,'active','Client portal','disabled')`,[workspaceA,proposalOwner.userId]);
   const accepted=await app.accept(receipt.id,workspaceA,pmA,{schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000003'});
   expect(accepted.workspaceId).toBe(workspaceA);
-  expect((await db.query(`select status,accepts_new_requests,write_mode,revoked_at
+  expect((await db.query(`select status,write_mode,revoked_at
     from alpha_private.ticket_service_grants where workspace_id=$1 and client_user_id=$2`,[workspaceA,proposalOwner.userId])).rows)
-    .toEqual([{status:'active',accepts_new_requests:false,write_mode:'enabled',revoked_at:null}]);
+    .toEqual([{status:'active',write_mode:'enabled',revoked_at:null}]);
  });
  it.each(['suspended','revoked'])('does not revive a %s grant or partially create a ticket',async(status)=>{
   const {receipt}=await submitProposal();

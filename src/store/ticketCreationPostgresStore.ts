@@ -12,7 +12,7 @@ import { decodeTicketWorkflow, ticketWriteMode } from './ticketPostgresCodec.js'
 
 interface CreateContextDbRow {
   id: string; workspace_id: string; client_user_id: string; status: string;
-  accepts_new_requests: boolean; write_mode: string; display_name: string;
+  write_mode: string; display_name: string;
   workspace_write_mode: string | null;
 }
 interface ProjectOptionDbRow { project_id: string; display_name: string }
@@ -106,7 +106,7 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
     if (subject.kind !== 'client' || !text(subject.userId) || !/^[a-f0-9]{64}$/.test(subject.sessionId)
       || !text(contextId)) return null;
     const { rows } = await this.sql.query<CreateContextDbRow>(
-      `select sg.id, sg.workspace_id, sg.client_user_id, sg.status, sg.accepts_new_requests,
+      `select sg.id, sg.workspace_id, sg.client_user_id, sg.status,
               sg.write_mode, sg.display_name, w.settings_json->>'ticketing_write_mode' as workspace_write_mode
        from public.workspaces w
        join alpha_private.ticket_client_sessions s
@@ -121,11 +121,11 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
     );
     const row = rows[0];
     if (!row || row.id !== contextId || row.client_user_id !== subject.userId || row.status !== 'active'
-      || typeof row.accepts_new_requests !== 'boolean' || typeof row.display_name !== 'string'
+      || typeof row.display_name !== 'string'
       || !row.display_name.trim()) return null;
     this.context = {
       id: row.id, workspaceId: row.workspace_id, clientId: row.client_user_id,
-      accessActive: true, acceptsNewRequests: row.accepts_new_requests,
+      accessActive: true,
       mode: modeFor(row), companyLabel: row.display_name,
     };
     return { ...this.context };
@@ -214,11 +214,11 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
     if (this.createdTarget || state.id !== header.ticketId || state.workspaceId !== header.workspaceId
       || state.version !== 0 || state.status !== 'received' || state.clientId !== context.clientId
       || state.scopeVersionId !== null || state.agreedScopeVersionId !== null || state.authorizedScopeVersionId !== null
-      || state.projectId !== null || state.requiredIssueIds.length !== 0 || state.delivery !== null
+      || state.requiredIssueIds.length !== 0 || state.delivery !== null
       || state.withdrawalRequested || state.hold !== null || state.closureReason !== null
       || state.actionOwner !== 'pm' || state.nextAction !== 'review_ticket'
       || header.clientSafeCompanyLabel !== context.companyLabel || header.closedAt !== null
-      || header.sharedProject !== null || request.source !== 'authenticated_client'
+      || request.source !== 'authenticated_client'
       || request.intakeContextId !== context.id || request.contact !== null
       || decoded.status !== state.status || decoded.version !== state.version) return invalid();
 
@@ -232,11 +232,16 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
       const option = this.selectedOption;
       if (!option || option.id !== request.projectPreference.optionId || !option.active || !option.clientVisible
         || option.workspaceId !== context.workspaceId || option.clientId !== context.clientId
-        || request.preferredProjectId !== option.projectId || request.requestedProjectLabel !== option.displayName) return invalid();
+        || request.preferredProjectId !== option.projectId || request.requestedProjectLabel !== option.displayName
+        || state.projectId !== option.projectId || !header.sharedProject
+        || header.sharedProject.projectId !== option.projectId
+        || header.sharedProject.displayName !== option.displayName || !header.sharedProject.clientVisible
+        || (header.sharedProject.preview !== undefined && header.sharedProject.preview !== null)) return invalid();
       preference = 'shared_project';
       preferredProjectId = option.projectId;
       requestedProjectLabel = option.displayName;
     }
+    if (preference !== 'shared_project' && (state.projectId !== null || header.sharedProject !== null)) return invalid();
     if ((request.requestedDeadline !== null && !/^\d{4}-\d{2}-\d{2}$/.test(request.requestedDeadline))) return invalid();
 
     await this.sql.query(
@@ -245,9 +250,10 @@ class PostgresTicketCreationTransaction implements TicketCreationTransaction {
           workflow_state, client_user_id, contact_id, project_id, project_display_name, project_client_visible,
           related_ticket_id, created_at, client_updated_at, internal_updated_at, closed_at)
        values ($1, $2, $3, $4, $5, $6, 'authenticated_client', $7, $8, $9::jsonb, $10, null,
-               null, null, false, $11, $12, $13, $14, null)`,
+               $11, $12, $13, $14, $15, $16, $17, null)`,
       [state.id, state.workspaceId, header.reference, header.title, header.description,
         header.clientSafeCompanyLabel, state.status, state.version, JSON.stringify(decoded), context.clientId,
+        state.projectId, header.sharedProject?.displayName ?? null, header.sharedProject?.clientVisible ?? false,
         header.relatedTicketId, header.createdAt, header.clientUpdatedAt, header.internalUpdatedAt],
     );
     await this.sql.query(

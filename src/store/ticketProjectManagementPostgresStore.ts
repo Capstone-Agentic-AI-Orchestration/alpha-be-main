@@ -4,16 +4,14 @@ import type { LockedTicket, SavedTicketOperation, TicketOperationKey, TicketSubj
 import type { TicketProjectManagementStore, TicketProjectManagementTransaction, TicketProjectLinkAudit,
   TicketSharedPreview, TicketWorkspaceProject } from './ticketProjectManagementStore.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
-import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import { decodeTicketWorkflow } from './ticketPostgresCodec.js';
 
 interface ReceiptDbRow { operation_kind: string; fingerprint: string; receipt: Record<string, unknown> }
-interface ClientGrantDbRow { accepts_new_requests: boolean }
 
 function invalid(): never { throw new TicketReadInvariantError(); }
 
-/** PM-only, workspace-scoped project links and per-client request permission.
+/** PM-only, workspace-scoped project links.
  * It uses the same cloud Postgres authority as the PM ticket queue.
  */
 export class PostgresTicketProjectManagementStore implements TicketProjectManagementStore {
@@ -169,48 +167,6 @@ class PostgresTicketProjectManagementTransaction implements TicketProjectManagem
       [key.workspaceId, key.ticketId, key.actorKind, key.actorId, key.operationId,
         operation.fingerprint, JSON.stringify(operation.receipt)],
     );
-  }
-
-  async setClientRequestsEnabled(target: TicketTarget, subject: TicketSubject, enabled: boolean): Promise<boolean> {
-    if (subject.kind !== 'internal') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only a project manager can change client request access.');
-    const scope = await this.authorization.lockQueueScope(target.workspaceId, subject);
-    if (!scope || scope.principal.kind !== 'pm') throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
-    if (scope.mode !== 'enabled') throw new TicketWorkflowError(503, 'ticket_writes_disabled', 'Ticket changes are unavailable right now.');
-
-    // Match the grant-before-ticket lock order used by activation and client
-    // request creation. The untrusted ticket lookup only discovers the client
-    // key; it grants no authority and is rechecked after both locks are held.
-    const { rows: ticketRows } = await this.sql.query<{ client_user_id: string | null }>(
-      `select client_user_id from alpha_private.tickets where workspace_id=$1 and id=$2`,
-      [target.workspaceId, target.ticketId],
-    );
-    const clientId = ticketRows[0]?.client_user_id;
-    if (!clientId) throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
-    const { rows: grants } = await this.sql.query<ClientGrantDbRow>(
-      `select accepts_new_requests from alpha_private.ticket_service_grants
-        where workspace_id=$1 and client_user_id=$2 and status='active' and revoked_at is null
-        for update`, [target.workspaceId, clientId],
-    );
-    if (!grants[0]) throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
-    const ticket = await this.authorization.lockTicket(target, subject, 'update');
-    if (!ticket || ticket.actor.kind !== 'pm' || ticket.state.clientId !== clientId) {
-      throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
-    }
-    this.locked = ticket;
-    if (grants[0].accepts_new_requests === enabled) return enabled;
-    const { rows } = await this.sql.query<{ accepts_new_requests: boolean }>(
-      `update alpha_private.ticket_service_grants set accepts_new_requests=$3
-        where workspace_id=$1 and client_user_id=$2 and status='active' and revoked_at is null
-        returning accepts_new_requests`, [target.workspaceId, clientId, enabled],
-    );
-    if (rows.length !== 1 || rows[0].accepts_new_requests !== enabled) return invalid();
-    await this.sql.query(
-      `insert into alpha_private.ticket_audit_events
-         (id,workspace_id,ticket_id,actor_kind,actor_id,event_type,occurred_at,metadata)
-       values ($1,$2,$3,'pm',$4,'client_request_access_changed',now(),$5::jsonb)`,
-      [randomUUID(), target.workspaceId, target.ticketId, subject.userId, JSON.stringify({ enabled })],
-    );
-    return enabled;
   }
 
   private requireKey(key: TicketOperationKey): void {

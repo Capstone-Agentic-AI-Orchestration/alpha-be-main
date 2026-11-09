@@ -48,8 +48,8 @@ beforeEach(async () => {
   await db.query(`insert into public.workspace_members(id,workspace_id,user_id,role) values
     ('phase6-pm-member',$1,$2,'pm')`, [workspaceId, pmId]);
   await db.query(`insert into alpha_private.ticket_service_grants
-    (id,workspace_id,client_user_id,status,display_name,accepts_new_requests,write_mode)
-    values ('phase6-client-grant',$1,$2,'active','Phase 6 Client',true,'enabled')`, [workspaceId, clientId]);
+    (id,workspace_id,client_user_id,status,display_name,write_mode)
+    values ('phase6-client-grant',$1,$2,'active','Phase 6 Client','enabled')`, [workspaceId, clientId]);
   await db.query(`insert into alpha_private.ticket_client_sessions
     (session_id_hash,client_user_id,csrf_hash,created_at,expires_at)
     values ($1,$2,$3,$4,$5)`, [sessionId, clientId, 'a'.repeat(64), new Date(now.getTime() - 60_000), new Date(now.getTime() + 3_600_000)]);
@@ -72,7 +72,7 @@ beforeEach(async () => {
 afterEach(async () => { await pg?.close(); });
 
 describe('PM project organization and client requests on the main migration schema', () => {
-  it('links requests under a project, shares only its name, and allows authorized clients to submit a separate request', async () => {
+  it('links requests under a project and allows a separate request despite a legacy paused flag', async () => {
     const projectService = createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db), () => now);
     const linkInput = { schemaVersion: 1 as const, operationId: 'phase6-link-1', expectedVersion: 0,
       projectId, clientVisible: true };
@@ -86,6 +86,8 @@ describe('PM project organization and client requests on the main migration sche
     expect(JSON.stringify(detail)).not.toContain(projectId);
     expect(JSON.stringify(detail)).not.toContain('requiredIssueIds');
 
+    await db.query(`update alpha_private.ticket_service_grants set accepts_new_requests=false
+      where workspace_id=$1 and client_user_id=$2`, [workspaceId, clientId]);
     const intake = createTicketClientIntakeContextService(new PostgresTicketClientIntakeContextStore(db));
     const context = await intake.get(workspaceId, client);
     expect(context.canCreate).toBe(true);
@@ -103,7 +105,7 @@ describe('PM project organization and client requests on the main migration sche
       `select t.project_id,r.preferred_project_id from alpha_private.tickets t
         join alpha_private.ticket_requests r on r.workspace_id=t.workspace_id and r.ticket_id=t.id
         where t.workspace_id=$1 and t.id=$2`, [workspaceId, receipt.ticketId]);
-    expect(created.rows[0]).toEqual({ project_id: null, preferred_project_id: projectId });
+    expect(created.rows[0]).toEqual({ project_id: projectId, preferred_project_id: projectId });
 
     const queue = await createTicketQueueService(new PostgresTicketQueueStore(db), () => now)
       .list(workspaceId, pm);
@@ -113,18 +115,11 @@ describe('PM project organization and client requests on the main migration sche
     expect(pmItems.filter(item => item.internal.clientGroup?.key === `client:${clientId}`)).toHaveLength(2);
     expect(pmItems.find(item => item.id === firstTicketId)?.internal).toMatchObject({
       projectId, projectName: visibleProjectName, clientGroup: {
-        displayName: 'Phase 6 Client', accessActive: true, acceptsNewRequests: true,
+        displayName: 'Phase 6 Client',
       },
     });
-    expect(pmItems.find(item => item.id === receipt.ticketId)?.internal.projectId).toBeNull();
+    expect(pmItems.find(item => item.id === receipt.ticketId)?.internal).toMatchObject({ projectId, projectName: visibleProjectName });
 
-    const access = await projectService.setClientRequestsEnabled({ workspaceId, ticketId: firstTicketId }, pm,
-      { acceptsNewRequests: false });
-    expect(access).toEqual({ ticketId: firstTicketId, acceptsNewRequests: false });
-    expect((await intake.get(workspaceId, client)).canCreate).toBe(false);
-    await expect(creation.create(context.intakeContextId, client, {
-      schemaVersion: 1, operationId: 'phase6-create-disabled', title: 'Blocked request', description: 'Should not be written.',
-    })).rejects.toMatchObject({ status: 503, code: 'ticket_writes_disabled' });
   }, 60_000);
 
   it('rejects client project-management actions and cross-workspace project links without changing the ticket', async () => {

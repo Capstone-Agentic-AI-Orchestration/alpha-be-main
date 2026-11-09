@@ -8,6 +8,7 @@ import { pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 export interface TicketCentralIntakeApplication {
   listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown; filter?: unknown }): Promise<unknown>;
   accept(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
+  clarify?(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
   decline(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
 }
 
@@ -22,7 +23,7 @@ function safePage(value: unknown) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TicketReadInvariantError();
     const row = item as Record<string, unknown>;
     if (row.kind !== undefined && row.kind !== 'public_inquiry' && row.kind !== 'project_proposal') throw new TicketReadInvariantError();
-    if ((row.status !== undefined && !['pending','accepted','declined'].includes(String(row.status)))
+    if ((row.status !== undefined && !['pending','awaiting_client','accepted','declined'].includes(String(row.status)))
       || (row.handledAt != null && (typeof row.handledAt !== 'string' || !Number.isFinite(Date.parse(row.handledAt))))
       || (row.outcomeEmailStatus != null && !['pending','retry','leased','delivered','dead'].includes(String(row.outcomeEmailStatus)))) throw new TicketReadInvariantError();
     if (typeof row.id !== 'string' || !row.id.trim() || row.id.length > 200
@@ -38,9 +39,20 @@ function safePage(value: unknown) {
       throw new TicketReadInvariantError();
     }
     // Explicit client-data allowlist for the PM-only intake response.
+    const clarificationMessages = row.clarificationMessages ?? [];
+    if (!Array.isArray(clarificationMessages) || clarificationMessages.length > 100) throw new TicketReadInvariantError();
+    const safeClarificationMessages = clarificationMessages.map(message => {
+      if (!message || typeof message !== 'object' || Array.isArray(message)) throw new TicketReadInvariantError();
+      const entry = message as Record<string, unknown>;
+      if (typeof entry.id !== 'string' || !entry.id.trim() || entry.id.length > 200
+        || (entry.author !== 'pm' && entry.author !== 'client')
+        || typeof entry.body !== 'string' || !entry.body.trim() || entry.body.length > 4000
+        || typeof entry.createdAt !== 'string' || !Number.isFinite(Date.parse(entry.createdAt))) throw new TicketReadInvariantError();
+      return { id: entry.id, author: entry.author, body: entry.body, createdAt: entry.createdAt };
+    });
     return { kind: row.kind ?? 'public_inquiry', id: row.id, publicReference: row.publicReference, fullName: row.fullName, email: row.email, company: row.company,
       title: row.title, description: row.description, requestedDeadline: row.requestedDeadline,
-      submittedAt: row.submittedAt,
+      submittedAt: row.submittedAt, clarificationMessages: safeClarificationMessages,
       status: row.status ?? 'pending', handledAt: row.handledAt ?? null, outcomeEmailStatus: row.outcomeEmailStatus ?? null };
   });
   return { items, nextCursor: page.nextCursor };
@@ -106,6 +118,22 @@ export function createTicketCentralIntakeRouter(
     const accepted = safeAcceptance(await application.accept(req.params.intakeId ?? '', workspaceId, subject, req.body));
     if (accepted.workspaceId !== workspaceId) throw new TicketReadInvariantError();
     return res.status(201).json(accepted);
+  }));
+  router.post('/intakes/:intakeId/clarify', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    if (await relayRequest(req, res)) return;
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    const workspaceId = req.workspace?.workspaceId;
+    if (!workspaceId) throw new TicketReadInvariantError();
+    if (!application.clarify) throw new TicketReadInvariantError();
+    const result = await application.clarify(req.params.intakeId ?? '', workspaceId, subject, req.body);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new TicketReadInvariantError();
+    const row = result as Record<string, unknown>;
+    if (row.intakeId !== req.params.intakeId || typeof row.operationId !== 'string'
+      || !/^[0-9a-f-]{36}$/i.test(row.operationId) || row.status !== 'awaiting_client') throw new TicketReadInvariantError();
+    return res.json({ intakeId: row.intakeId, operationId: row.operationId, status: row.status });
   }));
   router.post('/intakes/:intakeId/decline', route(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, private');

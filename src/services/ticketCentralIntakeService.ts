@@ -124,6 +124,32 @@ export function createTicketCentralIntakeService(input: {
       }
     },
 
+    async clarify(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown) {
+      if (!configured || !input.store.clarify) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The shared inquiry inbox is unavailable.');
+      const parsed = z.object({
+        schemaVersion: z.literal(1), operationId: operationSchema,
+        body: z.string().trim().min(1).max(4000),
+      }).strict().safeParse(raw);
+      if (!parsed.success || !opaque(intakeId) || !opaque(workspaceId) || subject.kind !== 'internal' || !opaque(subject.userId)) {
+        throw new TicketWorkflowError(400, 'central_intake_clarification_invalid', 'Add a question for the client before sending it.');
+      }
+      const instant = now();
+      if (!Number.isFinite(instant.getTime())) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The question could not be sent right now.');
+      try {
+        const result = await input.store.clarify({ organizationKey: input.organizationKey, intakeId, workspaceId,
+          subject, operationId: parsed.data.operationId, body: parsed.data.body, occurredAt: instant.toISOString() });
+        if (result === 'not_found') throw new TicketWorkflowError(404, 'central_intake_not_found', 'This proposal is no longer available.');
+        if (result === 'already_handled') throw new TicketWorkflowError(409, 'central_intake_already_handled', 'This proposal is no longer waiting for PM review. Refresh the inbox.');
+        if (result === 'operation_conflict') throw new TicketWorkflowError(409, 'central_intake_operation_conflict', 'This question could not be retried with a different message. Refresh the inbox.');
+        if (result === 'forbidden') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot message this client from the selected workspace.');
+        return result;
+      } catch (error) {
+        if (error instanceof TicketWorkflowError) throw error;
+        if (isTransactionOutcomeUnknown(error)) throw new TicketWorkflowError(503, 'central_intake_outcome_unknown', 'The result is not confirmed. Retry with the same operation ID.');
+        throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The question could not be sent right now.');
+      }
+    },
+
     async decline(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown) {
       if (!configured) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The shared inquiry inbox is unavailable.');
       const parsed = z.object({

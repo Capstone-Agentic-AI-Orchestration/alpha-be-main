@@ -58,8 +58,8 @@ with source/tooling changes need an implementation branch at this point.
 | Actor | Allowed | Forbidden |
 | --- | --- | --- |
 | Visitor | Text-only inquiry through the intended workspace entry; safe acknowledgement. | Private lookup using a reference, arbitrary workspace assignment or public uploads. |
-| Verified invited client | Granted tickets, replies, permitted document proposals, scope agreement, shared-result review and withdrawal request. | Internal workspace membership, repositories, runs, Issue assignment, development/release authorization or impersonating another client. |
-| Authorized PM | Invite/revoke, clarify scope, authorize work, choose eligible project, assign Issues, assess/share, close/cancel and authorize release. | Cross-workspace access, fabricating client acceptance, overwriting approved scope or bypassing project ownership. |
+| Verified invited client | Granted tickets, replies, ticket document uploads/replacements, scope agreement, shared-result review and withdrawal request. | Internal workspace membership, repositories, runs, Issue assignment, development/release authorization or impersonating another client. |
+| Authorized PM | Invite/revoke, clarify scope, authorize work, choose eligible project, assign Issues, assess/share, download client-submitted documents, close/cancel and authorize release. | Cross-workspace access, document uploads/replacements, fabricating client acceptance, overwriting approved scope or bypassing project ownership. |
 | Authorized developer/reviewer | Assigned Issue execution, approved brief and necessary correction context, required technical review. | Automatic access to whole client conversations, client invitations or publication/closure through Issue completion. |
 
 These boundaries are acceptance requirements, not evidence that the new APIs
