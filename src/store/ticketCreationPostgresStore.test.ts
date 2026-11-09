@@ -21,7 +21,7 @@ function makeClient(workspaceId: string) {
 }
 
 async function seedClient(workspaceId: string, options: {
-  workspaceMode?: string; grantMode?: string; acceptsNewRequests?: boolean; project?: boolean;
+  workspaceMode?: string; grantMode?: string; project?: boolean;
 } = {}) {
   const { client, sessionId, csrfHash, contextId } = makeClient(workspaceId);
   const created = new Date(Date.now() - 60_000).toISOString();
@@ -33,9 +33,9 @@ async function seedClient(workspaceId: string, options: {
   );
   await db.query(
     `insert into alpha_private.ticket_service_grants
-       (id, workspace_id, client_user_id, status, display_name, accepts_new_requests, write_mode)
-     values ($1, $2, $3, 'active', 'Synthetic Client', $4, $5)`,
-    [contextId, workspaceId, client.userId, options.acceptsNewRequests ?? true, options.grantMode ?? 'enabled'],
+       (id, workspace_id, client_user_id, status, display_name, write_mode)
+     values ($1, $2, $3, 'active', 'Synthetic Client', $4)`,
+    [contextId, workspaceId, client.userId, options.grantMode ?? 'enabled'],
   );
   await db.query(
     `insert into alpha_private.ticket_client_sessions
@@ -87,7 +87,7 @@ beforeAll(async () => {
 afterAll(async () => { await local?.close(); });
 
 describe('PostgresTicketCreationStore against the main migration schema', () => {
-  it('creates one authorized Received ticket and keeps the project choice as a private preference', async () => {
+  it('creates one authorized Received ticket linked to the selected shared project', async () => {
     const workspaceId = 'create-pg-workspace';
     const { client, contextId, projectId } = await seedClient(workspaceId, { project: true });
     const store = new PostgresTicketCreationStore(db);
@@ -107,8 +107,8 @@ describe('PostgresTicketCreationStore against the main migration schema', () => 
       client_user_id: string; project_id: string | null; status: string; workflow_state: Record<string, unknown>;
     }>(`select client_user_id, project_id, status, workflow_state from alpha_private.tickets where workspace_id = $1 and id = $2`, [workspaceId, receipt.ticketId]);
     expect(ticketRows).toEqual([{
-      client_user_id: client.userId, project_id: null, status: 'received',
-      workflow_state: expect.objectContaining({ clientId: client.userId, projectId: null, status: 'received' }),
+      client_user_id: client.userId, project_id: projectId, status: 'received',
+      workflow_state: expect.objectContaining({ clientId: client.userId, projectId, status: 'received' }),
     }]);
 
     const { rows: privateRequest } = await db.query<Record<string, unknown>>(
@@ -136,7 +136,7 @@ describe('PostgresTicketCreationStore against the main migration schema', () => 
     const detail = await read.detail({ workspaceId, ticketId: receipt.ticketId }, client);
     expect(detail).toMatchObject({ status: 'received', request: {
       projectPreference: 'shared_project', projectLabel: 'Client-safe project name', requestedDeadline: '2027-02-28',
-    } });
+    }, sharedProjectName: 'Client-safe project name' });
     expect(JSON.stringify(detail)).not.toContain(projectId);
 
     const { rows: effects } = await db.query<{ event_type: string; payload: Record<string, unknown> }>(

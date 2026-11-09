@@ -1,8 +1,9 @@
 # Client project portal backend
 
-These routes are additive. Ticket chat, document routes, project linking and
-ticket creation keep their existing semantics. Apply the accompanying migration
-before deploying this backend. No environment variables are added.
+These routes are additive. Ticket chat and document routes keep their existing
+semantics. Shared-project ticket creation now links the request to the selected
+project when it is created. Apply the accompanying migration before deploying
+this backend. No environment variables are added.
 
 ## Client API (client cookie session)
 
@@ -15,10 +16,12 @@ before deploying this backend. No environment variables are added.
   ticket queue fields plus `workspaceId`, `projectId`, `projectName`,
   `requestedProjectName` and `projectLinkStatus:'linked'|'pending_review'|null`.
   Actual project fields are null unless that ticket's actual link is visible.
-  Pending preferences are labeled separately and never populate `projectId`.
-  A pending preference appears in project requests only while another actual
-  visible linked ticket authorizes this same client's access. If that access
-  disappears, the ticket remains in global requests but project metadata is hidden.
+  A new request that selects an existing shared project is linked to it during
+  creation, so it appears in that project's request list immediately while the
+  PM review status remains `received`. `not_sure` and `new_project` requests stay
+  unlinked. Older pending preferences remain labeled separately and can appear
+  in project requests only while another visible linked ticket authorizes this
+  client's access; otherwise they remain in global requests with project metadata hidden.
   Filters: `all` (default), `open`, `history`, `needs_client`. Limit 1–100,
   default 25. Search matches ticket reference/title. Sort is public update time
   descending, then workspace ID and ticket ID descending. Cursors are opaque
@@ -85,12 +88,13 @@ are changed in this backend slice.
 For a client-created request under a shared project, load the existing workspace
 intake context and select that project's exact `intakeOptionId`; submit it as
 `projectPreference:{kind:'shared_project',optionId:intakeOptionId}`. Existing
-server authorization rechecks the option. Creation keeps actual `project_id`
-null; the PM reviews and confirms the project link later. The frontend exposes
-this project-scoped New Request action only when the existing intake context
-allows creation. A request is not shown in the project's request list until the
-PM confirms the link; the client can still see the pending request in the global
-request list. This does not create a second ticket workflow or authorize work.
+server authorization rechecks the option and atomically links the new ticket to
+that already-shared project. The ticket appears in the project's request list
+immediately, still awaiting PM review. The project link is organizational: it
+does not authorize work or grant new project access. `not_sure` and `new_project`
+requests remain unlinked for PM review. The frontend exposes this project-scoped
+New Request action only when the existing intake context allows creation.
+This does not create a second ticket workflow or authorize work.
 
 ## Persistence and compatibility
 

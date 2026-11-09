@@ -86,13 +86,17 @@ export class PostgresTicketDocumentStore implements TicketDocumentStore {
   list(target: TicketTarget, subject: TicketSubject): Promise<TicketDocument[]> {
     return this.db.transaction(async sql => {
       await lockTicket(sql, target, subject, false);
-      const actorKind = subject.kind === 'client' ? 'client' : 'pm';
+      const visibility = subject.kind === 'internal'
+        ? "author_kind='client' and status='available'"
+        : "(status='available' or (author_kind=$3 and author_id=$4))";
+      const params = subject.kind === 'internal'
+        ? [target.workspaceId, target.ticketId]
+        : [target.workspaceId, target.ticketId, 'client', subject.userId];
       const { rows } = await sql.query<DocumentDbRow>(
         `select ${columns} from alpha_private.ticket_documents
-          where workspace_id=$1 and ticket_id=$2
-            and (status='available' or (author_kind=$3 and author_id=$4))
+          where workspace_id=$1 and ticket_id=$2 and ${visibility}
           order by document_group_id collate "C", version_number, created_at, id collate "C"`,
-        [target.workspaceId, target.ticketId, actorKind, subject.userId],
+        params,
       );
       if (rows.length > 500) throw new TicketReadInvariantError();
       // Operation IDs are transport-level retry keys; never expose them in a read model.
@@ -102,11 +106,11 @@ export class PostgresTicketDocumentStore implements TicketDocumentStore {
 
   prepareUpload(target: TicketTarget, subject: TicketSubject, input: TicketDocumentUpload): Promise<PreparedTicketDocument> {
     return this.db.transaction(async sql => {
-      const ticket = await lockTicket(sql, target, subject, true);
-      if (subject.kind === 'internal' && ticket.actor.kind !== 'pm') {
-        throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot add documents to this ticket.');
+      await lockTicket(sql, target, subject, true);
+      if (subject.kind !== 'client') {
+        throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only the client can upload documents to this ticket.');
       }
-      const authorKind = subject.kind === 'client' ? 'client' as const : 'pm' as const;
+      const authorKind = 'client' as const;
       const { rows: priorOperations } = await sql.query<DocumentDbRow>(
         `select ${columns} from alpha_private.ticket_documents
           where workspace_id=$1 and ticket_id=$2 and author_kind=$3 and author_id=$4 and operation_id=$5
@@ -164,7 +168,10 @@ export class PostgresTicketDocumentStore implements TicketDocumentStore {
   markAvailable(target: TicketTarget, subject: TicketSubject, documentId: string, fingerprint: string): Promise<PreparedTicketDocument> {
     return this.db.transaction(async sql => {
       const ticket = await lockTicket(sql, target, subject, true);
-      const actorKind = subject.kind === 'client' ? 'client' : 'pm';
+      if (subject.kind !== 'client') {
+        throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only the client can upload documents to this ticket.');
+      }
+      const actorKind = 'client' as const;
       const row = await getById(sql, target, documentId);
       if (!row || row.author_kind !== actorKind || row.author_id !== subject.userId || row.fingerprint.trim() !== fingerprint) {
         throw new TicketWorkflowError(404, 'ticket_document_not_found', 'Document not found.');
@@ -194,16 +201,6 @@ export class PostgresTicketDocumentStore implements TicketDocumentStore {
           JSON.stringify({ documentId, groupId: saved.document_group_id, version: saved.version_number,
             changeProposed: saved.change_proposed })],
       );
-      if (actorKind === 'pm') {
-        await sql.query(
-          `insert into alpha_private.ticket_communication_notifications
-             (id,workspace_id,ticket_id,notification_kind,object_id,dedupe_key,status,available_at,created_at)
-           values ($1,$2,$3,'document',$4,$5,'pending',$6,$6)
-           on conflict (workspace_id,dedupe_key) do nothing`,
-          [randomUUID(), target.workspaceId, target.ticketId, documentId,
-            `ticket-document:${documentId}`, now],
-        );
-      }
       return prepared(saved);
     });
   }
@@ -211,9 +208,10 @@ export class PostgresTicketDocumentStore implements TicketDocumentStore {
   getDownload(target: TicketTarget, subject: TicketSubject, documentId: string): Promise<PreparedTicketDocument | null> {
     return this.db.transaction(async sql => {
       await lockTicket(sql, target, subject, false);
+      const authorRestriction = subject.kind === 'internal' ? "and author_kind='client'" : '';
       const { rows } = await sql.query<DocumentDbRow>(
         `select ${columns} from alpha_private.ticket_documents
-          where workspace_id=$1 and ticket_id=$2 and id=$3 and status='available'`,
+          where workspace_id=$1 and ticket_id=$2 and id=$3 and status='available' ${authorRestriction}`,
         [target.workspaceId, target.ticketId, documentId],
       );
       return rows[0] ? prepared(rows[0]) : null;

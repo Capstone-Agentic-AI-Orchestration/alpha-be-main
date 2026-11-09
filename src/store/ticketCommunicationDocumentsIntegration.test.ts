@@ -141,16 +141,25 @@ describe('Client and PM message/document flow', () => {
       async put(path, bytes) { objects.set(path, new Uint8Array(bytes)); },
       async get(path) { const bytes = objects.get(path); if (!bytes) throw new Error('Missing object'); return new Uint8Array(bytes); },
     });
-    const pmFile = Buffer.from('%PDF-1.7\nPM shared document\n');
-    const shared = await documents.upload(target, pm, {
-      operationId: 'ticket-communication-pm-document', filename: 'private-brief.pdf', contentType: 'application/pdf', bytes: pmFile,
-    });
     const clientFile = Buffer.from('client follow-up document\n');
     const uploaded = await documents.upload(target, client, {
       operationId: 'ticket-communication-client-document', filename: 'client-note.txt', contentType: 'text/plain', bytes: clientFile,
     });
-    expect(await documents.list(target, client)).toEqual(expect.arrayContaining([shared, uploaded]));
-    expect(Array.from((await documents.download(target, client, shared.id)).bytes)).toEqual(Array.from(pmFile));
+    const replacementFile = Buffer.from('client follow-up document v2\n');
+    const replacement = await documents.upload(target, client, {
+      operationId: 'ticket-communication-client-document-v2', replacesDocumentId: uploaded.id,
+      filename: 'client-note.txt', contentType: 'text/plain', bytes: replacementFile,
+    });
+    expect(replacement).toMatchObject({ groupId: uploaded.groupId, version: 2,
+      replacesDocumentId: uploaded.id, author: 'client', changeProposed: true, status: 'available' });
+    await expect(documents.upload(target, pm, {
+      operationId: 'ticket-communication-pm-document', filename: 'private-brief.pdf', contentType: 'application/pdf',
+      bytes: Buffer.from('%PDF-1.7\nPM shared document\n'),
+    })).rejects.toMatchObject({ status: 403, code: 'ticket_action_forbidden' });
+    expect(await documents.list(target, client)).toEqual([uploaded, replacement]);
+    expect(await documents.list(target, pm)).toEqual([uploaded, replacement]);
+    expect(Array.from((await documents.download(target, pm, uploaded.id)).bytes)).toEqual(Array.from(clientFile));
+    expect(Array.from((await documents.download(target, pm, replacement.id)).bytes)).toEqual(Array.from(replacementFile));
     await expect(documents.list(unrelated, client)).rejects.toMatchObject({ status: 404 });
     await expect(documents.download(target, client, 'unknown-document')).rejects.toMatchObject({ status: 404 });
 
@@ -173,23 +182,21 @@ describe('Client and PM message/document flow', () => {
       'select notification_kind,status from alpha_private.ticket_communication_notifications where workspace_id=$1 and ticket_id=$2 order by notification_kind',
       [workspaceId, target.ticketId],
     );
-    expect(queued.rows).toEqual([{ notification_kind: 'document', status: 'pending' }, { notification_kind: 'message', status: 'pending' }]);
+    expect(queued.rows).toEqual([{ notification_kind: 'message', status: 'pending' }]);
     await expect(notifications.deliverNext()).resolves.toBe('delivered');
     const afterFirst = await db.query<{ notification_kind: string; status: string; available_at: string }>(
       'select notification_kind,status,available_at::text as available_at from alpha_private.ticket_communication_notifications where workspace_id=$1 and ticket_id=$2 order by notification_kind',
       [workspaceId, target.ticketId],
     );
     expect(afterFirst.rows.map(({ notification_kind, status }) => ({ notification_kind, status })))
-      .toEqual([{ notification_kind: 'document', status: 'pending' }, { notification_kind: 'message', status: 'delivered' }]);
-    expect(Date.parse(afterFirst.rows[1].available_at)).toBeLessThanOrEqual(Date.now());
-    await expect(notifications.deliverNext()).resolves.toBe('delivered');
+      .toEqual([{ notification_kind: 'message', status: 'delivered' }]);
+    expect(Date.parse(afterFirst.rows[0].available_at)).toBeLessThanOrEqual(Date.now());
     await expect(notifications.deliverNext()).resolves.toBe('idle');
-    expect(sendContent).toHaveBeenCalledTimes(2);
+    expect(sendContent).toHaveBeenCalledTimes(1);
     for (const [, subject, body] of sendContent.mock.calls) {
       expect(subject).not.toContain(target.ticketId);
       expect(body).toContain('https://tickets.example.test/#/client');
       expect(body).not.toContain('Synthetic PM update');
-      expect(body).not.toContain('private-brief.pdf');
       expect(body).not.toContain('Synthetic PM-only note');
     }
   }, 60_000);

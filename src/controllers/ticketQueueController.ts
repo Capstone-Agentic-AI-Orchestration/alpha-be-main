@@ -87,8 +87,7 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
     || typeof internal.clientReplyUnread !== 'boolean'
     || (clientGroup !== undefined && (!clientGroup || !opaqueTicketRequestValue(clientGroup.key)
       || typeof clientGroup.displayName !== 'string' || !clientGroup.displayName.trim()
-      || clientGroup.displayName.trim() !== clientGroup.displayName || clientGroup.displayName.length > 200
-      || typeof clientGroup.acceptsNewRequests !== 'boolean' || typeof clientGroup.accessActive !== 'boolean'))
+      || clientGroup.displayName.trim() !== clientGroup.displayName || clientGroup.displayName.length > 200))
     || (internal.projectName !== undefined && internal.projectName !== null
       && (typeof internal.projectName !== 'string' || !internal.projectName.trim()
         || internal.projectName.trim() !== internal.projectName || internal.projectName.length > 200))
@@ -117,7 +116,6 @@ function safePmItem(value: QueueItem): PmTicketQueueItem {
       clientInvitation: invitation ?? null,
       ...(clientGroup ? { clientGroup: {
         key: clientGroup.key, displayName: clientGroup.displayName,
-        acceptsNewRequests: clientGroup.acceptsNewRequests, accessActive: clientGroup.accessActive,
       } } : {}),
       ...(internal.projectName !== undefined ? { projectName: internal.projectName } : {}),
     },

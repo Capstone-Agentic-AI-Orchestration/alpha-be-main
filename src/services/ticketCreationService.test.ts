@@ -28,7 +28,7 @@ const operationKey = (key: SavedTicketOperation['key']) => JSON.stringify([key.w
 function fixture() {
   const context: AuthorizedTicketCreateContext = {
     id: contextId, workspaceId: workspace, clientId: client.userId, accessActive: true,
-    acceptsNewRequests: true, mode: 'enabled', companyLabel: 'Approved company',
+    mode: 'enabled', companyLabel: 'Approved company',
   };
   let data = {
     records: new Map<string, TicketCreatedRecord>(), grants: new Set<string>(),
@@ -208,15 +208,16 @@ describe('authenticated ticket creation', () => {
     expect(JSON.stringify(f.data.messageAudits)).not.toContain(note.body);
     expect(JSON.stringify(f.data.changeSignals)).not.toContain(note.body);
   });
-  it('treats a shared project and deadline as preferences, not an approved project or commitment', async () => {
+  it('links a selected shared project without authorizing work or committing the requested date', async () => {
     const f = fixture(); f.control.options.set('option-a', { id: 'option-a', workspaceId: workspace, clientId: client.userId, projectId: 'internal-project', displayName: 'Shared preview label', active: true, clientVisible: true });
     const result = await f.service.create(contextId, client, input({ projectPreference: { kind: 'shared_project', optionId: 'option-a' }, requestedDeadline: '2027-02-28' }));
     const record = [...f.data.records.values()][0];
     expect(record.request).toMatchObject({ preferredProjectId: 'internal-project', requestedDeadline: '2027-02-28' });
-    expect(record.state).toMatchObject({ projectId: null, authorizedScopeVersionId: null, requiredIssueIds: [] });
+    expect(record.state).toMatchObject({ projectId: 'internal-project', authorizedScopeVersionId: null, requiredIssueIds: [] });
+    expect(record.header.sharedProject).toEqual({ projectId: 'internal-project', displayName: 'Shared preview label', clientVisible: true });
     expect(JSON.stringify(result)).not.toMatch(/internal-project|2027-02-28/);
     const detail = await f.reads.detail(targetOf(result), client);
-    expect(detail).toMatchObject({ request: { projectPreference: 'shared_project', projectLabel: 'Shared preview label', requestedDeadline: '2027-02-28' }, sharedProjectName: null });
+    expect(detail).toMatchObject({ request: { projectPreference: 'shared_project', projectLabel: 'Shared preview label', requestedDeadline: '2027-02-28' }, sharedProjectName: 'Shared preview label' });
     expect(JSON.stringify(detail)).not.toContain('internal-project');
   });
   it.each(['new_project', 'not_sure'] as const)('keeps project preference %s from creating project work', async kind => {
@@ -330,10 +331,6 @@ describe('atomicity, operation identity and recovery', () => {
   });
   it.each(['disabled', 'maintenance', undefined] as const)('blocks new/replayed writes under mode %s but retains authorized lookup', async mode => {
     const f = fixture(); const first = await f.service.create(contextId, client, input()); f.context.mode = mode;
-    await expect(f.service.create(contextId, client, input())).rejects.toMatchObject({ status: 503 }); expect(await f.service.lookup(contextId, client, 'create-op')).toEqual(first);
-  });
-  it('new intake disabled does not erase retained operation recovery', async () => {
-    const f = fixture(); const first = await f.service.create(contextId, client, input()); f.context.acceptsNewRequests = false;
     await expect(f.service.create(contextId, client, input())).rejects.toMatchObject({ status: 503 }); expect(await f.service.lookup(contextId, client, 'create-op')).toEqual(first);
   });
   it('returns no title, body, contact, private project, deadline or arbitrary saved fields in receipts', async () => {

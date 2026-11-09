@@ -17,7 +17,7 @@ export function createTicketClientIntakeContextService(store: TicketClientIntake
         const context = await tx.resolveAuthorizedContext(workspaceId, subject);
         if (!opaque(workspaceId) || !context || context.workspaceId !== workspaceId
           || context.clientId !== subject.userId || context.accessActive !== true
-          || !opaque(context.id) || typeof context.acceptsNewRequests !== 'boolean'
+          || !opaque(context.id)
           || !['enabled', 'disabled', 'maintenance', undefined].includes(context.mode)
           || !opaque(context.companyLabel)) {
           throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket intake is unavailable.');
@@ -38,7 +38,7 @@ export function createTicketClientIntakeContextService(store: TicketClientIntake
         sharedProjects.sort((a, b) => a.displayName.localeCompare(b.displayName) || a.optionId.localeCompare(b.optionId));
         return {
           intakeContextId: context.id,
-          canCreate: context.acceptsNewRequests && context.mode === 'enabled',
+          canCreate: context.mode === 'enabled',
           sharedProjects,
         };
       });

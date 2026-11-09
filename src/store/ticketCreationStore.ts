@@ -9,7 +9,6 @@ export interface AuthorizedTicketCreateContext {
   workspaceId: string;
   clientId: string;
   accessActive: boolean;
-  acceptsNewRequests: boolean;
   mode?: TicketWriteMode;
   companyLabel: string;
 }
@@ -29,7 +28,9 @@ export interface TicketCreatedRecord {
     source: 'authenticated_client';
     intakeContextId: string;
     projectPreference: TicketCreateInput['projectPreference'];
-    /** Server-resolved preference only. Does not link/authorize the project. */
+    /** Server-resolved project choice. It links only to an already shared project;
+     * it does not grant project access or authorize work.
+     */
     preferredProjectId: string | null;
     requestedProjectLabel: string | null;
     requestedDeadline: string | null;

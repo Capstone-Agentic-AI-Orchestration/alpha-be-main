@@ -94,6 +94,9 @@ export function createTicketDocumentService(store: TicketDocumentStore, objects:
       return store.list(target, subject).then(items => items.map(publicRecord));
     },
     async upload(target: TicketTarget, subject: TicketSubject, raw: TicketDocumentUploadInput): Promise<TicketDocument> {
+      if (subject.kind !== 'client') {
+        throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only the client can upload documents to this ticket.');
+      }
       const input = cleanInput(raw);
       const prepared = await store.prepareUpload(target, subject, input);
       if (prepared.status === 'available') return publicRecord(prepared);

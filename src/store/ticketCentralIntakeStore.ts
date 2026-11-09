@@ -2,11 +2,15 @@ import type { PublicTicketInquiryInput } from '../ticketing/intake.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 
 export interface CentralIntakeCursor { submittedAt: string; id: string }
+export interface CentralIntakeClarificationMessage {
+  id: string; author: 'pm' | 'client'; body: string; createdAt: string;
+}
 export interface CentralIntakeItem {
   kind?: 'public_inquiry' | 'project_proposal';
   id: string; publicReference: string; fullName: string; email: string; company: string | null; title: string;
   description: string; requestedDeadline: string | null; submittedAt: string;
-  status?: 'pending' | 'accepted' | 'declined';
+  status?: 'pending' | 'awaiting_client' | 'accepted' | 'declined';
+  clarificationMessages?: CentralIntakeClarificationMessage[];
   handledAt?: string | null;
   outcomeEmailStatus?: 'pending' | 'retry' | 'leased' | 'delivered' | 'dead' | null;
 }
@@ -20,6 +24,7 @@ export interface CentralIntakeAcceptance {
   ticketId: string; workspaceId: string; reference: string; operationId: string;
 }
 export interface CentralIntakeDeclineReceipt { intakeId: string; operationId: string; status: 'declined' }
+export interface CentralIntakeClarifyReceipt { intakeId: string; operationId: string; status: 'awaiting_client' }
 
 export interface TicketCentralIntakeStore {
   consumeAttempt(organizationKey: string, sourceHash: string, occurredAt: string,
@@ -28,6 +33,10 @@ export interface TicketCentralIntakeStore {
     fingerprints: readonly CentralIntakeFingerprint[], occurredAt: string): Promise<{ kind: 'received'; publicReference: string } | { kind: 'conflict' }>;
   listPending(organizationKey: string, workspaceId: string, subject: TicketSubject,
     cursor: CentralIntakeCursor | null, limit: number, filter?: 'pending' | 'handled'): Promise<CentralIntakePage | 'forbidden'>;
+  clarify?(input: {
+    organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
+    operationId: string; body: string; occurredAt: string;
+  }): Promise<CentralIntakeClarifyReceipt | 'not_found' | 'already_handled' | 'operation_conflict' | 'forbidden'>;
   accept(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; ticketId: string; reference: string; occurredAt: string;

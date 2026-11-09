@@ -36,7 +36,11 @@ async function setup(withProposals = false) {
       status: 'received', reference: 'T-1', privateMetadata: 'secret' })),
     lookupCreation: vi.fn(),
   };
-  const proposals = { list: vi.fn(async () => ({items:[]})), submit: vi.fn(async () => ({id:'proposal-a'})) };
+  const proposals = {
+    list: vi.fn(async () => ({items:[]})),
+    submit: vi.fn(async () => ({id:'proposal-a'})),
+    reply: vi.fn(async (_subject: unknown, id: string, input: {operationId: string}) => ({id,operationId:input.operationId,status:'pending' as const})),
+  };
   const emailFor = vi.fn(async () => 'verified@example.test');
   const router = createTicketClientApiRouter({...app, ...(withProposals ? {projectProposals:proposals,emailFor} : {})} as any, {
     secure: true, allowedOrigins: ['https://alpha.example'],
@@ -174,12 +178,28 @@ describe('project proposal client API',()=>{
   expect((await f.invoke('GET','/project-proposals')).body).toEqual({items:[]});
   expect(f.proposals.list).toHaveBeenCalledWith(subject);
  });
+ it('accepts a client clarification reply only through the authenticated CSRF-protected route',async()=>{
+  const f=await setup(true);
+  const body={schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000001',body:'The first release is for existing customers.'};
+  const result=await f.invoke('POST','/project-proposals/:proposalId/reply',{params:{proposalId:'proposal-a'},body});
+  expect(result.status).toBe(200);
+  expect(result.body).toEqual({id:'proposal-a',operationId:body.operationId,status:'pending'});
+  expect(f.proposals.reply).toHaveBeenCalledWith(subject,'proposal-a',body);
+ });
  it('rejects missing session, invalid CSRF and foreign origins before proposal access',async()=>{
   const f=await setup(true);
   expect((await f.invoke('GET','/project-proposals',{headers:{cookie:''}})).status).toBe(401);
   expect((await f.invoke('POST','/project-proposals',{headers:{'x-csrf-token':'wrong'}})).status).toBe(403);
   expect((await f.invoke('POST','/project-proposals',{headers:{origin:'https://foreign.example'}})).status).toBe(403);
+  const reply={schemaVersion:1,operationId:'20000000-0000-4000-8000-000000000002',body:'A reply'};
+  expect((await f.invoke('POST','/project-proposals/:proposalId/reply',{
+   params:{proposalId:'proposal-a'},headers:{'x-csrf-token':'wrong'},body:reply,
+  })).status).toBe(403);
+  expect((await f.invoke('POST','/project-proposals/:proposalId/reply',{
+   params:{proposalId:'proposal-a'},headers:{origin:'https://foreign.example'},body:reply,
+  })).status).toBe(403);
   expect(f.proposals.submit).not.toHaveBeenCalled();
   expect(f.proposals.list).not.toHaveBeenCalled();
+  expect(f.proposals.reply).not.toHaveBeenCalled();
  });
 });

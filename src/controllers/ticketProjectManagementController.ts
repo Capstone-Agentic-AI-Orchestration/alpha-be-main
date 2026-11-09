@@ -8,7 +8,6 @@ import { TicketReadInvariantError } from '../ticketing/readModels.js';
 
 export interface TicketProjectManagementApplication {
   linkProject(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<TicketProjectLinkReceipt>;
-  setClientRequestsEnabled(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<{ ticketId: string; acceptsNewRequests: boolean }>;
 }
 
 const statuses = new Set<TicketStatus>([
@@ -68,20 +67,6 @@ export function createTicketProjectManagementRouter(
     }
     const target = { workspaceId, ticketId };
     return res.json(safeLinkReceipt(await application.linkProject(target, subject, req.body), ticketId));
-  }));
-  router.put('/:ticketId/client-requests', route(async (req, res) => {
-    headers(res);
-    if (await relayRequest(req, res)) return;
-    const subject = pmTicketSubject(req, res);
-    if (!subject) return;
-    const ticketId = req.params.ticketId ?? '';
-    const workspaceId = req.workspace?.workspaceId;
-    if (!opaqueTicketRequestValue(ticketId) || !opaqueTicketRequestValue(workspaceId)) {
-      return res.status(404).json({ error: 'Ticket not found.' });
-    }
-    const result = await application.setClientRequestsEnabled({ workspaceId, ticketId }, subject, req.body);
-    if (result.ticketId !== ticketId || typeof result.acceptsNewRequests !== 'boolean') throw new TicketReadInvariantError();
-    return res.json({ ticketId, acceptsNewRequests: result.acceptsNewRequests });
   }));
   return router;
 }

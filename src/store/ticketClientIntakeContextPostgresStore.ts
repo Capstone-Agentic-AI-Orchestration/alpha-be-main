@@ -9,7 +9,6 @@ interface ContextDbRow {
   workspace_id: string;
   client_user_id: string;
   status: string;
-  accepts_new_requests: boolean;
   write_mode: string;
   display_name: string;
   workspace_write_mode: string | null;
@@ -44,7 +43,7 @@ class PostgresTicketClientIntakeContextTransaction implements TicketClientIntake
     if (subject.kind !== 'client' || !text(workspaceId) || !text(subject.userId)
       || !/^[a-f0-9]{64}$/.test(subject.sessionId)) return null;
     const { rows } = await this.sql.query<ContextDbRow>(
-      `select sg.id, sg.workspace_id, sg.client_user_id, sg.status, sg.accepts_new_requests,
+      `select sg.id, sg.workspace_id, sg.client_user_id, sg.status,
               sg.write_mode, sg.display_name, w.settings_json->>'ticketing_write_mode' as workspace_write_mode
          from public.workspaces w
          join alpha_private.ticket_client_sessions s
@@ -59,10 +58,10 @@ class PostgresTicketClientIntakeContextTransaction implements TicketClientIntake
     );
     const row = rows[0];
     if (!row || row.client_user_id !== subject.userId || row.status !== 'active'
-      || typeof row.accepts_new_requests !== 'boolean' || !text(row.display_name)) return null;
+      || !text(row.display_name)) return null;
     this.resolved = {
       id: row.id, workspaceId: row.workspace_id, clientId: row.client_user_id,
-      accessActive: true, acceptsNewRequests: row.accepts_new_requests,
+      accessActive: true,
       mode: modeFor(row), companyLabel: row.display_name,
     };
     return { ...this.resolved };
@@ -106,6 +105,6 @@ function text(value: unknown): value is string {
 }
 function sameContext(left: AuthorizedTicketCreateContext, right: AuthorizedTicketCreateContext): boolean {
   return left.id === right.id && left.workspaceId === right.workspaceId && left.clientId === right.clientId
-    && left.accessActive === right.accessActive && left.acceptsNewRequests === right.acceptsNewRequests
+    && left.accessActive === right.accessActive
     && left.mode === right.mode && left.companyLabel === right.companyLabel;
 }

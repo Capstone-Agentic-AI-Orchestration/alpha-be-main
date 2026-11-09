@@ -21,7 +21,6 @@ interface QueueDbRow {
   project_id: string | null;
   project_display_name: string | null;
   client_access_active: boolean | null;
-  client_accepts_new_requests: boolean | null;
   client_service_active: boolean | null;
   client_group_key: string | null;
   client_group_name: string | null;
@@ -100,8 +99,6 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 case when $2='pm' then t.project_display_name else null end as project_display_name,
                 coalesce(sg.status = 'active' and sg.revoked_at is null and cg.active and cg.revoked_at is null, false) as client_access_active,
                 case when $2='pm' and t.client_user_id is not null
-                  then coalesce(sg.status='active' and sg.revoked_at is null and sg.accepts_new_requests,false) else false end as client_accepts_new_requests,
-                case when $2='pm' and t.client_user_id is not null
                   then coalesce(sg.status='active' and sg.revoked_at is null,false) else false end as client_service_active,
                 case when $2='pm' and t.client_user_id is not null then 'client:' || t.client_user_id
                      when $2='pm' then 'ticket:' || t.id else null end as client_group_key,
@@ -123,7 +120,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 case when $2 = 'pm' then t.internal_updated_at else t.client_updated_at end as sort_at
          from alpha_private.tickets t
          left join lateral (
-           select grant_row.status, grant_row.revoked_at, grant_row.accepts_new_requests, grant_row.display_name
+           select grant_row.status, grant_row.revoked_at, grant_row.display_name
            from alpha_private.ticket_service_grants grant_row
         where grant_row.workspace_id = t.workspace_id and grant_row.client_user_id = t.client_user_id
            for share
@@ -304,15 +301,12 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
 
     const pmClientGroup = scope.principal.kind === 'pm' ? (() => {
       if (typeof row.client_group_key !== 'string' || !row.client_group_key.trim()
-        || typeof row.client_group_name !== 'string' || !row.client_group_name.trim()
-        || typeof row.client_accepts_new_requests !== 'boolean') return invariant();
+        || typeof row.client_group_name !== 'string' || !row.client_group_name.trim()) return invariant();
       if ((row.project_id === null) !== (row.project_display_name === null)
         || (row.project_display_name !== null && (!row.project_display_name.trim() || row.project_display_name.length > 200))) return invariant();
       return {
         key: row.client_group_key,
         displayName: row.client_group_name,
-        acceptsNewRequests: row.client_accepts_new_requests,
-        accessActive: row.client_service_active === true,
       };
     })() : undefined;
 
