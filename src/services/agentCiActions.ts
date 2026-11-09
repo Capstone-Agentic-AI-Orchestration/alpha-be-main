@@ -46,8 +46,8 @@ export function assertRepo(repo: unknown): string {
 }
 
 export function assertRunId(runId: unknown): string {
-  const value = String(runId ?? '').trim();
-  if (!/^\d+$/.test(value)) throw new Error(`Invalid workflow run id "${String(runId)}".`);
+  const value = typeof runId === 'string' || typeof runId === 'number' ? String(runId).trim() : '';
+  if (!/^\d+$/.test(value)) throw new Error(`Invalid workflow run id "${value}".`);
   return value;
 }
 
@@ -193,6 +193,67 @@ export interface IssueUpdateInput {
   reason?: unknown;
 }
 
+interface CheckedIssueChange {
+  /** Title and labels, ready to send. */
+  fields: Record<string, unknown>;
+  /** The new body without the attribution line, when the body changes. */
+  body?: string;
+  state?: 'open' | 'closed';
+  reason?: 'completed' | 'not_planned';
+  comment?: string;
+}
+
+function checkedTitle(value: unknown): string {
+  const title = typeof value === 'string' ? value.trim() : '';
+  if (!title || title.length > 256) throw new Error('An issue needs a title of 1 to 256 characters.');
+  return title;
+}
+
+function checkedLabels(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 10 || value.some(label => typeof label !== 'string' || !label.trim())) {
+    throw new Error('Labels must be up to 10 non-empty strings.');
+  }
+  return value.map(label => (label as string).trim());
+}
+
+const textOrUndefined = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+
+/** Everything wrong with a change is refused here, before GitHub is asked anything. */
+function checkIssueChange(input: IssueUpdateInput): CheckedIssueChange {
+  const change: CheckedIssueChange = { fields: {} };
+  if (input.title !== undefined) change.fields.title = checkedTitle(input.title);
+  if (input.labels !== undefined) change.fields.labels = checkedLabels(input.labels);
+  if (input.state !== undefined) {
+    if (input.state !== 'open' && input.state !== 'closed') throw new Error('state must be open or closed.');
+    change.state = input.state;
+  }
+  if (input.reason !== undefined) {
+    if (input.reason !== 'completed' && input.reason !== 'not_planned') throw new Error('reason must be completed or not_planned.');
+    change.reason = input.reason;
+  }
+  change.comment = textOrUndefined(input.comment);
+  if (change.state === 'closed' && !change.comment) {
+    throw new Error('Closing an issue needs a comment saying why, for example the pull request that fixed it.');
+  }
+  if (input.body !== undefined) {
+    change.body = typeof input.body === 'string' ? input.body.trim() : '';
+    if (change.body.length > 60_000) throw new Error('The issue body is too long.');
+  }
+  if (!Object.keys(change.fields).length && change.body === undefined && change.state === undefined) {
+    throw new Error('Say what to change: title, body, labels or state.');
+  }
+  return change;
+}
+
+/** The attribution line an agent's issue carries, or a refusal for a person's issue. */
+function agentOpenedLine(issue: GitHubIssue): string {
+  const opened = AGENT_OPENED.exec(issue.body ?? '')?.[0];
+  if (!opened) {
+    throw new Error(`#${issue.number} was not opened by an Alpha agent, so an agent does not edit, close or reopen it. Comment on it with github_comment_issue instead.`);
+  }
+  return opened.trim();
+}
+
 /**
  * Edit, close or reopen an issue an Alpha agent opened. A person's issue is
  * refused: an agent comments on it instead, and the person decides. The
@@ -202,51 +263,23 @@ export interface IssueUpdateInput {
 export async function updateIssue(api: GitHubApi, repo: string, issueNumber: unknown, input: IssueUpdateInput, attribution: string) {
   const ownerRepo = assertRepo(repo);
   const number = assertIssueNumber(issueNumber);
-
-  const patch: Record<string, unknown> = {};
-  if (input.title !== undefined) {
-    const title = typeof input.title === 'string' ? input.title.trim() : '';
-    if (!title || title.length > 256) throw new Error('An issue needs a title of 1 to 256 characters.');
-    patch.title = title;
-  }
-  if (input.labels !== undefined) {
-    const labels = input.labels;
-    if (!Array.isArray(labels) || labels.length > 10 || labels.some(label => typeof label !== 'string' || !label.trim())) {
-      throw new Error('Labels must be up to 10 non-empty strings.');
-    }
-    patch.labels = labels.map(label => (label as string).trim());
-  }
-  if (input.state !== undefined && input.state !== 'open' && input.state !== 'closed') throw new Error('state must be open or closed.');
-  if (input.reason !== undefined && input.reason !== 'completed' && input.reason !== 'not_planned') {
-    throw new Error('reason must be completed or not_planned.');
-  }
-  const closing = input.state === 'closed';
-  if (closing && (typeof input.comment !== 'string' || !input.comment.trim())) {
-    throw new Error('Closing an issue needs a comment saying why, for example the pull request that fixed it.');
-  }
-  const newBody = input.body === undefined ? undefined : typeof input.body === 'string' ? input.body.trim() : '';
-  if (newBody !== undefined && newBody.length > 60_000) throw new Error('The issue body is too long.');
-  if (!Object.keys(patch).length && newBody === undefined && input.state === undefined) {
-    throw new Error('Say what to change: title, body, labels or state.');
-  }
+  const change = checkIssueChange(input);
 
   const issue = await readIssue(api, ownerRepo, number);
-  const opened = (issue.body ?? '').match(AGENT_OPENED)?.[0];
-  if (!opened) {
-    throw new Error(`#${number} was not opened by an Alpha agent, so an agent does not edit, close or reopen it. Comment on it with github_comment_issue instead.`);
-  }
-  if (newBody !== undefined) patch.body = [newBody, '---', opened.trim()].filter(Boolean).join('\n\n');
-  if (input.state !== undefined && input.state !== issue.state) {
-    patch.state = input.state;
-    if (closing) patch.state_reason = input.reason ?? 'completed';
+  const opened = agentOpenedLine(issue);
+  const patch: Record<string, unknown> = { ...change.fields };
+  if (change.body !== undefined) patch.body = [change.body, '---', opened].filter(Boolean).join('\n\n');
+  if (change.state !== undefined && change.state !== issue.state) {
+    patch.state = change.state;
+    if (change.state === 'closed') patch.state_reason = change.reason ?? 'completed';
   }
 
   // The why goes on the record first, so a closed issue never lacks it. A
   // comment with any other change is posted too; closing an issue that is
   // already closed changes nothing and says nothing.
-  const alreadyClosed = closing && issue.state === 'closed';
-  if (typeof input.comment === 'string' && input.comment.trim() && !alreadyClosed) {
-    await api.post(`/repos/${ownerRepo}/issues/${number}/comments`, { body: commentBody(input.comment, attribution) });
+  const closingAgain = change.state === 'closed' && issue.state === 'closed';
+  if (change.comment && !closingAgain) {
+    await api.post(`/repos/${ownerRepo}/issues/${number}/comments`, { body: commentBody(change.comment, attribution) });
   }
   if (!Object.keys(patch).length) return { number, url: issue.html_url, state: issue.state, changed: [] as string[] };
   const updated = await api.patch<GitHubIssue>(`/repos/${ownerRepo}/issues/${number}`, patch);

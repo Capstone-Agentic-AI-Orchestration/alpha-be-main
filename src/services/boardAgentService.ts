@@ -62,10 +62,16 @@ export interface BoardToolResult {
 const text = (value: unknown, max: number): string | undefined =>
   typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
 
+/** Code-unit order, as `sort()` with no compare function gives, so request keys stay the same. */
+function byCodeUnit(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
   if (value && typeof value === 'object') {
-    return '{' + Object.keys(value as object).sort().map(key => JSON.stringify(key) + ':' + stableStringify((value as Record<string, unknown>)[key])).join(',') + '}';
+    return '{' + Object.keys(value as object).sort(byCodeUnit).map(key => JSON.stringify(key) + ':' + stableStringify((value as Record<string, unknown>)[key])).join(',') + '}';
   }
   return JSON.stringify(value ?? null);
 }
@@ -304,21 +310,29 @@ async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentCh
     const { saved, syncWarning } = await restoreCard(workspaceId, card, by);
     return withSyncWarning({ ...change, after: pick(saved, ['archivedAt', 'archivedBy']) }, syncWarning);
   }
-  if (change.action === 'comment') {
-    const comment = await issueStore().addComment(workspaceId, {
-      id: 'comm-' + card.id + '-agent-' + randomUUID().slice(0, 12),
-      issueId: card.id,
-      authorType: 'agent',
-      authorName: change.agentName,
-      ...(change.agentId ? { agentId: change.agentId } : {}),
-      content: String(input.text) + '\n\n(on behalf of ' + change.actorLogin + ')',
-      createdAt: new Date().toISOString()
-    });
-    void supabaseService.shareComment(comment);
-    return change;
-  }
+  if (change.action === 'comment') return applyComment(change, card);
+  return applyCardEdit(change, card, by);
+}
 
-  // update or move
+/** A comment signed as the agent, on behalf of the developer. */
+async function applyComment(change: BoardAgentChangeRecord, card: Issue): Promise<BoardAgentChangeRecord> {
+  const comment = await issueStore().addComment(change.workspaceId, {
+    id: 'comm-' + card.id + '-agent-' + randomUUID().slice(0, 12),
+    issueId: card.id,
+    authorType: 'agent',
+    authorName: change.agentName,
+    ...(change.agentId ? { agentId: change.agentId } : {}),
+    content: String((change.input as Record<string, unknown>).text) + '\n\n(on behalf of ' + change.actorLogin + ')',
+    createdAt: new Date().toISOString()
+  });
+  void supabaseService.shareComment(comment);
+  return change;
+}
+
+/** An update or move: the card's own rules, then one activity note per card per turn. */
+async function applyCardEdit(change: BoardAgentChangeRecord, card: Issue, by: string): Promise<BoardAgentChangeRecord> {
+  const workspaceId = change.workspaceId;
+  const input = change.input as Record<string, any>;
   const updates = await prepareCardUpdate(workspaceId, card, { ...(input.updates as object) });
   const { saved, syncWarning } = await saveCardUpdate(workspaceId, card, updates);
   // One note per card per turn: the team sees who changed it and for whom,
