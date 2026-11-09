@@ -2,7 +2,8 @@ import type { GitHubApi } from './githubApi.js';
 
 /**
  * What an agent may do about CI on its own: read why a run failed, retry a
- * failure once, and open an issue for one it cannot fix.
+ * failure once, open an issue for one it cannot fix, and keep that issue
+ * current -- comment on it, and edit, close or reopen it.
  *
  * The limits here are the ethics of it, not tuning. A failing check is a
  * finding, so an agent reads the log and fixes the cause; a run retried until
@@ -127,4 +128,127 @@ export async function createIssue(api: GitHubApi, repo: string, input: IssueInpu
     ...(labels.length ? { labels: labels.map(label => (label as string).trim()) } : {})
   });
   return { number: issue.number, url: issue.html_url };
+}
+
+/**
+ * The line `createIssue` ends an agent's issue with. Agents act through the
+ * developer's own GitHub account, so the author cannot tell an agent's issue
+ * from the developer's; this line can.
+ */
+const AGENT_OPENED = /^_Opened by an Alpha agent[^\n]*\._[ \t]*$/m;
+
+interface GitHubIssue {
+  number: number;
+  title: string;
+  body?: string | null;
+  state: 'open' | 'closed';
+  locked?: boolean;
+  html_url: string;
+  pull_request?: unknown;
+}
+
+export function assertIssueNumber(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) throw new Error(`Invalid issue number "${String(value)}".`);
+  return number;
+}
+
+/** An issue, refusing pull requests: an agent reviews those with github_review_pull_request. */
+async function readIssue(api: GitHubApi, ownerRepo: string, number: number): Promise<GitHubIssue> {
+  const issue = await api.get<GitHubIssue>(`/repos/${ownerRepo}/issues/${number}`);
+  if (issue.pull_request) throw new Error(`#${number} is a pull request, not an issue. Use github_review_pull_request to comment on it.`);
+  return issue;
+}
+
+function commentBody(text: unknown, attribution: string): string {
+  const body = typeof text === 'string' ? text.trim() : '';
+  if (!body) throw new Error('A comment needs text.');
+  if (body.length > 60_000) throw new Error('The comment is too long.');
+  return [body, '---', `_${attribution}_`].join('\n\n');
+}
+
+/**
+ * Comment on an issue in one of the project's repositories: progress, new
+ * evidence, the pull request that fixes it. Any issue there, since a comment
+ * adds to the record without changing what a person wrote.
+ */
+export async function commentOnIssue(api: GitHubApi, repo: string, issueNumber: unknown, text: unknown, attribution: string) {
+  const ownerRepo = assertRepo(repo);
+  const number = assertIssueNumber(issueNumber);
+  const body = commentBody(text, attribution);
+  const issue = await readIssue(api, ownerRepo, number);
+  if (issue.locked) throw new Error(`#${number} is locked, so it takes no comments.`);
+  const comment = await api.post<{ id: number; html_url: string }>(`/repos/${ownerRepo}/issues/${number}/comments`, { body });
+  return { issue: number, url: comment.html_url };
+}
+
+export interface IssueUpdateInput {
+  title?: unknown;
+  body?: unknown;
+  labels?: unknown;
+  state?: unknown;
+  /** Required to close: says why, as a comment, before the issue closes. */
+  comment?: unknown;
+  /** When closing: 'completed' (default) or 'not_planned'. */
+  reason?: unknown;
+}
+
+/**
+ * Edit, close or reopen an issue an Alpha agent opened. A person's issue is
+ * refused: an agent comments on it instead, and the person decides. The
+ * agent's attribution stays at the end of a rewritten body, so the issue
+ * still says an agent opened it and stays editable by one.
+ */
+export async function updateIssue(api: GitHubApi, repo: string, issueNumber: unknown, input: IssueUpdateInput, attribution: string) {
+  const ownerRepo = assertRepo(repo);
+  const number = assertIssueNumber(issueNumber);
+
+  const patch: Record<string, unknown> = {};
+  if (input.title !== undefined) {
+    const title = typeof input.title === 'string' ? input.title.trim() : '';
+    if (!title || title.length > 256) throw new Error('An issue needs a title of 1 to 256 characters.');
+    patch.title = title;
+  }
+  if (input.labels !== undefined) {
+    const labels = input.labels;
+    if (!Array.isArray(labels) || labels.length > 10 || labels.some(label => typeof label !== 'string' || !label.trim())) {
+      throw new Error('Labels must be up to 10 non-empty strings.');
+    }
+    patch.labels = labels.map(label => (label as string).trim());
+  }
+  if (input.state !== undefined && input.state !== 'open' && input.state !== 'closed') throw new Error('state must be open or closed.');
+  if (input.reason !== undefined && input.reason !== 'completed' && input.reason !== 'not_planned') {
+    throw new Error('reason must be completed or not_planned.');
+  }
+  const closing = input.state === 'closed';
+  if (closing && (typeof input.comment !== 'string' || !input.comment.trim())) {
+    throw new Error('Closing an issue needs a comment saying why, for example the pull request that fixed it.');
+  }
+  const newBody = input.body === undefined ? undefined : typeof input.body === 'string' ? input.body.trim() : '';
+  if (newBody !== undefined && newBody.length > 60_000) throw new Error('The issue body is too long.');
+  if (!Object.keys(patch).length && newBody === undefined && input.state === undefined) {
+    throw new Error('Say what to change: title, body, labels or state.');
+  }
+
+  const issue = await readIssue(api, ownerRepo, number);
+  const opened = (issue.body ?? '').match(AGENT_OPENED)?.[0];
+  if (!opened) {
+    throw new Error(`#${number} was not opened by an Alpha agent, so an agent does not edit, close or reopen it. Comment on it with github_comment_issue instead.`);
+  }
+  if (newBody !== undefined) patch.body = [newBody, '---', opened.trim()].filter(Boolean).join('\n\n');
+  if (input.state !== undefined && input.state !== issue.state) {
+    patch.state = input.state;
+    if (closing) patch.state_reason = input.reason ?? 'completed';
+  }
+
+  // The why goes on the record first, so a closed issue never lacks it. A
+  // comment with any other change is posted too; closing an issue that is
+  // already closed changes nothing and says nothing.
+  const alreadyClosed = closing && issue.state === 'closed';
+  if (typeof input.comment === 'string' && input.comment.trim() && !alreadyClosed) {
+    await api.post(`/repos/${ownerRepo}/issues/${number}/comments`, { body: commentBody(input.comment, attribution) });
+  }
+  if (!Object.keys(patch).length) return { number, url: issue.html_url, state: issue.state, changed: [] as string[] };
+  const updated = await api.patch<GitHubIssue>(`/repos/${ownerRepo}/issues/${number}`, patch);
+  return { number, url: updated.html_url, state: updated.state, changed: Object.keys(patch).filter(key => key !== 'state_reason') };
 }
