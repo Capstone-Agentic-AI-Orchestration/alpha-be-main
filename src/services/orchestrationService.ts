@@ -164,6 +164,9 @@ export interface OrchestrationTaskPackage {
   reportSchemaVersion: number;
   goal: string;
   projectContext: string;
+  /** Optional instructions selected for the originating chat message. */
+  chatSkillIds?: string[];
+  chatSkillGuidance?: string;
   exclusions: string[];
   task: {
     id: string;
@@ -1694,6 +1697,8 @@ export class OrchestrationService {
       reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       goal: snapshot.run.plan.goal,
       projectContext: snapshot.run.plan.projectContext ?? '',
+      ...(snapshot.run.plan.chatSkillIds?.length ? { chatSkillIds: snapshot.run.plan.chatSkillIds } : {}),
+      ...(snapshot.run.plan.chatSkillGuidance ? { chatSkillGuidance: snapshot.run.plan.chatSkillGuidance } : {}),
       exclusions: snapshot.run.plan.exclusions,
       task: {
         id: task.id,

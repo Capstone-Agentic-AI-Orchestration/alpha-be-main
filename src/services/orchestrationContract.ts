@@ -63,6 +63,9 @@ export const orchestrationPlanSchema = z.object({
   goal: z.string().trim().min(1).max(4_000),
   /** Snapshot of saved project rules carried to each specialist. Set by Alpha, not trusted from model output. */
   projectContext: z.string().max(MAX_PROJECT_CONTEXT_CHARS).optional(),
+  /** Optional per-message skill guidance and IDs, stamped by Alpha and carried through the approved run. */
+  chatSkillIds: z.array(z.string().trim().min(1).max(160)).max(5).optional(),
+  chatSkillGuidance: z.string().max(20_000).optional(),
   exclusions: z.array(shortText).max(20).default([]),
   requirements: z.array(z.object({
     id: identifier,

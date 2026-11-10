@@ -316,6 +316,7 @@ create table if not exists chat_messages (
   operation_mode    text,
   agent_call_status text,
   revision_target   text,
+  skill_ids         jsonb not null default '[]'::jsonb,
   timestamp         timestamptz not null default now()
 );
 
