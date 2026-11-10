@@ -4,7 +4,7 @@ import { route } from './asyncRoute.js';
 import { agentStore, chatStore, issueStore, projectStore } from '../store/stores.js';
 import { isAskThreadId, isBoardThreadId } from '../services/boardThreads.js';
 import { ensureBoardThread } from '../services/boardThreadService.js';
-import { chatService, ChatRouteError } from '../services/chatService.js';
+import { chatService, ChatRouteError, MAX_CHAT_SKILLS } from '../services/chatService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { requireEntityWorkspace, requireProjectWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
@@ -441,10 +441,29 @@ chatRouter.post('/projects/:projectId/board-thread', desktopOnly, route(async (r
 }));
 
 
+/** Suggest a revision to the current composer draft without sending or saving it. */
+chatRouter.post('/chat/improve-prompt', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const { draft, skillIds } = req.body ?? {};
+  if (typeof draft !== 'string' || !draft.trim() || draft.length > 12_000) {
+    return res.status(400).json({ error: 'draft must be a non-empty string of at most 12,000 characters' });
+  }
+  if (!Array.isArray(skillIds) || skillIds.length < 1 || skillIds.length > MAX_CHAT_SKILLS ||
+      skillIds.some((id: unknown) => typeof id !== 'string' || !id.trim() || id.length > 160)) {
+    return res.status(400).json({ error: `skillIds must contain between 1 and ${MAX_CHAT_SKILLS} skill ids` });
+  }
+  try {
+    res.json(await chatService.improvePrompt({ draft, skillIds: [...new Set(skillIds.map((id: string) => id.trim()))] }));
+  } catch (error) {
+    const status = error instanceof ChatRouteError ? error.status : 503;
+    res.status(status).json({ error: error instanceof Error ? error.message : 'The prompt could not be improved.' });
+  }
+}));
+
 chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Response) => {
   try {
     if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
-    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, issueId, approvalMode, buildDecision, scopeIssueIds } = req.body;
+    const { threadId, content, senderName, targetAgentId, targetSquadId, repository, repositories, projectId, intent, clientMessageId, attachmentIds, skillIds, issueId, approvalMode, buildDecision, scopeIssueIds } = req.body;
     if (typeof threadId !== 'string' || !threadId.trim() || typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'threadId and content are required' });
     }
@@ -462,6 +481,10 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     }
     if (attachmentIds !== undefined && (!Array.isArray(attachmentIds) || attachmentIds.length > 8 || attachmentIds.some((id: unknown) => typeof id !== 'string'))) {
       return res.status(400).json({ error: 'attachmentIds must be a list of up to 8 attachment ids' });
+    }
+    if (skillIds !== undefined && (!Array.isArray(skillIds) || skillIds.length > MAX_CHAT_SKILLS ||
+        skillIds.some((id: unknown) => typeof id !== 'string' || !id.trim() || id.length > 160))) {
+      return res.status(400).json({ error: `skillIds must be a list of up to ${MAX_CHAT_SKILLS} skill ids` });
     }
     if (targetAgentId !== undefined && targetAgentId !== null && typeof targetAgentId !== 'string') {
       return res.status(400).json({ error: 'targetAgentId must be a string or null' });
@@ -568,6 +591,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       projectId: scopedProjectId,
       clientMessageId,
       attachmentIds,
+      skillIds: skillIds === undefined ? undefined : [...new Set((skillIds as string[]).map(id => id.trim()))],
       workspaceId: req.workspace!.workspaceId,
       userId: req.workspace!.userId,
       buildRequest,
@@ -575,7 +599,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     });
     res.status(201).json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to process chat message' });
+    res.status(err instanceof ChatRouteError ? err.status : 500).json({ error: err.message || 'Failed to process chat message' });
   } finally {
     if (typeof req.body?.threadId === 'string' && typeof req.body?.clientMessageId === 'string') {
       chatService.finishTurn(req.body.threadId, req.body.clientMessageId);

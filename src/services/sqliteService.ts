@@ -842,7 +842,8 @@ export class SQLiteService {
         revision_target TEXT,
         route_proposal TEXT,
         timestamp TEXT NOT NULL,
-        attachments_json TEXT NOT NULL DEFAULT '[]'
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        skill_ids TEXT NOT NULL DEFAULT '[]'
       );
 
       CREATE TABLE IF NOT EXISTS chat_attachments (
@@ -1533,6 +1534,7 @@ export class SQLiteService {
       ['chat_threads', 'target_agent_id TEXT'],
       ['chat_threads', 'target_squad_id TEXT'],
       ['chat_messages', "attachments_json TEXT NOT NULL DEFAULT '[]'"],
+      ['chat_messages', "skill_ids TEXT NOT NULL DEFAULT '[]'"],
       /**
        * Whose conversation this is.
        *
@@ -6170,6 +6172,7 @@ export class SQLiteService {
       revisionTarget: parseJson<AgentCallTarget | undefined>(r.revision_target, undefined),
       routeProposal: parseJson<ChatMessage['routeProposal']>(r.route_proposal, undefined),
       attachments: parseJson<ChatMessage['attachments']>(r.attachments_json, []),
+      skillIds: parseJson<ChatMessage['skillIds']>(r.skill_ids, []),
       timestamp: r.timestamp
     }));
   }
@@ -6425,12 +6428,12 @@ export class SQLiteService {
       INSERT INTO chat_messages (
         id, thread_id, sender_type, sender_name, agent_id, content,
         thinking_process, tools_executed, message_type, agent_call_id,
-        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, route_proposal, timestamp, attachments_json
+        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, route_proposal, timestamp, attachments_json, skill_ids
       )
       VALUES (
         @id, @threadId, @senderType, @senderName, @agentId, @content,
         @thinkingProcess, @toolsExecuted, @messageType, @agentCallId,
-        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @routeProposal, @timestamp, @attachments
+        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @routeProposal, @timestamp, @attachments, @skillIds
       )
     `);
     stmt.run({
@@ -6446,7 +6449,8 @@ export class SQLiteService {
       agentCallStatus: msg.agentCallStatus || null,
       revisionTarget: msg.revisionTarget ? JSON.stringify(msg.revisionTarget) : null,
       routeProposal: msg.routeProposal ? JSON.stringify(msg.routeProposal) : null,
-      attachments: JSON.stringify(msg.attachments ?? [])
+      attachments: JSON.stringify(msg.attachments ?? []),
+      skillIds: JSON.stringify(msg.skillIds ?? [])
     });
 
     const updateThread = this.db.prepare(`

@@ -66,6 +66,7 @@ export interface MessageRow {
   operation_mode: string | null;
   agent_call_status: string | null;
   revision_target: AgentCallTarget | string | null;
+  skill_ids: string[] | null;
   timestamp: Timestamp;
 }
 
@@ -105,6 +106,7 @@ export function toMessage(row: MessageRow): ChatMessage {
       typeof row.revision_target === 'string'
         ? (JSON.parse(row.revision_target) as AgentCallTarget)
         : (row.revision_target ?? undefined),
+    skillIds: row.skill_ids ?? [],
     timestamp: iso(row.timestamp)
   };
 }
@@ -148,6 +150,7 @@ export function messageRow(message: ChatMessage): Record<string, unknown> {
     operation_mode: message.operationMode ?? null,
     agent_call_status: message.agentCallStatus ?? null,
     revision_target: message.revisionTarget ?? null,
+    skill_ids: message.skillIds ?? [],
     timestamp: message.timestamp || new Date().toISOString()
   };
 }

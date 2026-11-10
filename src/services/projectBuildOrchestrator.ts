@@ -56,6 +56,9 @@ interface StartProjectBuildInput {
   threadId: string;
   messageId: string;
   content: string;
+  /** Optional skills selected on the originating chat message; instruction text stays separate from the goal. */
+  chatSkillIds?: string[];
+  chatSkillGuidance?: string;
   requestedRepository?: string;
   requestedRepositories?: string[];
   /** Existing board issue to build. Omitted for chat requests, which get their own issue. */
@@ -259,6 +262,8 @@ async function startOrchestratedProjectBuild(input: {
   threadId: string;
   messageId: string;
   content: string;
+  chatSkillIds?: string[];
+  chatSkillGuidance?: string;
   issueId?: string;
 }): Promise<ProjectBuildStartResult> {
   const { context, project, members, buildSteps } = input;
@@ -497,6 +502,8 @@ async function startOrchestratedProjectBuild(input: {
       repositoryRoots: reservations.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })),
       branchContext: reservations.map(item => ({ repository: item.repository, branchName: item.branchName, baseRef: baseRefs.get(item.repository) ?? item.baseCommit, baseCommit: item.baseCommit })),
       goal: cleanGoal,
+      chatSkillIds: input.chatSkillIds,
+      chatSkillGuidance: input.chatSkillGuidance,
       // The team's playbook and the detected stack, read from the planning checkouts.
       projectContext: composeProjectContext({
         description: project.description,
@@ -745,6 +752,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     return startOrchestratedProjectBuild({
       context, project, repositories: selectedCheckouts, members: projectAgents,
       buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId,
+      chatSkillIds: input.chatSkillIds, chatSkillGuidance: input.chatSkillGuidance,
       deliveryRepair: input.deliveryRepair
     });
   });

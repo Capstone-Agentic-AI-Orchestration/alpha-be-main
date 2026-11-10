@@ -718,6 +718,8 @@ export interface ChatMessage {
   revisionTarget?: AgentCallTarget;
   /** Local-only file references. File bytes never leave the desktop attachment store. */
   attachments?: ChatAttachmentReference[];
+  /** Optional installed skills selected specifically for this user message. */
+  skillIds?: string[];
   timestamp: string;
 }
 
