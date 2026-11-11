@@ -18,6 +18,19 @@ afterEach(() => { store?.close(); vi.unstubAllEnvs(); vi.resetModules(); fs.rmSy
 const entry = (id: string, threadId: string): UsageEntry => ({ id, threadId, agentId: 'agent', provider: 'codex', startedAt: '2026-10-25T01:00:00Z', updatedAt: '2026-10-25T01:00:02Z', status: 'completed', usage: { totalTokens: 100 } });
 
 describe('private durable usage', () => {
+  it('aggregates only the owner’s usage in the active workspace and requested period', async () => {
+    store.saveChatUsage(entry('alice-in-range', 'a'));
+    store.saveChatUsage(entry('bob-in-range', 'b'));
+    store.saveChatUsage({ ...entry('alice-outside', 'a'), startedAt: '2026-10-27T01:00:00Z' });
+    const from = '2026-10-25T00:00:00.000Z';
+    const to = '2026-10-26T00:00:00.000Z';
+    expect(store.getAiUsageForOwner('alice', from, to).map(row => row.id)).toEqual(['alice-in-range']);
+    expect(store.getAiUsageForOwner('bob', from, to).map(row => row.id)).toEqual(['bob-in-range']);
+    expect(store.getAiUsageForOwner('', from, to)).toEqual([]);
+    const { runWithWorkspace } = await import('./workspaceContext.js');
+    const workspace = store.createWorkspace({ name: 'Other workspace' });
+    runWithWorkspace(workspace.id, () => expect(store.getAiUsageForOwner('alice', from, to)).toEqual([]));
+  });
   it('updates the same invocation instead of appending totals and enforces thread ownership', () => {
     store.saveChatUsage(entry('one', 'a'));
     store.saveChatUsage({ ...entry('one', 'a'), usage: { totalTokens: 150 } });

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { ParsedEvent, RunTelemetry, StreamFamily } from './streamParser.js';
 import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
 import { sqliteService } from './sqliteService.js';
+import { estimateApiEquivalentCost } from './usagePricing.js';
 
 export interface UsageContext {
   threadId?: string;
@@ -19,6 +20,10 @@ export interface TokenUsage {
   cacheCreationTokens?: number;
   thinkingTokens?: number;
   totalTokens?: number;
+  /** Cost reported by the CLI. This is not an actual provider bill. */
+  reportedCostUsd?: number;
+  /** API list-price equivalent, kept separate from provider-reported cost. */
+  estimatedCostUsd?: number;
 }
 export interface UsageEntry extends UsageContext {
   id: string;
@@ -32,9 +37,10 @@ export interface UsageEntry extends UsageContext {
 }
 const active = new Set<string>();
 const tokenKeys = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'thinkingTokens'] as const;
+const costKeys = ['reportedCostUsd', 'estimatedCostUsd'] as const;
 
 /** Provider counts have different overlap rules. Never add a cached/reasoning subset twice. */
-export function normalizeTokens(family: StreamFamily, telemetry: RunTelemetry): TokenUsage {
+export function normalizeTokens(family: StreamFamily, telemetry: RunTelemetry, model?: string): TokenUsage {
   const result: TokenUsage = {};
   for (const key of tokenKeys) {
     const value = telemetry[key];
@@ -46,6 +52,7 @@ export function normalizeTokens(family: StreamFamily, telemetry: RunTelemetry): 
   if (family === 'antigravity') parts.push(result.thinkingTokens);
   const reported = parts.filter((value): value is number => value !== undefined);
   if (reported.length) result.totalTokens = reported.reduce((sum, value) => sum + value, 0);
+  Object.assign(result, estimateApiEquivalentCost(family, model, result, telemetry.costUsd));
   return result;
 }
 
@@ -54,16 +61,19 @@ export class UsageAccumulator {
   private messages = new Map<string, RunTelemetry>();
   private final?: TokenUsage;
   private turns = new Map<string, TokenUsage>();
-  constructor(private readonly family: StreamFamily) {}
+  constructor(private readonly family: StreamFamily, private readonly model?: string) {}
   accept(event: ParsedEvent): TokenUsage {
     if (!event.telemetry || !['usage', 'result'].includes(event.type)) return this.snapshot();
-    if (event.type === 'result' && this.family === 'codex') this.turns.set(event.streamKey ?? 'turn', normalizeTokens(this.family, event.telemetry));
-    else if (event.type === 'result') this.final = normalizeTokens(this.family, event.telemetry);
+    if (event.type === 'result' && this.family === 'codex') this.turns.set(event.streamKey ?? 'turn', normalizeTokens(this.family, event.telemetry, this.model));
+    else if (event.type === 'result') this.final = normalizeTokens(this.family, event.telemetry, this.model);
     else if (!this.final && event.streamKey) {
-      const next = { ...this.messages.get(event.streamKey) };
+      const next: RunTelemetry = { ...this.messages.get(event.streamKey) };
       for (const key of tokenKeys) {
         const value = event.telemetry[key];
         if (typeof value === 'number' && Number.isFinite(value) && value >= 0) next[key] = Math.max(next[key] ?? 0, value);
+      }
+      if (typeof event.telemetry.costUsd === 'number' && Number.isFinite(event.telemetry.costUsd) && event.telemetry.costUsd >= 0) {
+        next.costUsd = Math.max(next.costUsd ?? 0, event.telemetry.costUsd);
       }
       this.messages.set(event.streamKey, next);
     }
@@ -72,10 +82,15 @@ export class UsageAccumulator {
   snapshot(): TokenUsage {
     if (this.final && this.final.totalTokens !== undefined) return { ...this.final };
     const sum: TokenUsage = {};
-    const parts = this.family === 'codex' ? [...this.turns.values()] : [...this.messages.values()].map(message => normalizeTokens(this.family, message));
+    const parts = this.family === 'codex' ? [...this.turns.values()] : [...this.messages.values()].map(message => normalizeTokens(this.family, message, this.model));
     for (const normalized of parts) {
-      for (const key of [...tokenKeys, 'totalTokens'] as const) {
+      for (const key of [...tokenKeys, 'totalTokens', ...costKeys] as const) {
         if (normalized[key] !== undefined) sum[key] = (sum[key] ?? 0) + normalized[key]!;
+      }
+    }
+    if (this.final) {
+      for (const key of [...tokenKeys, 'totalTokens', ...costKeys] as const) {
+        if (this.final[key] !== undefined) sum[key] = this.final[key]!;
       }
     }
     return sum;
@@ -88,7 +103,7 @@ export function startUsage(context: UsageContext | undefined, provider: StreamFa
   context = { ...context, messageId: context.messageId ?? call?.messageId };
   const now = new Date().toISOString();
   const entry: UsageEntry = { ...context, id: randomUUID(), provider, model, startedAt: now, updatedAt: now, status: 'running', usage: {} };
-  const accumulator = new UsageAccumulator(provider);
+  const accumulator = new UsageAccumulator(provider, model);
   active.add(entry.id);
   const workspaceId = currentWorkspaceId();
   let persistenceFailed = false;
@@ -118,6 +133,7 @@ export function startUsage(context: UsageContext | undefined, provider: StreamFa
         return;
       }
       entry.usage = accumulator.accept(event);
+      Object.assign(entry.usage, estimateApiEquivalentCost(provider, model, entry.usage, entry.usage.reportedCostUsd));
       entry.updatedAt = new Date().toISOString();
       persistSoon();
     },
