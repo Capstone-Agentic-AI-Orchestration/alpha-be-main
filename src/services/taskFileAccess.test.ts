@@ -9,7 +9,9 @@ let roots: Array<{ name: string; repo: string; dir: string }>;
 const scope: TaskFileScope = { taskId: 'backend-task', repository: 'test/backend', kind: 'backend',
   includePaths: ['src/**', 'package-lock.json'], excludePaths: ['src/generated/**'], requiredChecks: ['test'], reportOnly: false };
 beforeEach(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-task-scope-test-'));
+  // Project roots are canonicalized by parseRoots; Windows temp paths can use
+  // an 8.3 alias that differs from the real path returned for child files.
+  dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-task-scope-test-')));
   fs.mkdirSync(path.join(dir, 'src', 'generated'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'src', 'api.ts'), 'before');
   roots = [{ name: 'backend', repo: 'test/backend', dir }];

@@ -497,6 +497,37 @@ export class SQLiteService {
       .map(row => JSON.parse(row.data));
   }
 
+  /**
+   * Alpha-launched model usage visible to one signed-in user in this workspace.
+   * The rows contain telemetry only; private prompts and provider credentials
+   * are never part of the aggregate response.
+   */
+  getAiUsageForOwner(ownerId: string, from: string, to: string): UsageEntry[] {
+    if (!ownerId) return [];
+    const workspaceId = this.workspaceId();
+    return (this.db.prepare(`SELECT u.data FROM chat_usage u
+      WHERE u.workspace_id = ?
+        AND json_extract(u.data, '$.startedAt') >= ?
+        AND json_extract(u.data, '$.startedAt') < ?
+        AND (
+          u.thread_id IN (
+            SELECT t.id FROM chat_threads t
+            WHERE t.workspace_id = u.workspace_id AND t.owner_id = ?
+          )
+          OR u.orchestration_run_id IN (
+            SELECT o.id FROM orchestration_runs o
+            WHERE o.workspace_id = u.workspace_id AND o.created_by = ?
+          )
+          OR u.prototype_run_id IN (
+            SELECT p.id FROM prototype_runs p
+            JOIN orchestration_runs o ON o.id = p.orchestration_run_id AND o.workspace_id = p.workspace_id
+            WHERE p.workspace_id = u.workspace_id AND o.created_by = ?
+          )
+        )
+      ORDER BY json_extract(u.data, '$.startedAt'), u.id`)
+      .all(workspaceId, from, to, ownerId, ownerId, ownerId) as Array<{ data: string }>).map(row => JSON.parse(row.data));
+  }
+
   private initTables() {
     this.db.exec(`CREATE TABLE IF NOT EXISTS orchestration_deliveries (
       workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, revision INTEGER NOT NULL,
@@ -518,6 +549,7 @@ export class SQLiteService {
       );
       CREATE INDEX IF NOT EXISTS idx_chat_usage_thread ON chat_usage(workspace_id, thread_id);
       CREATE INDEX IF NOT EXISTS idx_chat_usage_run ON chat_usage(workspace_id, orchestration_run_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_usage_started_at ON chat_usage(workspace_id, json_extract(data, '$.startedAt'));
 
       CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
