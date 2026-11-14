@@ -74,11 +74,21 @@ function fixture() {
           step('page'); expect(scope).toBe(authorized); control.queries.push({ page, month });
           if (control.rawRows) return structuredClone(control.rawRows);
           const items = visible(scope).filter(item => matchesTicketQueueFilter(item, page.filter, month)
-            && `${item.header.reference} ${item.header.title}`.toLowerCase().includes(page.search.toLowerCase()))
+            && (page.clientGroupKey === undefined || item.pmClientGroup?.key === page.clientGroupKey)
+            && `${item.header.reference} ${item.header.title} ${item.pmClientGroup?.displayName ?? ''}`.toLowerCase().includes(page.search.toLowerCase()))
             .sort((a, b) => queueSortTime(scope, b) - queueSortTime(scope, a) || (a.ticket.state.id > b.ticket.state.id ? -1 : 1));
           const cursor = page.after === null ? -1 : items.findIndex(item => item.ticket.state.id === page.after);
           if (page.after !== null && cursor === -1) throw new TicketWorkflowError(404, 'ticket_not_found', 'Ticket not found.');
           return items.slice(cursor + 1, cursor + 1 + page.limit + 1);
+        },
+        async listClientGroups(scope) {
+          step('groups'); expect(scope).toBe(authorized);
+          const groups = new Map<string, string>();
+          for (const item of visible(scope)) {
+            const group = item.pmClientGroup;
+            if (group) groups.set(group.key, group.displayName);
+          }
+          return [...groups].map(([key, displayName]) => ({ key, displayName }));
         },
         async countQueue(scope, month) {
           step('counts'); expect(scope).toBe(authorized);
