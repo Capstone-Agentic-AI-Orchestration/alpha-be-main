@@ -3,7 +3,7 @@ import { Router, type Request } from 'express';
 import { route } from './asyncRoute.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
-import type { TicketQueueCounters } from '../store/ticketQueueStore.js';
+import type { TicketQueueClientGroup, TicketQueueCounters } from '../store/ticketQueueStore.js';
 import type { ClientTicketQueueItem, PmTicketQueueItem } from '../ticketing/queueModels.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
@@ -17,6 +17,7 @@ interface TicketQueuePage {
 
 export interface PmTicketQueueApplication {
   list(workspaceId: string, subject: TicketSubject, input: unknown): Promise<TicketQueuePage>;
+  listClientGroups(workspaceId: string, subject: TicketSubject): Promise<TicketQueueClientGroup[]>;
 }
 
 const statusValues = new Set([
@@ -31,13 +32,22 @@ const actionValues = new Set([
 const requestedActionValues = new Set(['reply', 'agree_scope', 'review_result']);
 const invitationStateValues = new Set(['pending', 'expired', 'revoked', 'consumed']);
 const invitationDeliveryValues = new Set(['queued', 'sending', 'retrying', 'accepted_by_provider', 'failed', 'unknown']);
-const allowedQueryKeys = new Set(['limit', 'after', 'search', 'filter']);
+const allowedQueryKeys = new Set(['limit', 'after', 'search', 'filter', 'clientGroupKey']);
 const terminalStatuses = new Set(['closed', 'declined', 'cancelled']);
 const validTimestamp = (value: unknown): value is string => typeof value === 'string'
   && value.length <= 40 && Number.isFinite(Date.parse(value));
 
 function invalidPage(): never {
   throw new TicketWorkflowError(400, 'invalid_ticket_page', 'This ticket page is invalid.');
+}
+
+function safeClientGroup(value: TicketQueueClientGroup): TicketQueueClientGroup {
+  if (!value || !opaqueTicketRequestValue(value.key)
+    || typeof value.displayName !== 'string' || !value.displayName.trim()
+    || value.displayName.trim() !== value.displayName || value.displayName.length > 200) {
+    throw new TicketReadInvariantError();
+  }
+  return { key: value.key, displayName: value.displayName };
 }
 
 /** Express query values are strings (or arrays/objects for malformed input). */
@@ -167,6 +177,28 @@ export function createTicketQueueRouter(
       throw new TicketReadInvariantError();
     }
     return res.json({ items, nextCursor: page.nextCursor, counters: safeCounters(page.counters) });
+  }));
+
+  router.get('/client-groups', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    if (await relayRequest(req, res)) return;
+
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    const workspace = req.workspace;
+    if (!workspace) throw new TicketReadInvariantError();
+
+    const groups = await application.listClientGroups(workspace.workspaceId, subject);
+    if (!Array.isArray(groups)) throw new TicketReadInvariantError();
+    const keys = new Set<string>();
+    const items = groups.map(group => {
+      const safe = safeClientGroup(group);
+      if (keys.has(safe.key)) throw new TicketReadInvariantError();
+      keys.add(safe.key);
+      return safe;
+    });
+    return res.json({ items });
   }));
 
   return router;

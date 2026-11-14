@@ -1,4 +1,4 @@
-import type { TicketQueueStore, TicketQueueTransaction, LockedTicketQueue, TicketQueuePageRequest, TicketQueueMonth, TicketQueueCounters, TicketQueueRow } from './ticketQueueStore.js';
+import type { TicketQueueStore, TicketQueueTransaction, LockedTicketQueue, TicketQueuePageRequest, TicketQueueMonth, TicketQueueCounters, TicketQueueRow, TicketQueueClientGroup } from './ticketQueueStore.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import { type TransactionalSql, type Sql } from './database.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
@@ -32,6 +32,7 @@ interface QueueDbRow {
 }
 
 interface CountDbRow { open_count?: string | number; needs_client_count?: string | number; needs_pm_count?: string | number; in_progress_count?: string | number; waiting_client_count?: string | number; closed_month_count?: string | number }
+interface ClientGroupDbRow { client_group_key: string | null; client_group_name: string | null }
 
 function invariant(): never { throw new TicketReadInvariantError(); }
 
@@ -167,6 +168,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
        ), filtered as (
          select b.* from base b
          where ($4 = '' or position(lower($4) in lower(b.reference || ' ' || b.title || ' ' || coalesce(b.client_group_name,''))) > 0)
+           and ($10::text is null or b.client_group_key = $10)
            and (${predicate})
        ), cursor_row as (
          select sort_at, ticket_id from filtered where ticket_id = $8
@@ -182,7 +184,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
        from (select 1) seed
        left join page_rows p on true`,
       [scope.workspaceId, scope.principal.kind, scope.principal.userId, page.search,
-        month.year, month.month, month.timeZone, page.after, page.limit + 1],
+        month.year, month.month, month.timeZone, page.after, page.limit + 1, page.clientGroupKey ?? null],
     );
 
     if (rows.some(row => row.cursor_found !== true)) {
@@ -190,6 +192,60 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
     }
     return rows.filter((row): row is QueueDbRow & { ticket_id: string } => row.ticket_id !== null)
       .map(row => this.queueRow(row, scope));
+  }
+
+  async listClientGroups(scope: LockedTicketQueue): Promise<TicketQueueClientGroup[]> {
+    const { rows } = await this.sql.query<ClientGroupDbRow>(
+      `with group_rows as (
+         select case when t.client_user_id is not null then 'client:' || t.client_user_id
+                     else 'ticket:' || t.id end as client_group_key,
+                case when t.client_user_id is null
+                  then coalesce(nullif(btrim(unverified_contact.full_name), ''), 'Unverified inquiry')
+                  else coalesce(nullif(btrim(verified_contact.full_name), ''),
+                    nullif(btrim(verified_contact.company), ''),
+                    nullif(nullif(btrim(sg.display_name), ''), 'Client portal'), 'Client account')
+                end as client_group_name
+         from alpha_private.tickets t
+         left join lateral (
+           select grant_row.display_name
+           from alpha_private.ticket_service_grants grant_row
+           where grant_row.workspace_id = t.workspace_id and grant_row.client_user_id = t.client_user_id
+           limit 1
+         ) sg on true
+         left join lateral (
+           select contact.full_name
+           from alpha_private.ticket_contacts contact
+           where t.client_user_id is null
+             and contact.workspace_id = t.workspace_id and contact.id = t.contact_id
+           limit 1
+         ) unverified_contact on true
+         left join lateral (
+           select contact.full_name, contact.company
+           from alpha_private.tickets linked_ticket
+           join alpha_private.ticket_contacts contact
+             on contact.workspace_id = linked_ticket.workspace_id and contact.id = linked_ticket.contact_id
+           where t.client_user_id is not null
+             and linked_ticket.workspace_id = t.workspace_id and linked_ticket.client_user_id = t.client_user_id
+             and contact.email_verified
+           order by linked_ticket.created_at, linked_ticket.id collate "C"
+           limit 1
+         ) verified_contact on true
+         where t.workspace_id = $1
+       ), distinct_groups as (
+         select distinct on (client_group_key) client_group_key, client_group_name
+         from group_rows
+         order by client_group_key, client_group_name
+       )
+       select client_group_key, client_group_name
+       from distinct_groups
+       order by lower(client_group_name), client_group_key`,
+      [scope.workspaceId],
+    );
+    return rows.map(row => {
+      if (typeof row.client_group_key !== 'string' || !row.client_group_key.trim()
+        || typeof row.client_group_name !== 'string' || !row.client_group_name.trim()) return invariant();
+      return { key: row.client_group_key, displayName: row.client_group_name };
+    });
   }
 
   async countQueue(scope: LockedTicketQueue, month: TicketQueueMonth): Promise<TicketQueueCounters> {

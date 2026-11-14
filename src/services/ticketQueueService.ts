@@ -12,6 +12,7 @@ const pageSchema = z.object({
   after: z.string().min(1).max(200).refine(value => value.trim() === value).nullable().default(null),
   search: z.string().trim().max(200).default(''),
   filter: z.enum(['all', 'history', 'open', 'needs_client', 'needs_pm', 'in_progress', 'waiting_client', 'closed_month']).default('all'),
+  clientGroupKey: z.string().trim().min(1).max(200).optional(),
 }).strict();
 const filters = {
   client: new Set(['all', 'history', 'open', 'needs_client']),
@@ -24,7 +25,8 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
       return store.transaction(async tx => {
         const scope = await authorizeTicketQueueAccess(tx, workspaceId, subject);
         const parsed = pageSchema.safeParse(input);
-        if (!parsed.success || !filters[scope.principal.kind].has(parsed.data.filter)) {
+        if (!parsed.success || !filters[scope.principal.kind].has(parsed.data.filter)
+          || (parsed.data.clientGroupKey !== undefined && scope.principal.kind !== 'pm')) {
           throw new TicketWorkflowError(400, 'invalid_ticket_page', 'This ticket page is invalid.');
         }
         const page: TicketQueuePageRequest = parsed.data;
@@ -39,6 +41,7 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
           const row = rows[i]; const previous = rows[i - 1];
           if (ids.has(row.ticket.state.id) || row.ticket.state.id === page.after
             || !matchesTicketQueueFilter(row, page.filter, month)
+            || (page.clientGroupKey !== undefined && row.pmClientGroup?.key !== page.clientGroupKey)
             || !`${row.header.reference} ${row.header.title} ${scope.principal.kind === 'pm' ? row.pmClientGroup?.displayName ?? '' : ''}`
               .toLowerCase().includes(page.search.toLowerCase())
             || (previous && (queueSortTime(scope, previous) < queueSortTime(scope, row)
@@ -59,6 +62,24 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
         }
         const items = projected.slice(0, page.limit);
         return { items, nextCursor: projected.length > page.limit ? items[items.length - 1].id : null, counters };
+      });
+    },
+    async listClientGroups(workspaceId: string, subject: TicketSubject) {
+      return store.transaction(async tx => {
+        const scope = await authorizeTicketQueueAccess(tx, workspaceId, subject);
+        if (scope.principal.kind !== 'pm') {
+          throw new TicketWorkflowError(403, 'ticket_client_groups_forbidden', 'Client filtering is only available to project managers.');
+        }
+        const groups = await tx.listClientGroups(scope);
+        const keys = new Set<string>();
+        for (const group of groups) {
+          if (!group || typeof group.key !== 'string' || !group.key.trim() || group.key.trim() !== group.key
+            || group.key.length > 200 || typeof group.displayName !== 'string' || !group.displayName.trim()
+            || group.displayName.trim() !== group.displayName || group.displayName.length > 200
+            || keys.has(group.key)) throw new TicketReadInvariantError();
+          keys.add(group.key);
+        }
+        return groups;
       });
     },
   };

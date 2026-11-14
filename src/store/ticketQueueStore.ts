@@ -12,11 +12,13 @@ export interface LockedTicketQueue {
 }
 export type TicketQueueFilter = 'all' | 'history' | 'open' | 'needs_client'
   | 'needs_pm' | 'in_progress' | 'waiting_client' | 'closed_month';
+export interface TicketQueueClientGroup { key: string; displayName: string }
 export interface TicketQueuePageRequest {
   limit: number;
   after: string | null;
   search: string;
   filter: TicketQueueFilter;
+  clientGroupKey?: string;
 }
 export interface TicketQueueMonth { year: number; month: number; timeZone: string }
 export interface TicketQueueRow {
@@ -59,6 +61,8 @@ export interface TicketQueueTransaction {
    * No stale snapshot counts/rows after concurrent revocation is committed.
    */
   loadQueue(scope: LockedTicketQueue, page: TicketQueuePageRequest, month: TicketQueueMonth): Promise<TicketQueueRow[]>;
+  /** All PM-visible client identities in the authorized workspace, independent of queue pagination. */
+  listClientGroups(scope: LockedTicketQueue): Promise<TicketQueueClientGroup[]>;
   /** Entire authorized workspace queue, independent of page/search/filter.
    * Use identical live ticket grants/predicates. COUNT DISTINCT ticket identity;
    * joined messages/Issues must not multiply counts. No cache/page-length counts.
