@@ -31,7 +31,7 @@ import {
  *
  * Any probe that spawns an agent CLI must go through this.
  */
-function runClosedStdin(
+export function runClosedStdin(
   bin: string,
   args: string[],
   timeoutMs = 30_000,

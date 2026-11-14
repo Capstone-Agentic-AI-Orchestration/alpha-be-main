@@ -1,6 +1,6 @@
 import crossSpawn from 'cross-spawn';
-import { RuntimeService } from './runtimeService.js';
-import { codexAlphaHome, codexAlphaSignedIn } from './cliHome.js';
+import { RuntimeService, runClosedStdin } from './runtimeService.js';
+import { cliHomeEnv, codexAlphaHome, codexAlphaSignedIn, openCodeIsolationEnv } from './cliHome.js';
 import { childProcessEnv } from './childProcessEnv.js';
 import { sqliteService } from './sqliteService.js';
 
@@ -15,7 +15,7 @@ export interface ProviderLimitWindow {
 }
 
 export interface ProviderLimits {
-  provider: 'codex' | 'claude';
+  provider: 'codex' | 'claude' | 'antigravity' | 'opencode';
   name: string;
   status: ProviderLimitStatus;
   accountLabel?: string;
@@ -24,6 +24,8 @@ export interface ProviderLimits {
   dashboardUrl: string;
   detail: string;
   lastCheckedAt: string | null;
+  /** Local spending for providers without plan limits, such as OpenCode. */
+  spend?: { days: number; costUsd: number; sessions: number; inputTokens: number; outputTokens: number };
 }
 
 export interface ProviderLimitsSnapshot {
@@ -64,7 +66,7 @@ function rateLimitWindows(result: any): ProviderLimitWindow[] {
       const resetSeconds = typeof window.resetsAt === 'number' ? window.resetsAt : undefined;
       windows.push({
         id: `${limitId}-${key}`,
-        label: `${snapshot.limitName || limitId} · ${durationLabel(duration)}`,
+        label: snapshot.limitName ? `${snapshot.limitName} · ${durationLabel(duration)}` : durationLabel(duration),
         usedPercent,
         remainingPercent: Math.max(0, 100 - usedPercent),
         resetsAt: resetSeconds && resetSeconds > 0 ? new Date(resetSeconds * 1000).toISOString() : null
@@ -204,35 +206,209 @@ export function readCodexLimits(timeoutMs = 10_000): Promise<ProviderLimits> {
   });
 }
 
-function claudeLimits(): ProviderLimits {
-  const now = new Date().toISOString();
-  const runtime = sqliteService.getRuntimes().find(item => item.id === 'claude');
-  const authMethod = runtime?.account?.authMethod;
-  if (!RuntimeService.claudePath()) {
-    return { provider: 'claude', name: 'Claude Code', status: 'unsupported', windows: [], dashboardUrl: CLAUDE_DASHBOARD,
-      detail: 'Claude Code CLI is not installed on this machine.', lastCheckedAt: now };
+const clampPercent = (value: number) => Math.max(0, Math.min(100, Math.round(value * 10) / 10));
+const isoOrNull = (value: unknown) => typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? new Date(value).toISOString() : null;
+
+/** Plan windows from Claude Code's experimental SDK get_usage response (utilization is 0-100). */
+export function claudeUsageWindows(rateLimits: any): ProviderLimitWindow[] {
+  if (!rateLimits || typeof rateLimits !== 'object') return [];
+  const windows: ProviderLimitWindow[] = [];
+  const add = (id: string, label: string, window: any) => {
+    if (!window || typeof window.utilization !== 'number' || !Number.isFinite(window.utilization)) return;
+    const usedPercent = clampPercent(window.utilization);
+    windows.push({ id, label, usedPercent, remainingPercent: clampPercent(100 - usedPercent), resetsAt: isoOrNull(window.resets_at) });
+  };
+  const named: Array<[string, string]> = [
+    ['five_hour', '5-hour window'], ['seven_day', 'Weekly window'], ['seven_day_opus', 'Weekly · Opus'],
+    ['seven_day_sonnet', 'Weekly · Sonnet'], ['seven_day_oauth_apps', 'Weekly · connected apps']
+  ];
+  for (const [key, label] of named) add('claude-' + key, label, rateLimits[key]);
+  if (Array.isArray(rateLimits.model_scoped)) {
+    rateLimits.model_scoped.forEach((window: any, index: number) =>
+      add('claude-model-' + index, String(window?.display_name || 'Model') + ' · Weekly', window));
   }
-  if ((authMethod && /not signed in|sign-in not confirmed/i.test(authMethod)) || (runtime?.status === 'degraded' && Boolean(authMethod))) {
-    return { provider: 'claude', name: 'Claude Code', status: 'signed_out', windows: [], dashboardUrl: CLAUDE_DASHBOARD,
-      detail: 'Claude Code does not appear to be signed in on this machine.', lastCheckedAt: now };
-  }
-  if (!runtime || runtime.status === 'offline' || !authMethod) {
-    return { provider: 'claude', name: 'Claude Code', status: 'unavailable', windows: [], dashboardUrl: CLAUDE_DASHBOARD,
-      detail: 'Claude Code account status could not be confirmed. Refresh runtimes and try again.', lastCheckedAt: now };
-  }
-  const dashboardUrl = /api.?key/i.test(authMethod) ? 'https://console.anthropic.com/settings/usage' : CLAUDE_DASHBOARD;
-  return { provider: 'claude', name: 'Claude Code', status: 'unsupported', accountLabel: authMethod,
-    plan: runtime.account?.plan, windows: [], dashboardUrl,
-    detail: 'Claude Code does not expose subscription quota windows through a supported read-only CLI interface. Check limits in Claude settings.',
-    lastCheckedAt: now };
+  return windows;
 }
+
+/**
+ * Ask Claude Code for the same data as its /usage screen through the SDK
+ * control protocol. No prompt is sent, so no model turn or quota is used, and
+ * the session is not saved.
+ */
+function claudeGetUsage(bin: string, timeoutMs: number): Promise<any | null> {
+  return new Promise(resolve => {
+    let child: ReturnType<typeof crossSpawn>;
+    try {
+      child = crossSpawn(bin, [
+        '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+        '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence'
+      ], { stdio: ['pipe', 'pipe', 'ignore'], env: childProcessEnv(), windowsHide: true });
+    } catch {
+      resolve(null);
+      return;
+    }
+    if (!child.stdin || !child.stdout) { child.kill(); resolve(null); return; }
+    const stdin = child.stdin;
+    let buffer = '';
+    let settled = false;
+    const finish = (value: any | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stdin.end();
+      child.kill();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    timer.unref?.();
+    const send = (message: Record<string, unknown>) => stdin.write(JSON.stringify(message) + '\n');
+    child.on('error', () => finish(null));
+    child.on('exit', () => finish(null));
+    stdin.on('error', () => finish(null));
+    child.stdout.on('data', chunk => {
+      buffer += String(chunk);
+      if (buffer.length > 1024 * 1024) { finish(null); return; }
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        let message: any;
+        try { message = JSON.parse(line); } catch { continue; }
+        if (message?.type !== 'control_response') continue;
+        const response = message.response;
+        if (response?.request_id === 'alpha-init') {
+          send({ type: 'control_request', request_id: 'alpha-usage', request: { subtype: 'get_usage', skip_behaviors: true } });
+        } else if (response?.request_id === 'alpha-usage') {
+          finish(response.subtype === 'success' ? response.response ?? null : null);
+        }
+      }
+    });
+    send({ type: 'control_request', request_id: 'alpha-init', request: { subtype: 'initialize' } });
+  });
+}
+
+export async function readClaudeLimits(timeoutMs = 30_000): Promise<ProviderLimits> {
+  const now = new Date().toISOString();
+  const base = { provider: 'claude' as const, name: 'Claude Code', windows: [], dashboardUrl: CLAUDE_DASHBOARD, lastCheckedAt: now };
+  const bin = RuntimeService.claudePath();
+  const auth = await runClosedStdin(bin, ['auth', 'status'], 15_000);
+  let status: any;
+  try { status = JSON.parse(auth.stdout); } catch { status = undefined; }
+  if (!status) {
+    const installed = Boolean(auth.stdout || auth.stderr || auth.timedOut);
+    return { ...base, status: installed ? 'unavailable' : 'unsupported',
+      detail: installed ? 'Claude Code account status could not be read. Try again.' : 'Claude Code CLI is not installed on this machine.' };
+  }
+  if (!status.loggedIn) {
+    return { ...base, status: 'signed_out', detail: 'Claude Code is signed out on this computer. Run "claude auth login", then refresh.' };
+  }
+  if (status.authMethod !== 'claude.ai') {
+    return { ...base, status: 'unsupported', accountLabel: 'Anthropic API key', dashboardUrl: 'https://console.anthropic.com/settings/usage',
+      detail: 'This Claude Code sign-in uses API billing, so plan limits do not apply. Review spending in the Anthropic Console.' };
+  }
+  const usage = await claudeGetUsage(bin, timeoutMs);
+  const plan = typeof usage?.subscription_type === 'string' ? usage.subscription_type
+    : typeof status.subscriptionType === 'string' ? status.subscriptionType : undefined;
+  if (!usage) {
+    return { ...base, status: 'unavailable', accountLabel: 'Claude account', plan,
+      detail: 'Claude Code did not return usage before the check timed out. This Claude Code version may not support usage checks.' };
+  }
+  const windows = usage.rate_limits_available ? claudeUsageWindows(usage.rate_limits) : [];
+  return { ...base, status: windows.length ? 'available' : 'unsupported', accountLabel: 'Claude account', plan, windows,
+    detail: windows.length ? 'Read from Claude Code, the same figures as its /usage screen.'
+      : 'Claude Code reported no plan limits for this sign-in.' };
+}
+
+const ANTIGRAVITY_SPANS: Record<string, string> = { weekly: 'Weekly', '5h': '5-hour window', daily: 'Daily', hourly: 'Hourly' };
+
+/** Quota buckets from Antigravity's "/usage" command (remaining_fraction is 0-1). */
+export function antigravityUsageWindows(result: any): ProviderLimitWindow[] {
+  const groups = result?.command?.data?.groups;
+  if (!Array.isArray(groups)) return [];
+  const windows: ProviderLimitWindow[] = [];
+  for (const group of groups) {
+    if (!Array.isArray(group?.buckets)) continue;
+    for (const bucket of group.buckets) {
+      if (typeof bucket?.remaining_fraction !== 'number' || !Number.isFinite(bucket.remaining_fraction)) continue;
+      const remainingPercent = clampPercent(bucket.remaining_fraction * 100);
+      const span = ANTIGRAVITY_SPANS[String(bucket.window)] ?? String(bucket.name || 'Usage window');
+      windows.push({
+        id: 'antigravity-' + String(bucket.id || windows.length),
+        label: String(group.name || 'Antigravity') + ' · ' + span,
+        usedPercent: clampPercent(100 - remainingPercent),
+        remainingPercent,
+        resetsAt: isoOrNull(bucket.reset_time)
+      });
+    }
+  }
+  return windows;
+}
+
+/** Antigravity answers "/usage" locally in print mode, without a model turn. */
+export async function readAntigravityLimits(timeoutMs = 75_000): Promise<ProviderLimits> {
+  const now = new Date().toISOString();
+  const base = { provider: 'antigravity' as const, name: 'Google Antigravity', windows: [], dashboardUrl: '', lastCheckedAt: now };
+  const run = await runClosedStdin(RuntimeService.agyPath(), ['-p', '/usage', '--output-format', 'json', '--print-timeout', '60s'], timeoutMs,
+    { env: { ...cliHomeEnv('antigravity'), AGY_CLI_DISABLE_AUTO_UPDATE: 'true' } });
+  let result: any;
+  const line = run.stdout.split(/\r?\n/).reverse().find(text => text.trim().startsWith('{'));
+  try { result = line ? JSON.parse(line) : undefined; } catch { result = undefined; }
+  const output = (run.stdout + ' ' + run.stderr + ' ' + String(result?.response ?? '')).toLowerCase();
+  if (!result && !run.stdout && !run.stderr && !run.timedOut) {
+    return { ...base, status: 'unsupported', detail: 'Antigravity CLI is not installed on this machine.' };
+  }
+  if (/sign.?in|log.?in|not authenticated|unauthorized|401/.test(output) && !antigravityUsageWindows(result).length) {
+    return { ...base, status: 'signed_out', detail: 'Antigravity is signed out on this computer. Sign in to Antigravity, then refresh.' };
+  }
+  const windows = antigravityUsageWindows(result);
+  if (!windows.length) {
+    return { ...base, status: 'unavailable', detail: run.timedOut ? 'Antigravity did not return usage before the check timed out.'
+      : 'Antigravity did not report quota for this sign-in.' };
+  }
+  return { ...base, status: 'available', accountLabel: 'Google account', windows,
+    detail: 'Read from Antigravity, the same figures as its /usage command. Models in a group share its limits.' };
+}
+
+/** The headline figures from "opencode stats". Token counts may be abbreviated (12.5K, 3.1M). */
+export function parseOpenCodeStats(text: string): Omit<NonNullable<ProviderLimits['spend']>, 'days'> | null {
+  const clean = text.replace(/\u001b\[[0-9;]*m/g, '');
+  const read = (label: string) => {
+    const match = new RegExp(label + '[\\s│|]+\\$?([\\d,.]+)\\s*([KMB])?', 'i').exec(clean);
+    if (!match) return null;
+    const scale = { K: 1e3, M: 1e6, B: 1e9 }[(match[2] ?? '').toUpperCase() as 'K' | 'M' | 'B'] ?? 1;
+    const value = Number(match[1].replace(/,/g, '')) * scale;
+    return Number.isFinite(value) ? value : null;
+  };
+  const costUsd = read('Total Cost');
+  if (costUsd === null) return null;
+  return {
+    costUsd, sessions: Math.round(read('Sessions') ?? 0),
+    inputTokens: Math.round(read('Input') ?? 0), outputTokens: Math.round(read('Output') ?? 0)
+  };
+}
+
+/** OpenCode has no plan-limit interface; report what this computer spent through it. */
+export async function readOpenCodeUsage(days = 7): Promise<ProviderLimits> {
+  const now = new Date().toISOString();
+  const base = { provider: 'opencode' as const, name: 'OpenCode', windows: [], dashboardUrl: '', lastCheckedAt: now };
+  const run = await runClosedStdin(RuntimeService.opencodePath(), ['stats', '--days', String(days), '--pure'], 30_000,
+    { env: openCodeIsolationEnv() });
+  const spend = parseOpenCodeStats(run.stdout);
+  if (!spend) {
+    const installed = Boolean(run.stdout || run.stderr || run.timedOut);
+    return { ...base, status: installed ? 'unavailable' : 'unsupported',
+      detail: installed ? 'OpenCode usage could not be read. Try again.' : 'OpenCode CLI is not installed on this machine.' };
+  }
+  return { ...base, status: 'unsupported', spend: { days, ...spend },
+    detail: 'OpenCode reports spending, not plan limits. Figures cover OpenCode sessions on this computer.' };
+}
+
 
 export async function getProviderLimits(force = false): Promise<ProviderLimitsSnapshot> {
   if (!force && cached && Date.now() - cachedAt < CACHE_MS) return cached;
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
-    const [codex] = await Promise.all([readCodexLimits()]);
-    const providers = [codex, claudeLimits()];
+    // Each reader asks its own CLI and never throws, so one slow or missing CLI cannot hide the others.
+    const providers = await Promise.all([readCodexLimits(), readClaudeLimits(), readAntigravityLimits(), readOpenCodeUsage()]);
     const checked = providers.map(provider => provider.lastCheckedAt).filter((value): value is string => Boolean(value)).sort();
     const snapshot: ProviderLimitsSnapshot = {
       available: true,
