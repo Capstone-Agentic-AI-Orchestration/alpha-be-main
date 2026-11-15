@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import type { TicketSubject } from '../store/ticketCommandStore.js';
-import type { TicketQueueStore, TicketQueuePageRequest } from '../store/ticketQueueStore.js';
+import type { TicketQueueStore, TicketQueuePageRequest, TicketQueueClientSummary } from '../store/ticketQueueStore.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { matchesTicketQueueFilter, projectTicketQueueCounters, projectTicketQueueRow, queueSortTime, ticketQueueMonth } from '../ticketing/queueModels.js';
@@ -50,7 +50,8 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
           }
           ids.add(row.ticket.state.id);
         }
-        const counters = projectTicketQueueCounters(scope, await tx.countQueue(scope, month));
+        // Counters follow a PM's client filter: on a client's page they are that client's.
+        const counters = projectTicketQueueCounters(scope, await tx.countQueue(scope, month, page.clientGroupKey));
         const minimum = (filter: TicketQueuePageRequest['filter']) => rows.filter(row => matchesTicketQueueFilter(row, filter, month)).length;
         // Aggregates cover the complete authorized queue, so they cannot be
         // smaller than the matching records already proven in this snapshot.
@@ -82,5 +83,43 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
         return groups;
       });
     },
+    async listClients(workspaceId: string, subject: TicketSubject): Promise<TicketQueueClientSummary[]> {
+      return store.transaction(async tx => {
+        const scope = await authorizeTicketQueueAccess(tx, workspaceId, subject);
+        if (scope.principal.kind !== 'pm') {
+          throw new TicketWorkflowError(403, 'ticket_clients_forbidden', 'The client list is only available to project managers.');
+        }
+        const clients = await tx.listClients(scope);
+        const keys = new Set<string>();
+        for (const client of clients) {
+          if (!validClientSummary(client) || keys.has(client.key)) throw new TicketReadInvariantError();
+          keys.add(client.key);
+        }
+        return clients;
+      });
+    },
   };
+}
+
+const count = (value: unknown): boolean => Number.isSafeInteger(value) && (value as number) >= 0;
+
+/** Fail closed on anything the store should never return. */
+function validClientSummary(client: TicketQueueClientSummary): boolean {
+  if (!client || typeof client.key !== 'string' || !/^client:\S+$/.test(client.key) || client.key.length > 200
+    || typeof client.displayName !== 'string' || !client.displayName.trim() || client.displayName.length > 200
+    || (client.company !== null && (typeof client.company !== 'string' || !client.company.trim() || client.company.length > 200))
+    || (client.access !== 'active' && client.access !== 'inactive')
+    || typeof client.lastActivityAt !== 'string' || !Number.isFinite(Date.parse(client.lastActivityAt))
+    || !Array.isArray(client.projects) || client.projects.length > 200) return false;
+  const t = client.tickets;
+  if (!t || ![t.needsPm, t.waitingClient, t.open, t.closed, t.unlinkedOpen, t.accessRevoked].every(count)
+    || t.needsPm > t.open || t.waitingClient > t.open || t.unlinkedOpen > t.open) return false;
+  const projects = new Set<string>();
+  for (const project of client.projects) {
+    if (!project || typeof project.projectId !== 'string' || !project.projectId || projects.has(project.projectId)
+      || typeof project.name !== 'string' || !project.name.trim() || project.name.length > 200
+      || typeof project.previewPublished !== 'boolean') return false;
+    projects.add(project.projectId);
+  }
+  return true;
 }

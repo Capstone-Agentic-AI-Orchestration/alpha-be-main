@@ -45,6 +45,11 @@ describe('PM read-only ticket route composition', () => {
     expect(triage).toContain('/operations/:operationId');
     expect(triage).toContain('/:ticketId/invitations');
     expect(triage.indexOf('/intakes')).toBeLessThan(triage.indexOf('/:ticketId'));
+    // GET /:ticketId would read "clients" as a ticket id if it came first.
+    for (const routes of [readOnly, triage]) {
+      expect(routes).toContain('/clients');
+      expect(routes.indexOf('/clients')).toBeLessThan(routes.indexOf('/:ticketId'));
+    }
     expect(triage).not.toContain('/:ticketId/scope');
     expect(db.query).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();

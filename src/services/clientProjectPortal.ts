@@ -10,6 +10,7 @@ import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { validTicketProjectPreview } from './ticketProjectManagementService.js';
 import type { TicketSharedPreview } from '../store/ticketProjectManagementStore.js';
+import { CLIENT_TICKET_ACCESS_JOINS_SQL, CLIENT_VISIBLE_PROJECT_SQL } from '../store/ticketClientSql.js';
 
 const id = z.string().min(1).max(200).refine(v => v.trim() === v);
 const pageSchema = z.object({
@@ -48,17 +49,14 @@ export interface ClientProjectRequest extends ClientTicketQueueItem {
 
 // A preference is deliberately absent from this predicate. Only current ticket
 // ownership plus an active exact ticket grant can expose a project or thread.
+// The access and visibility rules are shared with the PM Clients list, so a PM
+// sees exactly the projects this client sees (store/ticketClientSql.ts).
 const eligibleTickets = `from alpha_private.tickets t
- join public.workspaces w on w.id=t.workspace_id and w.status='active'
+ ${CLIENT_TICKET_ACCESS_JOINS_SQL}
  join alpha_private.ticket_client_sessions s on s.client_user_id=t.client_user_id
    and s.session_id_hash=$2 and s.revoked_at is null and s.created_at<=now() and s.expires_at>now()
- join alpha_private.ticket_service_grants sg on sg.workspace_id=t.workspace_id and sg.client_user_id=t.client_user_id
-   and sg.status='active' and sg.revoked_at is null
- join alpha_private.ticket_client_grants cg on cg.workspace_id=t.workspace_id and cg.ticket_id=t.id
-   and cg.client_user_id=t.client_user_id and cg.active and cg.revoked_at is null
  where t.client_user_id=$1`;
-const visibleProject = `t.project_id is not null and t.project_client_visible
- and exists(select 1 from public.projects p where p.id=t.project_id and p.workspace_id=t.workspace_id)`;
+const visibleProject = CLIENT_VISIBLE_PROJECT_SQL;
 const needsAction = `status not in ('closed','declined','cancelled','on_hold')
  and workflow_state->>'withdrawalRequested' is distinct from 'true'
  and workflow_state->>'actionOwner'='client' and workflow_state->>'nextAction' in ('reply','agree_scope','review_result')`;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TicketSubject } from '../store/ticketCommandStore.js';
-import type { LockedTicketQueue, TicketQueueCounters, TicketQueueRow, TicketQueueStore } from '../store/ticketQueueStore.js';
+import type { LockedTicketQueue, TicketQueueClientSummary, TicketQueueCounters, TicketQueueRow, TicketQueueStore } from '../store/ticketQueueStore.js';
 import { matchesTicketQueueFilter, queueSortTime, ticketQueueMonth } from '../ticketing/queueModels.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { newTicketWorkflow, TicketWorkflowError } from '../ticketing/workflow.js';
@@ -37,6 +37,7 @@ function fixture() {
     timeZone: 'Asia/Manila', now: clock, mode: 'enabled' as LockedTicketQueue['mode'],
     rows: [] as TicketQueueRow[], rawRows: null as TicketQueueRow[] | null,
     counts: null as TicketQueueCounters | null, grants: new Set<string>(),
+    clients: [] as TicketQueueClientSummary[],
     sessions: new Map([pm, client].map(subject => [credential(subject), subject])),
     role: 'pm' as 'pm' | 'developer' | 'admin', failAt: '', calls: [] as string[], queries: [] as unknown[],
   };
@@ -90,10 +91,14 @@ function fixture() {
           }
           return [...groups].map(([key, displayName]) => ({ key, displayName }));
         },
-        async countQueue(scope, month) {
+        async listClients(scope) {
+          step('clients'); expect(scope).toBe(authorized);
+          return structuredClone(control.clients);
+        },
+        async countQueue(scope, month, clientGroupKey) {
           step('counts'); expect(scope).toBe(authorized);
           if (control.counts) return structuredClone(control.counts);
-          const items = visible(scope);
+          const items = visible(scope).filter(item => clientGroupKey === undefined || item.pmClientGroup?.key === clientGroupKey);
           const count = (filter: Parameters<typeof matchesTicketQueueFilter>[1]) => items.filter(item => matchesTicketQueueFilter(item, filter, month)).length;
           return scope.principal.kind === 'client' ? { kind: 'client', open: count('open'), needsClient: count('needs_client') }
             : { kind: 'pm', needsPm: count('needs_pm'), inProgress: count('in_progress'), waitingClient: count('waiting_client'), closedMonth: count('closed_month') };
@@ -314,5 +319,55 @@ describe('calendar definitions, filters and safe failures', () => {
     await expect(f.service.list(workspace, pm)).rejects.toBeInstanceOf(TicketReadInvariantError);
     f.control.counts[field] = Number.NaN;
     await expect(f.service.list(workspace, pm)).rejects.toBeInstanceOf(TicketReadInvariantError);
+  });
+});
+
+describe('PM clients', () => {
+  const summary = (key: string, overrides: Partial<TicketQueueClientSummary> = {}): TicketQueueClientSummary => ({
+    key, displayName: 'Ana Cruz', company: 'Resort Co', access: 'active',
+    tickets: { needsPm: 1, waitingClient: 0, open: 2, closed: 1, unlinkedOpen: 1, accessRevoked: 0 },
+    projects: [{ projectId: 'gh-repo-1', name: 'Resort Website', previewPublished: true }],
+    lastActivityAt: updatedAt, ...overrides,
+  });
+
+  it('counts only the filtered client when a PM filters the queue by client', async () => {
+    const { service, add } = fixture();
+    const mine = { ...row('t1'), pmClientGroup: { key: 'client:a', displayName: 'Ana' } };
+    const theirs = { ...row('t2'), pmClientGroup: { key: 'client:b', displayName: 'Ben' } };
+    add(mine, theirs);
+    const all = await service.list(workspace, pm, {});
+    const filtered = await service.list(workspace, pm, { clientGroupKey: 'client:a' });
+    expect(all.counters).toMatchObject({ kind: 'pm', needsPm: 2 });
+    expect(filtered.counters).toMatchObject({ kind: 'pm', needsPm: 1 });
+    expect(filtered.items.map(item => item.id)).toEqual(['t1']);
+  });
+
+  it('lists client summaries for a PM', async () => {
+    const { service, control } = fixture();
+    control.clients = [summary('client:a'), summary('client:b', { displayName: 'Ben', company: null, access: 'inactive', projects: [] })];
+    expect(await service.listClients(workspace, pm)).toEqual(control.clients);
+  });
+
+  it('refuses the client list to a client', async () => {
+    const { service } = fixture();
+    await expect(service.listClients(workspace, client)).rejects.toMatchObject({ status: 403, code: 'ticket_clients_forbidden' });
+  });
+
+  it.each([
+    ['an unverified inquiry key', summary('ticket:t1')],
+    ['a blank name', summary('client:a', { displayName: ' ' })],
+    ['more needing the PM than are open', summary('client:a', { tickets: { needsPm: 3, waitingClient: 0, open: 2, closed: 0, unlinkedOpen: 0, accessRevoked: 0 } })],
+    ['a repeated project', summary('client:a', { projects: [
+      { projectId: 'p', name: 'One', previewPublished: false }, { projectId: 'p', name: 'One', previewPublished: false }] })],
+  ])('fails closed on %s', async (_label, bad) => {
+    const { service, control } = fixture();
+    control.clients = [bad];
+    await expect(service.listClients(workspace, pm)).rejects.toBeInstanceOf(TicketReadInvariantError);
+  });
+
+  it('fails closed on a repeated client', async () => {
+    const { service, control } = fixture();
+    control.clients = [summary('client:a'), summary('client:a')];
+    await expect(service.listClients(workspace, pm)).rejects.toBeInstanceOf(TicketReadInvariantError);
   });
 });

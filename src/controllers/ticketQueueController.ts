@@ -3,7 +3,7 @@ import { Router, type Request } from 'express';
 import { route } from './asyncRoute.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
-import type { TicketQueueClientGroup, TicketQueueCounters } from '../store/ticketQueueStore.js';
+import type { TicketQueueClientGroup, TicketQueueClientSummary, TicketQueueCounters } from '../store/ticketQueueStore.js';
 import type { ClientTicketQueueItem, PmTicketQueueItem } from '../ticketing/queueModels.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
@@ -18,6 +18,7 @@ interface TicketQueuePage {
 export interface PmTicketQueueApplication {
   list(workspaceId: string, subject: TicketSubject, input: unknown): Promise<TicketQueuePage>;
   listClientGroups(workspaceId: string, subject: TicketSubject): Promise<TicketQueueClientGroup[]>;
+  listClients(workspaceId: string, subject: TicketSubject): Promise<TicketQueueClientSummary[]>;
 }
 
 const statusValues = new Set([
@@ -48,6 +49,42 @@ function safeClientGroup(value: TicketQueueClientGroup): TicketQueueClientGroup 
     throw new TicketReadInvariantError();
   }
   return { key: value.key, displayName: value.displayName };
+}
+
+/** Only the documented fields leave the server, whatever the application returns. */
+function safeClientSummary(value: TicketQueueClientSummary): TicketQueueClientSummary {
+  if (!value || !opaqueTicketRequestValue(value.key) || !value.key.startsWith('client:')
+    || typeof value.displayName !== 'string' || !value.displayName.trim() || value.displayName.length > 200
+    || (value.company !== null && (typeof value.company !== 'string' || !value.company.trim() || value.company.length > 200))
+    || (value.access !== 'active' && value.access !== 'inactive')
+    || !validTimestamp(value.lastActivityAt) || !value.tickets || !Array.isArray(value.projects)) {
+    throw new TicketReadInvariantError();
+  }
+  const count = (n: unknown) => {
+    if (!Number.isSafeInteger(n) || (n as number) < 0) throw new TicketReadInvariantError();
+    return n as number;
+  };
+  return {
+    key: value.key,
+    displayName: value.displayName,
+    company: value.company,
+    access: value.access,
+    tickets: {
+      needsPm: count(value.tickets.needsPm),
+      waitingClient: count(value.tickets.waitingClient),
+      open: count(value.tickets.open),
+      closed: count(value.tickets.closed),
+      unlinkedOpen: count(value.tickets.unlinkedOpen),
+      accessRevoked: count(value.tickets.accessRevoked),
+    },
+    projects: value.projects.map(project => {
+      if (!project || !opaqueTicketRequestValue(project.projectId)
+        || typeof project.name !== 'string' || !project.name.trim() || project.name.length > 200
+        || typeof project.previewPublished !== 'boolean') throw new TicketReadInvariantError();
+      return { projectId: project.projectId, name: project.name, previewPublished: project.previewPublished };
+    }),
+    lastActivityAt: value.lastActivityAt,
+  };
 }
 
 /** Express query values are strings (or arrays/objects for malformed input). */
@@ -194,6 +231,31 @@ export function createTicketQueueRouter(
     const keys = new Set<string>();
     const items = groups.map(group => {
       const safe = safeClientGroup(group);
+      if (keys.has(safe.key)) throw new TicketReadInvariantError();
+      keys.add(safe.key);
+      return safe;
+    });
+    return res.json({ items });
+  }));
+
+  // Registered here, in the queue router, because the read router mounted after
+  // it has GET /:ticketId, which would otherwise take "clients" for a ticket id.
+  router.get('/clients', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    if (await relayRequest(req, res)) return;
+
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    const workspace = req.workspace;
+    if (!workspace) throw new TicketReadInvariantError();
+    if (Object.keys(req.query as Record<string, unknown>).length > 0) invalidPage();
+
+    const clients = await application.listClients(workspace.workspaceId, subject);
+    if (!Array.isArray(clients)) throw new TicketReadInvariantError();
+    const keys = new Set<string>();
+    const items = clients.map(client => {
+      const safe = safeClientSummary(client);
       if (keys.has(safe.key)) throw new TicketReadInvariantError();
       keys.add(safe.key);
       return safe;
