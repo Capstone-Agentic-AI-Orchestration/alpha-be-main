@@ -13,6 +13,32 @@ export interface LockedTicketQueue {
 export type TicketQueueFilter = 'all' | 'history' | 'open' | 'needs_client'
   | 'needs_pm' | 'in_progress' | 'waiting_client' | 'closed_month';
 export interface TicketQueueClientGroup { key: string; displayName: string }
+/**
+ * One client account in a PM's workspace, for the Clients list. Counts use the
+ * queue's own predicates, so they agree with the queue filtered to this client.
+ */
+export interface TicketQueueClientSummary {
+  /** `client:<account>`, the key the queue's clientGroupKey filter takes. */
+  key: string;
+  displayName: string;
+  /** Second line when two clients share a name; null when none is known. */
+  company: string | null;
+  /** The client's service grant in this workspace. */
+  access: 'active' | 'inactive';
+  tickets: {
+    needsPm: number;
+    waitingClient: number;
+    open: number;
+    closed: number;
+    /** Open requests whose project is not linked and shared with the client yet. */
+    unlinkedOpen: number;
+    /** Requests this client can no longer open while their account is active. */
+    accessRevoked: number;
+  };
+  /** Exactly the projects the client portal shows this client. */
+  projects: Array<{ projectId: string; name: string; previewPublished: boolean }>;
+  lastActivityAt: string;
+}
 export interface TicketQueuePageRequest {
   limit: number;
   after: string | null;
@@ -63,7 +89,10 @@ export interface TicketQueueTransaction {
   loadQueue(scope: LockedTicketQueue, page: TicketQueuePageRequest, month: TicketQueueMonth): Promise<TicketQueueRow[]>;
   /** All PM-visible client identities in the authorized workspace, independent of queue pagination. */
   listClientGroups(scope: LockedTicketQueue): Promise<TicketQueueClientGroup[]>;
+  /** PM only: every client account (never an unverified inquiry) with its counts, projects and access. */
+  listClients(scope: LockedTicketQueue): Promise<TicketQueueClientSummary[]>;
   /** Entire authorized workspace queue, independent of page/search/filter.
+   * A PM's clientGroupKey narrows it to that client, as the queue it counts is.
    * Use identical live ticket grants/predicates. COUNT DISTINCT ticket identity;
    * joined messages/Issues must not multiply counts. No cache/page-length counts.
    * Client-action counts require an active designated-client ticket grant and
@@ -71,7 +100,7 @@ export interface TicketQueueTransaction {
    * Closed month is workspace-local year/month, not browser/UTC or last update.
    * Accepted/answered/cancelled closures qualify; a decline alone never does.
    */
-  countQueue(scope: LockedTicketQueue, month: TicketQueueMonth): Promise<TicketQueueCounters>;
+  countQueue(scope: LockedTicketQueue, month: TicketQueueMonth, clientGroupKey?: string): Promise<TicketQueueCounters>;
 }
 export interface TicketQueueStore {
   transaction<T>(work: (tx: TicketQueueTransaction) => Promise<T>): Promise<T>;

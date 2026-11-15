@@ -1,10 +1,11 @@
-import type { TicketQueueStore, TicketQueueTransaction, LockedTicketQueue, TicketQueuePageRequest, TicketQueueMonth, TicketQueueCounters, TicketQueueRow, TicketQueueClientGroup } from './ticketQueueStore.js';
+import type { TicketQueueStore, TicketQueueTransaction, LockedTicketQueue, TicketQueuePageRequest, TicketQueueMonth, TicketQueueCounters, TicketQueueRow, TicketQueueClientGroup, TicketQueueClientSummary } from './ticketQueueStore.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import { type TransactionalSql, type Sql } from './database.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError, type TicketWorkflow } from '../ticketing/workflow.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import { decodeTicketWorkflow, ticketSqlIso } from './ticketPostgresCodec.js';
+import { CLIENT_GROUP_KEY_SQL, CLIENT_TICKET_ACCESS_JOINS_SQL, CLIENT_VISIBLE_PROJECT_SQL, clientContactJoinsSql, clientGroupNameSql } from './ticketClientSql.js';
 
 interface QueueDbRow {
   workspace_id: string;
@@ -33,6 +34,28 @@ interface QueueDbRow {
 
 interface CountDbRow { open_count?: string | number; needs_client_count?: string | number; needs_pm_count?: string | number; in_progress_count?: string | number; waiting_client_count?: string | number; closed_month_count?: string | number }
 interface ClientGroupDbRow { client_group_key: string | null; client_group_name: string | null }
+interface ClientSummaryDbRow {
+  client_group_key: string | null; display_name: string | null; company: string | null; service_active: boolean | null;
+  needs_pm_count: string | number; waiting_client_count: string | number; open_count: string | number;
+  closed_count: string | number; unlinked_open_count: string | number; access_revoked_count: string | number;
+  last_activity_at: Date | string | null; projects: unknown;
+}
+
+/*
+ * Count predicates over a CTE with the ticket's status, workflow_state and
+ * client_access_active. countQueue and listClients both use these, so a
+ * client's numbers on the Clients list match the queue filtered to that client.
+ */
+const COUNT_OPEN_SQL = `status <> all(array['closed','declined','cancelled']::text[])`;
+const COUNT_NEEDS_PM_SQL = `${COUNT_OPEN_SQL}
+           and workflow_state->>'actionOwner' = 'pm'
+           and nullif(workflow_state->>'nextAction','') is not null`;
+const COUNT_WAITING_CLIENT_SQL = `${COUNT_OPEN_SQL}
+           and status <> 'on_hold'
+           and workflow_state->>'withdrawalRequested' is distinct from 'true'
+           and workflow_state->>'actionOwner' = 'client'
+           and workflow_state->>'nextAction' in ('reply','agree_scope','review_result')
+           and client_access_active`;
 
 function invariant(): never { throw new TicketReadInvariantError(); }
 
@@ -101,12 +124,8 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 coalesce(sg.status = 'active' and sg.revoked_at is null and cg.active and cg.revoked_at is null, false) as client_access_active,
                 case when $2='pm' and t.client_user_id is not null
                   then coalesce(sg.status='active' and sg.revoked_at is null,false) else false end as client_service_active,
-                case when $2='pm' and t.client_user_id is not null then 'client:' || t.client_user_id
-                     when $2='pm' then 'ticket:' || t.id else null end as client_group_key,
-                case when $2<>'pm' then null
-                  when t.client_user_id is null then coalesce(nullif(btrim(unverified_contact.full_name),''),'Unverified inquiry')
-                  else coalesce(nullif(btrim(verified_contact.full_name),''), nullif(btrim(verified_contact.company),''),
-                    nullif(nullif(btrim(sg.display_name),''),'Client portal'), 'Client account') end as client_group_name,
+                case when $2='pm' then ${CLIENT_GROUP_KEY_SQL} else null end as client_group_key,
+                case when $2<>'pm' then null else ${clientGroupNameSql('sg.display_name')} end as client_group_name,
                 invitation.status as invitation_status,
                 invitation.expires_at as invitation_expires_at,
                 invitation.delivery_status as invitation_delivery_status,
@@ -133,24 +152,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
              and grant_row.client_user_id = t.client_user_id
            for share
          ) cg on true
-         left join lateral (
-           select contact.full_name
-           from alpha_private.ticket_contacts contact
-           where $2='pm' and t.client_user_id is null
-             and contact.workspace_id=t.workspace_id and contact.id=t.contact_id
-           limit 1
-         ) unverified_contact on true
-         left join lateral (
-           select contact.full_name, contact.company
-           from alpha_private.tickets linked_ticket
-           join alpha_private.ticket_contacts contact
-             on contact.workspace_id=linked_ticket.workspace_id and contact.id=linked_ticket.contact_id
-           where $2='pm' and t.client_user_id is not null
-             and linked_ticket.workspace_id=t.workspace_id and linked_ticket.client_user_id=t.client_user_id
-             and contact.email_verified
-           order by linked_ticket.created_at, linked_ticket.id collate "C"
-           limit 1
-         ) verified_contact on true
+         ${clientContactJoinsSql("$2='pm'")}
          left join lateral (
            select i.status, i.expires_at, o.status as delivery_status
            from alpha_private.ticket_invitations i
@@ -197,14 +199,8 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
   async listClientGroups(scope: LockedTicketQueue): Promise<TicketQueueClientGroup[]> {
     const { rows } = await this.sql.query<ClientGroupDbRow>(
       `with group_rows as (
-         select case when t.client_user_id is not null then 'client:' || t.client_user_id
-                     else 'ticket:' || t.id end as client_group_key,
-                case when t.client_user_id is null
-                  then coalesce(nullif(btrim(unverified_contact.full_name), ''), 'Unverified inquiry')
-                  else coalesce(nullif(btrim(verified_contact.full_name), ''),
-                    nullif(btrim(verified_contact.company), ''),
-                    nullif(nullif(btrim(sg.display_name), ''), 'Client portal'), 'Client account')
-                end as client_group_name
+         select ${CLIENT_GROUP_KEY_SQL} as client_group_key,
+                ${clientGroupNameSql('sg.display_name')} as client_group_name
          from alpha_private.tickets t
          left join lateral (
            select grant_row.display_name
@@ -212,24 +208,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
            where grant_row.workspace_id = t.workspace_id and grant_row.client_user_id = t.client_user_id
            limit 1
          ) sg on true
-         left join lateral (
-           select contact.full_name
-           from alpha_private.ticket_contacts contact
-           where t.client_user_id is null
-             and contact.workspace_id = t.workspace_id and contact.id = t.contact_id
-           limit 1
-         ) unverified_contact on true
-         left join lateral (
-           select contact.full_name, contact.company
-           from alpha_private.tickets linked_ticket
-           join alpha_private.ticket_contacts contact
-             on contact.workspace_id = linked_ticket.workspace_id and contact.id = linked_ticket.contact_id
-           where t.client_user_id is not null
-             and linked_ticket.workspace_id = t.workspace_id and linked_ticket.client_user_id = t.client_user_id
-             and contact.email_verified
-           order by linked_ticket.created_at, linked_ticket.id collate "C"
-           limit 1
-         ) verified_contact on true
+         ${clientContactJoinsSql()}
          where t.workspace_id = $1
        ), distinct_groups as (
          select distinct on (client_group_key) client_group_key, client_group_name
@@ -248,7 +227,109 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
     });
   }
 
-  async countQueue(scope: LockedTicketQueue, month: TicketQueueMonth): Promise<TicketQueueCounters> {
+  async listClients(scope: LockedTicketQueue): Promise<TicketQueueClientSummary[]> {
+    if (scope.principal.kind !== 'pm') return invariant();
+    const { rows } = await this.sql.query<ClientSummaryDbRow>(
+      `with base as (
+         select t.status, t.workflow_state, t.internal_updated_at,
+                ${CLIENT_GROUP_KEY_SQL} as client_group_key,
+                ${clientGroupNameSql('sg.display_name')} as client_group_name,
+                nullif(btrim(verified_contact.company), '') as company,
+                -- The same access test countQueue uses, so the counts agree.
+                coalesce(sg.status = 'active' and cg.active, false) as client_access_active,
+                coalesce(sg.status = 'active' and sg.revoked_at is null, false) as service_active,
+                coalesce(cg.active and cg.revoked_at is null, false) as ticket_grant_active,
+                coalesce(${CLIENT_VISIBLE_PROJECT_SQL}, false) as project_visible
+         from alpha_private.tickets t
+         left join lateral (
+           select grant_row.status, grant_row.revoked_at, grant_row.display_name
+           from alpha_private.ticket_service_grants grant_row
+           where grant_row.workspace_id = t.workspace_id and grant_row.client_user_id = t.client_user_id
+         ) sg on true
+         left join lateral (
+           select grant_row.active, grant_row.revoked_at
+           from alpha_private.ticket_client_grants grant_row
+           where grant_row.workspace_id = t.workspace_id and grant_row.ticket_id = t.id
+             and grant_row.client_user_id = t.client_user_id
+         ) cg on true
+         ${clientContactJoinsSql()}
+         where t.workspace_id = $1 and t.client_user_id is not null
+       ), clients as (
+         select client_group_key,
+                min(client_group_name) as display_name,
+                min(company) as company,
+                bool_or(service_active) as service_active,
+                count(*) filter (where ${COUNT_NEEDS_PM_SQL}) as needs_pm_count,
+                count(*) filter (where ${COUNT_WAITING_CLIENT_SQL}) as waiting_client_count,
+                count(*) filter (where ${COUNT_OPEN_SQL}) as open_count,
+                count(*) filter (where not (${COUNT_OPEN_SQL})) as closed_count,
+                count(*) filter (where ${COUNT_OPEN_SQL} and not project_visible) as unlinked_open_count,
+                count(*) filter (where service_active and not ticket_grant_active) as access_revoked_count,
+                max(internal_updated_at) as last_activity_at
+         from base
+         group by client_group_key
+       ), client_projects as (
+         -- Exactly what the client portal lists for this client.
+         select distinct ${CLIENT_GROUP_KEY_SQL} as client_group_key, t.project_id, p.name,
+                exists (
+                  select 1 from alpha_private.client_uat_rounds r
+                  where r.workspace_id = t.workspace_id and r.project_id = t.project_id
+                    and r.client_user_id = t.client_user_id
+                    and r.status in ('published','submitted') and r.published_at is not null
+                ) as preview_published
+         from alpha_private.tickets t
+         ${CLIENT_TICKET_ACCESS_JOINS_SQL}
+         join public.projects p on p.id = t.project_id and p.workspace_id = t.workspace_id
+         where t.workspace_id = $1 and t.client_user_id is not null and ${CLIENT_VISIBLE_PROJECT_SQL}
+       )
+       select c.*,
+              coalesce((
+                select json_agg(json_build_object('projectId', cp.project_id, 'name', cp.name,
+                  'previewPublished', cp.preview_published) order by lower(cp.name), cp.project_id collate "C")
+                from client_projects cp where cp.client_group_key = c.client_group_key
+              ), '[]'::json) as projects
+       from clients c
+       order by c.needs_pm_count desc, c.last_activity_at desc, c.client_group_key collate "C"`,
+      [scope.workspaceId],
+    );
+    return rows.map(row => this.clientSummary(row));
+  }
+
+  private clientSummary(row: ClientSummaryDbRow): TicketQueueClientSummary {
+    if (typeof row.client_group_key !== 'string' || !row.client_group_key.startsWith('client:')
+      || typeof row.display_name !== 'string' || !row.display_name.trim()
+      || (row.company !== null && (typeof row.company !== 'string' || !row.company.trim()))
+      || typeof row.service_active !== 'boolean' || row.last_activity_at === null) return invariant();
+    const raw = typeof row.projects === 'string' ? JSON.parse(row.projects) as unknown : row.projects;
+    if (!Array.isArray(raw)) return invariant();
+    const projects = raw.map(item => {
+      const project = item as Record<string, unknown> | null;
+      if (!project || typeof project.projectId !== 'string' || !project.projectId
+        || typeof project.name !== 'string' || !project.name.trim()
+        || typeof project.previewPublished !== 'boolean') return invariant();
+      return { projectId: project.projectId, name: project.name, previewPublished: project.previewPublished };
+    });
+    return {
+      key: row.client_group_key,
+      displayName: row.display_name,
+      company: row.company,
+      access: row.service_active ? 'active' : 'inactive',
+      tickets: {
+        needsPm: this.count(row.needs_pm_count),
+        waitingClient: this.count(row.waiting_client_count),
+        open: this.count(row.open_count),
+        closed: this.count(row.closed_count),
+        unlinkedOpen: this.count(row.unlinked_open_count),
+        accessRevoked: this.count(row.access_revoked_count),
+      },
+      projects,
+      lastActivityAt: ticketSqlIso(row.last_activity_at),
+    };
+  }
+
+  async countQueue(scope: LockedTicketQueue, month: TicketQueueMonth, clientGroupKey?: string): Promise<TicketQueueCounters> {
+    // A client filter is a PM view; the service rejects it for a client before this point.
+    if (clientGroupKey !== undefined && scope.principal.kind !== 'pm') return invariant();
     const { rows } = await this.sql.query<CountDbRow>(
       `with base as (
          select t.status, t.closed_at, t.workflow_state,
@@ -269,31 +350,20 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
          ) cg on true
          where t.workspace_id = $1
            and ($2 = 'pm' or (t.client_user_id = $3 and coalesce(sg.status = 'active' and cg.active, false)))
+           and ($7::text is null or (${CLIENT_GROUP_KEY_SQL}) = $7)
        )
        select
-         count(*) filter (where status <> all(array['closed','declined','cancelled']::text[])) as open_count,
-         count(*) filter (where status <> all(array['closed','declined','cancelled']::text[])
-           and status <> 'on_hold'
-           and workflow_state->>'withdrawalRequested' is distinct from 'true'
-           and workflow_state->>'actionOwner' = 'client'
-           and workflow_state->>'nextAction' in ('reply','agree_scope','review_result')
-           and client_access_active) as needs_client_count,
-         count(*) filter (where status <> all(array['closed','declined','cancelled']::text[])
-           and workflow_state->>'actionOwner' = 'pm'
-           and nullif(workflow_state->>'nextAction','') is not null) as needs_pm_count,
+         count(*) filter (where ${COUNT_OPEN_SQL}) as open_count,
+         count(*) filter (where ${COUNT_WAITING_CLIENT_SQL}) as needs_client_count,
+         count(*) filter (where ${COUNT_NEEDS_PM_SQL}) as needs_pm_count,
          count(*) filter (where status = 'in_progress') as in_progress_count,
-         count(*) filter (where status <> all(array['closed','declined','cancelled']::text[])
-           and status <> 'on_hold'
-           and workflow_state->>'withdrawalRequested' is distinct from 'true'
-           and workflow_state->>'actionOwner' = 'client'
-           and workflow_state->>'nextAction' in ('reply','agree_scope','review_result')
-           and client_access_active) as waiting_client_count,
+         count(*) filter (where ${COUNT_WAITING_CLIENT_SQL}) as waiting_client_count,
          count(*) filter (where status in ('closed','cancelled')
            and workflow_state->>'closureReason' in ('accepted','answered','cancelled')
            and closed_at >= make_timestamptz($4, $5, 1, 0, 0, 0, $6)
            and closed_at < make_timestamptz($4, $5, 1, 0, 0, 0, $6) + interval '1 month') as closed_month_count
        from base`,
-      [scope.workspaceId, scope.principal.kind, scope.principal.userId, month.year, month.month, month.timeZone],
+      [scope.workspaceId, scope.principal.kind, scope.principal.userId, month.year, month.month, month.timeZone, clientGroupKey ?? null],
     );
     const row = rows[0];
     if (!row) return invariant();
