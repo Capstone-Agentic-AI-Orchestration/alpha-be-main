@@ -32,11 +32,19 @@ services:
         value: cloud
 
       # Authenticated PM reads; the separate triage switch adds Phase 2 writes.
-      # Client accounts and later workflow actions remain unavailable.
       - key: ALPHA_TICKETING_READS_ENABLED
         value: "1"
       # Requires the additive ticket operation receipt migration before rollout.
       - key: ALPHA_TICKETING_TRIAGE_ENABLED
+        value: "1"
+      # The client -> PM -> developer -> client path: the PM proposes scope, the
+      # client agrees, the PM links the agreed work to board tasks, finished tasks
+      # return the ticket to the PM, who shares the result for the client to
+      # accept, then closes. Off, those actions answer "unavailable" and tickets
+      # stop at triage. It starts no workers and runs no agents here: builds stay
+      # on developers' desktops. Needs the ticket migrations through
+      # 20261116120000 applied.
+      - key: ALPHA_TICKETING_WORKFLOW_ENABLED
         value: "1"
       # Public inquiry uses the existing origin allowlist and durable DB budgets;
       # no third-party CAPTCHA/Turnstile credentials are required.
