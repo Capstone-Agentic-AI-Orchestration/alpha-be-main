@@ -176,6 +176,27 @@ describe('PM project organization and client requests on the main migration sche
     expect((afterRead.items[0] as PmTicketQueueItem).internal.clientReplyUnread).toBe(false);
   }, 60_000);
 
+  it('summarizes one client conversations for PMs without internal notes or marking replies read', async () => {
+    const at = (ms: number) => new Date(now.getTime() + ms);
+    await db.query(`insert into alpha_private.ticket_messages
+      (id,workspace_id,ticket_id,author_kind,author_id,audience,body,created_at) values
+      ('phase6-first-reply',$1,$2,'client',$3,'client','First question',$4),
+      ('phase6-latest-reply',$1,$2,'client',$3,'client',$5,$6),
+      ('phase6-private-note',$1,$2,'pm',$7,'internal','Private PM note',$8)`,
+    [workspaceId, firstTicketId, clientId, at(1_000), 'x'.repeat(300), at(2_000), pmId, at(3_000)]);
+    const queue = createTicketQueueService(new PostgresTicketQueueStore(db), () => now);
+    const summary = await queue.listClientConversations(workspaceId, pm, `client:${clientId}`);
+    expect(summary).toEqual({ complete: true, items: [{ ticketId: firstTicketId, latest: {
+      id: 'phase6-latest-reply', authorKind: 'client', preview: 'x'.repeat(280), truncated: true, createdAt: at(2_000).toISOString(),
+    } }] });
+    expect(JSON.stringify(summary)).not.toContain('Private PM note');
+    expect(await queue.listClientConversations(workspaceId, pm, 'client:someone-else')).toEqual({ items: [], complete: true });
+    expect(await queue.listClientConversations(otherWorkspaceId, pm, `client:${clientId}`).catch(error => error.status)).toBe(404);
+    // A summary is a peek: the reply stays unread until the PM opens the conversation.
+    expect(((await queue.list(workspaceId, pm)).items[0] as PmTicketQueueItem).internal.clientReplyUnread).toBe(true);
+    await expect(queue.listClientConversations(workspaceId, client, `client:${clientId}`)).rejects.toMatchObject({ status: 403 });
+  }, 60_000);
+
   it('removes a ticket from the client queue as soon as its grant is revoked', async () => {
     const queue = createTicketQueueService(new PostgresTicketQueueStore(db), () => now);
     expect((await queue.list(workspaceId, client)).items.map(item => item.id)).toContain(firstTicketId);

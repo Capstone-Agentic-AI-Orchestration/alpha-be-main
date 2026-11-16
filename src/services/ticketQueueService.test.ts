@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TicketSubject } from '../store/ticketCommandStore.js';
-import type { LockedTicketQueue, TicketQueueClientSummary, TicketQueueCounters, TicketQueueRow, TicketQueueStore } from '../store/ticketQueueStore.js';
+import type { LockedTicketQueue, TicketClientConversationRow, TicketQueueClientSummary, TicketQueueCounters, TicketQueueRow, TicketQueueStore } from '../store/ticketQueueStore.js';
 import { matchesTicketQueueFilter, queueSortTime, ticketQueueMonth } from '../ticketing/queueModels.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { newTicketWorkflow, TicketWorkflowError } from '../ticketing/workflow.js';
@@ -38,6 +38,7 @@ function fixture() {
     rows: [] as TicketQueueRow[], rawRows: null as TicketQueueRow[] | null,
     counts: null as TicketQueueCounters | null, grants: new Set<string>(),
     clients: [] as TicketQueueClientSummary[],
+    conversations: [] as TicketClientConversationRow[], conversationKeys: [] as string[],
     sessions: new Map([pm, client].map(subject => [credential(subject), subject])),
     role: 'pm' as 'pm' | 'developer' | 'admin', failAt: '', calls: [] as string[], queries: [] as unknown[],
   };
@@ -94,6 +95,10 @@ function fixture() {
         async listClients(scope) {
           step('clients'); expect(scope).toBe(authorized);
           return structuredClone(control.clients);
+        },
+        async listClientConversations(scope, clientGroupKey) {
+          step('conversations'); expect(scope).toBe(authorized); control.conversationKeys.push(clientGroupKey);
+          return structuredClone(control.conversations);
         },
         async countQueue(scope, month, clientGroupKey) {
           step('counts'); expect(scope).toBe(authorized);
@@ -369,5 +374,43 @@ describe('PM clients', () => {
     const { service, control } = fixture();
     control.clients = [summary('client:a'), summary('client:a')];
     await expect(service.listClients(workspace, pm)).rejects.toBeInstanceOf(TicketReadInvariantError);
+  });
+});
+
+describe('client conversation summaries for a PM client page', () => {
+  const message = (id: string, authorKind: 'pm' | 'client' = 'client') => ({ id, authorKind, preview: 'Hello', truncated: false, createdAt: updatedAt });
+  it('returns each request with its newest client-visible message for a PM', async () => {
+    const f = fixture(); f.control.conversations = [{ ticketId: 'a', latest: message('m1') }, { ticketId: 'b', latest: null }];
+    expect(await f.service.listClientConversations(workspace, pm, 'client:client-a')).toEqual({
+      items: [{ ticketId: 'a', latest: message('m1') }, { ticketId: 'b', latest: null }], complete: true });
+    expect(f.control.conversationKeys).toEqual(['client:client-a']); expect(f.control.calls).toEqual(['authorize', 'conversations']);
+  });
+  it('refuses clients and unauthorized staff before reading conversations', async () => {
+    const f = fixture();
+    await expect(f.service.listClientConversations(workspace, client, 'client:client-a')).rejects.toMatchObject({ status: 403 });
+    f.control.permission = false;
+    await expect(f.service.listClientConversations(workspace, pm, 'client:client-a')).rejects.toMatchObject({ status: 403 });
+    expect(f.control.calls).not.toContain('conversations');
+  });
+  it.each(['', ' client:a', 'x'.repeat(201), 42, null])('rejects an invalid client key %s', async key => {
+    const f = fixture();
+    await expect(f.service.listClientConversations(workspace, pm, key)).rejects.toMatchObject({ status: 400 });
+    expect(f.control.calls).not.toContain('conversations');
+  });
+  it('reports an incomplete summary past the request limit', async () => {
+    const f = fixture();
+    f.control.conversations = Array.from({ length: 201 }, (_, index) => ({ ticketId: `t${String(index).padStart(3, '0')}`, latest: null }));
+    const result = await f.service.listClientConversations(workspace, pm, 'client:client-a');
+    expect(result.items).toHaveLength(200); expect(result.complete).toBe(false);
+  });
+  it.each([
+    ['duplicate', [{ ticketId: 'a', latest: null }, { ticketId: 'a', latest: null }]],
+    ['unordered', [{ ticketId: 'b', latest: null }, { ticketId: 'a', latest: null }]],
+    ['internal author', [{ ticketId: 'a', latest: { ...message('m1'), authorKind: 'developer' } }]],
+    ['long preview', [{ ticketId: 'a', latest: { ...message('m1'), preview: 'x'.repeat(281) } }]],
+    ['bad time', [{ ticketId: 'a', latest: { ...message('m1'), createdAt: 'never' } }]],
+  ])('fails closed on a %s row', async (_label, rows) => {
+    const f = fixture(); f.control.conversations = rows as TicketClientConversationRow[];
+    await expect(f.service.listClientConversations(workspace, pm, 'client:client-a')).rejects.toBeInstanceOf(TicketReadInvariantError);
   });
 });
