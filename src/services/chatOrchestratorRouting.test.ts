@@ -154,6 +154,8 @@ describe('specialist analysis handoffs', () => {
     expect(turnInputs[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', skills: [], priorSession: null,
       autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github'] });
     expect(turnInputs[0].systemPrompt).toContain('approved scoped build flow');
+    // The specialist is told its runtime, so "which model are you" gets a true answer.
+    expect(turnInputs[0].systemPrompt).toContain('## Your runtime');
   });
 
   it('routes a directly selected specialist code request into plan approval', async () => {

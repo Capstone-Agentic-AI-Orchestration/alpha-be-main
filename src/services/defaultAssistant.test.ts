@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickDefaultRuntime, DEFAULT_ASSISTANT, DEFAULT_ASSISTANT_PROMPT } from './defaultAssistant.js';
+import { pickDefaultRuntime, DEFAULT_ASSISTANT, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel } from './defaultAssistant.js';
 import { RuntimeEngine, ModelProvider } from '../models/index.js';
 
 const rt = (
@@ -78,5 +78,18 @@ describe('the default assistant identity', () => {
   it('tells it to point at @mentions rather than impersonate an agent', () => {
     expect(DEFAULT_ASSISTANT_PROMPT).toMatch(/@mention/i);
     expect(DEFAULT_ASSISTANT_PROMPT).toMatch(/rather than answering on that agent/i);
+  });
+});
+
+describe('describeRuntimeModel', () => {
+  it('tells the agent the runtime and model Alpha chose, so it can say which model it is', () => {
+    const text = describeRuntimeModel({ provider: 'Anthropic', name: 'Claude Code CLI', modelName: 'claude-sonnet-5', reasoningEffort: 'high' });
+    expect(text).toContain('## Your runtime');
+    expect(text).toContain('Claude Code CLI (Anthropic) with the model claude-sonnet-5, high reasoning effort');
+    expect(text).toContain('which model or runtime you are using');
+  });
+
+  it('does not repeat the provider when the runtime has no separate name', () => {
+    expect(describeRuntimeModel({ provider: 'OpenAI', modelName: 'gpt-6.1' })).toContain('runs through OpenAI with the model gpt-6.1, as selected');
   });
 });
