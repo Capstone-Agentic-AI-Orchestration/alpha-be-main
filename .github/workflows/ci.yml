@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The quality step diffs against the pull request's base branch.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -34,6 +37,13 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      # Maintainability and correctness rules (eslint.config.mjs) on the lines this pull
+      # request adds or edits only; existing code never blocks. Replaces SonarCloud, whose
+      # line limit refused every analysis of main.
+      - name: Code quality (changed lines)
+        if: github.event_name == 'pull_request'
+        run: npm run quality -- --base origin/${{ github.base_ref }}
 
       - name: Unit tests
         run: npm test
