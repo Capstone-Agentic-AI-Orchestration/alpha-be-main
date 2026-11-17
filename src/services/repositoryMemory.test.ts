@@ -60,7 +60,7 @@ describe('repository memory', () => {
     const cacheRoot = folder();
     const api = fakeGitHub({ 'ALPHA.md': '<!-- tip -->\nAPI base URL from VITE_API_URL.' });
     let now = Date.parse('2026-11-18T10:00:00Z');
-    const options = { api, cacheRoot, now: () => now };
+    const options = { api, cacheRoot, now: () => now, viewer: 'alice' };
 
     expect(await fetchMemoryFromGitHub('org/fe', options)).toMatchObject({ file: 'ALPHA.md', text: 'API base URL from VITE_API_URL.', origin: 'github', version: 'blob-ALPHA.md' });
     expect(api.calls).toEqual(['/repos/org/fe/contents/AGENTS.md', '/repos/org/fe/contents/ALPHA.md']);
@@ -73,14 +73,38 @@ describe('repository memory', () => {
     expect(api.calls).toHaveLength(4);
   });
 
-  it('falls back to the last copy, marked stale, when GitHub cannot be reached', async () => {
+  it('falls back to the last copy, marked stale, only when GitHub cannot be reached', async () => {
     const cacheRoot = folder();
     let now = Date.parse('2026-11-18T10:00:00Z');
-    await fetchMemoryFromGitHub('org/fe', { api: fakeGitHub({ 'AGENTS.md': 'Cookies carry the session.' }), cacheRoot, now: () => now });
+    const base = { cacheRoot, now: () => now, viewer: 'alice' };
+    await fetchMemoryFromGitHub('org/fe', { ...base, api: fakeGitHub({ 'AGENTS.md': 'Cookies carry the session.' }) });
     now += 10 * 60_000;
     const offline = fakeGitHub({}, new GitHubApiError('Service unavailable', 503));
-    expect(await fetchMemoryFromGitHub('org/fe', { api: offline, cacheRoot, now: () => now })).toMatchObject({ text: 'Cookies carry the session.', origin: 'cache', stale: true });
-    await expect(fetchMemoryFromGitHub('org/other', { api: offline, cacheRoot, now: () => now })).rejects.toThrow('Service unavailable');
+    expect(await fetchMemoryFromGitHub('org/fe', { ...base, api: offline })).toMatchObject({ text: 'Cookies carry the session.', origin: 'cache', stale: true });
+    await expect(fetchMemoryFromGitHub('org/other', { ...base, api: offline })).rejects.toThrow('Service unavailable');
+    // Access was withdrawn: GitHub refuses, so the saved copy is not served.
+    await expect(fetchMemoryFromGitHub('org/fe', { ...base, api: fakeGitHub({}, new GitHubApiError('Forbidden', 403)) })).rejects.toThrow('Forbidden');
+  });
+
+  it("never serves one person's cached copy to another GitHub identity", async () => {
+    const cacheRoot = folder();
+    const now = () => Date.parse('2026-11-18T10:00:00Z');
+    await fetchMemoryFromGitHub('org/private', { api: fakeGitHub({ 'AGENTS.md': 'Private rules.' }), cacheRoot, now, viewer: 'alice' });
+    // Bob cannot read the repository: GitHub answers 404 for every file, and nothing of Alice's leaks.
+    const bob = fakeGitHub({});
+    expect(await fetchMemoryFromGitHub('org/private', { api: bob, cacheRoot, now, viewer: 'bob' })).toMatchObject({ text: '', origin: 'github' });
+    expect(bob.calls.length).toBeGreaterThan(0);
+  });
+
+  it('reads only a regular file, never a link that could point elsewhere on the computer', () => {
+    const outside = folder({ 'secret.txt': 'TOKEN=abc' });
+    const dir = folder();
+    try {
+      fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(dir, 'AGENTS.md'), 'file');
+    } catch {
+      return; // Creating links needs extra rights on some Windows setups; the check still runs on CI.
+    }
+    expect(readMemoryFromDir('org/fe', dir)).toEqual({ repository: 'org/fe', text: '', origin: 'checkout' });
   });
 
   it('puts every repository under one heading that frames memory as facts, within the budgets', () => {

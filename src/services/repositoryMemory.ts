@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { ALPHA_DIR } from '../config/env.js';
 import { REPOSITORY_MEMORY_LIMITS } from '../config/constants.js';
 import type { Project } from '../models/index.js';
-import { githubApi, GitHubApiError, type GitHubApi } from './githubApi.js';
+import { githubApi, GitHubApiError, tokenForThisRequest, type GitHubApi } from './githubApi.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { projectReadRoots } from './projectFolders.js';
 import { logError } from '../utils/logger.js';
@@ -51,12 +51,24 @@ export function memoryText(raw: string): string {
   return raw.replace(/<!--[\s\S]*?-->/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-/** The first memory file in a working folder. */
+/** Larger than any useful memory file; anything bigger is not read at all. */
+const MAX_MEMORY_FILE_BYTES = 256 * 1024;
+
+/**
+ * The first memory file in a working folder.
+ *
+ * Only a regular file directly in the folder counts. A symbolic link named
+ * AGENTS.md could point anywhere on this computer, and whatever it pointed at
+ * would be sent to a model, so links are skipped.
+ */
 export function readMemoryFromDir(repository: string, dir: string): RepositoryMemory {
   for (const file of MEMORY_FILES) {
     let raw: string;
     try {
-      raw = fs.readFileSync(path.join(dir, file), 'utf8');
+      const filePath = path.join(dir, file);
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.size > MAX_MEMORY_FILE_BYTES) continue;
+      raw = fs.readFileSync(filePath, 'utf8');
     } catch {
       continue;
     }
@@ -84,7 +96,7 @@ export async function readMemoryAtCommit(repository: string, dir: string, commit
 // ---- GitHub, with a small cache so chat does not ask GitHub on every turn ----
 
 const FRESH_MS = 5 * 60_000;
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const pending = new Map<string, Promise<RepositoryMemory>>();
 
 export interface GitHubMemoryOptions {
@@ -93,10 +105,31 @@ export interface GitHubMemoryOptions {
   /** Test seam. Production caches live under ALPHA_DIR. */
   cacheRoot?: string;
   now?: () => number;
+  /**
+   * Whose copy this is. Defaults to a fingerprint of the GitHub token the
+   * request acts with, so one person's cached copy of a private repository is
+   * never served to someone GitHub would refuse.
+   */
+  viewer?: string;
 }
 
-function cacheFile(cacheRoot: string, repository: string): string {
-  return path.join(cacheRoot, CACHE_VERSION, createHash('sha256').update(repository.toLowerCase()).digest('hex') + '.json');
+async function viewerKey(options: GitHubMemoryOptions): Promise<string> {
+  if (options.viewer) return createHash('sha256').update(options.viewer).digest('hex').slice(0, 24);
+  try {
+    return createHash('sha256').update(await tokenForThisRequest()).digest('hex').slice(0, 24);
+  } catch {
+    return 'signed-out';
+  }
+}
+
+function cacheFile(cacheRoot: string, viewer: string, repository: string): string {
+  return path.join(cacheRoot, CACHE_VERSION, viewer, createHash('sha256').update(repository.toLowerCase()).digest('hex') + '.json');
+}
+
+/** Only an unreachable GitHub justifies the saved copy; a refusal or "not found" never does. */
+function isOutage(error: unknown): boolean {
+  if (error instanceof GitHubApiError) return error.status === 429 || error.status >= 500;
+  return true;
 }
 
 function readCache(filePath: string): RepositoryMemory | null {
@@ -134,11 +167,13 @@ async function fetchFirstMemoryFile(repository: string, api: GitHubApi, fetchedA
 export async function fetchMemoryFromGitHub(repository: string, options: GitHubMemoryOptions = {}): Promise<RepositoryMemory> {
   if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repository)) throw new Error(`Repository must be "owner/name", got "${repository}".`);
   const now = options.now ?? Date.now;
-  const filePath = cacheFile(options.cacheRoot ?? path.join(ALPHA_DIR, 'memory-cache'), repository);
+  const viewer = await viewerKey(options);
+  const filePath = cacheFile(options.cacheRoot ?? path.join(ALPHA_DIR, 'memory-cache'), viewer, repository);
   const cached = readCache(filePath);
   if (!options.refresh && cached?.fetchedAt && now() - Date.parse(cached.fetchedAt) < FRESH_MS) return { ...cached, origin: 'cache' };
 
-  const key = repository.toLowerCase();
+  // Shared only between requests acting as the same GitHub identity.
+  const key = viewer + ':' + repository.toLowerCase();
   const running = pending.get(key);
   if (running) return running;
   const job = (async () => {
@@ -147,8 +182,8 @@ export async function fetchMemoryFromGitHub(repository: string, options: GitHubM
       await writeCache(filePath, fresh).catch(() => undefined);
       return fresh;
     } catch (error) {
-      // Never block an agent on GitHub: the last copy is better than none, and is marked as such.
-      if (cached) return { ...cached, origin: 'cache' as const, stale: true };
+      // GitHub unreachable: the last copy this same identity saw is better than none, marked as such.
+      if (cached && isOutage(error)) return { ...cached, origin: 'cache' as const, stale: true };
       throw error;
     } finally {
       pending.delete(key);
