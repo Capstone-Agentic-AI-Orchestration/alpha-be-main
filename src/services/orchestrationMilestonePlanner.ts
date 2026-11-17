@@ -52,7 +52,11 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
         if (content) { source.push({ path: file, content }); remaining -= content.length; }
       }
       evidence.push({ repository: workspace.repository, commit, changedPaths: changed.slice(0, 120), source });
-      if (milestone.repositories.some(repo => repo.toLowerCase() === workspace.repository.toLowerCase())) repositories.push({ repository: workspace.repository, repositoryContext: overview.context, availableScripts: overview.scripts });
+      // A repository finished in an earlier milestone may still be listed here (a requirement can
+      // span both sides); it gets a task only if this milestone needs changes there.
+      if (milestone.repositories.some(repo => repo.toLowerCase() === workspace.repository.toLowerCase())) repositories.push({
+        repository: workspace.repository, repositoryContext: overview.context, availableScripts: overview.scripts, hasAcceptedWork: Boolean(latestAccepted)
+      });
     }
     const requirements = run.plan.requirements.filter(item => milestone.requirementIds.includes(item.id));
     const acceptedReports = snapshot.attempts.filter(attempt => attempt.status === 'accepted').slice(-12).map(attempt => ({

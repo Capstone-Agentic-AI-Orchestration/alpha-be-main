@@ -112,6 +112,42 @@ describe('read-only orchestration planner', () => {
     expect(turn).toHaveBeenCalledTimes(2);
     expect(turn.mock.calls[0]?.length).toBeGreaterThan(0);
   });
+  /**
+   * The reported build: milestone 1 finished the backend, milestone 2 listed both repositories
+   * because one requirement spans them, and the planner (sensibly) planned frontend work only.
+   * Requiring a new backend task stopped the build before dispatch on every retry.
+   */
+  describe('a later milestone that lists a repository finished earlier', () => {
+    const requirements = [{ id: 'REQ-CLIENT', description: 'Visitors can sign up from the landing page using the accepted API.' }];
+    const clientOnly = { schemaVersion: 1, goal: 'Landing page and account flows.', requirements, tasks: [{
+      id: 'landing-signup', title: 'Landing page signup', description: 'Build the landing page and its signup form against the accepted API.',
+      kind: 'frontend', ownerAgentId: 'frontend-agent', repository: 'acme/client', dependsOn: [], requirementIds: ['REQ-CLIENT'],
+      acceptanceCriteria: ['A visitor can sign up from the landing page.'], requiredChecks: ['test'],
+      scope: { includePaths: ['src/**'], excludePaths: [] }, required: true
+    }] };
+    const milestoneInput = (apiHasAcceptedWork: boolean) => ({ ...input, goal: clientOnly.goal, buildSteps: [], approvedRequirements: requirements,
+      milestoneContext: { id: 'M2', title: 'Landing page and account flows', objective: 'Use the accepted account API.' },
+      acceptedEvidence: 'Accepted API: POST /api/signup, POST /api/login.',
+      eligibleAgents: [...input.eligibleAgents, { id: 'frontend-agent', role: 'Frontend Agent' as const }],
+      repositories: [
+        { repository: 'acme/api', repositoryContext: 'Account API (accepted in M1)', availableScripts: ['test'], hasAcceptedWork: apiHasAcceptedWork },
+        { repository: 'acme/client', repositoryContext: 'Client scaffold', availableScripts: ['test'] }
+      ] });
+
+    it('accepts a plan with no new task in the finished repository, and tells the planner why', async () => {
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(clientOnly)));
+      const result = await new OrchestrationPlanner(turn).createPlan(milestoneInput(true));
+      expect(turn).toHaveBeenCalledTimes(1);
+      expect(result.plan.tasks.map(task => task.repository)).toEqual(['acme/client']);
+      expect(turn.mock.calls[0][0].prompt).toMatch(/"hasAcceptedWork":\s*true/);
+    });
+
+    it('still requires a task in a listed repository that has no accepted work yet', async () => {
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(clientOnly)));
+      await expect(new OrchestrationPlanner(turn).createPlan(milestoneInput(false))).rejects.toThrow(/No task is assigned to selected repository acme\/api/);
+    });
+  });
+
   it('validates role, checks, scope, and project-step mapping before returning the plan', async () => {
     let request: CliTurnOptions | undefined;
     const planner = new OrchestrationPlanner(async options => {
