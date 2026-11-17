@@ -83,7 +83,7 @@ export function createTicketCentralIntakeService(input: {
       return { received: true, publicReference: outcome.publicReference };
     },
 
-    async listPending(workspaceId: string, subject: TicketSubject, raw: { after?: unknown; limit?: unknown; filter?: unknown }) {
+    async listPending(workspaceId: string, subject: TicketSubject, raw: { after?: unknown; limit?: unknown; filter?: unknown; client?: unknown }) {
       if (!configured) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The shared inquiry inbox is unavailable.');
       if (!opaque(workspaceId) || subject.kind !== 'internal' || !opaque(subject.userId)) {
         throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot view the shared inquiry inbox.');
@@ -93,7 +93,10 @@ export function createTicketCentralIntakeService(input: {
       const cursor = parseCursor(raw.after);
       const filter = raw.filter ?? 'pending';
       if (filter !== 'pending' && filter !== 'handled') throw new TicketWorkflowError(400, 'central_intake_page_invalid', 'Choose pending or handled inquiries.');
-      const page = await input.store.listPending(input.organizationKey, workspaceId, subject, cursor, limit, filter);
+      // A client account: only that client's project proposals, for their page in Clients.
+      if (raw.client !== undefined && !opaque(raw.client)) throw new TicketWorkflowError(400, 'central_intake_page_invalid', 'The inquiry page is invalid.');
+      const clientUserId = raw.client === undefined ? null : raw.client as string;
+      const page = await input.store.listPending(input.organizationKey, workspaceId, subject, cursor, limit, filter, clientUserId);
       if (page === 'forbidden') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot view the shared inquiry inbox.');
       return { items: page.items, nextCursor: page.nextCursor ? encodeCursor(page.nextCursor) : null };
     },

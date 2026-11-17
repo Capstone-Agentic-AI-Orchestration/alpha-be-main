@@ -162,7 +162,8 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
   }
 
   async listPending(organizationKey: string, workspaceId: string, subject: TicketSubject,
-    cursor: CentralIntakeCursor | null, limit: number, filter: 'pending' | 'handled' = 'pending'): Promise<CentralIntakePage | 'forbidden'> {
+    cursor: CentralIntakeCursor | null, limit: number, filter: 'pending' | 'handled' = 'pending',
+    clientUserId: string | null = null): Promise<CentralIntakePage | 'forbidden'> {
     if (!text(organizationKey) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Central inquiry page is invalid.');
     return this.db.transaction(async tx => {
       const scope = await new PostgresTicketAuthorization(tx).lockQueueScope(workspaceId, subject);
@@ -178,9 +179,10 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
            from alpha_private.ticket_central_intakes i
            left join alpha_private.ticket_central_intake_outcomes o on o.organization_key=i.organization_key and o.intake_id=i.id
           where i.organization_key=$1 and (($5='pending' and i.status in ('pending','awaiting_client')) or ($5='handled' and i.status in ('accepted','declined')))
+            and ($6::text is null or (i.kind='project_proposal' and i.client_user_id=$6::text))
             and ($2::timestamptz is null or (i.submitted_at,i.id collate "C")<($2::timestamptz,$3::text collate "C"))
           order by i.submitted_at desc,i.id collate "C" desc limit $4`,
-        [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1, filter]);
+        [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1, filter, clientUserId]);
       const hasMore = rows.length > limit;
       const items = rows.slice(0, limit).map(mapItem);
       const last = items.at(-1);
