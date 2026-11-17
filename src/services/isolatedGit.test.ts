@@ -49,7 +49,8 @@ describe('isolated git for token-bearing commands', () => {
       const get = (...args: string[]) => run(['config', ...args]).then(out => out.trim(), () => null);
       expect(await get('--get-urlmatch', 'http.sslVerify', 'https://github.com/')).toBe('true');
       expect(await get('--get', 'http.proxy')).toBeNull();
-      expect(await get('--get', 'http.sslCAInfo')).not.toContain('attacker-ca');
+      // Unset on Linux; on Windows the system config supplies Git's own CA bundle.
+      expect((await get('--get', 'http.sslCAInfo')) ?? '').not.toContain('attacker-ca');
       expect(await get('--get-regexp', '^url\\.')).toBeNull();
       expect(await get('--get', 'core.hooksPath')).toBeNull();
     });

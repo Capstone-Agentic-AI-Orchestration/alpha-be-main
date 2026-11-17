@@ -78,7 +78,8 @@ describe('build working copy checkpoints', () => {
     // Pushed from the project checkout, as in production: it shares the working copy's objects.
     await remote.push(fixture.checkout, 'org/api', commit, checkpointRef(branchName));
     reclone(fixture.origin, fixture.checkout);
-    expect(() => git(fixture.worktree, 'status')).toThrow(/not a git repository/);
+    // Windows git: "not a git repository"; newer Linux git: "gitfile does not point to a valid repository".
+    expect(() => git(fixture.worktree, 'status')).toThrow(/not a git repository|does not point to a valid repository/);
 
     const result = await ensureBuildWorktree({ checkoutDir: fixture.checkout, worktreePath: fixture.worktree, branchName,
       repository: 'org/api', expectedCommit: commit, runId: 'run-1', remote, alphaDir: directory });
