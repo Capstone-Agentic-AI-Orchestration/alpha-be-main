@@ -13,7 +13,10 @@ import { reserveTicketExecution as reserveTicketExecutionDefault, stopTicketExec
   type TicketExecutionHandle } from './ticketExecutionRelay.js';
 import { addBranchWorktree, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
 import { roleCanOwnSavedTask } from './orchestrationContract.js';
-import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
+import { authorizedRepositoriesForRun, repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
+import { checkpointRef, ensureBuildWorktree, latestCheckpointCommit, type CheckpointRemote } from './orchestrationCheckpoints.js';
+import { githubCheckpointRemote } from './orchestrationCheckpointRemote.js';
+import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash, type PreservedWorktreeChanges } from './orchestrationWorktreeRecovery.js';
 
@@ -38,6 +41,7 @@ interface AdapterDependencies {
   readinessFor?: typeof agentReadiness;
   reserveTicketExecution?: (input: Parameters<typeof reserveTicketExecutionDefault>[0]) => Promise<TicketExecutionHandle | null>;
   stopTicketExecution?: (handle: TicketExecutionHandle) => Promise<void>;
+  checkpointRemote?: CheckpointRemote;
 }
 
 function normalizeRepository(value: string | undefined): string {
@@ -61,6 +65,7 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
   private readonly readinessFor: typeof agentReadiness;
   private readonly reserveTicketExecution: NonNullable<AdapterDependencies['reserveTicketExecution']>;
   private readonly stopTicketExecution: NonNullable<AdapterDependencies['stopTicketExecution']>;
+  private readonly checkpointRemote: CheckpointRemote;
   private resultHandlers?: OrchestrationResultHandlers;
   private eventHandlersAttached = false;
 
@@ -75,6 +80,54 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
     this.readinessFor = dependencies.readinessFor ?? agentReadiness;
     this.reserveTicketExecution = dependencies.reserveTicketExecution ?? reserveTicketExecutionDefault;
     this.stopTicketExecution = dependencies.stopTicketExecution ?? stopTicketExecutionDefault;
+    this.checkpointRemote = dependencies.checkpointRemote ?? githubCheckpointRemote;
+  }
+
+  /**
+   * Repair or rebuild every working copy of a build before it plans a milestone or
+   * resumes, so a re-cloned project folder is recovered from the saved checkpoints
+   * instead of failing every retry with "not a git repository".
+   */
+  async ensureWorkspaces(snapshot: OrchestrationSnapshot): Promise<void> {
+    return runWithWorkspace(snapshot.run.workspaceId, async () => {
+      const project = this.store.getProjects().find(candidate => candidate.id === snapshot.run.projectId);
+      if (!project) throw new Error('The build project is unavailable in this workspace.');
+      for (const repositoryName of authorizedRepositoriesForRun(snapshot.run)) {
+        const workspace = repositoryWorkspaceForRun(snapshot.run, repositoryName);
+        // No checkpoint yet means no working copy was created yet: nothing to protect.
+        if (!workspace?.baseCommit || !workspace.branchName) continue;
+        const repository = this.resolveWorkspace(project, workspace.repository);
+        if (!repository || !fs.existsSync(repository.dir) || !(await isGitRepo(repository.dir))) {
+          throw new Error(`The ${workspace.repository} checkout is unavailable on this executor. Reconnect the project repository before retrying.`);
+        }
+        const result = await ensureBuildWorktree({
+          checkoutDir: repository.dir,
+          worktreePath: workspace.worktreePath,
+          branchName: workspace.branchName,
+          repository: workspace.repository,
+          expectedCommit: latestCheckpointCommit(snapshot, workspace.repository, workspace.baseCommit),
+          runId: snapshot.run.id,
+          remote: this.checkpointRemote
+        });
+        if (result.status !== 'connected') {
+          logInfo(`${snapshot.run.id}: ${result.status} the ${workspace.repository} working copy` +
+            (result.status === 'rebuilt' ? ` at ${result.commit.slice(0, 7)}${result.preservedFolder ? `; the old folder is at ${result.preservedFolder}` : ''}` : ''));
+        }
+      }
+    });
+  }
+
+  /** Back up an accepted checkpoint to GitHub, so losing the project folder cannot lose the work. */
+  async checkpoint(snapshot: OrchestrationSnapshot, attemptId: string): Promise<void> {
+    await runWithWorkspace(snapshot.run.workspaceId, async () => {
+      const attempt = snapshot.attempts.find(item => item.id === attemptId);
+      const task = attempt && snapshot.tasks.find(item => item.id === attempt.taskId);
+      if (!attempt?.resultCommit || !task) return;
+      const workspace = repositoryWorkspaceForRun(snapshot.run, task.repository ?? snapshot.run.repository);
+      if (!workspace?.branchName || !fs.existsSync(workspace.worktreePath)) return;
+      const ownerRepo = workspace.repository.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '');
+      await this.checkpointRemote.push(path.resolve(workspace.worktreePath), ownerRepo, attempt.resultCommit, checkpointRef(workspace.branchName));
+    });
   }
 
   attachResultHandlers(handlers: OrchestrationResultHandlers): void {
@@ -135,6 +188,19 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       let baseRef = request.baseRef ?? repositoryWorkspace.baseRef ?? 'HEAD';
       let preserved: PreservedWorktreeChanges | undefined;
       let resumedWorktreeHash: string | undefined;
+      if (repositoryWorkspace.baseCommit) {
+        // A recorded working copy must still belong to the project checkout. When the
+        // project folder was re-cloned, rebuild it at its last checkpoint before any check below.
+        await ensureBuildWorktree({
+          checkoutDir: repository.dir,
+          worktreePath: workingDir,
+          branchName,
+          repository: request.repository,
+          expectedCommit: latestCheckpointCommit(snapshot!, request.repository, repositoryWorkspace.baseCommit),
+          runId: request.runId,
+          remote: this.checkpointRemote
+        });
+      }
       if (fs.existsSync(workingDir)) {
         if (!(await isGitRepo(workingDir))) {
           throw new Error('The orchestration worktree path exists but is not a Git worktree. Preserve it for recovery and inspect it before retrying.');

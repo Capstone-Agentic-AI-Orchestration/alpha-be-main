@@ -103,6 +103,8 @@ export function classifyRecoveryCategory(input: {
   finalValidation: boolean;
 }): OrchestrationRecoveryCategory {
   const text = input.reason.toLowerCase();
+  // The working copy and its checkpoint are gone: a workspace problem that no retry can fix.
+  if (text.trim().startsWith('build working copy lost:')) return 'workspace';
   if (/usage budget|token budget|cost budget|build age limit|elapsed.?time budget/i.test(text)) return 'budget';
   if (input.finalValidation) return 'final_validation';
   if (/audit evidence.{0,80}(?:not produced|missing|stale|failed)|audit report must reference completed tool evidence/i.test(text)) return 'alpha';

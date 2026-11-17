@@ -236,6 +236,48 @@ function assertOwnerRepo(ownerRepo: string): void {
   }
 }
 
+/** Git environment that authenticates to GitHub with this request's token, sent as a header rather than in the URL. */
+async function authenticatedGitEnv(): Promise<NodeJS.ProcessEnv> {
+  const token = await tokenForThisRequest();
+  const authorization = Buffer.from(`x-access-token:${token}`).toString('base64');
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`
+  };
+}
+
+function assertCheckpointRef(ref: string): void {
+  if (!/^refs\/alpha-checkpoints\/[A-Za-z0-9._/-]{1,200}$/.test(ref) || ref.includes('..') || ref.endsWith('/') || ref.endsWith('.lock')) {
+    throw new Error('Invalid build checkpoint ref.');
+  }
+}
+
+/**
+ * Back up a build checkpoint to a hidden ref on GitHub. Not a branch: it is not listed
+ * with the project's branches and does not trigger push workflows. Forced, because the
+ * ref only ever names this build's latest accepted checkpoint.
+ */
+export async function pushCheckpointRef(cwd: string, expectedRepo: string, commit: string, ref: string): Promise<void> {
+  assertOwnerRepo(expectedRepo);
+  assertCheckpointRef(ref);
+  if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error('A checkpoint backup needs a full commit ID.');
+  await execFileAsync('git', [
+    'push', '--porcelain', '--no-verify', `https://github.com/${expectedRepo}.git`, `+${commit}:${ref}`
+  ], { cwd, env: await authenticatedGitEnv(), timeout: 180_000, windowsHide: true, maxBuffer: 1024 * 1024 });
+}
+
+/** Bring a backed-up build checkpoint into a checkout that no longer has it. */
+export async function fetchCheckpointRef(cwd: string, expectedRepo: string, ref: string): Promise<void> {
+  assertOwnerRepo(expectedRepo);
+  assertCheckpointRef(ref);
+  await execFileAsync('git', [
+    'fetch', '--no-tags', `https://github.com/${expectedRepo}.git`, `+${ref}:${ref}`
+  ], { cwd, env: await authenticatedGitEnv(), timeout: 180_000, windowsHide: true, maxBuffer: 1024 * 1024 });
+}
+
 async function pushAuthenticatedBranch(
   cwd: string,
   branchName: string,
@@ -253,15 +295,7 @@ async function pushAuthenticatedBranch(
     throw new Error(`The validated build branch is not checked out. Expected "${branchName}"; found "${inspection.branch || 'unknown'}".`);
   }
 
-  const token = await tokenForThisRequest();
-  const authorization = Buffer.from(`x-access-token:${token}`).toString('base64');
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`
-  };
+  const env = await authenticatedGitEnv();
   await execFileAsync('git', [
     'push', '--porcelain', '--no-verify',
     `https://github.com/${expectedRepo}.git`,

@@ -24,3 +24,15 @@ vi.mock('dotenv', () => ({
     config: vi.fn(() => ({ parsed: {} })),
   },
 }));
+
+/**
+ * Build checkpoints are backed up to the project's GitHub repository. A test run must
+ * never push there: accept backups silently and have no GitHub copy to fetch.
+ * Tests of the backup itself pass their own CheckpointRemote.
+ */
+vi.mock('../services/orchestrationCheckpointRemote.js', () => ({
+  githubCheckpointRemote: {
+    push: vi.fn(async () => undefined),
+    fetch: vi.fn(async () => { throw new Error('Tests never reach GitHub.'); }),
+  },
+}));
