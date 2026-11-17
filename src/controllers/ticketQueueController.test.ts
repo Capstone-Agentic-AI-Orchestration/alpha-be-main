@@ -5,7 +5,7 @@ import type { TicketQueueClientSummary } from '../store/ticketQueueStore.js';
 
 const summary: TicketQueueClientSummary = {
   key: 'client:a', displayName: 'Ana Cruz', company: 'Resort Co', access: 'active',
-  tickets: { needsPm: 1, waitingClient: 0, open: 2, closed: 1, unlinkedOpen: 1, accessRevoked: 0 },
+  tickets: { needsPm: 1, waitingClient: 0, open: 2, closed: 1, unlinkedOpen: 1, accessRevoked: 0, unreadReplies: 1 },
   projects: [{ projectId: 'gh-repo-1', name: 'Resort Website', previewPublished: true }],
   lastActivityAt: '2026-11-15T10:00:00.000Z',
 };

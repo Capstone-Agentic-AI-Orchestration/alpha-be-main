@@ -142,8 +142,8 @@ function validClientSummary(client: TicketQueueClientSummary): boolean {
     || typeof client.lastActivityAt !== 'string' || !Number.isFinite(Date.parse(client.lastActivityAt))
     || !Array.isArray(client.projects) || client.projects.length > 200) return false;
   const t = client.tickets;
-  if (!t || ![t.needsPm, t.waitingClient, t.open, t.closed, t.unlinkedOpen, t.accessRevoked].every(count)
-    || t.needsPm > t.open || t.waitingClient > t.open || t.unlinkedOpen > t.open) return false;
+  if (!t || ![t.needsPm, t.waitingClient, t.open, t.closed, t.unlinkedOpen, t.accessRevoked, t.unreadReplies].every(count)
+    || t.needsPm > t.open || t.waitingClient > t.open || t.unlinkedOpen > t.open || t.unreadReplies > t.open + t.closed) return false;
   const projects = new Set<string>();
   for (const project of client.projects) {
     if (!project || typeof project.projectId !== 'string' || !project.projectId || projects.has(project.projectId)
