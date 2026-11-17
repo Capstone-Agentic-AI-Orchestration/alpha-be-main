@@ -231,6 +231,20 @@ describe('authenticated project proposals',()=>{
   expect(pending.items[0]).toMatchObject({kind:'project_proposal',fullName:'verified@example.test',email:'verified@example.test'});
   expect(JSON.stringify(pending)).not.toContain('proposal-client');
  });
+ it('lists one client account\'s proposals for their page, never inquiries or other clients\' proposals',async()=>{
+  await submitProposal();
+  const other=new ClientProjectProposals(db,organizationKey);
+  await other.submit({...proposalOwner,userId:'other-client'},'other@example.test',
+   {...proposalBody,operationId:'10000000-0000-4000-8000-000000000002',title:'Other client project'});
+  await app.submit(inquiry,{origin:'https://alpha.example.test',remoteAddress:'192.0.2.10'});
+  const mine=await app.listPending(workspaceA,pmA,{client:proposalOwner.userId});
+  expect(mine.items.map(item=>[item.kind,item.title])).toEqual([['project_proposal','New project']]);
+  expect((await app.listPending(workspaceA,pmA,{client:'nobody'})).items).toEqual([]);
+  expect((await app.listPending(workspaceA,pmA,{client:proposalOwner.userId,filter:'handled'})).items).toEqual([]);
+  expect((await app.listPending(workspaceA,pmA,{})).items.length).toBeGreaterThanOrEqual(2);
+  for(const client of ['',' padded',42]) await expect(app.listPending(workspaceA,pmA,{client})).rejects.toMatchObject({status:400});
+  await expect(app.listPending(workspaceA,developer,{client:proposalOwner.userId})).rejects.toMatchObject({status:403});
+ });
  it('lets a PM request clarification and only the proposal owner reply idempotently',async()=>{
   const {proposals,receipt}=await submitProposal();
   const question={schemaVersion:1,operationId:'10000000-0000-4000-8000-000000000005',body:'Which customer group should the first release support?'};

@@ -31,8 +31,9 @@ export interface TicketCentralIntakeStore {
     policy: CentralIntakeRatePolicy): Promise<{ allowed: true } | { allowed: false; retryAfterSeconds: number }>;
   submit(organizationKey: string, id: string, publicReference: string, input: PublicTicketInquiryInput,
     fingerprints: readonly CentralIntakeFingerprint[], occurredAt: string): Promise<{ kind: 'received'; publicReference: string } | { kind: 'conflict' }>;
+  /** PM-only. `clientUserId` narrows the page to that client account's project proposals. */
   listPending(organizationKey: string, workspaceId: string, subject: TicketSubject,
-    cursor: CentralIntakeCursor | null, limit: number, filter?: 'pending' | 'handled'): Promise<CentralIntakePage | 'forbidden'>;
+    cursor: CentralIntakeCursor | null, limit: number, filter?: 'pending' | 'handled', clientUserId?: string | null): Promise<CentralIntakePage | 'forbidden'>;
   clarify?(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; body: string; occurredAt: string;

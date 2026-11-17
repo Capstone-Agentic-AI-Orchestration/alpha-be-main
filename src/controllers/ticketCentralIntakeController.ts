@@ -6,7 +6,7 @@ import { route } from './asyncRoute.js';
 import { pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 
 export interface TicketCentralIntakeApplication {
-  listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown; filter?: unknown }): Promise<unknown>;
+  listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown; filter?: unknown; client?: unknown }): Promise<unknown>;
   accept(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
   clarify?(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
   decline(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
@@ -79,13 +79,13 @@ function safeDecline(value: unknown, intakeId: string, operationId: string) {
   return { intakeId, operationId, status: 'declined' as const };
 }
 
-function pageInput(req: Request): { after?: unknown; limit?: unknown; filter?: unknown } {
+function pageInput(req: Request): { after?: unknown; limit?: unknown; filter?: unknown; client?: unknown } {
   const query = req.query as Record<string, unknown>;
   const keys = Object.keys(query);
-  if (keys.some(key => key !== 'after' && key !== 'limit' && key !== 'filter')) {
+  if (keys.some(key => key !== 'after' && key !== 'limit' && key !== 'filter' && key !== 'client')) {
     throw new TicketWorkflowError(400, 'central_intake_page_invalid', 'The inquiry page is invalid.');
   }
-  return { after: query.after, limit: query.limit, filter: query.filter };
+  return { after: query.after, limit: query.limit, filter: query.filter, ...(query.client === undefined ? {} : { client: query.client }) };
 }
 
 /** PM-only view of pre-ticket inquiries. Workspace selection comes from the
