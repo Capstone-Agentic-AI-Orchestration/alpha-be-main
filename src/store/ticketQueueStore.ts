@@ -39,6 +39,16 @@ export interface TicketQueueClientSummary {
   projects: Array<{ projectId: string; name: string; previewPublished: boolean }>;
   lastActivityAt: string;
 }
+/** PM-only summary of one request's client conversation, for a client's page. */
+export interface TicketClientConversationRow {
+  ticketId: string;
+  /** Newest client-visible message, shortened to a preview. Never an internal note. */
+  latest: { id: string; authorKind: 'pm' | 'client'; preview: string; truncated: boolean; createdAt: string } | null;
+}
+/** Longest message preview a client conversation summary returns. */
+export const TICKET_CONVERSATION_PREVIEW_LENGTH = 280;
+/** Most requests one client conversation summary covers. */
+export const TICKET_CLIENT_CONVERSATION_LIMIT = 200;
 export interface TicketQueuePageRequest {
   limit: number;
   after: string | null;
@@ -91,6 +101,11 @@ export interface TicketQueueTransaction {
   listClientGroups(scope: LockedTicketQueue): Promise<TicketQueueClientGroup[]>;
   /** PM only: every client account (never an unverified inquiry) with its counts, projects and access. */
   listClients(scope: LockedTicketQueue): Promise<TicketQueueClientSummary[]>;
+  /** PM-only. Every ticket in one client group (the queue's own key), each with its
+   * newest client-audience message. Internal notes are never read. Read-only: it
+   * MUST NOT move a PM read cursor. At most TICKET_CLIENT_CONVERSATION_LIMIT + 1
+   * rows, ordered by ticket ID (binary). */
+  listClientConversations(scope: LockedTicketQueue, clientGroupKey: string): Promise<TicketClientConversationRow[]>;
   /** Entire authorized workspace queue, independent of page/search/filter.
    * A PM's clientGroupKey narrows it to that client, as the queue it counts is.
    * Use identical live ticket grants/predicates. COUNT DISTINCT ticket identity;

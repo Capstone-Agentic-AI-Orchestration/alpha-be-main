@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { TicketSubject } from '../store/ticketCommandStore.js';
 import type { TicketQueueStore, TicketQueuePageRequest, TicketQueueClientSummary } from '../store/ticketQueueStore.js';
+import { TICKET_CLIENT_CONVERSATION_LIMIT, TICKET_CONVERSATION_PREVIEW_LENGTH } from '../store/ticketQueueStore.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { matchesTicketQueueFilter, projectTicketQueueCounters, projectTicketQueueRow, queueSortTime, ticketQueueMonth } from '../ticketing/queueModels.js';
@@ -14,6 +15,7 @@ const pageSchema = z.object({
   filter: z.enum(['all', 'history', 'open', 'needs_client', 'needs_pm', 'in_progress', 'waiting_client', 'closed_month']).default('all'),
   clientGroupKey: z.string().trim().min(1).max(200).optional(),
 }).strict();
+const clientGroupKeySchema = z.string().min(1).max(200).refine(value => value.trim() === value);
 const filters = {
   client: new Set(['all', 'history', 'open', 'needs_client']),
   pm: new Set(['all', 'history', 'needs_pm', 'in_progress', 'waiting_client', 'closed_month']),
@@ -63,6 +65,34 @@ export function createTicketQueueService(store: TicketQueueStore, now: () => Dat
         }
         const items = projected.slice(0, page.limit);
         return { items, nextCursor: projected.length > page.limit ? items[items.length - 1].id : null, counters };
+      });
+    },
+    /** PM-only: each request in one client group with its newest client-visible message. */
+    async listClientConversations(workspaceId: string, subject: TicketSubject, clientGroupKey: unknown) {
+      return store.transaction(async tx => {
+        const scope = await authorizeTicketQueueAccess(tx, workspaceId, subject);
+        if (scope.principal.kind !== 'pm') {
+          throw new TicketWorkflowError(403, 'ticket_client_groups_forbidden', 'Client pages are only available to project managers.');
+        }
+        const key = clientGroupKeySchema.safeParse(clientGroupKey);
+        if (!key.success) throw new TicketWorkflowError(400, 'invalid_ticket_client', 'This client is invalid.');
+        const rows = await tx.listClientConversations(scope, key.data);
+        if (!Array.isArray(rows) || rows.length > TICKET_CLIENT_CONVERSATION_LIMIT + 1) throw new TicketReadInvariantError();
+        const ids = new Set<string>();
+        let previous = '';
+        for (const row of rows) {
+          const latest = row?.latest;
+          if (!row || typeof row.ticketId !== 'string' || !row.ticketId || ids.has(row.ticketId)
+            || (previous && Buffer.compare(Buffer.from(previous), Buffer.from(row.ticketId)) >= 0)
+            || (latest !== null && (!latest || typeof latest.id !== 'string' || !latest.id
+              || (latest.authorKind !== 'pm' && latest.authorKind !== 'client')
+              || typeof latest.preview !== 'string' || latest.preview.length > TICKET_CONVERSATION_PREVIEW_LENGTH
+              || typeof latest.truncated !== 'boolean' || !Number.isFinite(Date.parse(latest.createdAt))))) {
+            throw new TicketReadInvariantError();
+          }
+          ids.add(row.ticketId); previous = row.ticketId;
+        }
+        return { items: rows.slice(0, TICKET_CLIENT_CONVERSATION_LIMIT), complete: rows.length <= TICKET_CLIENT_CONVERSATION_LIMIT };
       });
     },
     async listClientGroups(workspaceId: string, subject: TicketSubject) {

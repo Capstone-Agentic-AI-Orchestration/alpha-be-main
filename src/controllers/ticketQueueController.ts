@@ -3,7 +3,8 @@ import { Router, type Request } from 'express';
 import { route } from './asyncRoute.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
-import type { TicketQueueClientGroup, TicketQueueClientSummary, TicketQueueCounters } from '../store/ticketQueueStore.js';
+import type { TicketClientConversationRow, TicketQueueClientGroup, TicketQueueClientSummary, TicketQueueCounters } from '../store/ticketQueueStore.js';
+import { TICKET_CLIENT_CONVERSATION_LIMIT, TICKET_CONVERSATION_PREVIEW_LENGTH } from '../store/ticketQueueStore.js';
 import type { ClientTicketQueueItem, PmTicketQueueItem } from '../ticketing/queueModels.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
@@ -19,6 +20,8 @@ export interface PmTicketQueueApplication {
   list(workspaceId: string, subject: TicketSubject, input: unknown): Promise<TicketQueuePage>;
   listClientGroups(workspaceId: string, subject: TicketSubject): Promise<TicketQueueClientGroup[]>;
   listClients(workspaceId: string, subject: TicketSubject): Promise<TicketQueueClientSummary[]>;
+  listClientConversations(workspaceId: string, subject: TicketSubject, clientGroupKey: string):
+    Promise<{ items: TicketClientConversationRow[]; complete: boolean }>;
 }
 
 const statusValues = new Set([
@@ -261,6 +264,46 @@ export function createTicketQueueRouter(
       return safe;
     });
     return res.json({ items });
+  }));
+
+  /** A client's page: each of their requests with its newest client-visible message. */
+  router.get('/clients/:clientGroupKey/conversations', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    if (await relayRequest(req, res)) return;
+
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    const workspace = req.workspace;
+    if (!workspace) throw new TicketReadInvariantError();
+    const clientGroupKey = req.params.clientGroupKey;
+    if (Object.keys(req.query as Record<string, unknown>).length > 0 || !opaqueTicketRequestValue(clientGroupKey)) {
+      throw new TicketWorkflowError(400, 'invalid_ticket_client', 'This client is invalid.');
+    }
+
+    const result = await application.listClientConversations(workspace.workspaceId, subject, clientGroupKey);
+    if (!result || !Array.isArray(result.items) || result.items.length > TICKET_CLIENT_CONVERSATION_LIMIT
+      || typeof result.complete !== 'boolean') throw new TicketReadInvariantError();
+    const ids = new Set<string>();
+    // Explicit allowlist: never serialize a store row.
+    const items = result.items.map(row => {
+      const latest = row?.latest;
+      if (!row || !opaqueTicketRequestValue(row.ticketId) || ids.has(row.ticketId)
+        || (latest !== null && (!latest || !opaqueTicketRequestValue(latest.id)
+          || (latest.authorKind !== 'pm' && latest.authorKind !== 'client')
+          || typeof latest.preview !== 'string' || latest.preview.length > TICKET_CONVERSATION_PREVIEW_LENGTH
+          || typeof latest.truncated !== 'boolean' || !validTimestamp(latest.createdAt)))) {
+        throw new TicketReadInvariantError();
+      }
+      ids.add(row.ticketId);
+      return {
+        ticketId: row.ticketId,
+        latestMessage: latest ? {
+          id: latest.id, author: latest.authorKind, preview: latest.preview, truncated: latest.truncated, createdAt: latest.createdAt,
+        } : null,
+      };
+    });
+    return res.json({ items, complete: result.complete });
   }));
 
   return router;

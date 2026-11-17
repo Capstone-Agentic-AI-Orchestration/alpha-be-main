@@ -1,4 +1,5 @@
-import type { TicketQueueStore, TicketQueueTransaction, LockedTicketQueue, TicketQueuePageRequest, TicketQueueMonth, TicketQueueCounters, TicketQueueRow, TicketQueueClientGroup, TicketQueueClientSummary } from './ticketQueueStore.js';
+import type { TicketQueueStore, TicketQueueTransaction, LockedTicketQueue, TicketQueuePageRequest, TicketQueueMonth, TicketQueueCounters, TicketQueueRow, TicketQueueClientGroup, TicketQueueClientSummary, TicketClientConversationRow } from './ticketQueueStore.js';
+import { TICKET_CLIENT_CONVERSATION_LIMIT, TICKET_CONVERSATION_PREVIEW_LENGTH } from './ticketQueueStore.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import { type TransactionalSql, type Sql } from './database.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
@@ -6,6 +7,11 @@ import { TicketWorkflowError, type TicketWorkflow } from '../ticketing/workflow.
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import { decodeTicketWorkflow, ticketSqlIso } from './ticketPostgresCodec.js';
 import { CLIENT_GROUP_KEY_SQL, CLIENT_TICKET_ACCESS_JOINS_SQL, CLIENT_VISIBLE_PROJECT_SQL, clientContactJoinsSql, clientGroupNameSql } from './ticketClientSql.js';
+
+interface ConversationDbRow {
+  ticket_id: string | null; message_id: string | null; author_kind: string | null;
+  preview: string | null; truncated: boolean | null; created_at: Date | string | null;
+}
 
 interface QueueDbRow {
   workspace_id: string;
@@ -325,6 +331,39 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
       projects,
       lastActivityAt: ticketSqlIso(row.last_activity_at),
     };
+  }
+
+  async listClientConversations(scope: LockedTicketQueue, clientGroupKey: string): Promise<TicketClientConversationRow[]> {
+    if (scope.principal.kind !== 'pm') return invariant();
+    // The shared client key rule, so a client's page covers exactly the tickets the
+    // queue shows under that client. Only client-audience messages; no read cursor.
+    const { rows } = await this.sql.query<ConversationDbRow>(
+      `select t.id as ticket_id, m.id as message_id, m.author_kind,
+              left(m.body, $3::int) as preview, char_length(m.body) > $3::int as truncated, m.created_at
+         from alpha_private.tickets t
+         left join lateral (
+           select message.id, message.author_kind, message.body, message.created_at
+           from alpha_private.ticket_messages message
+           where message.workspace_id = t.workspace_id and message.ticket_id = t.id
+             and message.audience = 'client'
+           order by message.created_at desc, message.id collate "C" desc
+           limit 1
+         ) m on true
+        where t.workspace_id = $1 and (${CLIENT_GROUP_KEY_SQL}) = $2
+        order by t.id collate "C"
+        limit $4`,
+      [scope.workspaceId, clientGroupKey, TICKET_CONVERSATION_PREVIEW_LENGTH, TICKET_CLIENT_CONVERSATION_LIMIT + 1],
+    );
+    return rows.map(row => {
+      if (typeof row.ticket_id !== 'string' || !row.ticket_id) return invariant();
+      if (row.message_id === null) return { ticketId: row.ticket_id, latest: null };
+      if ((row.author_kind !== 'pm' && row.author_kind !== 'client') || typeof row.preview !== 'string'
+        || typeof row.truncated !== 'boolean') return invariant();
+      return { ticketId: row.ticket_id, latest: {
+        id: row.message_id, authorKind: row.author_kind, preview: row.preview, truncated: row.truncated,
+        createdAt: ticketSqlIso(row.created_at),
+      } };
+    });
   }
 
   async countQueue(scope: LockedTicketQueue, month: TicketQueueMonth, clientGroupKey?: string): Promise<TicketQueueCounters> {
