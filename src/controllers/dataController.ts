@@ -65,6 +65,7 @@ import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
 import { BoardChangeSync, BoardCursorError, boardStateRowCount, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
 import { recordBoardSyncMetric } from '../services/boardSyncMetrics.js';
+import { refreshProjectMemories } from '../services/repositoryMemory.js';
 import {
   BoardRuleError,
   activeRunForIssue,
@@ -370,6 +371,8 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
       for (const agent of pulled.unpublished.agents) await supabaseService.shareAgent(agent);
       // Every project that reached this computer gets its folder.
       runWithWorkspace(req.workspace!.workspaceId, () => ensureDefaultProjectFolders(sqliteService.getProjects()));
+      // Repository memory for repositories with no checkout here, in the background; never fails the sync.
+      void runWithWorkspace(req.workspace!.workspaceId, () => refreshProjectMemories(sqliteService.getProjects())).catch(() => undefined);
       res.json(asSyncReport(pulled));
     } catch (err: any) {
       /**
@@ -404,6 +407,7 @@ dataRouter.post('/board/sync', route(async (req: Request, res: Response) => {
 
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   const report = await syncBoardFromGitHub(req.workspace!.workspaceId);
+  void projectStore().list(req.workspace!.workspaceId).then(projects => refreshProjectMemories(projects)).catch(() => undefined);
   // 200 even with per-project errors: a workspace where one repository is
   // unreachable still synced the others, and the report says which failed.
   res.json(report);

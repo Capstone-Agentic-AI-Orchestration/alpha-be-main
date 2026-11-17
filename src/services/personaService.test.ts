@@ -163,3 +163,18 @@ describe('resolveAgentLogged', () => {
     );
   });
 });
+
+describe('resolveAgent — repository memory', () => {
+  it('puts the project memory first and keeps the tool policy last', () => {
+    const resolved = svc.resolveAgent(agent(), { repositoryMemory: '## Project memory: read this first\nLogin uses a cookie.', includeToolPolicy: true });
+    expect(resolved.systemPrompt.startsWith('## Project memory: read this first\nLogin uses a cookie.\n\n---\n\nDB_PROMPT')).toBe(true);
+    expect(resolved.systemPrompt.indexOf('DB_PROMPT')).toBeLessThan(resolved.systemPrompt.lastIndexOf('---'));
+    expect(resolved.sources.slice(0, 2)).toEqual(['alpha.db', 'repository-memory']);
+  });
+
+  it('adds nothing when no memory is passed, and changes the hash when memory changes', () => {
+    const plain = svc.resolveAgent(agent());
+    expect(svc.resolveAgent(agent(), { repositoryMemory: '   ' }).systemPrompt).toBe(plain.systemPrompt);
+    expect(svc.resolveAgent(agent(), { repositoryMemory: 'A' }).personaHash).not.toBe(svc.resolveAgent(agent(), { repositoryMemory: 'B' }).personaHash);
+  });
+});

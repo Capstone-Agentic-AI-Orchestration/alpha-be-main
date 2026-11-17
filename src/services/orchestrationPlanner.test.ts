@@ -71,6 +71,16 @@ describe('read-only orchestration planner', () => {
     expect(turn.mock.calls[0][0].prompt).toContain('roleContract');
     expect(result.plan.roleContractVersion).toBe(2);
   });
+  it("opens the planner's system prompt with the project's repository memory", async () => {
+    const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(plan)));
+    await new OrchestrationPlanner(turn).createPlan({ ...input, repositoryMemory: '## Project memory: read this first\nLogin: POST /api/auth/login' });
+    const systemPrompt = turn.mock.calls[0][0].systemPrompt ?? '';
+    expect(systemPrompt.startsWith('## Project memory: read this first\nLogin: POST /api/auth/login')).toBe(true);
+    expect(systemPrompt).toContain('read-only planning orchestrator');
+    await new OrchestrationPlanner(turn).createPlan(input);
+    expect(turn.mock.calls[1][0].systemPrompt?.startsWith('You are Alpha')).toBe(true);
+  });
+
   it('passes both reserved repository roots to read-only file tools instead of guessing sibling paths', async () => {
     const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(plan)));
     const roots = [

@@ -13,6 +13,8 @@ import {
   RepoWorkspaceError
 } from '../services/githubRepoWorkspace.js';
 import { getRepoArchitecture } from '../services/githubRepoArchitecture.js';
+import { budgetMemory, projectMemory } from '../services/repositoryMemory.js';
+import { REPOSITORY_MEMORY_LIMITS } from '../config/constants.js';
 import { actionsRuns, actionsWorkflows, actionsRun, actionsJobs, actionsJobLogs, actionsArtifacts,
   actionsArtifactDownload, type ActionsOptions } from '../services/projectActionsService.js';
 import { deleteProjectRepository, RepoDeletionError } from '../services/repoDeletionService.js';
@@ -100,6 +102,47 @@ projectRepoRouter.get(
   '/projects/:id/repos/:owner/:name/tree',
   withProjectRepo(async (req, res, repo) => res.json(await getTree(repo, query(req, 'ref') ?? 'dev')))
 );
+
+/**
+ * The project's repository memory: each repository's AGENTS.md as agents receive
+ * it, for developers and PMs to see what every agent is told first. Clients never
+ * see it. `?refresh=1` skips the short GitHub cache.
+ */
+projectRepoRouter.get('/projects/:id/memory', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    if (!requireProjectWorkspace(req, res, id)) return;
+    if (req.workspace?.role === 'client') {
+      res.status(403).json({ error: 'Project memory is shared with the project team only.' });
+      return;
+    }
+    const project = await projectStore().get(req.workspace!.workspaceId, id);
+    if (!project) {
+      res.status(404).json({ error: 'Project not found in the active workspace.' });
+      return;
+    }
+    const entries = await projectMemory(project, { refresh: query(req, 'refresh') === '1' });
+    const sent = budgetMemory(entries);
+    res.json({
+      limits: REPOSITORY_MEMORY_LIMITS,
+      sentCharacters: sent.reduce((total, entry) => total + entry.text.length, 0),
+      repositories: entries.map((entry, index) => ({
+        repository: entry.repository,
+        ...(entry.file ? { file: entry.file } : {}),
+        text: entry.text,
+        characters: entry.text.length,
+        sentCharacters: sent[index].text.length,
+        shortened: sent[index].shortened,
+        origin: entry.origin,
+        ...(entry.version ? { version: entry.version } : {}),
+        ...(entry.fetchedAt ? { fetchedAt: entry.fetchedAt } : {}),
+        ...(entry.stale ? { stale: true } : {})
+      }))
+    });
+  } catch (err) {
+    if (!sendKnownError(res, err)) next(err);
+  }
+});
 
 projectRepoRouter.get(
   '/projects/:id/repos/:owner/:name/architecture',

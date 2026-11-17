@@ -40,6 +40,7 @@ import type { OrchestrationTaskPackage } from './orchestrationService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
 import { EXECUTION_LIMITS } from '../config/constants.js';
 import { worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
+import { projectMemoryBlock } from './repositoryMemory.js';
 
 export interface StartRunParams {
   issueId: string;
@@ -747,11 +748,18 @@ export class RunnerService extends EventEmitter {
         ? describeRepositoryExecution(cwd, task?.requiredChecks) : '',
       this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad, ctx.orchestration)
     ].filter(Boolean).join('\n\n');
+    // Repository memory comes first. A build task carries it in its task package (read at the
+    // checkpoint and covered by its hash), not the persona, so the persona check above is
+    // unaffected; any other run on a project reads it as the project's checkouts are now.
+    const repositoryMemory = ctx.orchestration
+      ? ctx.orchestration.taskPackage.repositoryMemory
+      : ctx.project ? await projectMemoryBlock(ctx.project) : '';
+    const personaWithMemory = [repositoryMemory, persona.systemPrompt].filter(Boolean).join('\n\n---\n\n');
     const systemPrompt = ctx.orchestration
-      ? appendOrchestrationTaskPolicy(persona.systemPrompt, persona, ctx.orchestration, ctx.ticketWorkContext)
+      ? appendOrchestrationTaskPolicy(personaWithMemory, persona, ctx.orchestration, ctx.ticketWorkContext)
       : ctx.squad
-        ? appendSquadAssignmentPolicy(persona.systemPrompt, persona, ctx.squad)
-        : persona.systemPrompt;
+        ? appendSquadAssignmentPolicy(personaWithMemory, persona, ctx.squad)
+        : personaWithMemory;
 
     const invocation = buildTurnInvocation(
       {

@@ -167,6 +167,7 @@ function appendSkillGuidance(prompt: string, guidance: string): string {
 import { runWithWorkspace } from './workspaceContext.js';
 import { describeBoardTasks, describeProjectBuild, type BoardTaskRecord } from './chatBuildContext.js';
 import { isAskThreadId } from './boardThreads.js';
+import { projectMemoryBlock } from './repositoryMemory.js';
 
 export interface SendMessageParams {
   buildDecision?: ChatBuildDecision;
@@ -1504,6 +1505,8 @@ export class ChatService extends EventEmitter {
     const preview = await previewChatContext(previewContext, threadId, prompt, localCode.roots);
     localCode.roots = preview.roots;
     const assistantServers = localCode.roots.length ? ['alpha-github', 'alpha-project-files'] : ['alpha-github'];
+    // The project's repository memory opens the assistant's context, as it does every agent's.
+    const repositoryMemory = assistantProject ? await projectMemoryBlock(assistantProject) : '';
     const cwd = chatScratchFolder(threadId, assistantProject?.name ?? 'Alpha');
     // The coordinator never implements a task itself, even if the composer grants Full access.
     const approvalSkills: string[] = [];
@@ -1540,7 +1543,7 @@ export class ChatService extends EventEmitter {
         codexBaseUrl: runtime.endpoint,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         // The tool policy still applies: a chat inspects, it does not mutate.
-        systemPrompt: [DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
+        systemPrompt: [repositoryMemory, DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
           describeOrchestratorGitHubAccess(projectRepos),
           describeLocalProjectFiles(assistantProject?.name ?? null, localCode.roots, localCode.missing),
           assistantProject ? describeProjectBuild(sqliteService.getLatestOrchestrationSnapshot(assistantProject.id, threadId),
@@ -1551,8 +1554,9 @@ export class ChatService extends EventEmitter {
         personaName: DEFAULT_ASSISTANT.name,
         prompt: [sessionMemoryPrompt(threadId, ownerId), prompt].filter(Boolean).join('\n\n'),
         priorSession: priorSession?.cliSessionId ?? null,
-        // Routing rules and the eligible roster can change between turns, including on a CLI resume.
-        personaChanged: Boolean(routingPrompt),
+        // Routing rules, the eligible roster and repository memory can change between turns,
+        // including on a CLI resume, and some CLIs only read the persona with a first message.
+        personaChanged: Boolean(routingPrompt) || Boolean(repositoryMemory),
         // Read-only GitHub tools: a chat turn without the sk-git skill gets 'read' access from mcpAccessFor.
         mcpServers: assistantServers,
         autonomyLevel: approvalSkills.includes('sk-git') ? 'Full Autonomy' : undefined,
@@ -1688,10 +1692,12 @@ export class ChatService extends EventEmitter {
      * The persona file wins over the database row, and the memory tiers are
      * appended to it.
      *
-     * No project key: a chat thread belongs to no project, so Tier 2 does not
-     * apply. Global and agent memory do.
+     * A thread pinned to a project gets that project's repository memory
+     * (AGENTS.md of each repository) first; global and agent memory still apply.
      */
+    const repositoryMemory = activeProject ? await projectMemoryBlock(activeProject) : '';
     const persona = resolveAgentLogged(agent, {
+      repositoryMemory,
       includeToolPolicy: true,
       skillsOverride: [],
       autonomyOverride: 'Supervised',
