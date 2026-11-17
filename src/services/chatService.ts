@@ -19,6 +19,7 @@ import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import {
   DEFAULT_ASSISTANT,
   DEFAULT_ASSISTANT_PROMPT,
+  describeRuntimeModel,
   clearUsageLimit,
   defaultAssistantCandidates,
   markUsageLimited,
@@ -1543,7 +1544,7 @@ export class ChatService extends EventEmitter {
         codexBaseUrl: runtime.endpoint,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         // The tool policy still applies: a chat inspects, it does not mutate.
-        systemPrompt: [repositoryMemory, DEFAULT_ASSISTANT_PROMPT, routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
+        systemPrompt: [repositoryMemory, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel(runtime), routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
           describeOrchestratorGitHubAccess(projectRepos),
           describeLocalProjectFiles(assistantProject?.name ?? null, localCode.roots, localCode.missing),
           assistantProject ? describeProjectBuild(sqliteService.getLatestOrchestrationSnapshot(assistantProject.id, threadId),
@@ -1779,8 +1780,8 @@ export class ChatService extends EventEmitter {
       )?.endpoint,
       reasoningEffort: persona.reasoningEffort,
       systemPrompt: board?.access === 'write'
-        ? `${persona.systemPrompt}\n\n${MANAGER_BOARD_INSTRUCTIONS}${boardRefusal ? `\n\nYou cannot change the board in this conversation: ${boardRefusal} Answer from the attached records only, and say so if asked to change cards.` : ''}`
-        : `${persona.systemPrompt}\n\nThis is a read-only specialist chat. Use only alpha-project-files and read-only alpha-github${boardScope ? ', and the read-only alpha-board tools' : ''}. No edits, shell commands, deployment, publication or further delegation are authorized. Code changes require Alpha’s approved scoped build flow. ${boardScope ? BOARD_READ_INSTRUCTIONS + ' ' : ''}${routingInstructions ? 'For a requested code change, return the build/confirm_build routing decision below with a self-contained concrete goal. Do not return a delegate decision or claim implementation happened.\n' + routingInstructions : ''}`,
+        ? `${persona.systemPrompt}\n\n${describeRuntimeModel({ provider: persona.modelProvider, modelName: persona.modelName, reasoningEffort: persona.reasoningEffort })}\n\n${MANAGER_BOARD_INSTRUCTIONS}${boardRefusal ? `\n\nYou cannot change the board in this conversation: ${boardRefusal} Answer from the attached records only, and say so if asked to change cards.` : ''}`
+        : `${persona.systemPrompt}\n\n${describeRuntimeModel({ provider: persona.modelProvider, modelName: persona.modelName, reasoningEffort: persona.reasoningEffort })}\n\nThis is a read-only specialist chat. Use only alpha-project-files and read-only alpha-github${boardScope ? ', and the read-only alpha-board tools' : ''}. No edits, shell commands, deployment, publication or further delegation are authorized. Code changes require Alpha’s approved scoped build flow. ${boardScope ? BOARD_READ_INSTRUCTIONS + ' ' : ''}${routingInstructions ? 'For a requested code change, return the build/confirm_build routing decision below with a self-contained concrete goal. Do not return a delegate decision or claim implementation happened.\n' + routingInstructions : ''}`,
       personaName: persona.name,
       // What other agents said this turn rides with the message, not the system
       // prompt: it is true of this turn only, and putting it in the persona

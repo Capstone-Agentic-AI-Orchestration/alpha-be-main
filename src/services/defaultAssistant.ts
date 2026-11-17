@@ -41,6 +41,24 @@ export const DEFAULT_ASSISTANT_PROMPT = [
   'rather than answering on that agent\'s behalf. Never impersonate a specialist.'
 ].join('\n');
 
+/**
+ * The runtime and model this reply runs on, as Alpha chose it.
+ *
+ * A model cannot reliably name itself: its training predates its own release
+ * name, and the CLI does not tell it which model the account selected. Alpha
+ * does know, so it says so, and the agent can answer "which model are you"
+ * truthfully instead of guessing or refusing.
+ */
+export function describeRuntimeModel(runtime: { provider: string; modelName: string; name?: string; reasoningEffort?: string | null }): string {
+  const via = runtime.name && runtime.name !== runtime.provider ? `${runtime.name} (${runtime.provider})` : runtime.provider;
+  const effort = runtime.reasoningEffort ? `, ${runtime.reasoningEffort} reasoning effort` : '';
+  return [
+    '## Your runtime',
+    `This reply runs through ${via} with the model ${runtime.modelName}${effort}, as selected in Alpha.`,
+    'If someone asks which model or runtime you are using, answer with exactly this. It comes from Alpha\'s settings, which are more reliable than your own sense of which model you are.'
+  ].join('\n');
+}
+
 export interface DefaultAssistantRuntime {
   provider: string;
   modelName: string;
