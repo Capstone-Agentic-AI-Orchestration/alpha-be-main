@@ -330,7 +330,7 @@ describe('calendar definitions, filters and safe failures', () => {
 describe('PM clients', () => {
   const summary = (key: string, overrides: Partial<TicketQueueClientSummary> = {}): TicketQueueClientSummary => ({
     key, displayName: 'Ana Cruz', company: 'Resort Co', access: 'active',
-    tickets: { needsPm: 1, waitingClient: 0, open: 2, closed: 1, unlinkedOpen: 1, accessRevoked: 0 },
+    tickets: { needsPm: 1, waitingClient: 0, open: 2, closed: 1, unlinkedOpen: 1, accessRevoked: 0, unreadReplies: 0 },
     projects: [{ projectId: 'gh-repo-1', name: 'Resort Website', previewPublished: true }],
     lastActivityAt: updatedAt, ...overrides,
   });
@@ -361,7 +361,9 @@ describe('PM clients', () => {
   it.each([
     ['an unverified inquiry key', summary('ticket:t1')],
     ['a blank name', summary('client:a', { displayName: ' ' })],
-    ['more needing the PM than are open', summary('client:a', { tickets: { needsPm: 3, waitingClient: 0, open: 2, closed: 0, unlinkedOpen: 0, accessRevoked: 0 } })],
+    ['more needing the PM than are open', summary('client:a', { tickets: { needsPm: 3, waitingClient: 0, open: 2, closed: 0, unlinkedOpen: 0, accessRevoked: 0, unreadReplies: 0 } })],
+    ['more unread than requests', summary('client:a', { tickets: { needsPm: 0, waitingClient: 0, open: 1, closed: 1, unlinkedOpen: 0, accessRevoked: 0, unreadReplies: 3 } })],
+    ['a missing unread count', summary('client:a', { tickets: { needsPm: 0, waitingClient: 0, open: 1, closed: 0, unlinkedOpen: 0, accessRevoked: 0 } as never })],
     ['a repeated project', summary('client:a', { projects: [
       { projectId: 'p', name: 'One', previewPublished: false }, { projectId: 'p', name: 'One', previewPublished: false }] })],
   ])('fails closed on %s', async (_label, bad) => {

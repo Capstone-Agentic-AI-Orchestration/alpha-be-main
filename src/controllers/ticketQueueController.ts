@@ -79,6 +79,7 @@ function safeClientSummary(value: TicketQueueClientSummary): TicketQueueClientSu
       closed: count(value.tickets.closed),
       unlinkedOpen: count(value.tickets.unlinkedOpen),
       accessRevoked: count(value.tickets.accessRevoked),
+      unreadReplies: count(value.tickets.unreadReplies),
     },
     projects: value.projects.map(project => {
       if (!project || !opaqueTicketRequestValue(project.projectId)

@@ -44,6 +44,7 @@ interface ClientSummaryDbRow {
   client_group_key: string | null; display_name: string | null; company: string | null; service_active: boolean | null;
   needs_pm_count: string | number; waiting_client_count: string | number; open_count: string | number;
   closed_count: string | number; unlinked_open_count: string | number; access_revoked_count: string | number;
+  unread_reply_count: string | number;
   last_activity_at: Date | string | null; projects: unknown;
 }
 
@@ -245,7 +246,16 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 coalesce(sg.status = 'active' and cg.active, false) as client_access_active,
                 coalesce(sg.status = 'active' and sg.revoked_at is null, false) as service_active,
                 coalesce(cg.active and cg.revoked_at is null, false) as ticket_grant_active,
-                coalesce(${CLIENT_VISIBLE_PROJECT_SQL}, false) as project_visible
+                coalesce(${CLIENT_VISIBLE_PROJECT_SQL}, false) as project_visible,
+                -- The queue's unread rule for this PM: a client reply after their read cursor.
+                exists (
+                  select 1 from alpha_private.ticket_messages client_message
+                  left join alpha_private.ticket_pm_read_cursors read_cursor
+                    on read_cursor.workspace_id = t.workspace_id and read_cursor.ticket_id = t.id and read_cursor.pm_user_id = $2
+                  where client_message.workspace_id = t.workspace_id and client_message.ticket_id = t.id
+                    and client_message.audience = 'client' and client_message.author_kind = 'client'
+                    and client_message.created_at > coalesce(read_cursor.last_read_at, '-infinity'::timestamptz)
+                ) as client_reply_unread
          from alpha_private.tickets t
          left join lateral (
            select grant_row.status, grant_row.revoked_at, grant_row.display_name
@@ -271,6 +281,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 count(*) filter (where not (${COUNT_OPEN_SQL})) as closed_count,
                 count(*) filter (where ${COUNT_OPEN_SQL} and not project_visible) as unlinked_open_count,
                 count(*) filter (where service_active and not ticket_grant_active) as access_revoked_count,
+                count(*) filter (where client_reply_unread) as unread_reply_count,
                 max(internal_updated_at) as last_activity_at
          from base
          group by client_group_key
@@ -296,7 +307,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
               ), '[]'::json) as projects
        from clients c
        order by c.needs_pm_count desc, c.last_activity_at desc, c.client_group_key collate "C"`,
-      [scope.workspaceId],
+      [scope.workspaceId, scope.principal.userId],
     );
     return rows.map(row => this.clientSummary(row));
   }
@@ -327,6 +338,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
         closed: this.count(row.closed_count),
         unlinkedOpen: this.count(row.unlinked_open_count),
         accessRevoked: this.count(row.access_revoked_count),
+        unreadReplies: this.count(row.unread_reply_count),
       },
       projects,
       lastActivityAt: ticketSqlIso(row.last_activity_at),

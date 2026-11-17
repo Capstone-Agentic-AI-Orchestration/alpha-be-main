@@ -34,6 +34,8 @@ export interface TicketQueueClientSummary {
     unlinkedOpen: number;
     /** Requests this client can no longer open while their account is active. */
     accessRevoked: number;
+    /** Requests with a client reply newer than this PM's read cursor (the queue's "unread" rule). */
+    unreadReplies: number;
   };
   /** Exactly the projects the client portal shows this client. */
   projects: Array<{ projectId: string; name: string; previewPublished: boolean }>;

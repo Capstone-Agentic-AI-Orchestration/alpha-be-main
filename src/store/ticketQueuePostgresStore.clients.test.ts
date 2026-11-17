@@ -88,14 +88,31 @@ describe('PM clients on the complete migration schema', () => {
     expect(clients.map(client => client.key)).toEqual(['client:client-a', 'client:client-b']);
     expect(clients[0]).toMatchObject({
       displayName: 'Ana Cruz', company: 'Resort Co', access: 'active',
-      tickets: { needsPm: 3, waitingClient: 0, open: 3, closed: 0, unlinkedOpen: 1, accessRevoked: 1 },
+      tickets: { needsPm: 3, waitingClient: 0, open: 3, closed: 0, unlinkedOpen: 1, accessRevoked: 1, unreadReplies: 0 },
       projects: [{ projectId: 'gh-repo-1', name: 'Resort Website', previewPublished: true }],
     });
     // Unverified contact and a revoked account: named from the service grant, shown as inactive.
     expect(clients[1]).toMatchObject({
       displayName: 'Ben Co', company: null, access: 'inactive',
-      tickets: { needsPm: 0, open: 0, closed: 1, unlinkedOpen: 0, accessRevoked: 0 }, projects: [],
+      tickets: { needsPm: 0, open: 0, closed: 1, unlinkedOpen: 0, accessRevoked: 0, unreadReplies: 0 }, projects: [],
     });
+  });
+
+  it('counts requests with a client reply this PM has not read, per PM', async () => {
+    await db.query(`insert into public.workspace_members(id,workspace_id,user_id,role) values ('member-2','workspace-a','pm-2','pm')`);
+    await db.query(`insert into alpha_private.ticket_messages(id,workspace_id,ticket_id,author_kind,author_id,audience,body,created_at) values
+      ('m-a1','workspace-a','t-a1','client','client-a','client','Any news?',now()-interval '3 minutes'),
+      ('m-a1b','workspace-a','t-a1','client','client-a','client','Following up',now()-interval '2 minutes'),
+      ('m-a2','workspace-a','t-a2','client','client-a','client','One more thing',now()-interval '2 minutes'),
+      ('m-a2-pm','workspace-a','t-a2','pm','pm','client','Thanks, on it',now()-interval '1 minute'),
+      ('m-a2-note','workspace-a','t-a2','pm','pm','internal','Private note',now())`);
+    const unread = async (subject: TicketSubject) => (await service.listClients('workspace-a', subject))[0].tickets.unreadReplies;
+    // Two requests have client replies; a PM reply or an internal note does not count as read.
+    expect(await unread(pm)).toBe(2);
+    await db.query(`insert into alpha_private.ticket_pm_read_cursors(workspace_id,ticket_id,pm_user_id,last_read_at) values ('workspace-a','t-a1','pm',now())`);
+    expect(await unread(pm)).toBe(1);
+    // Read cursors are per PM: another PM still has both unread.
+    expect(await unread({ ...pm, userId: 'pm-2' })).toBe(2);
   });
 
   it('shows the PM exactly the projects the client portal shows that client', async () => {
