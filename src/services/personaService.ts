@@ -78,6 +78,13 @@ export interface ResolveOptions {
   skillsOverride?: string[];
   /** Full chat access is the only selector state that enables GitHub writes. */
   autonomyOverride?: AutonomyLevel;
+  /**
+   * The project's repository memory (AGENTS.md of each repository), already
+   * rendered by repositoryMemory.renderProjectMemory. Placed first, so the agent
+   * reads it before anything else; Alpha's tool policy still comes last.
+   * Opt-in: passed by every caller that works on a project.
+   */
+  repositoryMemory?: string;
 }
 
 /**
@@ -102,6 +109,11 @@ export function resolveAgent(agent: Agent, options: ResolveOptions = {}): Resolv
   const sources: string[] = [overlay ? `agents/${agent.id}.md` : 'alpha.db'];
 
   const parts: string[] = [];
+  const repositoryMemory = options.repositoryMemory?.trim();
+  if (repositoryMemory) {
+    parts.push(repositoryMemory);
+    sources.push('repository-memory');
+  }
   const persona = (merged.systemPrompt ?? '').trim();
   if (persona) parts.push(persona);
 

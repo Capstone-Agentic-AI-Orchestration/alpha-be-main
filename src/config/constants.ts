@@ -23,6 +23,16 @@ export const MEMORY_LIMITS = {
   MAX_CHARS_PER_THREAD: 6000
 };
 
+/**
+ * Repository memory: each project repository's AGENTS.md, put first in every
+ * agent's context. Paid on every request, so it stays small: a project with
+ * several repositories shares the total.
+ */
+export const REPOSITORY_MEMORY_LIMITS = {
+  PER_REPO: 3000,
+  TOTAL: 6000
+};
+
 export const PROVIDER_CONCURRENCY = {
   ANTHROPIC: { concurrency: 2, interval: 60000, intervalCap: 50 },
   GEMINI: { concurrency: 5, interval: 60000, intervalCap: 120 },

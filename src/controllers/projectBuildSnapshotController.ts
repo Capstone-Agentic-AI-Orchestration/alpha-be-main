@@ -9,6 +9,7 @@ import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { lostApprovalWorkingCopy } from '../services/orchestrationReviewService.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
+import { MEMORY_FILES } from '../services/repositoryMemory.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
 import { dependencyAuditEvidenceSchema } from '../services/dependencyAuditContract.js';
 import type { OrchestrationRunStatus } from '../services/orchestrationStateMachine.js';
@@ -234,6 +235,18 @@ function safeProjectBuildRun(run: PrototypeRun): PrototypeRun {
   };
 }
 
+/** Which repository memory an attempt was given, as recorded at preparation: names and versions only. */
+function safeMemorySources(value: unknown): Array<{ repository: string; file: string; version?: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 10).flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const { repository, file, version } = item as Record<string, unknown>;
+    if (typeof repository !== 'string' || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repository)) return [];
+    if (typeof file !== 'string' || !(MEMORY_FILES as readonly string[]).includes(file)) return [];
+    return [{ repository, file, ...(typeof version === 'string' && /^[a-f0-9]{7,64}$/i.test(version) ? { version } : {}) }];
+  });
+}
+
 function safeRepositoryPath(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   const normalized = value.replace(/\\/g, '/');
@@ -373,6 +386,7 @@ function safeOrchestrationProjection(
         taskId: attempt.taskId,
         attemptNumber: attempt.attemptNumber,
         reportFormatRetry: attempt.contextManifest.reportOnlyReportRetry === true,
+        repositoryMemory: safeMemorySources(attempt.contextManifest.repositoryMemory),
         prototypeRunId: attempt.prototypeRunId,
         agentId: safeAgentId(attempt.agentId),
         agentName: safeAgentName(attempt.agentId),

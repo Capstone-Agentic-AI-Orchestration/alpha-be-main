@@ -8,6 +8,7 @@ import { resolveAgent } from './personaService.js';
 import { OrchestrationPlanner } from './orchestrationPlanner.js';
 import { plannerModelName, repositoryPlanningContext } from './projectBuildOrchestrator.js';
 import { getCurrentBranch, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 
 export async function reviseBoardPlan(context: WorkspaceContext, runId: string, revision: number, instruction: string) {
   return runWithWorkspace(context.workspaceId, async () => {
@@ -33,6 +34,9 @@ export async function reviseBoardPlan(context: WorkspaceContext, runId: string, 
     const planned = await new OrchestrationPlanner().createPlan({ runId, cwd: roots[0].worktreePath,
       goal: snapshot.run.plan.goal + '\nPlan revision requested by the developer (within the same requirements):\n' + instruction,
       exclusions: snapshot.run.plan.exclusions, approvedRequirements: snapshot.run.plan.requirements,
+      // A revision keeps the saved project context (it used to be dropped) and reads the same memory.
+      projectContext: snapshot.run.plan.projectContext,
+      repositoryMemory: renderProjectMemory(await Promise.all(roots.map(root => readMemoryAtCommit(root.repository, root.worktreePath, root.baseCommit)))),
       repositoryContext: contexts[0].context.context, availableScripts: contexts[0].context.scripts,
       repositories: contexts.map(item => ({ repository: item.repository, repositoryContext: item.context.context, availableScripts: item.context.scripts })),
       repositoryRoots: roots.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })), branchContext: roots,

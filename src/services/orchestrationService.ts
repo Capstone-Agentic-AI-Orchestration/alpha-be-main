@@ -24,9 +24,10 @@ import { pathMatchesScope } from '../utils/pathScope.js';
 import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
-import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { authorizedRepositoriesForRun, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { memorySources, readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
-import { isBuildWorkspaceLost } from './orchestrationCheckpoints.js';
+import { isBuildWorkspaceLost, latestCheckpointCommit } from './orchestrationCheckpoints.js';
 import { logError } from '../utils/logger.js';
 import {
   ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS,
@@ -162,10 +163,19 @@ export interface OrchestrationLaunchRequest {
 }
 
 export interface OrchestrationTaskPackage {
-  packageVersion: 6;
+  /** 7 added repository memory; saved version 6 packages run without it. */
+  packageVersion: 6 | 7;
   reportSchemaVersion: number;
   goal: string;
   projectContext: string;
+  /**
+   * The project's repository memory (AGENTS.md of each repository) as committed at
+   * each repository's checkpoint when the task was prepared. Part of the package, so
+   * the package hash covers it and an edit during the build cannot reach this task.
+   */
+  repositoryMemory?: string;
+  /** Which file and commit each repository's memory came from. */
+  repositoryMemorySources?: Array<{ repository: string; file: string; version?: string }>;
   /** Optional instructions selected for the originating chat message. */
   chatSkillIds?: string[];
   chatSkillGuidance?: string;
@@ -1714,11 +1724,13 @@ export class OrchestrationService {
     const reviewInputs = task.kind === 'review' && !reportCorrection
       ? await this.createReviewInputs(snapshot, task)
       : [];
+    const memory = await repositoryMemoryAtCheckpoints(snapshot);
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 6,
+      packageVersion: 7,
       reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       goal: snapshot.run.plan.goal,
       projectContext: snapshot.run.plan.projectContext ?? '',
+      ...(memory.text ? { repositoryMemory: memory.text, repositoryMemorySources: memory.sources } : {}),
       ...(snapshot.run.plan.chatSkillIds?.length ? { chatSkillIds: snapshot.run.plan.chatSkillIds } : {}),
       ...(snapshot.run.plan.chatSkillGuidance ? { chatSkillGuidance: snapshot.run.plan.chatSkillGuidance } : {}),
       exclusions: snapshot.run.plan.exclusions,
@@ -1989,4 +2001,19 @@ export function orchestrationRequestFingerprint(input: {
     value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase()
   ))].sort();
   return createHash('sha256').update(JSON.stringify({ ...input, repositories })).digest('hex');
+}
+
+/**
+ * The project's repository memory as committed at each repository's checkpoint:
+ * its latest accepted commit, or the build's base. Read from git, not the folder,
+ * so uncommitted edits and changes after preparation never reach the task.
+ */
+export async function repositoryMemoryAtCheckpoints(snapshot: OrchestrationSnapshot): Promise<{ text: string; sources: Array<{ repository: string; file: string; version?: string }> }> {
+  const entries = await Promise.all(authorizedRepositoriesForRun(snapshot.run).map(async repository => {
+    const workspace = repositoryWorkspaceForRun(snapshot.run, repository);
+    const commit = workspace ? latestCheckpointCommit(snapshot, repository, workspace.baseCommit) : undefined;
+    if (!workspace?.worktreePath || !commit) return { repository, text: '', origin: 'commit' as const };
+    return readMemoryAtCommit(repository, workspace.worktreePath, commit);
+  }));
+  return { text: renderProjectMemory(entries), sources: memorySources(entries) };
 }

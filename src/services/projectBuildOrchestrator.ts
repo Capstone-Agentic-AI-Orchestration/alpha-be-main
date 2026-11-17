@@ -31,6 +31,7 @@ import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningW
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
 import { repositoryFileOverview } from './repositoryOverview.js';
+import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 
 export interface ProjectBuildStartResult {
   blockingBuild?: { runId: string; projectId?: string; issueId?: string; status: string };
@@ -504,7 +505,10 @@ async function startOrchestratedProjectBuild(input: {
       goal: cleanGoal,
       chatSkillIds: input.chatSkillIds,
       chatSkillGuidance: input.chatSkillGuidance,
-      // The team's playbook and the detected stack, read from the planning checkouts.
+      // The team's notes (AGENTS.md) as committed at each planning checkpoint, first in the planner's context.
+      repositoryMemory: renderProjectMemory(await Promise.all(reservations.map(item =>
+        readMemoryAtCommit(item.repository, item.worktreePath, item.baseCommit)))),
+      // The detected stack and the project description, read from the planning checkouts.
       projectContext: composeProjectContext({
         description: project.description,
         repositories: reservations.map(item => ({ repository: item.repository, dir: item.worktreePath }))

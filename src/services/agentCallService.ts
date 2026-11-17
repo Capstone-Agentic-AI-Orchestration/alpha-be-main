@@ -25,6 +25,7 @@ import { logInfo } from '../utils/logger.js';
 import { saveChatMessageAndShare } from './chatWriteThrough.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { getHeadCommit } from '../utils/gitUtils.js';
+import { projectMemoryBlock } from './repositoryMemory.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH_BYTES = 2_000_000;
@@ -513,7 +514,9 @@ export class AgentCallService extends EventEmitter {
       const persona = resolveAgentLogged(agent, {
         projectKey: project.key,
         includeMemory: false,
-        includeToolPolicy: false
+        includeToolPolicy: false,
+        // The project's repository memory comes first, as for every agent on a project.
+        repositoryMemory: await projectMemoryBlock(project)
       });
       const effectiveAgent = { ...agent, ...persona };
       const runtimes = sqliteService.getRuntimes();

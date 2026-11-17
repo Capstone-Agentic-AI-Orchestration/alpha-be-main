@@ -106,6 +106,12 @@ export interface OrchestrationPlanningInput {
   goal: string;
   /** Human-authored project rules that guide the plan within the requested goal. */
   projectContext?: string;
+  /**
+   * The project's repository memory (AGENTS.md of each repository), rendered by
+   * repositoryMemory.renderProjectMemory from the planning checkpoints. Opens the
+   * planner's system prompt; it informs the plan and never widens the goal.
+   */
+  repositoryMemory?: string;
   /** Optional instructions selected for the source chat message; never grants tools or scope. */
   chatSkillIds?: readonly string[];
   chatSkillGuidance?: string;
@@ -171,8 +177,9 @@ const phaseKinds: Record<PlannerBuildStep['phase'], ReadonlySet<OrchestrationTas
   delivery: new Set(['delivery'])
 };
 
-function plannerSystemPrompt(agent: PlannerAgentIdentity): string {
+function plannerSystemPrompt(agent: PlannerAgentIdentity, repositoryMemory?: string): string {
   return [
+    repositoryMemory?.trim(),
     `You are Alpha's read-only planning orchestrator, using ${agent.name} (${agent.role}) as the configured planning identity.`,
     'Produce a small, executable task plan for other specialists. You do not implement files, run commands, dispatch agents, approve results, change permissions, create repositories, push, publish, or deploy.',
     'Repository inspection is through alpha-project-files only: project_list_files, project_read_file, project_search, and project_git. Select a repository from authorizedRepositoryRoots and use paths relative to that root. Never guess sibling folders, read ../ paths, use terminal commands, or inspect Alpha records, CLI transcripts or session files. If a file is absent, plan from the supplied repository context; do not search outside the authorized roots.',
@@ -463,7 +470,7 @@ export class OrchestrationPlanner {
       provider: input.planner.provider,
       modelName: input.planner.modelName,
       reasoningEffort: input.planner.reasoningEffort,
-      systemPrompt: plannerSystemPrompt(input.planner),
+      systemPrompt: plannerSystemPrompt(input.planner, input.repositoryMemory),
       personaName: input.planner.name,
       priorSession: null,
       // Only the server-resolved planning checkouts are exposed through read-only tools.

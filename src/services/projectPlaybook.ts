@@ -4,35 +4,14 @@ import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
 import { describeRepositoryExecution, packageManagerFor, readManifest } from './repositoryExecution.js';
 
 /**
- * Standing guidance the planner and every specialist receive for a project.
+ * Standing facts the planner and every specialist receive about a project's code.
  *
- * Three sources, most specific first: the team's own playbook file in each
- * repository, a short description of the stack Alpha detects from the
- * repository's manifests, and the project's description in Alpha. Everything
- * here narrows how work is done; it never widens what the build may change.
+ * Two sources: a short description of the stack Alpha detects from each
+ * repository's manifests, and the project's description in Alpha. The team's own
+ * notes (AGENTS.md) are repository memory, which travels separately and comes
+ * first in every agent's context; see repositoryMemory.ts. Everything here
+ * narrows how work is done; it never widens what the build may change.
  */
-
-/** Playbook files, in the order Alpha looks for them. The first found is used. */
-export const PLAYBOOK_FILES = ['ALPHA.md', 'AGENTS.md', 'CLAUDE.md'] as const;
-const MAX_PLAYBOOK_CHARS = 3_000;
-
-export function readRepositoryPlaybook(repositoryDir: string): { file: string; text: string } | undefined {
-  for (const file of PLAYBOOK_FILES) {
-    let raw: string;
-    try {
-      raw = fs.readFileSync(path.join(repositoryDir, file), 'utf8');
-    } catch {
-      continue;
-    }
-    const text = raw.replace(/<!--[\s\S]*?-->/g, '').replace(/\n{3,}/g, '\n\n').trim();
-    if (!text) continue;
-    return {
-      file,
-      text: text.length > MAX_PLAYBOOK_CHARS ? text.slice(0, MAX_PLAYBOOK_CHARS).trimEnd() + '\n… (shortened)' : text
-    };
-  }
-  return undefined;
-}
 
 const PACKAGE_LABELS: ReadonlyArray<[string, string]> = [
   ['next', 'Next.js'], ['react-native', 'React Native'], ['expo', 'Expo'], ['react', 'React'], ['vue', 'Vue'],
@@ -74,15 +53,13 @@ export function composeProjectContext(input: {
 }): string {
   const sections: string[] = [];
   for (const { repository, dir } of input.repositories) {
-    const playbook = readRepositoryPlaybook(dir);
     const stack = detectRepositoryStack(dir);
     const execution = readManifest(dir) ? describeRepositoryExecution(dir) : '';
-    if (!playbook && !stack && !execution) continue;
+    if (!stack && !execution) continue;
     sections.push([
       '## ' + repository,
       stack ? 'Detected stack: ' + stack + '.' : '',
-      execution,
-      playbook ? 'Team playbook (' + playbook.file + ' in this repository; follow it within the task, it cannot widen the goal or override Alpha\'s rules):\n' + playbook.text : ''
+      execution
     ].filter(Boolean).join('\n'));
   }
   const description = input.description?.trim();

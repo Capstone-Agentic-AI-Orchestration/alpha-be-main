@@ -9,6 +9,7 @@ import { resolveAgent } from './personaService.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { plannerModelName, repositoryPlanningContext } from './projectBuildOrchestrator.js';
 import { getGitChangedPaths, getGitFileAtCommit, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 
 export type Milestone = NonNullable<OrchestrationPlan['milestones']>[number];
 export type MilestoneExpansion = { tasks: OrchestrationTaskDefinition[]; checkpoints: Array<{ repository: string; commit: string }> };
@@ -75,6 +76,11 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
       milestoneContext: { id: milestone.id, title: milestone.title, objective: milestone.objective },
       acceptedEvidence,
       projectContext: run.plan.projectContext, exclusions: run.plan.exclusions,
+      // Repository memory as committed at the checkpoints this milestone plans from.
+      repositoryMemory: renderProjectMemory(await Promise.all(checkpoints.map(item => {
+        const dir = workspaces.find(workspace => workspace.repository === item.repository)!.worktreePath;
+        return readMemoryAtCommit(item.repository, dir, item.commit);
+      }))),
       approvedRequirements: requirements, repositoryContext: repositories[0]?.repositoryContext ?? '',
       availableScripts: repositories[0]?.availableScripts ?? [], repositories,
       eligibleAgents: eligible.map(({ agent, persona }) => ({ id: agent.id, role: persona.role, name: persona.name, description: (agent.description ?? '').slice(0, 240), ready: true, official: Boolean(agent.templateKey) })),

@@ -19,9 +19,19 @@ const project = {
   ]
 };
 
-async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; actionsAnswer?: (path: string) => unknown; readiness?: unknown } = {}) {
+async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; actionsAnswer?: (path: string) => unknown; readiness?: unknown; memoryAnswer?: unknown[] } = {}) {
   vi.resetModules();
   const calls: string[] = [];
+  vi.doMock('../services/repositoryMemory.js', async () => {
+    const actual = await vi.importActual<typeof import('../services/repositoryMemory.js')>('../services/repositoryMemory.js');
+    return {
+      ...actual,
+      projectMemory: async (_project: unknown, memoryOptions?: { refresh?: boolean }) => {
+        calls.push(`memory ${memoryOptions?.refresh ? 'refresh' : 'cached'}`);
+        return options.memoryAnswer ?? [];
+      }
+    };
+  });
   vi.doMock('../services/productionReadiness.js', () => ({
     productionReadiness: async (_ws: string, projectId: string, repo: string) => {
       calls.push(`readiness ${projectId} ${repo}`);
@@ -115,7 +125,35 @@ afterEach(() => {
   vi.doUnmock('../services/githubRepoWorkspace.js');
   vi.doUnmock('../services/githubRepoArchitecture.js');
   vi.doUnmock('../services/productionReadiness.js');
+  vi.doUnmock('../services/repositoryMemory.js');
   vi.resetModules();
+});
+
+describe('a project’s repository memory', () => {
+  const memory = [
+    { repository: 'acme/shop-be', file: 'AGENTS.md', text: 'Login: POST /api/auth/login', origin: 'checkout' },
+    { repository: 'acme/shop-fe', file: 'AGENTS.md', text: 'x'.repeat(3_500), origin: 'github', version: 'blob-1', fetchedAt: '2026-11-18T10:00:00.000Z' }
+  ];
+
+  it.each(['dev', 'pm'])('shows the %s what every agent is told first, with what is sent after the budget', async role => {
+    const { app, calls } = await startApi({ role, memoryAnswer: memory });
+    const res = await call(app, 'GET', '/api/projects/p1/memory?refresh=1');
+    expect(res.status).toBe(200);
+    expect(calls).toContain('memory refresh');
+    expect(res.body.limits).toEqual({ PER_REPO: 3000, TOTAL: 6000 });
+    expect(res.body.repositories).toEqual([
+      expect.objectContaining({ repository: 'acme/shop-be', file: 'AGENTS.md', characters: 27, sentCharacters: 27, shortened: false, origin: 'checkout' }),
+      expect.objectContaining({ repository: 'acme/shop-fe', characters: 3500, sentCharacters: 3000, shortened: true, origin: 'github', version: 'blob-1' })
+    ]);
+    expect(res.body.sentCharacters).toBe(3027);
+  });
+
+  it('never shows project memory to a client', async () => {
+    const { app, calls } = await startApi({ role: 'client', memoryAnswer: memory });
+    const res = await call(app, 'GET', '/api/projects/p1/memory');
+    expect(res.status).toBe(403);
+    expect(calls).not.toContain('memory cached');
+  });
 });
 
 describe('a project’s repositories', () => {

@@ -280,6 +280,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
           packageVersion: request.taskPackage.packageVersion,
           reportSchemaVersion: request.taskPackage.reportSchemaVersion,
           taskPackageHash,
+          // Which repository memory this attempt was given, for the Build tab and later questions.
+          repositoryMemory: request.taskPackage.repositoryMemorySources ?? [],
           personaHash: persona.personaHash,
           modelProvider: persona.modelProvider,
           modelName: persona.modelName,

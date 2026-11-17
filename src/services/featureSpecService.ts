@@ -21,6 +21,7 @@ import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { resolveProjectWorkspace } from './workspaceService.js';
 import { workspaceRegistry, type WorkspaceContext } from './workspaceRegistry.js';
+import { projectMemoryBlock } from './repositoryMemory.js';
 
 const SPEC_INSTRUCTIONS = [
   'You are writing a feature spec for Alpha\'s project board. Return ONLY one JSON object matching the supplied schema.',
@@ -79,7 +80,10 @@ async function runManagerTurn(input: {
   if (!await workspaceRegistry.canAccessProjectAgentRun(input.context, input.projectId, manager.id)) {
     throw new FeatureSpecError('The Manager Agent is not available to you in this project. Ask an administrator to review its access.', 403);
   }
-  const persona = resolveAgent(manager, { includeMemory: false });
+  // The spec is written for a project, so its repository memory comes first.
+  const project = runWithWorkspace(input.workspaceId, () => sqliteService.getProjects().find(item => item.id === input.projectId));
+  const repositoryMemory = project ? await projectMemoryBlock(project) : '';
+  const persona = resolveAgent(manager, { includeMemory: false, repositoryMemory });
   const runtime = defaultAssistantCandidates(sqliteService.getRuntimes(), {
     provider: persona.modelProvider, modelName: persona.modelName,
     reasoningEffort: persona.reasoningEffort ?? null, agentName: manager.name
