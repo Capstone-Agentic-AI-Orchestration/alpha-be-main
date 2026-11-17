@@ -126,8 +126,8 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       const workspace = repositoryWorkspaceForRun(snapshot.run, task.repository ?? snapshot.run.repository);
       if (!workspace?.branchName) return;
       const project = this.store.getProjects().find(candidate => candidate.id === snapshot.run.projectId);
-      // Push from the project's checkout, never the agent's working copy: they share
-      // objects, but only the checkout's git metadata is outside the agent's reach.
+      // The checkout supplies the commits; the push itself runs in an isolated repository
+      // (see withIsolatedRepository), because agents can write the config it shares.
       const checkout = project && this.resolveWorkspace(project, workspace.repository);
       if (!checkout || !fs.existsSync(checkout.dir) || !(await isGitRepo(checkout.dir))) return;
       const ownerRepo = workspace.repository.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '');

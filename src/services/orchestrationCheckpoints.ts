@@ -79,9 +79,9 @@ export function checkpointBackupRefusal(input: { repository: string; checkoutRep
 }
 
 /**
- * Back up and restore checkpoints on the project's GitHub repository. `cwd` is always the
- * project's own checkout, never an agent's working copy: an agent can rewrite its working
- * copy's git metadata, and these commands carry the GitHub token.
+ * Back up and restore checkpoints on the project's GitHub repository. `cwd` is the project's
+ * own checkout. It only supplies commits: the real remote runs the token-bearing commands
+ * isolated from its config, which agents can write through their working copies.
  */
 export interface CheckpointRemote {
   push(cwd: string, repository: string, commit: string, ref: string): Promise<void>;
