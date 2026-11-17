@@ -260,6 +260,7 @@ export interface SendMessageResult {
 interface ActiveChatTurn {
   threadId: string;
   messageId: string;
+  startedAt: string;
   stopRequested: boolean;
   currentRunId?: string;
   currentCallId?: string;
@@ -424,6 +425,11 @@ function sessionMemoryPrompt(threadId: string, ownerId?: string): string | undef
 export class ChatService extends EventEmitter {
   private buildDecisions = new Map<string, Promise<SendMessageResult>>();
   private readonly activeTurns = new Map<string, ActiveChatTurn>();
+
+  /** Agent replies being written in this process right now, without their content. */
+  liveTurns(): Array<{ threadId: string; agentName?: string; startedAt: string }> {
+    return [...this.activeTurns.values()].map(turn => ({ threadId: turn.threadId, agentName: turn.currentAgentName, startedAt: turn.startedAt }));
+  }
   /** Alpha replies that report a runtime failure rather than an answer. */
   private readonly failedDefaultReplies = new WeakSet<ChatMessage>();
 
@@ -617,7 +623,7 @@ export class ChatService extends EventEmitter {
       if (pending) return pending;
       const job = (async () => {
         const decision = params.buildDecision;
-        const turn: ActiveChatTurn = { threadId, messageId, stopRequested: false, steering: [] };
+        const turn: ActiveChatTurn = { threadId, messageId, startedAt: new Date().toISOString(), stopRequested: false, steering: [] };
         this.activeTurns.set(this.turnKey(threadId, messageId), turn);
         let result: string;
         try {
@@ -721,6 +727,7 @@ export class ChatService extends EventEmitter {
     const turn: ActiveChatTurn = {
       threadId,
       messageId: userMessage.id,
+      startedAt: new Date().toISOString(),
       stopRequested: false,
       steering: []
     };
