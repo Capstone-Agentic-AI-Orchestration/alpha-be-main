@@ -175,7 +175,15 @@ export function roleCanOwnSavedTask(kind: OrchestrationTaskKind, role: string, v
 export function validateOrchestrationPlan(
   plan: OrchestrationPlan,
   eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[],
-  options: { maxTaskCount?: number; initialPlan?: boolean; repositories?: readonly string[]; auditMilestone?: boolean } = {}
+  options: {
+    maxTaskCount?: number; initialPlan?: boolean; repositories?: readonly string[]; auditMilestone?: boolean;
+    /**
+     * Selected repositories that may receive tasks but need not: in a later milestone, those
+     * whose earlier milestones are already accepted. Requirement coverage still applies, so
+     * a requirement that needs changes there must still be planned.
+     */
+    optionalRepositories?: readonly string[];
+  } = {}
 ): PlanValidationIssue[] {
   const issues: PlanValidationIssue[] = [];
   const maxTaskCount = options.maxTaskCount ?? MAX_PLAN_TASKS;
@@ -271,7 +279,9 @@ export function validateOrchestrationPlan(
     }
   }
 
+  const optionalRepositories = new Set((options.optionalRepositories ?? []).map(value => value.toLowerCase()));
   for (const repository of repositories ?? []) {
+    if (optionalRepositories.has(repository)) continue;
     if (!assignedRepositories.has(repository) && !milestones.some(item => item.repositories.some(repo => repo.toLowerCase() === repository))) {
       issues.push({ code: 'unassigned_repository', detail: `No task is assigned to selected repository ${repository}.` });
     }
