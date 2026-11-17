@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseOrchestrationPlan, validateOrchestrationPlan } from './orchestrationContract.js';
 import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
 import { SQLiteService } from './sqliteService.js';
-import { OrchestrationService } from './orchestrationService.js';
+import { OrchestrationService, type OrchestrationExecutor } from './orchestrationService.js';
+import { BuildWorkspaceLostError } from './orchestrationCheckpoints.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { initialTaskRecords } from './orchestrationStateMachine.js';
 import type { MilestoneExpansion, PlanNextMilestone } from './orchestrationMilestonePlanner.js';
@@ -78,12 +79,12 @@ describe('adaptive milestone boundaries', () => {
     expect(document.content).toContain('Tasks will be planned from accepted repository evidence.');
   });
 
-  async function setup(next: PlanNextMilestone) {
+  async function setup(next: PlanNextMilestone, extras: Partial<OrchestrationExecutor> = {}) {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-milestones-'));
     store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
     vi.spyOn(store, 'getAgents').mockReturnValue(agents as any);
     const launch = vi.fn(async (request: { attemptId: string }) => ({ prototypeRunId: `prototype-${request.attemptId}` }));
-    const service = new OrchestrationService(store, { launch }, undefined, next);
+    const service = new OrchestrationService(store, { launch, ...extras }, undefined, next);
     // No physical worktrees are needed for this deterministic scheduler test.
     const initial = await service.start({ workspaceId: 'ws-default', projectId: 'project', issueId: 'issue', repository: 'acme/service',
       requestKey: 'request', requestFingerprint: 'request-hash', createdBy: 'user', executorId: 'executor', eligibleAgents: agents, plan });
@@ -128,6 +129,23 @@ describe('adaptive milestone boundaries', () => {
     expect(stopped.run.status).toBe('blocked');
     expect(stopped.run.planVersion).toBe(1);
     expect(stopped.run.stoppedReason).toContain('Provider unavailable');
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs up accepted checkpoints and stops plainly, without planning, when a working copy is lost', async () => {
+    const checkpoint = vi.fn(async () => undefined);
+    const ensureWorkspaces = vi.fn(async () => {
+      throw new BuildWorkspaceLostError('The acme/service working copy is no longer connected. Stop this build and start a new one.');
+    });
+    const next = vi.fn(async () => expansion);
+    const { service, active, launch } = await setup(next, { checkpoint, ensureWorkspaces });
+    const accept = await submit(service, active);
+    const stopped = await accept();
+    expect(checkpoint).toHaveBeenCalledWith(expect.objectContaining({ run: expect.objectContaining({ id: active.run.id }) }), expect.any(String));
+    expect(stopped.run.status).toBe('blocked');
+    expect(stopped.run.stoppedReason).toMatch(/^Build working copy lost: /);
+    expect(stopped.run.stoppedReason).not.toContain('Milestone planning stopped');
+    expect(next).not.toHaveBeenCalled();
     expect(launch).toHaveBeenCalledTimes(1);
   });
 

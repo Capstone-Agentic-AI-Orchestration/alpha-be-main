@@ -19,6 +19,7 @@ import {
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
 import { githubApiWithToken, tokenForThisRequest } from './githubApi.js';
+import { withIsolatedRepository, type IsolatedGit } from './isolatedGit.js';
 import { failedRunLogs } from './agentCiActions.js';
 import {
   DeviceFlowError,
@@ -236,6 +237,54 @@ function assertOwnerRepo(ownerRepo: string): void {
   }
 }
 
+/**
+ * Git config that authenticates to GitHub with a token, sent as a header rather than in the
+ * URL, with TLS verification forced on. Only ever used inside withIsolatedRepository, where
+ * no repository or user config can add a proxy, a CA, or a URL-scoped override.
+ */
+export function githubAuthConfig(token: string): Array<[string, string]> {
+  const authorization = Buffer.from(`x-access-token:${token}`).toString('base64');
+  return [
+    ['http.https://github.com/.extraheader', `AUTHORIZATION: basic ${authorization}`],
+    ['http.sslVerify', 'true'],
+    ['http.https://github.com/.sslVerify', 'true']
+  ];
+}
+
+/** Run token-bearing git against `sourceRepoDir`'s commits, isolated from its config. */
+async function withGitHubRepository<T>(sourceRepoDir: string, use: (git: IsolatedGit, repositoryDir: string) => Promise<T>): Promise<T> {
+  return withIsolatedRepository(sourceRepoDir, githubAuthConfig(await tokenForThisRequest()), use);
+}
+
+function assertCheckpointRef(ref: string): void {
+  if (!/^refs\/alpha-checkpoints\/[A-Za-z0-9._/-]{1,200}$/.test(ref) || ref.includes('..') || ref.endsWith('/') || ref.endsWith('.lock')) {
+    throw new Error('Invalid build checkpoint ref.');
+  }
+}
+
+/**
+ * Back up a build checkpoint to a hidden ref on GitHub. Not a branch: it is not listed
+ * with the project's branches and does not trigger push workflows. Forced, because the
+ * ref only ever names this build's latest accepted checkpoint.
+ */
+export async function pushCheckpointRef(cwd: string, expectedRepo: string, commit: string, ref: string): Promise<void> {
+  assertOwnerRepo(expectedRepo);
+  assertCheckpointRef(ref);
+  if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error('A checkpoint backup needs a full commit ID.');
+  await withGitHubRepository(cwd, git => git(['push', '--porcelain', '--no-verify', `https://github.com/${expectedRepo}.git`, `+${commit}:${ref}`]));
+}
+
+/** Bring a backed-up build checkpoint into a checkout that no longer has it. */
+export async function fetchCheckpointRef(cwd: string, expectedRepo: string, ref: string): Promise<void> {
+  assertOwnerRepo(expectedRepo);
+  assertCheckpointRef(ref);
+  await withGitHubRepository(cwd, async (git, repositoryDir) => {
+    await git(['fetch', '--no-tags', `https://github.com/${expectedRepo}.git`, `+${ref}:${ref}`]);
+    // Then hand the commits to the checkout locally, with no token in the environment.
+    await execFileAsync('git', ['fetch', '--no-tags', repositoryDir, `+${ref}:${ref}`], { cwd, timeout: 180_000, windowsHide: true });
+  });
+}
+
 async function pushAuthenticatedBranch(
   cwd: string,
   branchName: string,
@@ -253,20 +302,12 @@ async function pushAuthenticatedBranch(
     throw new Error(`The validated build branch is not checked out. Expected "${branchName}"; found "${inspection.branch || 'unknown'}".`);
   }
 
-  const token = await tokenForThisRequest();
-  const authorization = Buffer.from(`x-access-token:${token}`).toString('base64');
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`
-  };
-  await execFileAsync('git', [
-    'push', '--porcelain', '--no-verify',
-    `https://github.com/${expectedRepo}.git`,
-    `refs/heads/${branchName}:refs/heads/${branchName}`
-  ], { cwd, env, timeout: 180_000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  // Resolved without the token; the push itself runs isolated from this checkout's config.
+  const { stdout } = await execFileAsync('git', ['rev-parse', '--verify', `refs/heads/${branchName}^{commit}`], { cwd, windowsHide: true });
+  const commit = stdout.trim();
+  await withGitHubRepository(cwd, git => git([
+    'push', '--porcelain', '--no-verify', `https://github.com/${expectedRepo}.git`, `${commit}:refs/heads/${branchName}`
+  ]));
 }
 
 /** Accept the repository forms project resources commonly store. */

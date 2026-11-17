@@ -26,6 +26,8 @@ import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalVali
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
+import { isBuildWorkspaceLost } from './orchestrationCheckpoints.js';
+import { logError } from '../utils/logger.js';
 import {
   ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS,
   ALPHA_ORCHESTRATION_MAX_COST_USD,
@@ -267,6 +269,10 @@ export interface OrchestrationExecutor {
   launch(request: OrchestrationLaunchRequest): Promise<OrchestrationLaunchReceipt>;
   /** Stop a provider process when a concrete runner id is available. */
   cancel?(prototypeRunId: string): Promise<void>;
+  /** Repair or rebuild the build's working copies from their checkpoints before planning or resuming. */
+  ensureWorkspaces?(snapshot: OrchestrationSnapshot): Promise<void>;
+  /** Back up an accepted checkpoint off this machine. Best effort: a failure never stops the build. */
+  checkpoint?(snapshot: OrchestrationSnapshot, attemptId: string): Promise<void>;
 }
 
 export interface StartOrchestrationInput {
@@ -567,6 +573,9 @@ export class OrchestrationService {
   }): Promise<OrchestrationSnapshot> {
     return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
       const snapshot = this.store.acceptOrchestrationAttempt(input);
+      // Off the critical path: the build continues while the backup uploads.
+      void this.executor.checkpoint?.(snapshot, input.attemptId)
+        .catch(error => logError(`${input.runId}: could not back up the accepted checkpoint to GitHub:`, error));
       return input.dispatchNext === false
         ? snapshot
         : this.dispatchNextUnlocked(snapshot, input.acceptedBy, undefined, input.now);
@@ -788,6 +797,8 @@ export class OrchestrationService {
         ? [{ repository: snapshot.run.repository, worktreePath: snapshot.run.worktreePath, branchName: snapshot.run.branchName, baseRef: snapshot.run.baseRef, baseCommit: snapshot.run.baseCommit }]
         : [];
     if (!workspaces.length) throw new Error('The saved build has no recorded private workspace. Review the saved work before resuming.');
+    // A re-cloned project folder disconnects the working copies; rebuild them from their checkpoints.
+    await this.executor.ensureWorkspaces?.(snapshot);
     for (const workspace of workspaces) {
       const worktree = path.resolve(workspace.worktreePath);
       if (!fs.existsSync(worktree) || !(await isGitRepo(worktree))) {
@@ -1540,6 +1551,8 @@ export class OrchestrationService {
         const budgetStop = this.recoveryBudgetStop(snapshot);
         if (budgetStop) throw new Error(budgetStop.reason);
         if (!this.planNextMilestone) throw new Error('Milestone planning is unavailable in this executor.');
+        // The planner reads the working copies; repair or rebuild them first.
+        await this.executor.ensureWorkspaces?.(snapshot);
         this.planningMilestones.add(planningKey);
         const expansion = await this.planNextMilestone(snapshot, milestone);
         this.planningMilestones.delete(planningKey);
@@ -1549,8 +1562,10 @@ export class OrchestrationService {
       } catch (error) {
         const latest = this.store.getOrchestrationSnapshot(snapshot.run.id)!;
         if (latest.run.status !== 'executing' || latest.run.currentTaskId) return latest;
+        const message = error instanceof Error ? error.message : 'Planning failed.';
+        // A lost working copy is not a planning failure: no retry can fix it, so say so plainly.
         return this.store.transitionOrchestrationRun({ runId: latest.run.id, expectedRevision: latest.run.revision, nextStatus: 'blocked', actorId,
-          reason: `Milestone planning stopped before dispatch: ${error instanceof Error ? error.message : 'Planning failed.'}`, now });
+          reason: isBuildWorkspaceLost(message) ? message : `Milestone planning stopped before dispatch: ${message}`, now });
       } finally {
         this.planningMilestones.delete(planningKey);
       }
