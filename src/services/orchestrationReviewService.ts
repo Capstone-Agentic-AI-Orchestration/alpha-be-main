@@ -7,6 +7,7 @@ import { sqliteService, type SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
+import { BuildWorkspaceLostError, lostReviewedWorkingCopy, lostReviewedWorkingCopyDetail } from './orchestrationCheckpoints.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_DIFF_PREVIEW_CHARS = 96_000;
@@ -113,6 +114,36 @@ export function getOrchestrationFinalValidationEvidence(
   return { ...record, checks } as FinalValidationEvidence;
 }
 
+/**
+ * For a build waiting for approval: why it can no longer publish what was reviewed,
+ * or undefined. `checkoutFor` names each repository's project checkout on this computer.
+ */
+export async function lostApprovalWorkingCopy(
+  snapshot: OrchestrationSnapshot,
+  checkoutFor: (repository: string) => string | undefined,
+  store: SQLiteService = sqliteService
+): Promise<string | undefined> {
+  if (snapshot.run.status !== 'awaiting_approval') return undefined;
+  let evidence: FinalValidationEvidence | undefined;
+  try {
+    evidence = getOrchestrationFinalValidationEvidence(snapshot, store);
+  } catch {
+    evidence = undefined;
+  }
+  const workspaces = snapshot.run.repositoryWorkspaces?.length
+    ? snapshot.run.repositoryWorkspaces
+    : [repositoryWorkspaceForRun(snapshot.run, snapshot.run.repository)].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  for (const workspace of workspaces) {
+    const repoEvidence = Array.isArray(evidence?.repositories)
+      ? evidence.repositories.find(item => item && typeof item === 'object' && (item as Record<string, unknown>).repository === workspace.repository) as Record<string, unknown> | undefined
+      : undefined;
+    const reviewedCommit = typeof repoEvidence?.resultCommit === 'string' ? repoEvidence.resultCommit : evidence?.resultCommit;
+    const reason = await lostReviewedWorkingCopy({ repository: workspace.repository, worktreePath: workspace.worktreePath, checkoutDir: checkoutFor(workspace.repository), reviewedCommit });
+    if (reason) return reason;
+  }
+  return undefined;
+}
+
 export async function assertOrchestrationApprovalCheckpointCurrent(
   snapshot: OrchestrationSnapshot,
   store: SQLiteService = sqliteService
@@ -131,7 +162,11 @@ export async function assertOrchestrationApprovalCheckpointCurrent(
     const expectedCommit = typeof repoEvidence?.resultCommit === 'string' ? repoEvidence.resultCommit : evidence.resultCommit;
     const expectedBranch = typeof repoEvidence?.branchName === 'string' ? repoEvidence.branchName : evidence.branchName;
     const worktree = path.resolve(workspace.worktreePath);
-    if (!worktree || !store.isPathAllowed(worktree) || workspace.branchName !== expectedBranch || !(await isGitRepo(worktree))) {
+    // Disconnected by now (approval repairs what it can first) means the reviewed commit is gone: say so plainly.
+    if (worktree && store.isPathAllowed(worktree) && !(await isGitRepo(worktree))) {
+      throw new BuildWorkspaceLostError(lostReviewedWorkingCopyDetail(workspace.repository, expectedCommit));
+    }
+    if (!worktree || !store.isPathAllowed(worktree) || workspace.branchName !== expectedBranch) {
       throw new Error(`The reviewed workspace for ${workspace.repository} is unavailable or no longer authorized. Reconcile the build before approval.`);
     }
     const [branchName, headCommit, clean] = await Promise.all([getCurrentBranch(worktree), getHeadCommit(worktree), isGitWorkingTreeClean(worktree)]);

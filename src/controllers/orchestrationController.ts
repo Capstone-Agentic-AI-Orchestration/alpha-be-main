@@ -4,7 +4,7 @@ import { Request, Response, Router } from 'express';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
 import { issueStore, projectStore } from '../store/stores.js';
 import { sqliteService } from '../services/sqliteService.js';
-import { getOrchestrationDiffPreview, getOrchestrationLiveChanges } from '../services/orchestrationReviewService.js';
+import { getOrchestrationDiffPreview, getOrchestrationLiveChanges, lostApprovalWorkingCopy } from '../services/orchestrationReviewService.js';
 import { inspectOrchestrationPlanningWorktree, getOrchestrationPlanningRecoveryPreview, removeStaleOrchestrationPlanningWorktree } from '../services/orchestrationPlanningRecovery.js';
 import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
@@ -196,6 +196,16 @@ orchestrationRouter.get('/issues/build-status', desktopOnly, route(async (req: R
         fresh: true, observedAt: new Date().toISOString() };
     });
   });
+  // Only builds waiting for approval are checked: their working copy must still hold the reviewed commit.
+  for (const row of rows) {
+    if (row.status !== 'awaiting_approval' || !row.runId) continue;
+    const project = projects.find(item => item.id === row.projectId);
+    const snapshot = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getOrchestrationSnapshot(row.runId));
+    if (!project || !snapshot) continue;
+    const lost = await runWithWorkspace(req.workspace!.workspaceId, () =>
+      lostApprovalWorkingCopy(snapshot, repository => resolveProjectWorkspace(project, repository)?.dir));
+    if (lost) Object.assign(row, { workspaceLost: true });
+  }
   res.json(rows);
 }));
 

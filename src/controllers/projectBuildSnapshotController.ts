@@ -7,6 +7,8 @@ import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { orchestrationRecoveryService } from '../services/orchestrationRecoveryService.js';
 import { sqliteService } from '../services/sqliteService.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
+import { lostApprovalWorkingCopy } from '../services/orchestrationReviewService.js';
+import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
 import { dependencyAuditEvidenceSchema } from '../services/dependencyAuditContract.js';
 import type { OrchestrationRunStatus } from '../services/orchestrationStateMachine.js';
@@ -1337,6 +1339,10 @@ projectBuildSnapshotRouter.get('/projects/:projectId/build-snapshot', route(asyn
         },
         requirements: [], tasks: [], attempts: [], artifacts: [], findings: []
       } : null;
+  // A build waiting for approval whose working copy is gone can never publish: say so before anyone presses Approve.
+  const workspaceLostReason = !IS_CLOUD && selectedOrchestration
+    ? await runWithWorkspace(workspaceId, () => lostApprovalWorkingCopy(selectedOrchestration, repository => resolveProjectWorkspace(project, repository)?.dir))
+    : undefined;
   res.json({
     project: {
       id: project.id,
@@ -1414,7 +1420,7 @@ projectBuildSnapshotRouter.get('/projects/:projectId/build-snapshot', route(asyn
     },
     artifacts,
     chatCalls,
-    orchestration,
+    orchestration: orchestration && workspaceLostReason ? { ...orchestration, run: { ...orchestration.run, workspaceLostReason } } : orchestration,
     planningRecoveries,
     lastUpdated: [selectedRun?.updatedAt, selectedOrchestration?.run.updatedAt, selectedPlanningReservation?.createdAt,
       latestChatActivity, ...planningRecoveries.map(recovery => recovery.createdAt),

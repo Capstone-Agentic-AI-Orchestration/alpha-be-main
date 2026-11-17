@@ -128,6 +128,26 @@ async function hasCommit(cwd: string, commit: string): Promise<boolean> {
   }
 }
 
+/** Why a validated build cannot be approved once its working copy, and the reviewed commit with it, is gone. */
+export function lostReviewedWorkingCopyDetail(repository: string, reviewedCommit?: string): string {
+  const commit = reviewedCommit && /^[a-f0-9]{7,64}$/i.test(reviewedCommit) ? ` (${reviewedCommit.slice(0, 7)})` : '';
+  return `The ${repository} working copy is no longer connected to its project checkout, most likely because the project folder was deleted or cloned again. ` +
+    `The reviewed changes${commit} went with it and were never published, so this build cannot be approved. Stop it and plan a new build.`;
+}
+
+/**
+ * Why a validated working copy is gone for good, or undefined while it is connected or
+ * can still be repaired, because the project checkout still has the reviewed commit.
+ * Read-only: it never repairs anything, so the board can ask on every refresh.
+ */
+export async function lostReviewedWorkingCopy(input: { repository: string; worktreePath: string; checkoutDir?: string; reviewedCommit?: string }): Promise<string | undefined> {
+  if (await isConnected(path.resolve(input.worktreePath))) return undefined;
+  const checkout = input.checkoutDir ? path.resolve(input.checkoutDir) : undefined;
+  const commit = input.reviewedCommit && /^[a-f0-9]{40,64}$/i.test(input.reviewedCommit) ? input.reviewedCommit : undefined;
+  if (checkout && commit && fs.existsSync(checkout) && await isGitRepo(checkout) && await hasCommit(checkout, commit)) return undefined;
+  return `${BUILD_WORKSPACE_LOST_PREFIX} ${lostReviewedWorkingCopyDetail(input.repository, commit)}`;
+}
+
 /** Move the disconnected folder aside rather than deleting anything a person may want back. */
 async function moveAside(worktreePath: string, alphaDir: string, runId: string, now: Date): Promise<string> {
   const safe = (value: string) => value.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'build';

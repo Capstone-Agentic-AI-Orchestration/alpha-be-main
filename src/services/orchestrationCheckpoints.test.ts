@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { addBranchWorktree } from '../utils/gitUtils.js';
 import { classifyRecoveryCategory } from './orchestrationRecoveryPolicy.js';
 import {
-  BUILD_WORKSPACE_LOST_PREFIX, checkpointBackupRefusal, checkpointRef, ensureBuildWorktree, isBuildWorkspaceLost, type CheckpointRemote
+  BUILD_WORKSPACE_LOST_PREFIX, checkpointBackupRefusal, checkpointRef, ensureBuildWorktree, isBuildWorkspaceLost, lostReviewedWorkingCopy, type CheckpointRemote
 } from './orchestrationCheckpoints.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', [
@@ -114,6 +114,43 @@ describe('build working copy checkpoints', () => {
     await expect(attempt).rejects.toThrow(/deleted and cloned again/);
     // Nothing is moved or removed when the build cannot be rebuilt.
     expect(fs.existsSync(path.join(fixture.worktree, 'login.ts'))).toBe(true);
+  });
+
+  describe('a build waiting for approval', () => {
+    it('is fine while its working copy is connected', async () => {
+      const fixture = buildWithCheckpoint();
+      const commit = await fixture.start();
+      await expect(lostReviewedWorkingCopy({ repository: 'org/api', worktreePath: fixture.worktree, checkoutDir: fixture.checkout, reviewedCommit: commit })).resolves.toBeUndefined();
+    });
+
+    it('is still approvable when the copy is disconnected but the checkout has the reviewed commit', async () => {
+      const fixture = buildWithCheckpoint();
+      const commit = await fixture.start();
+      // The registration is gone (as after a moved folder), but the commit is still in the checkout.
+      fs.rmSync(path.join(fixture.checkout, '.git', 'worktrees'), { recursive: true, force: true });
+      await expect(lostReviewedWorkingCopy({ repository: 'org/api', worktreePath: fixture.worktree, checkoutDir: fixture.checkout, reviewedCommit: commit })).resolves.toBeUndefined();
+      await expect(ensureBuildWorktree({ checkoutDir: fixture.checkout, worktreePath: fixture.worktree, branchName,
+        repository: 'org/api', expectedCommit: commit, runId: 'run-1', alphaDir: directory })).resolves.toMatchObject({ status: 'rebuilt', commit });
+    });
+
+    it('says plainly that it cannot be approved once the project folder was deleted with the reviewed commit', async () => {
+      const fixture = buildWithCheckpoint();
+      const commit = await fixture.start();
+      fs.rmSync(fixture.checkout, { recursive: true, force: true });
+      const reason = await lostReviewedWorkingCopy({ repository: 'org/api', worktreePath: fixture.worktree, checkoutDir: fixture.checkout, reviewedCommit: commit });
+      expect(isBuildWorkspaceLost(reason)).toBe(true);
+      expect(reason).toContain(`(${commit.slice(0, 7)})`);
+      expect(reason).toContain('cannot be approved');
+      // The files themselves are untouched: the check only reads.
+      expect(fs.readFileSync(path.join(fixture.worktree, 'login.ts'), 'utf8')).toContain('login');
+    });
+
+    it('treats a re-cloned checkout without the unpushed commit as lost too', async () => {
+      const fixture = buildWithCheckpoint();
+      const commit = await fixture.start();
+      reclone(fixture.origin, fixture.checkout);
+      expect(isBuildWorkspaceLost(await lostReviewedWorkingCopy({ repository: 'org/api', worktreePath: fixture.worktree, checkoutDir: fixture.checkout, reviewedCommit: commit }))).toBe(true);
+    });
   });
 
   it('classifies a lost working copy as a workspace problem', () => {

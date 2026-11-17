@@ -347,6 +347,13 @@ export class OrchestrationService {
         if (!Number.isSafeInteger(input.expectedRevision) || snapshot.run.revision !== input.expectedRevision) {
           throw new Error('The build changed after this review was loaded. Refresh the review before approving it.');
         }
+        // A moved or re-cloned project folder can often be repaired from its checkout before
+        // approval. A lost copy stops here; anything else is reported by the check below.
+        try {
+          await this.executor.ensureWorkspaces?.(snapshot);
+        } catch (error) {
+          if (error instanceof Error && isBuildWorkspaceLost(error.message)) throw error;
+        }
         await assertOrchestrationApprovalCheckpointCurrent(snapshot, this.store);
         const publicationTarget = await this.publication.prepare(snapshot);
         snapshot = this.store.transitionOrchestrationRun({

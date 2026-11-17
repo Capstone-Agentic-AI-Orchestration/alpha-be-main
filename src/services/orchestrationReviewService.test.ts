@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SQLiteService } from './sqliteService.js';
 import { parseOrchestrationPlan } from './orchestrationContract.js';
 import { initialTaskRecords, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationDiffPreview } from './orchestrationReviewService.js';
+import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationDiffPreview, lostApprovalWorkingCopy } from './orchestrationReviewService.js';
+import { isBuildWorkspaceLost } from './orchestrationCheckpoints.js';
 import { runWithWorkspace } from './workspaceContext.js';
 
 const plan = parseOrchestrationPlan({
@@ -110,6 +111,21 @@ describe('orchestration review checkpoint', () => {
 
     await expect(assertOrchestrationApprovalCheckpointCurrent(snapshot, store!))
       .rejects.toThrow(/changed after final checks/);
+  });
+
+  it('says the build cannot be approved once its working copy lost its git data, instead of a vague 404', async () => {
+    const snapshot = await prepareAwaitingApproval();
+    const worktree = snapshot.run.worktreePath!;
+    expect(await lostApprovalWorkingCopy(snapshot, () => worktree, store!)).toBeUndefined();
+    // What a deleted project checkout leaves behind: the files, and a .git link to nothing.
+    fs.rmSync(path.join(worktree, '.git'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${path.join(directory, 'deleted-checkout', '.git', 'worktrees', 'build')}
+`);
+
+    const reason = await lostApprovalWorkingCopy(snapshot, () => path.join(directory, 'deleted-checkout'), store!);
+    expect(isBuildWorkspaceLost(reason)).toBe(true);
+    expect(reason).toContain('acme/review');
+    await expect(assertOrchestrationApprovalCheckpointCurrent(snapshot, store!)).rejects.toThrow(/^Build working copy lost: .*cannot be approved/);
   });
 
   it('previews the exact saved checkpoint while a build is blocked', async () => {
