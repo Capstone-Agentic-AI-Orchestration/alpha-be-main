@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { addBranchWorktree } from '../utils/gitUtils.js';
 import { classifyRecoveryCategory } from './orchestrationRecoveryPolicy.js';
 import {
-  BUILD_WORKSPACE_LOST_PREFIX, checkpointRef, ensureBuildWorktree, isBuildWorkspaceLost, type CheckpointRemote
+  BUILD_WORKSPACE_LOST_PREFIX, checkpointBackupRefusal, checkpointRef, ensureBuildWorktree, isBuildWorkspaceLost, type CheckpointRemote
 } from './orchestrationCheckpoints.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', [
@@ -75,7 +75,8 @@ describe('build working copy checkpoints', () => {
     const fixture = buildWithCheckpoint();
     const commit = await fixture.start();
     const remote = remoteFor(fixture.origin);
-    await remote.push(fixture.worktree, 'org/api', commit, checkpointRef(branchName));
+    // Pushed from the project checkout, as in production: it shares the working copy's objects.
+    await remote.push(fixture.checkout, 'org/api', commit, checkpointRef(branchName));
     reclone(fixture.origin, fixture.checkout);
     expect(() => git(fixture.worktree, 'status')).toThrow(/not a git repository/);
 
@@ -118,6 +119,15 @@ describe('build working copy checkpoints', () => {
     const reason = `${BUILD_WORKSPACE_LOST_PREFIX} The org/api working copy is no longer connected.`;
     expect(isBuildWorkspaceLost(reason)).toBe(true);
     expect(classifyRecoveryCategory({ reason, hasTask: false, hasReportError: false, finalValidation: false })).toBe('workspace');
+  });
+
+  it('backs up only to a private repository the project checkout still points at', () => {
+    expect(checkpointBackupRefusal({ repository: 'org/api', checkoutRepository: 'org/api', isPrivate: true })).toBeNull();
+    expect(checkpointBackupRefusal({ repository: 'org/api', checkoutRepository: 'ORG/api.git', isPrivate: true })).toBeNull();
+    // Unreviewed work would be readable by anyone before review.
+    expect(checkpointBackupRefusal({ repository: 'org/api', checkoutRepository: 'org/api', isPrivate: false })).toMatch(/public/);
+    expect(checkpointBackupRefusal({ repository: 'org/api', checkoutRepository: 'other/api', isPrivate: true })).toMatch(/no longer points/);
+    expect(checkpointBackupRefusal({ repository: 'org/api', checkoutRepository: undefined, isPrivate: true })).toMatch(/no longer points/);
   });
 
   it('only accepts hidden checkpoint refs under refs/alpha-checkpoints', () => {

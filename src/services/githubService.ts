@@ -236,16 +236,22 @@ function assertOwnerRepo(ownerRepo: string): void {
   }
 }
 
-/** Git environment that authenticates to GitHub with this request's token, sent as a header rather than in the URL. */
+/**
+ * Git environment that authenticates to GitHub with this request's token, sent as a header
+ * rather than in the URL. These entries take precedence over every git config file, so a
+ * repository config that turned TLS verification off cannot expose the token to a proxy.
+ */
 async function authenticatedGitEnv(): Promise<NodeJS.ProcessEnv> {
   const token = await tokenForThisRequest();
   const authorization = Buffer.from(`x-access-token:${token}`).toString('base64');
   return {
     ...process.env,
     GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`,
+    GIT_CONFIG_KEY_1: 'http.sslVerify',
+    GIT_CONFIG_VALUE_1: 'true'
   };
 }
 

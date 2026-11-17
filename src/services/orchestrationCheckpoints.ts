@@ -61,7 +61,28 @@ export function latestCheckpointCommit(snapshot: OrchestrationSnapshot, reposito
   return accepted?.resultCommit ?? baseCommit;
 }
 
-/** Back up and restore checkpoints on the project's GitHub repository. */
+/**
+ * Why a checkpoint must not be backed up, or null when it may be.
+ *
+ * Accepted work is unreviewed until the build is published, and a hidden ref is still
+ * readable by anyone who can read the repository. So a backup only goes to a private
+ * repository, and only when the project checkout still points at that repository.
+ */
+export function checkpointBackupRefusal(input: { repository: string; checkoutRepository?: string; isPrivate: boolean }): string | null {
+  if (!input.checkoutRepository || !sameRepository(input.checkoutRepository, input.repository)) {
+    return `The project checkout no longer points at ${input.repository}.`;
+  }
+  if (!input.isPrivate) {
+    return `${input.repository} is public, and unreviewed build work is never published before review.`;
+  }
+  return null;
+}
+
+/**
+ * Back up and restore checkpoints on the project's GitHub repository. `cwd` is always the
+ * project's own checkout, never an agent's working copy: an agent can rewrite its working
+ * copy's git metadata, and these commands carry the GitHub token.
+ */
 export interface CheckpointRemote {
   push(cwd: string, repository: string, commit: string, ref: string): Promise<void>;
   fetch(cwd: string, repository: string, ref: string): Promise<void>;

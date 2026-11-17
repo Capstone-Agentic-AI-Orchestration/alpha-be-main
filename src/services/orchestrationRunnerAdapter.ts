@@ -124,9 +124,14 @@ export class OrchestrationRunnerAdapter implements OrchestrationExecutor {
       const task = attempt && snapshot.tasks.find(item => item.id === attempt.taskId);
       if (!attempt?.resultCommit || !task) return;
       const workspace = repositoryWorkspaceForRun(snapshot.run, task.repository ?? snapshot.run.repository);
-      if (!workspace?.branchName || !fs.existsSync(workspace.worktreePath)) return;
+      if (!workspace?.branchName) return;
+      const project = this.store.getProjects().find(candidate => candidate.id === snapshot.run.projectId);
+      // Push from the project's checkout, never the agent's working copy: they share
+      // objects, but only the checkout's git metadata is outside the agent's reach.
+      const checkout = project && this.resolveWorkspace(project, workspace.repository);
+      if (!checkout || !fs.existsSync(checkout.dir) || !(await isGitRepo(checkout.dir))) return;
       const ownerRepo = workspace.repository.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '');
-      await this.checkpointRemote.push(path.resolve(workspace.worktreePath), ownerRepo, attempt.resultCommit, checkpointRef(workspace.branchName));
+      await this.checkpointRemote.push(path.resolve(checkout.dir), ownerRepo, attempt.resultCommit, checkpointRef(workspace.branchName));
     });
   }
 
