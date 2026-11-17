@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "audit:migrations": "node scripts/audit-migrations.mjs",
     "test:migrations": "node --test scripts/migration-audit.node-test.mjs",
-    "eval:agents": "tsx scripts/agent-eval/run.ts"
+    "eval:agents": "tsx scripts/agent-eval/run.ts",
+    "quality": "node scripts/quality-check.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
@@ -38,6 +39,9 @@
     "@types/pg": "^8.23.1",
     "@types/split2": "^4.2.3",
     "@types/ws": "^8.5.14",
+    "@typescript-eslint/parser": "^8.73.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-sonarjs": "^3.0.7",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3",
     "vitest": "^3.2.7"
