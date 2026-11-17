@@ -333,6 +333,11 @@ export class RunnerService extends EventEmitter {
   private readonly cancellationRequests = new Set<string>();
   private readonly activeExecutions = new Map<string, Promise<void>>();
 
+  /** Runs with an execution in this process right now: the truth behind "running". */
+  liveRunIds(): string[] {
+    return [...this.activeExecutions.keys()];
+  }
+
   /**
    * Start autonomous execution for an issue
    */
