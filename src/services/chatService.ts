@@ -75,6 +75,8 @@ export interface ChatRoutingContext {
   answerOnly?: boolean;
   /** Ask Alpha only: the board tasks the person selected, already checked against the project. */
   scopeIssueIds?: string[];
+  /** A board task handed to this message, already checked against the project. A build Alpha starts for it builds that task in place. */
+  issueId?: string;
 }
 
 /**
@@ -1328,13 +1330,14 @@ export class ChatService extends EventEmitter {
     if (decision.route === 'build' && projectId) {
       return this.startChatBuild({
         threadId: thread.id, thread, userMessage, context: routing.context,
-        request: goal, originalRequest: request, repositories, attachmentIds: input.attachmentIds
+        request: goal, originalRequest: request, repositories, attachmentIds: input.attachmentIds,
+        issueId: routing.issueId
       });
     }
 
     const needsProject = !projectId;
     reply.messageType = needsProject ? 'project_needed' : 'build_proposal';
-    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, status: 'open' };
+    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, status: 'open', ...(routing.issueId ? { issueId: routing.issueId } : {}) };
     if (!reply.content) {
       reply.content = needsProject
         ? 'Which project is this for? Choose one in the header and I will plan the build.'
@@ -1390,7 +1393,9 @@ export class ChatService extends EventEmitter {
         request: proposal?.goal || request,
         originalRequest: request,
         repositories: input.routing.repositories?.length ? input.routing.repositories : proposal?.repositories,
-        attachmentIds
+        attachmentIds,
+        // The offer was for a task handed over from the board: build that task, not a new one.
+        issueId: proposal?.issueId
       });
       settle('accepted');
       return result;

@@ -340,6 +340,39 @@ describe('Alpha routes unaddressed chat messages', () => {
     expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
   });
 
+  describe('a task handed over from the board ("Work on this in chat")', () => {
+    const handedOff = { context, canBuild: true, issueId: 'issue-eco-101' };
+
+    it('answers a question about the task without starting a build', async () => {
+      const { chatService } = await load();
+      cliReply = { content: 'ECO-101 has not been built yet; it is still in Todo.' };
+      const result = await send(chatService, 'what is the update on this', { projectId: 'project-1', routing: handedOff });
+      expect(startProjectBuildBatch).not.toHaveBeenCalled();
+      expect(result.agentMessage.content).toBe('ECO-101 has not been built yet; it is still in Todo.');
+    });
+
+    it('builds that task in place when Alpha decides to build', async () => {
+      const { chatService } = await load();
+      cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Build the ECO-101 landing page"}' };
+      await send(chatService, 'go ahead and build it', { projectId: 'project-1', routing: handedOff });
+      expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
+      expect(startProjectBuildBatch.mock.calls[0][0].issueId).toBe('issue-eco-101');
+    });
+
+    it('builds that task, not a new one, when the user accepts Alpha\'s offer', async () => {
+      const { chatService } = await load();
+      cliReply = { content: 'ALPHA_ROUTE {"route":"confirm_build","goal":"Build the ECO-101 landing page"}\nShould I plan this?' };
+      const first = await send(chatService, 'can you do this one', { projectId: 'project-1', routing: handedOff });
+      expect(first.agentMessage.routeProposal).toMatchObject({ issueId: 'issue-eco-101', status: 'open' });
+      await chatService.routeMessage({
+        threadId: 'thread-1', messageId: first.userMessage.id, action: 'build', userId: 'user-1',
+        routing: { context, canBuild: true }
+      });
+      expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
+      expect(startProjectBuildBatch.mock.calls[0][0].issueId).toBe('issue-eco-101');
+    });
+  });
+
   it('never builds for a user whose role cannot, and hides the decision line', async () => {
     const { chatService } = await load();
     cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add search"}' };
