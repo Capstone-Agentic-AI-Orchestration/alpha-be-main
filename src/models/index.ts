@@ -730,6 +730,8 @@ export interface ChatRouteProposal {
   goal: string;
   repositories: string[];
   status: 'open' | 'accepted' | 'dismissed';
+  /** The board task the message was handed, built in place when the offer is accepted. */
+  issueId?: string;
 }
 
 export type OrchestrationRecoveryCategory =

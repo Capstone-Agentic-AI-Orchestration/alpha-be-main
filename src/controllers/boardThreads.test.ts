@@ -188,6 +188,24 @@ describe('POST /projects/:projectId/board-thread', () => {
     expect(forced.body.error).toMatch(/answers questions only/);
   });
 
+  it('accepts a task handed to project chat and lets Alpha decide, passing the task along', async () => {
+    const { app, svc } = await startApi();
+    const { project, issue } = await seedTask(svc);
+    const { chatService } = await import('../services/chatService.js');
+    // No model runs here: the question is what the controller accepts and forwards.
+    const sent = vi.spyOn(chatService, 'sendMessage').mockResolvedValue({} as any);
+
+    // Exactly what "Work on this in chat" sends: Alpha decides (auto), with the task attached.
+    const res = await call(app, 'POST', '/api/chat/messages', {
+      threadId: 'th-handoff', content: 'what is the update on this', intent: 'auto', issueId: issue.id, projectId: project.id
+    });
+
+    expect(res.status).toBe(201);
+    const params = sent.mock.calls[0][0];
+    expect(params.buildRequest).toBeUndefined();
+    expect(params.routing).toMatchObject({ issueId: issue.id, answerOnly: false });
+  });
+
   it('lets Ask Alpha look only at tasks from its own project', async () => {
     const { app, svc } = await startApi();
     const { project, issue } = await seedTask(svc);

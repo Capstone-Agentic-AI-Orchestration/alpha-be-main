@@ -495,9 +495,6 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
     if (issueId !== undefined && (typeof issueId !== 'string' || !issueId.trim() || issueId.length > 200)) {
       return res.status(400).json({ error: 'A task identifier is required and must be at most 200 characters' });
     }
-    if (issueId && intent !== 'build') {
-      return res.status(400).json({ error: 'A task can only be attached to a build request' });
-    }
     if (repository !== undefined && repository !== null && typeof repository !== 'string') {
       return res.status(400).json({ error: 'repository must be a repository name or omitted' });
     }
@@ -577,7 +574,9 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
           repositories: requestedRepositories,
           canBuild: workspaceRegistry.can(req.workspace!.role, 'agent.run'),
           answerOnly,
-          ...(askScope ? { scopeIssueIds: askScope } : {})
+          ...(askScope ? { scopeIssueIds: askScope } : {}),
+          // A task handed over from the board: Alpha answers about it, and builds it in place if it decides to build.
+          ...(issueId ? { issueId } : {})
         }
       : undefined;
     if (decision && (!routing || answerOnly || !scopedProjectId)) return res.status(400).json({ error: 'Build decisions require the main project chat.' });
