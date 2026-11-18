@@ -6721,6 +6721,17 @@ export class SQLiteService {
     return this.getChatThreads().find(t => t.id === threadId) ?? null;
   }
 
+  /** Rename a conversation. Nothing renames it automatically after creation, so this name stays. */
+  setChatThreadTitle(threadId: string, title: string): ChatThread | null {
+    const exists = this.getChatThreads().some(t => t.id === threadId);
+    if (!exists) return null;
+
+    this.db.prepare('UPDATE chat_threads SET title = ? WHERE id = ? AND workspace_id = ?')
+      .run(title, threadId, this.workspaceId());
+
+    return this.getChatThreads().find(t => t.id === threadId) ?? null;
+  }
+
   // --- Project-scoped agent calls -----------------------------------------
   private agentCallFromRow(row: any): AgentCall {
     return {

@@ -228,3 +228,41 @@ describe('POST /projects/:projectId/board-thread', () => {
     expect(notAsk.body.error).toMatch(/only accepted in Ask Alpha/);
   });
 });
+
+describe('PUT /chat/threads/:id/title', () => {
+  it('renames the owner\'s conversation, tidying spaces, and leaves its project alone', async () => {
+    const { app, svc } = await startApi();
+    const { project } = await seedTask(svc);
+    await call(app, 'POST', '/api/chat/threads', { id: 'th-rename', title: 'hello', projectId: project.id });
+
+    const res = await call(app, 'PUT', '/api/chat/threads/th-rename/title', { title: '  Landing   page\nplan ' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.title).toBe('Landing page plan');
+    const saved = svc.getChatThreads().find((thread: any) => thread.id === 'th-rename');
+    expect(saved.title).toBe('Landing page plan');
+    expect(saved.projectId).toBe(project.id);
+  });
+
+  it('refuses a blank, too long or missing name', async () => {
+    const { app } = await startApi();
+    await call(app, 'POST', '/api/chat/threads', { id: 'th-rename', title: 'hello' });
+
+    expect((await call(app, 'PUT', '/api/chat/threads/th-rename/title', { title: '   ' })).status).toBe(400);
+    expect((await call(app, 'PUT', '/api/chat/threads/th-rename/title', { title: 'x'.repeat(121) })).status).toBe(400);
+    expect((await call(app, 'PUT', '/api/chat/threads/th-rename/title', {})).status).toBe(400);
+    expect((await call(app, 'PUT', '/api/chat/threads/th-rename/title', { title: 'x'.repeat(120) })).status).toBe(200);
+  });
+
+  it('does not let anyone rename a conversation that is not theirs', async () => {
+    const { app, svc } = await startApi();
+    const { workspaceRegistry } = await import('../services/workspaceRegistry.js');
+    svc.createChatThread({ id: 'th-other', title: 'Their chat', ownerId: 'someone-else' });
+    workspaceRegistry.bind('chat_threads', 'th-other', 'ws-default');
+
+    const res = await call(app, 'PUT', '/api/chat/threads/th-other/title', { title: 'Mine now' });
+
+    expect(res.status).toBe(404);
+    expect(svc.getChatThreads().find((thread: any) => thread.id === 'th-other').title).toBe('Their chat');
+  });
+});
