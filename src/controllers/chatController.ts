@@ -213,6 +213,36 @@ chatRouter.put('/chat/threads/:id', desktopOnly, route(async (req: Request, res:
  * that field is the participant history and must not make an old participant
  * answer every future message.
  */
+/** A conversation's name: spaces tidied, never blank, at most this long. */
+export const CHAT_TITLE_MAX_LENGTH = 120;
+
+/**
+ * Rename a conversation.
+ *
+ * Its own route rather than a field on PUT /chat/threads/:id, which moves a
+ * chat between projects: a rename must never be able to do that. Only the
+ * owner can rename; anyone else gets the same 404 as a missing thread.
+ */
+chatRouter.put('/chat/threads/:id/title', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  if (!requireEntityWorkspace(req, res, 'chat_threads', req.params.id)) return;
+  const raw = req.body?.title;
+  if (typeof raw !== 'string') return res.status(400).json({ error: 'title must be text' });
+  const title = raw.replace(/\s+/g, ' ').trim();
+  if (!title) return res.status(400).json({ error: 'Give the conversation a name.' });
+  if (title.length > CHAT_TITLE_MAX_LENGTH) {
+    return res.status(400).json({ error: `Keep the name to ${CHAT_TITLE_MAX_LENGTH} characters or fewer.` });
+  }
+
+  const ownThreads = await chatStore().listThreads(req.workspace!.workspaceId, req.workspace!.userId);
+  if (!ownThreads.some(thread => thread.id === req.params.id)) return res.status(404).json({ error: 'Thread not found' });
+
+  const updated = sqliteService.setChatThreadTitle(req.params.id, title);
+  if (!updated) return res.status(404).json({ error: 'Thread not found' });
+  shareThread(updated);
+  return res.json(updated);
+}));
+
 chatRouter.put('/chat/threads/:id/target', desktopOnly, route(async (req: Request, res: Response) => {
   const { targetAgentId = null, targetSquadId = null } = req.body ?? {};
 
