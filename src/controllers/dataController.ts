@@ -63,7 +63,7 @@ import {
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { runWithWorkspace } from '../services/workspaceContext.js';
 import { desktopOnly } from './desktopOnly.js';
-import { BoardChangeSync, BoardCursorError, boardStateRowCount, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
+import { BoardChangeSync, BoardCursorError, boardCursor, boardStateRowCount, type BoardChangeAccess, type BoardCursor } from '../services/boardChangeSync.js';
 import { recordBoardSyncMetric } from '../services/boardSyncMetrics.js';
 import { refreshProjectMemories } from '../services/repositoryMemory.js';
 import {
@@ -91,25 +91,30 @@ async function boardChangeSyncFor(req: Request): Promise<BoardChangeSync | null>
     canReadSquads: workspaceRegistry.can(req.workspace!.role, 'squad.read')
   };
 
-  // Keep snapshots and deltas aligned with GET /projects and GET /issues.
-  // This matters on desktop too: its signed-in Data API client applies RLS,
-  // while this set also enforces the app's project-assignment rules.
-  const projects = await projectStore().list(workspaceId);
-  access.allowedProjectIds = workspaceRegistry.projectIdsFor(
-    req.workspace!,
-    projects.map(project => project.id)
-  );
-
   if (IS_CLOUD) {
     // The cloud connection bypasses RLS; apply the same visible-project set
     // that GET /projects and GET /issues use before reading current rows.
+    const projects = await projectStore().list(workspaceId);
+    access.allowedProjectIds = workspaceRegistry.projectIdsFor(
+      req.workspace!,
+      projects.map(project => project.id)
+    );
     return new BoardChangeSync(boardChangeStore(), access);
   }
 
   // A desktop's Supabase client carries the token exchanged for this user.
   // Never substitute a service-role client for this row-level path.
   const source = supabaseService.boardChangeSource();
-  return source ? new BoardChangeSync(source, access) : null;
+  if (!source) return null;
+  // The visible projects come from the team board, through this user's RLS -- which
+  // applies the same rule as the app (the team sees PM-owned projects, a client only
+  // assigned ones) -- never from this desktop's SQLite copy. That copy lacks a project
+  // created on the web until it arrives, so building the set from it dropped the new
+  // project and its cards from every page while the cursor moved past them.
+  // Issues and comments are readable workspace-wide under RLS, so the set still keeps
+  // them to visible projects, as GET /issues does.
+  if (source.visibleProjectIds) access.allowedProjectIds = new Set(await source.visibleProjectIds(workspaceId));
+  return new BoardChangeSync(source, access);
 }
 
 function recordBoardResponseMetric(
@@ -288,7 +293,7 @@ dataRouter.get('/board/bootstrap', route(async (req: Request, res: Response) => 
       const response = {
         workspaceId,
         userId: req.workspace!.userId,
-        cursor: { workspaceId, value },
+        cursor: boardCursor(workspaceId, value),
         ...pulled.snapshot
       };
       recordBoardResponseMetric(req, workspaceId, 'snapshot', boardStateRowCount(response), response);

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createTestDatabase, sqlFor } from '../store/testDatabase.js';
+import { BOARD_SYNC_EPOCH } from '../services/boardChangeSync.js';
 
 /**
  * The cloud's board, end to end.
@@ -294,7 +295,7 @@ describe('the cloud board change routes', () => {
     expect(bootstrap.status).toBe(200);
     expect(bootstrap.body).toMatchObject({
       workspaceId: 'ws-default',
-      cursor: { workspaceId: 'ws-default', value: expect.any(String) }
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: expect.any(String) }
     });
     expect(bootstrap.body.projects.map((row: any) => row.id)).toContain(project.id);
     expect(bootstrap.body.issues.map((row: any) => row.id)).toContain(created.body.id);
@@ -311,7 +312,7 @@ describe('the cloud board change routes', () => {
     });
 
     const page = await call(app, 'POST', '/api/board/changes', {
-      cursor: { workspaceId: 'ws-default', value: beforeIssue.rows[0].cursor },
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: beforeIssue.rows[0].cursor },
       limit: 1
     }, clientHeaders);
     expect(page.status).toBe(200);
@@ -354,7 +355,7 @@ describe('the cloud board change routes', () => {
     await call(app, 'PUT', `/api/projects/${project.id}`, { name: 'Latest name' });
 
     const response = await call(app, 'POST', '/api/board/changes', {
-      cursor: { workspaceId: 'ws-default', value: beforeChanges.rows[0].cursor },
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: beforeChanges.rows[0].cursor },
       limit: 100
     });
     const projectChanges = response.body.changes.filter((change: any) =>
@@ -375,14 +376,14 @@ describe('the cloud board change routes', () => {
     `);
 
     const future = await call(app, 'POST', '/api/board/changes', {
-      cursor: { workspaceId: 'ws-default', value: (BigInt(watermark.rows[0].cursor) + 1n).toString() }
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: (BigInt(watermark.rows[0].cursor) + 1n).toString() }
     });
     expect(future.status).toBe(200);
     expect(future.body).toMatchObject({ resetRequired: true, changes: [] });
 
     await db.exec(`delete from workspace_board_changes where workspace_id='ws-default'`);
     const stale = await call(app, 'POST', '/api/board/changes', {
-      cursor: { workspaceId: 'ws-default', value: '0' }
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '0' }
     });
     expect(stale.status).toBe(200);
     expect(stale.body).toMatchObject({ resetRequired: true, changes: [] });
@@ -399,7 +400,7 @@ describe('the cloud board change routes', () => {
     session = { login: 'Client1', role: 'client' };
     const client = await startCloudApi();
     const response = await call(client, 'POST', '/api/board/changes', {
-      cursor: { workspaceId: 'ws-default', value: beforeIssue.rows[0].cursor },
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: beforeIssue.rows[0].cursor },
       limit: 100
     });
     expect(response.status).toBe(200);
