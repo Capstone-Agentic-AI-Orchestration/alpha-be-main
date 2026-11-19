@@ -6375,6 +6375,33 @@ export class SQLiteService {
     this.db.prepare('DELETE FROM chat_sync_outbox WHERE id = ?').run(id);
   }
 
+  /**
+   * Give up on one queued change the cloud refused for good. The local copy is untouched;
+   * only the attempt to publish it ends, so it stops blocking later changes to its thread.
+   */
+  discardChatSyncItem(id: number): void {
+    this.db.prepare('DELETE FROM chat_sync_outbox WHERE id = ?').run(id);
+  }
+
+  /**
+   * A deleted thread's queued shares and edits are moot: drop them so the delete that
+   * follows is not stuck behind a send that can no longer matter.
+   */
+  dropChatSyncForThread(threadId: string): number {
+    return this.db.prepare(`DELETE FROM chat_sync_outbox WHERE thread_id = ? AND operation <> 'delete_thread'`).run(threadId).changes;
+  }
+
+  /**
+   * Queued shares for threads that no longer exist here, left by deletes made before
+   * deleting cleared them. Only deletes are kept: the cloud copy may still need removing.
+   */
+  purgeOrphanedChatSync(): number {
+    return this.db.prepare(`
+      DELETE FROM chat_sync_outbox
+      WHERE operation <> 'delete_thread' AND thread_id NOT IN (SELECT id FROM chat_threads)
+    `).run().changes;
+  }
+
   /** Remember a card the team board refused. A card already waiting keeps its backoff. */
   queueBoardShare(workspaceId: string, issueId: string, error: string, nextAttemptAt: string): void {
     this.db.prepare(`

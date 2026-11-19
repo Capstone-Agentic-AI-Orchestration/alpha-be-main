@@ -2,7 +2,8 @@ import type { ChatMessage, ChatThread } from '../models/index.js';
 import { knownIdentity } from './identityService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { sqliteService } from './sqliteService.js';
-import { supabaseService } from './supabaseService.js';
+import { supabaseService, type ChatSyncOutcome } from './supabaseService.js';
+import { logInfo } from '../utils/logger.js';
 
 const RETRY_BASE_MS = 5_000;
 const RETRY_MAX_MS = 30 * 60_000;
@@ -15,7 +16,7 @@ function retryDelay(attempts: number): number {
   return Math.min(RETRY_BASE_MS * 2 ** Math.min(attempts, 9), RETRY_MAX_MS);
 }
 
-async function deliver(item: ReturnType<typeof sqliteService.getDueChatSyncItems>[number]): Promise<boolean> {
+async function deliver(item: ReturnType<typeof sqliteService.getDueChatSyncItems>[number]): Promise<ChatSyncOutcome> {
   return runWithWorkspace(item.workspaceId, async () => {
     switch (item.operation) {
       case 'share_thread':
@@ -45,14 +46,20 @@ async function flush(): Promise<void> {
   for (let deliveredCount = 0; deliveredCount < FLUSH_LIMIT; deliveredCount += 1) {
     const item = sqliteService.getDueChatSyncItems(1, new Date().toISOString(), identity.login)[0];
     if (!item) return;
-    let delivered = false;
+    let outcome: ChatSyncOutcome = 'retry';
     try {
-      delivered = await deliver(item);
+      outcome = await deliver(item);
     } catch {
-      delivered = false;
+      outcome = 'retry';
     }
-    if (delivered) {
+    if (outcome === 'delivered') {
       sqliteService.markChatSyncDelivered(item.id);
+      continue;
+    }
+    // Refused for good (the reason is logged where it was refused): stop retrying it, so it
+    // no longer holds back the thread's later changes. It used to be retried every half hour, for ever.
+    if (outcome === 'rejected') {
+      sqliteService.discardChatSyncItem(item.id);
       continue;
     }
     sqliteService.scheduleChatSyncRetry(
@@ -65,6 +72,9 @@ async function flush(): Promise<void> {
 /** Retry any saved changes when connectivity returns or the app resumes. */
 export function startChatSyncRetryLoop(): () => void {
   if (retryTimer) return () => undefined;
+  // Shares queued for threads deleted before deleting cleared them can never matter; drop them once.
+  const orphaned = sqliteService.purgeOrphanedChatSync();
+  if (orphaned) logInfo(`Dropped ${orphaned} queued chat change(s) for conversations that no longer exist on this computer.`);
   retryTimer = setInterval(() => { void flushChatSyncOutbox(); }, 15_000);
   retryTimer.unref?.();
   return () => {
