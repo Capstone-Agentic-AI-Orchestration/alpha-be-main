@@ -13,6 +13,9 @@ export interface CentralIntakeItem {
   clarificationMessages?: CentralIntakeClarificationMessage[];
   handledAt?: string | null;
   outcomeEmailStatus?: 'pending' | 'retry' | 'leased' | 'delivered' | 'dead' | null;
+  /** Accepted into the asking workspace: the request it became, and that request's project once linked. */
+  acceptedTicketId?: string; acceptedTicketReference?: string;
+  acceptedProjectId?: string | null; acceptedProjectName?: string | null;
 }
 /** Store cursor stays structured; the service encodes it at the HTTP boundary. */
 export interface CentralIntakePage { items: CentralIntakeItem[]; nextCursor: CentralIntakeCursor | null }

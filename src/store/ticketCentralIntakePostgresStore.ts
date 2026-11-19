@@ -17,6 +17,8 @@ interface CentralIntakeDbRow {
   status: 'pending' | 'awaiting_client' | 'accepted' | 'declined'; handled_at: Date | string | null;
   outcome_email_status: CentralIntakeItem['outcomeEmailStatus'];
   clarification_messages: unknown;
+  accepted_ticket_id?: string | null; accepted_ticket_reference?: string | null;
+  accepted_project_id?: string | null; accepted_project_name?: string | null;
 }
 interface SavedOperationDbRow {
   kind: string; client_user_id: string | null; email: string;
@@ -64,7 +66,13 @@ function mapItem(row: CentralIntakeDbRow): CentralIntakeItem {
   return { kind: row.kind, id: row.id, publicReference: row.public_reference, fullName: row.full_name, email: row.email, company: row.company, title: row.title,
     description: row.description, requestedDeadline: row.requested_deadline, submittedAt: iso(row.submitted_at),
     status: row.status, clarificationMessages: clarificationMessages(row.clarification_messages),
-    handledAt: row.handled_at ? iso(row.handled_at) : null, outcomeEmailStatus: row.outcome_email_status ?? null };
+    handledAt: row.handled_at ? iso(row.handled_at) : null, outcomeEmailStatus: row.outcome_email_status ?? null,
+    // Only for an inquiry accepted into the workspace asking: what it became, and its project once linked.
+    ...(text(row.accepted_ticket_id) && text(row.accepted_ticket_reference) ? {
+      acceptedTicketId: row.accepted_ticket_id, acceptedTicketReference: row.accepted_ticket_reference,
+      acceptedProjectId: text(row.accepted_project_id) ? row.accepted_project_id : null,
+      acceptedProjectName: text(row.accepted_project_id) && text(row.accepted_project_name) ? row.accepted_project_name : null,
+    } : {}) };
 }
 
 /** Server-only global intake persistence. Ticket rows are created only when a PM accepts. */
@@ -171,6 +179,8 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
       const { rows } = await tx.query<CentralIntakeDbRow>(
         `select i.kind,i.id,i.public_reference,i.full_name,i.email,i.company,i.title,i.description,i.requested_deadline,i.submitted_at,
                 i.status,coalesce(i.accepted_at,i.declined_at) as handled_at,o.status as outcome_email_status,
+                t.id as accepted_ticket_id,t.reference as accepted_ticket_reference,
+                t.project_id as accepted_project_id,t.project_display_name as accepted_project_name,
                 coalesce((select jsonb_agg(jsonb_build_object('id',e.id,'author',e.actor_kind,'body',e.metadata->>'body','createdAt',e.occurred_at)
                     order by e.occurred_at,e.id)
                   from alpha_private.ticket_central_intake_events e
@@ -178,11 +188,13 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
                    and e.event_type in ('proposal_clarification_requested','proposal_clarification_replied')),'[]'::jsonb) as clarification_messages
            from alpha_private.ticket_central_intakes i
            left join alpha_private.ticket_central_intake_outcomes o on o.organization_key=i.organization_key and o.intake_id=i.id
+           left join alpha_private.tickets t on i.status='accepted' and i.accepted_workspace_id=$7
+             and t.workspace_id=i.accepted_workspace_id and t.id=i.accepted_ticket_id
           where i.organization_key=$1 and (($5='pending' and i.status in ('pending','awaiting_client')) or ($5='handled' and i.status in ('accepted','declined')))
             and ($6::text is null or (i.kind='project_proposal' and i.client_user_id=$6::text))
             and ($2::timestamptz is null or (i.submitted_at,i.id collate "C")<($2::timestamptz,$3::text collate "C"))
           order by i.submitted_at desc,i.id collate "C" desc limit $4`,
-        [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1, filter, clientUserId]);
+        [organizationKey, cursor?.submittedAt ?? null, cursor?.id ?? null, limit + 1, filter, clientUserId, workspaceId]);
       const hasMore = rows.length > limit;
       const items = rows.slice(0, limit).map(mapItem);
       const last = items.at(-1);

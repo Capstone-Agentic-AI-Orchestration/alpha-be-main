@@ -598,3 +598,57 @@ describe('Orchestrator project build defaults', () => {
     expect(unassigned.body.leadSquadId).toBeUndefined();
   });
 });
+
+/**
+ * Creating a project's repositories from the web. The scaffold service itself is
+ * replaced here (it builds files and talks to GitHub and hosting); what is under
+ * test is what the route now does around it on the hosted server.
+ */
+describe('creating repositories from the web', () => {
+  const repo = (name: string) => ({ url: `https://github.com/Capstone-Org/${name}`, nameWithOwner: `Capstone-Org/${name}`,
+    files: [], commitSha: 'c'.repeat(40), branches: ['dev', 'uat', 'main'], protectedBranches: ['dev', 'uat', 'main'],
+    deployTarget: 'vercel', requiredSecrets: [], deployVariable: null, ciSource: 'test' });
+  let scaffoldError: unknown;
+  async function pmApi() {
+    await db.exec(`insert into workspaces (id, name, slug) values ('ws-default', 'Alpha', 'alpha')`);
+    await db.exec(`insert into workspace_members (id, workspace_id, user_id, role, status) values ('m-pm', 'ws-default', 'PM1', 'pm', 'active')`);
+    session = { login: 'PM1', role: 'pm' };
+    process.env.ALPHA_ORG = 'Capstone-Org';
+    scaffoldError = undefined;
+    vi.doMock('../services/repoScaffoldService.js', () => ({
+      createScaffoldedRepository: async (input: { repoName: string }) => { if (scaffoldError) throw scaffoldError; return repo(input.repoName); },
+      createPairedProject: async (input: { repoName: string }) => [repo(`${input.repoName}-be`), repo(`${input.repoName}-fe`)],
+    }));
+    const app = await startCloudApi();
+    const project = await createOwnedProject(app, { name: 'Informational Website', key: 'INF' });
+    return { app, projectId: project.body.id as string };
+  }
+  afterEach(() => { delete process.env.ALPHA_ORG; vi.doUnmock('../services/repoScaffoldService.js'); });
+
+  it('records the new repositories on the project in the same request', async () => {
+    const { app, projectId } = await pmApi();
+    const res = await call(app, 'POST', '/api/github/repos/scaffold', { projectId, repoName: 'info', org: 'Capstone-Org', shape: 'paired', frontendStack: 'react', backendStack: 'nodejs' });
+    expect(res.status).toBe(201);
+    const project = (await call(app, 'GET', '/api/projects')).body.find((item: { id: string }) => item.id === projectId);
+    expect(project.githubOrg).toBe('Capstone-Org');
+    expect(project.resources.map((r: { name: string; stack: string; branchOrMachine: string }) => [r.name, r.stack, r.branchOrMachine])).toEqual([
+      ['Capstone-Org/info-be', 'nodejs', 'dev'], ['Capstone-Org/info-fe', 'react', 'dev'],
+    ]);
+  });
+
+  it('keeps repositories in Alpha\'s own organization on the hosted server', async () => {
+    const { app, projectId } = await pmApi();
+    const res = await call(app, 'POST', '/api/github/repos/scaffold', { projectId, repoName: 'info', org: 'someone-else', stack: 'react' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('Capstone-Org');
+  });
+
+  it('passes GitHub\'s own refusal through instead of a server error', async () => {
+    const { app, projectId } = await pmApi();
+    const { GitHubApiError } = await import('../services/githubApi.js');
+    scaffoldError = new GitHubApiError('Resource not accessible by integration', 403);
+    const res = await call(app, 'POST', '/api/github/repos/scaffold', { projectId, repoName: 'info', org: 'Capstone-Org', stack: 'react' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Resource not accessible by integration');
+  });
+});

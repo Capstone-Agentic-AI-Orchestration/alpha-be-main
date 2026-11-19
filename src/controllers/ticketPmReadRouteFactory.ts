@@ -17,6 +17,9 @@ import { createTicketCentralIntakeService } from '../services/ticketCentralIntak
 import { createTicketIntakeOriginRateGuard } from '../services/ticketIntakeOriginRateGuard.js';
 import { PostgresTicketCentralIntakeStore } from '../store/ticketCentralIntakePostgresStore.js';
 import { createTicketCentralIntakeRouter } from './ticketCentralIntakeController.js';
+import { createIntakeProjectStarter } from '../services/intakeProjectStart.js';
+import { workspaceRegistry } from '../services/workspaceRegistry.js';
+import { PostgresProjectStore } from '../store/postgresProjectStore.js';
 import { createTicketQueueRouter } from './ticketQueueController.js';
 import { createTicketReadRouter } from './ticketReadController.js';
 import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
@@ -130,7 +133,14 @@ export function createTicketPmReadRouteBoundary(
       fingerprintKeys: [{ id: 'central-session-derived-v1', secret: centralKey('alpha-ticket-central-intake-dedupe-v1') }],
       maxRequestAgeMs: 300_000,
     });
-    router.use(createTicketCentralIntakeRouter(centralIntake, relayRequest));
+    // Start a project from an inquiry: the same accept, project and link steps a PM did by hand, in one action.
+    const intakeProjects = createIntakeProjectStarter({
+      accept: (intakeId, workspaceId, subject, raw) => centralIntake.accept(intakeId, workspaceId, subject, raw),
+      link: createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)),
+      projects: new PostgresProjectStore(db),
+      bindProject: (projectId, workspaceId) => workspaceRegistry.bind('projects', projectId, workspaceId),
+    });
+    router.use(createTicketCentralIntakeRouter({ ...centralIntake, startProject: intakeProjects.startProject }, relayRequest));
   }
 
   if (triageEnabled) router.use(createPmClientProjectRouter(new PostgresClientProjectPortal(db), relayRequest));
