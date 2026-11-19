@@ -18,6 +18,20 @@ import { IS_CLOUD } from '../config/env.js';
 import { EventEmitter } from 'node:events';
 import { hasPreviewErrors } from './previewDiagnostics.js';
 import type { ProjectRoot } from './projectFiles.js';
+import { isGitRepo } from '../utils/gitUtils.js';
+
+/**
+ * Why a preview cannot start from a folder git can no longer open, in words a person can act on,
+ * instead of git's own "fatal: not a git repository: …/.git/worktrees/…".
+ */
+export function previewSourceUnavailable(repository: string, savedBuild: boolean): string {
+  return savedBuild
+    ? `The ${repository} working copy from this conversation's last build is no longer connected to a project checkout, ` +
+      'most likely because the project folder was deleted or cloned again. Its saved changes went with it, so there is nothing to preview. ' +
+      'Clone the repository again from the project\'s Code tab, then plan a new build.'
+    : `The ${repository} folder connected to this project is not a git repository any more, most likely because it was deleted or moved. ` +
+      'Clone the repository again from the project\'s Code tab, then ask for the preview again.';
+}
 const exec = promisify(execFile);
 
 export interface LocalPreview {
@@ -212,6 +226,9 @@ export class LocalPreviewService extends EventEmitter {
       if (!dir || !fs.existsSync(dir)) continue;
       ensureWorkspacesRoot();
       if (!sqliteService.isPathAllowed(dir)) throw new Error('Reconnect this repository folder in Alpha before running its preview; its path is not authorized.');
+      // A folder that exists is not enough: a build's working copy is a git worktree whose history lives in the
+      // project checkout, so deleting or re-cloning that checkout leaves a folder git can no longer open.
+      if (!(await isGitRepo(dir))) throw new Error(previewSourceUnavailable(repo, Boolean(saved)));
       const git = async (...args: string[]) => String((await exec('git', args, { cwd: dir, windowsHide: true, timeout: 15_000 })).stdout).trim();
       const commit = checkpoint ? await git('rev-parse', '--verify', `${checkpoint.commit}^{commit}`) : await git('rev-parse', '--verify', 'HEAD');
       if (checkpoint && commit !== checkpoint.commit) throw new Error('The saved preview checkpoint is unavailable.');
