@@ -3,6 +3,7 @@ import express from 'express';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BOARD_SYNC_EPOCH } from '../services/boardChangeSync.js';
 
 /**
  * A desktop on a team's board, through its routes.
@@ -57,7 +58,14 @@ const teamBoard = {
   projectAssignments: async () => []
 };
 
+/** The team board's projects as RLS shows them to the signed-in role; tests may add web-created ones. */
+let visibleOnTeamBoard: () => string[] = () => (role === 'client' ? [] : ['gh-repo-100']);
+/** Rows created on the web that this desktop's SQLite has never seen, keyed by table and id. */
+const webOnlyRows = new Map<string, Record<string, unknown>>();
+let changeLog: Array<{ cursor: string; table: string; rowKey: Record<string, string>; operation: string; createdAt: string }> | null = null;
+
 const teamBoardChangeSource = {
+  visibleProjectIds: async () => visibleOnTeamBoard(),
   watermark: async (workspaceId: string) => {
     boardChangeCalls.push(['watermark', workspaceId]);
     boardSyncOrder.push('watermark');
@@ -65,6 +73,9 @@ const teamBoardChangeSource = {
   },
   readAfter: async (workspaceId: string, after: string, limit: number) => {
     boardChangeCalls.push(['readAfter', workspaceId, after, limit]);
+    if (changeLog) {
+      return { rows: changeLog, hasMore: false, oldestCursor: '1', currentCursor: changeLog.at(-1)?.cursor ?? after };
+    }
     return {
       rows: [{ cursor: '2', table: 'projects', rowKey: { id: 'gh-repo-100' }, operation: 'update', createdAt: now }],
       hasMore: false,
@@ -84,12 +95,17 @@ const teamBoardChangeSource = {
   ) => {
     boardChangeAccesses.push(access);
     const projects = await teamBoard.projects();
-    return new Map(changes
-      .filter(change => !access.allowedProjectIds || access.allowedProjectIds.has(change.rowKey.id))
-      .map(change => [
-      `${change.table}:${JSON.stringify(change.rowKey)}`,
-      projects.find(row => row.id === change.rowKey.id)
-      ]));
+    const result = new Map<string, unknown>();
+    for (const change of changes) {
+      const key = `${change.table}:${JSON.stringify(change.rowKey)}`;
+      const row = webOnlyRows.get(key) ?? projects.find(project => project.id === change.rowKey.id);
+      if (!row) continue;
+      // As the real source does: projects by id, cards by their project.
+      const projectId = change.table === 'projects' ? change.rowKey.id : String((row as { projectId?: string }).projectId);
+      if (access.allowedProjectIds && !access.allowedProjectIds.has(projectId)) continue;
+      result.set(key, row);
+    }
+    return result;
   }
 };
 
@@ -270,9 +286,85 @@ describe('syncing a desktop on a team', () => {
 });
 
 describe('incremental board reads on a team desktop', () => {
-  it('limits delta row lookups to the client’s assigned projects', async () => {
+  afterEach(() => {
+    visibleOnTeamBoard = () => (role === 'client' ? [] : ['gh-repo-100']);
+    webOnlyRows.clear();
+    changeLog = null;
+  });
+
+  it('limits delta row lookups to the projects RLS shows a client', async () => {
     role = 'client';
     const { app } = await startApi();
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '1' },
+      limit: 10
+    });
+
+    expect(page.status).toBe(200);
+    expect(boardChangeAccesses[0]?.allowedProjectIds).toEqual(new Set());
+    expect(page.body.changes).toEqual([]);
+  });
+
+  /**
+   * The bug: the visible set was built from this desktop's SQLite, which had never
+   * seen a project created on the web. The project and its cards were dropped from
+   * the page and the cursor moved past them, so they never arrived.
+   */
+  it('brings a project created on the web, with its cards and comments, in the same catch-up', async () => {
+    const { app, svc } = await startApi();
+    expect(svc.getProjects().map((project: { id: string }) => project.id)).not.toContain('proj-web-a');
+    visibleOnTeamBoard = () => ['gh-repo-100', 'proj-web-a'];
+    webOnlyRows.set('projects:{"id":"proj-web-a"}', {
+      id: 'proj-web-a', name: 'Project A', key: 'PA', description: '', color: '', icon: '', status: 'planned',
+      priority: 'medium', startDate: now, targetDate: '', leadType: 'agent', leadName: '', resources: [],
+      githubOrg: 'acme', createdAt: now, envVars: []
+    });
+    webOnlyRows.set('issues:{"id":"issue-web-a1"}', {
+      id: 'issue-web-a1', identifier: 'PA-1', title: 'Landing page', description: '', status: 'todo', priority: 'medium',
+      projectId: 'proj-web-a', labels: [], subtasks: [], comments: [], createdAt: now, updatedAt: now
+    });
+    changeLog = [
+      { cursor: '2', table: 'projects', rowKey: { id: 'proj-web-a' }, operation: 'insert', createdAt: now },
+      { cursor: '3', table: 'issues', rowKey: { id: 'issue-web-a1' }, operation: 'insert', createdAt: now }
+    ];
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '1' },
+      limit: 10
+    });
+
+    expect(page.status).toBe(200);
+    expect(page.body.changes).toMatchObject([
+      { table: 'projects', operation: 'insert', row: { id: 'proj-web-a', name: 'Project A' } },
+      { table: 'issues', operation: 'insert', row: { id: 'issue-web-a1', projectId: 'proj-web-a' } }
+    ]);
+    expect(page.body.nextCursor).toEqual({ workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '3' });
+    // Written to this desktop's SQLite as well, and acknowledged.
+    expect(svc.getProjects().map((project: { id: string }) => project.id)).toContain('proj-web-a');
+    expect(svc.getIssues().map((issue: { id: string }) => issue.id)).toContain('issue-web-a1');
+    expect(svc.getBoardSyncCursor('ws-default')).toBe('3');
+  });
+
+  it('keeps cards of a project RLS hides out of the page', async () => {
+    const { app } = await startApi();
+    webOnlyRows.set('issues:{"id":"issue-hidden"}', {
+      id: 'issue-hidden', identifier: 'HID-1', title: 'Not ours', description: '', status: 'todo', priority: 'medium',
+      projectId: 'proj-not-visible', labels: [], subtasks: [], comments: [], createdAt: now, updatedAt: now
+    });
+    changeLog = [{ cursor: '2', table: 'issues', rowKey: { id: 'issue-hidden' }, operation: 'insert', createdAt: now }];
+
+    const page = await call(app, 'POST', '/api/board/changes', {
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '1' },
+      limit: 10
+    });
+
+    expect(page.status).toBe(200);
+    expect(page.body.changes).toEqual([]);
+  });
+
+  it('asks a desktop whose cursor predates the current sync version to start over', async () => {
+    const { app, svc } = await startApi();
 
     const page = await call(app, 'POST', '/api/board/changes', {
       cursor: { workspaceId: 'ws-default', value: '1' },
@@ -280,8 +372,9 @@ describe('incremental board reads on a team desktop', () => {
     });
 
     expect(page.status).toBe(200);
-    expect(boardChangeAccesses[0]?.allowedProjectIds).toEqual(new Set());
-    expect(page.body.changes).toEqual([]);
+    expect(page.body).toMatchObject({ resetRequired: true, changes: [] });
+    expect(boardChangeCalls.some(([name]) => name === 'readAfter')).toBe(false);
+    expect(svc.getBoardSyncCursor('ws-default')).toBeNull();
   });
 
   it('uses the signed-in board source for bootstrap and catch-up pages', async () => {
@@ -293,7 +386,7 @@ describe('incremental board reads on a team desktop', () => {
     expect(bootstrap.status).toBe(200);
     expect(bootstrap.body).toMatchObject({
       workspaceId: 'ws-default',
-      cursor: { workspaceId: 'ws-default', value: '1' },
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '1' },
       projects: [{ id: 'gh-repo-100' }]
     });
     expect(svc.getBoardSyncCursor('ws-default')).toBe('1');
@@ -308,7 +401,7 @@ describe('incremental board reads on a team desktop', () => {
     });
 
     const page = await call(app, 'POST', '/api/board/changes', {
-      cursor: { workspaceId: 'ws-default', value: '1' },
+      cursor: { workspaceId: 'ws-default', epoch: BOARD_SYNC_EPOCH, value: '1' },
       limit: 10
     }, clientHeaders);
     expect(page.status).toBe(200);

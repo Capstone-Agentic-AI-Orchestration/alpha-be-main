@@ -349,6 +349,12 @@ export function supabaseBoardChangeSource(client: SupabaseClient): BoardChangeSo
       };
     },
 
+    async visibleProjectIds(workspaceId) {
+      const rows = await everyRow<Pick<ProjectRow, 'id'>>((from, to) =>
+        client.from('projects').select('id').eq('workspace_id', workspaceId).order('id').range(from, to)
+      );
+      return rows.map(row => row.id);
+    },
     async readRows(workspaceId, changes, access) {
       const grouped = new Map<BoardTable, BoardChangeLogRow[]>();
       for (const change of changes) {

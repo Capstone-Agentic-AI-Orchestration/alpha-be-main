@@ -7,6 +7,42 @@ export type BoardTable =
 export interface BoardCursor {
   workspaceId: string;
   value: string;
+  /** The sync version the cursor was issued under; absent on cursors issued before versions existed. */
+  epoch?: number;
+}
+
+/**
+ * The version of the board sync every cursor is issued under. A cursor from any
+ * other version is answered with `resetRequired`, so the client replaces its
+ * cached board with one fresh snapshot and carries on from there.
+ *
+ * Raise it whenever a release fixes a bug that made clients skip changes: their
+ * cursors already sit past what they missed, and replaying deltas cannot bring
+ * it back. One backend change then recovers every client, with no client-side
+ * cache key to rename.
+ *
+ * 2: desktop delta pages dropped projects created on the web, because the visible
+ *    set came from the desktop's own SQLite copy, which did not have them yet.
+ */
+export const BOARD_SYNC_EPOCH = 2;
+
+/** A cursor for this workspace, issued under the current sync version. */
+export function boardCursor(workspaceId: string, value: string): BoardCursor {
+  return { workspaceId, value, epoch: BOARD_SYNC_EPOCH };
+}
+
+/**
+ * Whether a well-formed cursor for this workspace was issued under the current sync
+ * version. A malformed one, or one for another workspace, is refused outright.
+ */
+function isCurrentCursor(workspaceId: string, cursor: BoardCursor): boolean {
+  if (cursor.workspaceId !== workspaceId) {
+    throw new BoardCursorError('The cursor workspace does not match the active workspace.');
+  }
+  if (!/^(0|[1-9]\d*)$/.test(cursor.value)) {
+    throw new BoardCursorError('The cursor value must be a non-negative decimal number.');
+  }
+  return (cursor.epoch ?? 1) === BOARD_SYNC_EPOCH;
 }
 
 export interface BoardChange {
@@ -64,7 +100,14 @@ export interface BoardBootstrap extends BoardState {
 }
 
 export interface BoardChangeAccess {
-  /** Projects visible to the hosted API caller. Supabase Data API callers use their own RLS instead. */
+  /**
+   * The projects this caller may read, as the source of truth sees them right now:
+   * the hosted database for the hosted API, the caller's own Supabase RLS for a
+   * desktop. Never a desktop's local copy, which lags behind the team board -- a
+   * project created on the web was missing from it, so its rows were dropped from
+   * delta pages while the cursor moved past them for good. Undefined reads
+   * everything the source itself allows.
+   */
   allowedProjectIds?: ReadonlySet<string>;
   canReadIssues: boolean;
   canReadAgents: boolean;
@@ -80,6 +123,11 @@ export interface BoardChangeSource {
     changes: BoardChangeLogRow[],
     access: BoardChangeAccess
   ): Promise<Map<string, Record<string, unknown>>>;
+  /**
+   * Ids of the workspace's projects the caller can see now, for sources that read
+   * through the caller's own row-level security (a desktop's Data API client).
+   */
+  visibleProjectIds?(workspaceId: string): Promise<string[]>;
 }
 
 export class BoardCursorError extends Error {
@@ -122,15 +170,13 @@ export class BoardChangeSync {
     const state = await this.source.snapshot(workspaceId, this.access);
     // Archived cards, and their comments, stay out of the full load; the pages
     // after it still carry the change that archives or restores one.
-    return { workspaceId, cursor: { workspaceId, value }, ...state, issues: (state.issues ?? []).filter(issue => !issue.archivedAt) };
+    return { workspaceId, cursor: boardCursor(workspaceId, value), ...state, issues: (state.issues ?? []).filter(issue => !issue.archivedAt) };
   }
 
   async changes(workspaceId: string, cursor: BoardCursor, limit = 100): Promise<BoardChangePage> {
-    if (cursor.workspaceId !== workspaceId) {
-      throw new BoardCursorError('The cursor workspace does not match the active workspace.');
-    }
-    if (!/^(0|[1-9]\d*)$/.test(cursor.value)) {
-      throw new BoardCursorError('The cursor value must be a non-negative decimal number.');
+    // Issued before a fix for skipped changes: what it skipped is behind it, so start over.
+    if (!isCurrentCursor(workspaceId, cursor)) {
+      return { workspaceId, nextCursor: boardCursor(workspaceId, cursor.value), hasMore: false, resetRequired: true, changes: [] };
     }
 
     const pageSize = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 100;
@@ -142,7 +188,7 @@ export class BoardChangeSync {
     if (requested > current || historyExpired) {
       return {
         workspaceId,
-        nextCursor: { workspaceId, value: page.currentCursor },
+        nextCursor: boardCursor(workspaceId, page.currentCursor),
         hasMore: false,
         resetRequired: true,
         changes: []
@@ -189,7 +235,7 @@ export class BoardChangeSync {
 
     return {
       workspaceId,
-      nextCursor: { workspaceId, value: page.rows.at(-1)?.cursor ?? cursor.value },
+      nextCursor: boardCursor(workspaceId, page.rows.at(-1)?.cursor ?? cursor.value),
       hasMore: page.hasMore,
       resetRequired: false,
       changes
