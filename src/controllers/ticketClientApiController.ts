@@ -12,7 +12,7 @@ import type { ClientTicketQueueItem } from '../ticketing/queueModels.js';
 import type { PmTicketQueueItem } from '../ticketing/queueModels.js';
 import type { ClientTicketDetail, PublicTicketMessage } from '../ticketing/readModels.js';
 import type { TicketStatus } from '../ticketing/workflow.js';
-import { TicketReadInvariantError } from '../ticketing/readModels.js';
+import { scopeApprovedBy, TicketReadInvariantError, validScopeApprovedBy } from '../ticketing/readModels.js';
 import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
 import { route } from './asyncRoute.js';
@@ -126,9 +126,9 @@ function safeClientDetail(value: ClientTicketDetail | (ClientTicketDetail & { in
     const current = value.scope;
     if (!current || !opaqueTicketRequestValue(current.id) || !text(current.summary, 4000)
       || !date(current.proposedAt) || typeof current.agreed !== 'boolean'
-      || ![undefined, null, 'client', 'pm'].includes(current.approvedBy)) throw new TicketReadInvariantError();
+      || !validScopeApprovedBy(current.approvedBy)) throw new TicketReadInvariantError();
     scope = { id: current.id, summary: current.summary, proposedAt: current.proposedAt, agreed: current.agreed,
-      approvedBy: current.agreed ? current.approvedBy ?? 'client' : null };
+      approvedBy: scopeApprovedBy(current.agreed, current.approvedBy) };
   }
   let delivery: ClientTicketDetail['delivery'] = null;
   if (value.delivery !== null) {

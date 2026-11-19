@@ -64,6 +64,17 @@ export interface PmTicketDetail extends ClientTicketDetail {
   };
 }
 
+/** Who approved a plan, as shown to readers: older tickets were always approved by the client. */
+export function scopeApprovedBy(agreed: boolean, approvedBy: 'client' | 'pm' | null | undefined): 'client' | 'pm' | null {
+  if (!agreed) return null;
+  return approvedBy ?? 'client';
+}
+
+/** Read-model validation: absent on older payloads, otherwise one of the known approvers. */
+export function validScopeApprovedBy(value: unknown): boolean {
+  return value === undefined || value === null || value === 'client' || value === 'pm';
+}
+
 /** Explicit field mapping, not serialize-then-delete. Document history and
  * authorized file/preview endpoints are separate future services, not fake URLs.
  */
@@ -138,7 +149,7 @@ export function projectClientTicketDetail(ticket: LockedTicket, rows: TicketDeta
     relatedTicket: related,
     scope: scope ? {
       id: scope.id, summary: scope.publicSummary, proposedAt: scope.proposedAt, agreed: state.agreedScopeVersionId === scope.id,
-      approvedBy: state.agreedScopeVersionId === scope.id ? state.scopeApprovedBy ?? 'client' : null,
+      approvedBy: scopeApprovedBy(state.agreedScopeVersionId === scope.id, state.scopeApprovedBy),
     } : null,
     delivery,
     request: request ? { projectPreference: request.projectPreference.kind, projectLabel: request.requestedProjectLabel, requestedDeadline: request.requestedDeadline } : null,

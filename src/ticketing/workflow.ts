@@ -256,6 +256,33 @@ function assertDelivery(state: TicketWorkflow, deliveryId: string, facts: Ticket
   return current;
 }
 
+/** Records approval of the current plan, by the client or by the PM's choice; the PM then starts the work. */
+function approveScope(next: TicketWorkflow, scopeVersionId: string, by: 'client' | 'pm'): void {
+  next.agreedScopeVersionId = scopeVersionId; next.scopeApprovedBy = by;
+  next.status = 'under_review'; next.actionOwner = 'pm'; next.nextAction = 'authorize_work';
+}
+
+/** A new plan waits for the client's approval, unless the PM chose to skip it. */
+function proposeScope(next: TicketWorkflow, command: Extract<TicketCommand, { type: 'propose_scope' }>): void {
+  next.scopeVersionId = command.scopeVersionId; next.agreedScopeVersionId = null; next.authorizedScopeVersionId = null;
+  next.delivery = null; next.correctionRequestedFor = null; next.scopeApprovedBy = null;
+  if (command.clientApproval === 'skipped') { approveScope(next, command.scopeVersionId, 'pm'); return; }
+  next.status = 'awaiting_client'; next.actionOwner = 'client'; next.nextAction = 'agree_scope';
+}
+
+/** The PM can stop waiting for approval only of the current, not yet approved or started plan. */
+function assertScopeApprovalSkippable(state: TicketWorkflow, scopeVersionId: string): void {
+  requireStatus(state, ['awaiting_client', 'under_review']);
+  if (!state.scopeVersionId || scopeVersionId !== state.scopeVersionId) conflict('scope_not_current', 'Only the current plan can be approved.');
+  if (state.agreedScopeVersionId === scopeVersionId) conflict('scope_already_agreed', 'This plan is already approved.');
+  if (state.authorizedScopeVersionId) conflict('work_already_authorized', 'Work has already started on this plan.');
+}
+
+/** A PM's first real action on a new request counts as reviewing it. */
+function markReviewedByPm(state: TicketWorkflow, actor: TicketActor, next: TicketWorkflow): void {
+  if (actor.kind === 'pm' && state.status === 'received' && next.status === 'received') next.status = 'under_review';
+}
+
 export interface TicketDecision {
   state: TicketWorkflow;
   /** The store must persist this event and any affected Issue changes atomically. */
@@ -357,7 +384,7 @@ export function decideTicketCommand(
           next.hold = { status: 'under_review', actionOwner: 'pm', nextAction: 'reply' };
         }
         action('pm', state.status === 'on_hold' ? 'resolve_hold' : state.withdrawalRequested ? 'handle_withdrawal' : 'reply');
-      } else if (state.status === 'received') next.status = 'under_review';
+      }
       // A PM's ordinary update is not automatically a request for client action.
       break;
     case 'propose_scope':
@@ -370,30 +397,16 @@ export function decideTicketCommand(
         conflict('scope_not_current', 'An authorized scope version for this ticket is required.');
       }
       if (command.scopeVersionId === state.scopeVersionId) conflict('scope_not_new', 'Propose a new immutable scope version.');
-      next.scopeVersionId = command.scopeVersionId; next.agreedScopeVersionId = null; next.authorizedScopeVersionId = null;
-      next.delivery = null; next.correctionRequestedFor = null; next.scopeApprovedBy = null;
-      if (command.clientApproval === 'skipped') {
-        // PM discretion: the plan is shared with the client, and work can start without waiting.
-        next.agreedScopeVersionId = command.scopeVersionId; next.scopeApprovedBy = 'pm';
-        next.status = 'under_review'; action('pm', 'authorize_work');
-      } else {
-        next.status = 'awaiting_client'; action('client', 'agree_scope');
-      }
-      break;
+      proposeScope(next, command); break;
     case 'agree_scope':
       requireStatus(state, ['awaiting_client', 'under_review']);
       if (command.scopeVersionId !== state.scopeVersionId) conflict('scope_not_current', 'Only the current proposed scope can be agreed.');
       if (state.agreedScopeVersionId === command.scopeVersionId) conflict('scope_already_agreed', 'Agreement is already recorded; reconcile the original operation.');
-      next.agreedScopeVersionId = command.scopeVersionId; next.scopeApprovedBy = 'client';
-      next.status = 'under_review'; action('pm', 'authorize_work'); break;
+      approveScope(next, command.scopeVersionId, 'client'); break;
     case 'skip_scope_approval':
       // PM discretion after sending a plan: stop waiting for the client's approval.
-      requireStatus(state, ['awaiting_client', 'under_review']);
-      if (!state.scopeVersionId || command.scopeVersionId !== state.scopeVersionId) conflict('scope_not_current', 'Only the current plan can be approved.');
-      if (state.agreedScopeVersionId === command.scopeVersionId) conflict('scope_already_agreed', 'This plan is already approved.');
-      if (state.authorizedScopeVersionId) conflict('work_already_authorized', 'Work has already started on this plan.');
-      next.agreedScopeVersionId = command.scopeVersionId; next.scopeApprovedBy = 'pm';
-      next.status = 'under_review'; action('pm', 'authorize_work'); break;
+      assertScopeApprovalSkippable(state, command.scopeVersionId);
+      approveScope(next, command.scopeVersionId, 'pm'); break;
     case 'authorize_work':
       requireStatus(state, ['under_review']); assertClientAvailable(state, facts);
       if (state.authorizedScopeVersionId) conflict('work_already_authorized', 'Use targeted corrections or a newly agreed scope instead of replacing authorized work.');
@@ -463,6 +476,7 @@ export function decideTicketCommand(
       if (state.hold.actionOwner === 'client') assertClientAvailable(state, facts);
       next.status = state.hold.status; action(state.hold.actionOwner, state.hold.nextAction); next.hold = null; break;
   }
+  markReviewedByPm(state, actor, next);
   next.version = state.version + 1;
   return {
     state: next, reopenIssueIds,
