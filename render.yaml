@@ -141,6 +141,24 @@ services:
       - key: CORS_ORIGIN
         sync: false
 
+      # Creating a project's repositories from the web (a PM starting a project
+      # from an inquiry). The CI template every new repository gets: without these
+      # two, creating repositories fails with "no CI template repository configured".
+      # Values: Capstone-Agentic-AI-Orchestration/alphaorch-workflow and v1 (README).
+      - key: ALPHAORCH_WORKFLOW_REPO
+        sync: false
+      - key: ALPHAORCH_WORKFLOW_REF
+        sync: false
+      # Hosting for new repositories: Render for backends, Vercel for frontends.
+      # Cloud only, never on a desktop. Without them repositories are still
+      # created and hosting reports "unavailable".
+      - key: RENDER_API_KEY
+        sync: false
+      - key: VERCEL_TOKEN
+        sync: false
+      - key: VERCEL_TEAM_ID
+        sync: false
+
       # Temporary. Grants admin by GitHub login while the `admins` team does
       # not exist, and is the way back in if reading teams is itself what
       # broke. Delete once that team is created.

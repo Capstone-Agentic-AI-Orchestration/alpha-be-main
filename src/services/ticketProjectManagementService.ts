@@ -57,6 +57,20 @@ export function createTicketProjectManagementService(
 ) {
   return {
     async linkProject(target: TicketTarget, subject: TicketSubject, input: unknown): Promise<TicketProjectLinkReceipt> {
+      return link(target, subject, input, 'given');
+    },
+    /**
+     * Link a request its own flow just created, such as starting a project from an inquiry.
+     * The caller cannot know the ticket's version, so it is read in the same transaction;
+     * the operation ID still makes a retry return the saved result instead of linking twice.
+     */
+    async linkProjectAtCurrentVersion(target: TicketTarget, subject: TicketSubject,
+      input: { operationId: string; projectId: string; clientVisible: boolean }): Promise<TicketProjectLinkReceipt> {
+      return link(target, subject, { schemaVersion: 1, expectedVersion: 0, projectPreview: null, ...input }, 'current');
+    },
+  };
+
+  async function link(target: TicketTarget, subject: TicketSubject, input: unknown, version: 'given' | 'current'): Promise<TicketProjectLinkReceipt> {
       if (subject.kind !== 'internal') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only a project manager can link a project to a request.');
       const parsed = linkSchema.safeParse(input);
       if (!parsed.success || (parsed.data.projectId === null && (parsed.data.clientVisible || parsed.data.projectPreview !== null))
@@ -78,7 +92,7 @@ export function createTicketProjectManagementService(
           requestedPreview === null ? canonicalInput : { ...canonicalInput, projectPreview: requestedPreview } });
         const saved = await tx.findOperation(key);
         if (saved) return receipt(saved, key, fingerprint);
-        if (ticket.state.version !== parsed.data.expectedVersion) {
+        if (version === 'given' && ticket.state.version !== parsed.data.expectedVersion) {
           throw new TicketWorkflowError(409, 'ticket_version_conflict', 'The ticket changed. Refresh before linking a project.');
         }
 
@@ -120,6 +134,5 @@ export function createTicketProjectManagementService(
         await tx.insertOperation({ kind: 'command', key, fingerprint, receipt: commandReceipt });
         return result;
       });
-    },
-  };
+  }
 }

@@ -5,7 +5,8 @@ import { projectStore } from '../store/stores.js';
 import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
 import path from 'node:path';
 import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
-import { CORS_ORIGIN, ALPHA_ORG, GITHUB_CLIENT_ID } from '../config/env.js';
+import { CORS_ORIGIN, ALPHA_ORG, GITHUB_CLIENT_ID, IS_CLOUD } from '../config/env.js';
+import { GitHubApiError } from '../services/githubApi.js';
 import { fetchTeamsWithToken, refreshIdentity, roleForLogin } from '../services/identityService.js';
 import { supabaseService } from '../services/supabaseService.js';
 import { sessionService } from '../services/sessionService.js';
@@ -425,9 +426,9 @@ githubRouter.post('/github/repos', async (req: Request, res: Response) => {
  *
  * The organization is resolved from the project, not from the caller: the first
  * repository may set it, every later one inherits it. `org` is required at this
- * layer rather than only in the UI — the daemon listens on localhost and any
- * process on the machine can post here, so the PM-only policy must be enforced
- * at the route as well as in the form.
+ * layer rather than only in the UI — the desktop daemon listens on localhost, where any
+ * process on the machine can post here, and the hosted server faces the internet,
+ * so the PM-only policy must be enforced at the route as well as in the form.
  */
 githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
@@ -472,6 +473,13 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
         'This project has no GitHub organization set. Choose one — Alpha does not create personal repositories.'
     });
   }
+  // On the hosted server this route faces the internet, not one machine: keep repositories in
+  // Alpha's own organization, as hosting already does.
+  if (IS_CLOUD && effectiveOrg.toLowerCase() !== ALPHA_ORG.toLowerCase()) {
+    return res.status(403).json({ error: ALPHA_ORG
+      ? `Repositories can only be created in ${ALPHA_ORG}.`
+      : 'This server has no GitHub organization configured (ALPHA_ORG), so it cannot create repositories.' });
+  }
 
   try {
     const common = {
@@ -489,15 +497,32 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
       ? { shape: 'paired', repositories: await createPairedProject({ ...common, frontendStack, backendStack }) }
       : await createScaffoldedRepository({ ...common, stack, repoShape: shape ?? 'standalone' });
 
-    // Remember the organization on first use so later repositories in this
-    // project cannot silently land somewhere else.
-    if (!project.githubOrg) {
-      await projectStore().update(req.workspace!.workspaceId, project.id, { githubOrg: effectiveOrg });
-    }
+    // Record the repositories on the project here, in the same request, and remember the
+    // organization on first use so later repositories cannot land somewhere else. The form
+    // used to do the recording with a second request; when that was lost (a closed tab after
+    // a slow scaffold), the repositories existed on GitHub with nothing in Alpha pointing at them.
+    const created = 'repositories' in result ? result.repositories : [result];
+    const stacks = paired ? [backendStack, frontendStack] : [stack];
+    const known = new Set((project.resources ?? []).map(resource => resource.pathOrUrl.toLowerCase()));
+    const stamp = Date.now();
+    const added = created.filter(repo => !known.has(repo.url.toLowerCase())).map((repo, index) => ({
+      id: `res-${stamp}-${index}`, type: 'github_repo' as const, name: repo.nameWithOwner, pathOrUrl: repo.url,
+      // Work lands on dev; uat and main only move by promotion.
+      branchOrMachine: 'dev', stack: stacks[created.indexOf(repo)], shape: paired ? 'paired' as const : 'standalone' as const,
+      ...(repo.localPath ? { localPath: repo.localPath } : {})
+    }));
+    await projectStore().update(req.workspace!.workspaceId, project.id, {
+      ...(added.length ? { resources: [...(project.resources ?? []), ...added] } : {}),
+      ...(project.githubOrg ? {} : { githubOrg: effectiveOrg })
+    });
 
     return res.status(201).json(result);
   } catch (err: any) {
     const msg = err?.message ?? 'Failed to scaffold repository';
+    // GitHub's own refusals keep their meaning: signed out is 401, not allowed is 403, not "server error".
+    if (err instanceof GitHubApiError && (err.status === 401 || err.status === 403)) {
+      return res.status(err.status).json({ error: msg });
+    }
     const isConflict = /already exists/i.test(msg);
     const isClientError =
       /^Invalid /i.test(msg) || /is not supported yet/i.test(msg) || /is required/i.test(msg);

@@ -4,12 +4,38 @@ import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { route } from './asyncRoute.js';
 import { pmTicketSubject, relayPmTicketRequest } from './ticketRequestAuth.js';
+import { requireWorkspaceCapability } from './workspaceContext.js';
 
 export interface TicketCentralIntakeApplication {
   listPending(workspaceId: string, subject: TicketSubject, input: { after?: unknown; limit?: unknown; filter?: unknown; client?: unknown }): Promise<unknown>;
   accept(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
   clarify?(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
   decline(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
+  /** Accept, create or pick the project, and link them, in one retry-safe PM action. */
+  startProject?(intakeId: string, workspaceId: string, subject: TicketSubject, input: unknown): Promise<unknown>;
+}
+
+/** Explicit allowlist for the start-project response. */
+function safeStartedProject(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TicketReadInvariantError();
+  const row = value as Record<string, unknown>;
+  const text = (field: unknown) => typeof field === 'string' && field.trim().length > 0 && field.length <= 200;
+  if (!text(row.ticketId) || typeof row.reference !== 'string' || !/^TKT-[A-F0-9]{32}$/.test(row.reference)
+    || !text(row.projectId) || !text(row.projectName) || !text(row.projectKey)
+    || typeof row.created !== 'boolean' || typeof row.clientVisible !== 'boolean') throw new TicketReadInvariantError();
+  return { ticketId: row.ticketId, reference: row.reference, projectId: row.projectId, projectName: row.projectName,
+    projectKey: row.projectKey, created: row.created, clientVisible: row.clientVisible };
+}
+
+/** What an accepted inquiry became, allowlisted: its request, and that request's project once linked. */
+function acceptedOutcome(row: Record<string, unknown>) {
+  if (row.acceptedTicketId === undefined) return {};
+  const text = (field: unknown) => typeof field === 'string' && field.trim().length > 0 && field.length <= 200;
+  if (!text(row.acceptedTicketId) || typeof row.acceptedTicketReference !== 'string' || !/^TKT-[A-F0-9]{32}$/.test(row.acceptedTicketReference)
+    || (row.acceptedProjectId !== null && !text(row.acceptedProjectId))
+    || (row.acceptedProjectName !== null && !text(row.acceptedProjectName))) throw new TicketReadInvariantError();
+  return { acceptedTicketId: row.acceptedTicketId, acceptedTicketReference: row.acceptedTicketReference,
+    acceptedProjectId: row.acceptedProjectId, acceptedProjectName: row.acceptedProjectName };
 }
 
 function safePage(value: unknown) {
@@ -53,7 +79,8 @@ function safePage(value: unknown) {
     return { kind: row.kind ?? 'public_inquiry', id: row.id, publicReference: row.publicReference, fullName: row.fullName, email: row.email, company: row.company,
       title: row.title, description: row.description, requestedDeadline: row.requestedDeadline,
       submittedAt: row.submittedAt, clarificationMessages: safeClarificationMessages,
-      status: row.status ?? 'pending', handledAt: row.handledAt ?? null, outcomeEmailStatus: row.outcomeEmailStatus ?? null };
+      status: row.status ?? 'pending', handledAt: row.handledAt ?? null, outcomeEmailStatus: row.outcomeEmailStatus ?? null,
+      ...acceptedOutcome(row) };
   });
   return { items, nextCursor: page.nextCursor };
 }
@@ -118,6 +145,19 @@ export function createTicketCentralIntakeRouter(
     const accepted = safeAcceptance(await application.accept(req.params.intakeId ?? '', workspaceId, subject, req.body));
     if (accepted.workspaceId !== workspaceId) throw new TicketReadInvariantError();
     return res.status(201).json(accepted);
+  }));
+  router.post('/intakes/:intakeId/start-project', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Pragma', 'no-cache');
+    if (await relayRequest(req, res)) return;
+    const subject = pmTicketSubject(req, res);
+    if (!subject) return;
+    // It creates a project, so it needs the same permission as creating one from All Projects.
+    if (!requireWorkspaceCapability(req, res, 'project.create')) return;
+    const workspaceId = req.workspace?.workspaceId;
+    if (!workspaceId) throw new TicketReadInvariantError();
+    if (!application.startProject) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'Starting a project from an inquiry is unavailable right now.');
+    return res.status(201).json(safeStartedProject(await application.startProject(req.params.intakeId ?? '', workspaceId, subject, req.body)));
   }));
   router.post('/intakes/:intakeId/clarify', route(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, private');

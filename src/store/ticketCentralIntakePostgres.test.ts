@@ -10,6 +10,7 @@ import { PostgresTicketProjectManagementStore } from './ticketProjectManagementP
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { createTicketCentralIntakeService } from '../services/ticketCentralIntakeService.js';
+import { createIntakeProjectStarter, intakeProjectId } from '../services/intakeProjectStart.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import { sqlFor, createTestDatabase } from './testDatabase.js';
@@ -369,4 +370,77 @@ it('serializes competing PM decisions and rolls back all acceptance writes on a 
  expect(results.filter(result=>result.status==='rejected')).toHaveLength(1);
  expect((await db.query('select * from alpha_private.tickets')).rows).toHaveLength(1);
  expect((await db.query('select * from alpha_private.ticket_client_grants')).rows).toHaveLength(1);
+});
+
+describe('starting a project from an inquiry', () => {
+ const starter = () => createIntakeProjectStarter({
+  accept: (intakeId, workspaceId, subject, raw) => app.accept(intakeId, workspaceId, subject, raw),
+  link: createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)),
+  projects: new PostgresProjectStore(db),
+  bindProject: () => undefined,
+ });
+ const start = (overrides: Record<string, unknown> = {}) => ({ schemaVersion: 1, operationId: '50000000-0000-4000-8000-000000000001',
+  clientVisible: true, project: { name: 'Informational Website', description: 'An animated site', targetDate: '2026-12-01' }, ...overrides });
+
+ it('accepts, creates the project and links it in one action, so the client sees the project', async () => {
+  const { proposals, receipt } = await submitProposal();
+  const result = await starter().startProject(receipt.id, workspaceA, pmA, start());
+  expect(result).toMatchObject({ projectId: intakeProjectId(receipt.id), projectName: 'Informational Website', projectKey: 'INF', created: true, clientVisible: true });
+  expect(result.reference).toMatch(/^TKT-[A-F0-9]{32}$/);
+  const project = (await db.query<{ name: string; key: string; status: string; description: string; created_by: string }>(
+   'select name,key,status,description,created_by from public.projects where id=$1', [result.projectId])).rows[0];
+  expect(project).toMatchObject({ name: 'Informational Website', key: 'INF', status: 'planned', description: 'An animated site', created_by: pmA.userId });
+  const ticket = (await db.query<{ project_id: string; project_client_visible: boolean }>(
+   'select project_id,project_client_visible from alpha_private.tickets where id=$1', [result.ticketId])).rows[0];
+  expect(ticket).toEqual({ project_id: result.projectId, project_client_visible: true });
+  // The client now has the project, not just a request waiting for one.
+  await db.query(`insert into alpha_private.ticket_client_sessions
+   (session_id_hash,client_user_id,csrf_hash,created_at,expires_at)
+   values($1,$2,$3,now()-interval '1 minute',now()+interval '1 hour')`,[proposalOwner.sessionId,proposalOwner.userId,'b'.repeat(64)]);
+  expect(JSON.stringify(await new PostgresClientProjectPortal(db).projects(proposalOwner))).toContain('Informational Website');
+  expect((await proposals.list(proposalOwner)).items).toEqual([]);
+  // The PM's handled list says what it became.
+  const handled = await app.listPending(workspaceA, pmA, { filter: 'handled' });
+  expect(handled.items[0]).toMatchObject({ acceptedTicketId: result.ticketId, acceptedTicketReference: result.reference,
+   acceptedProjectId: result.projectId, acceptedProjectName: 'Informational Website' });
+  // Another workspace sees the outcome but not where it went.
+  expect((await app.listPending(workspaceB, pmB, { filter: 'handled' })).items[0]).not.toHaveProperty('acceptedProjectName');
+ });
+
+ it('finishes rather than repeats on a retry with the same operation', async () => {
+  const { receipt } = await submitProposal();
+  const first = await starter().startProject(receipt.id, workspaceA, pmA, start());
+  const again = await starter().startProject(receipt.id, workspaceA, pmA, start());
+  expect(again).toEqual({ ...first, created: false });
+  expect((await db.query('select id from public.projects')).rows).toHaveLength(1);
+  expect((await db.query('select id from alpha_private.tickets')).rows).toHaveLength(1);
+ });
+
+ it('picks the next free project key when the name\'s key is taken anywhere', async () => {
+  await new PostgresProjectStore(db).create(workspaceB, { id: 'other-project', name: 'Info hub', key: 'INF', createdBy: pmB.userId });
+  const { receipt } = await submitProposal();
+  const result = await starter().startProject(receipt.id, workspaceA, pmA, start());
+  expect(result.projectKey).toBe('INF2');
+ });
+
+ it('can add the inquiry to an existing project in this workspace, never one from another workspace', async () => {
+  await new PostgresProjectStore(db).create(workspaceA, { id: 'existing-a', name: 'Client site', key: 'CLS', createdBy: pmA.userId });
+  await new PostgresProjectStore(db).create(workspaceB, { id: 'existing-b', name: 'Elsewhere', key: 'ELS', createdBy: pmB.userId });
+  const { receipt } = await submitProposal();
+  await expect(starter().startProject(receipt.id, workspaceA, pmA, start({ project: { existingProjectId: 'existing-b' } })))
+   .rejects.toMatchObject({ status: 404 });
+  const result = await starter().startProject(receipt.id, workspaceA, pmA,
+   start({ operationId: '50000000-0000-4000-8000-000000000002', project: { existingProjectId: 'existing-a' } }));
+  expect(result).toMatchObject({ projectId: 'existing-a', projectName: 'Client site', created: false });
+  expect((await db.query('select id from public.projects')).rows).toHaveLength(2);
+ });
+
+ it('refuses a declined inquiry, a developer and an empty project name', async () => {
+  const { receipt } = await submitProposal();
+  await expect(starter().startProject(receipt.id, workspaceA, pmA, start({ project: { name: '  ' } }))).rejects.toMatchObject({ status: 400 });
+  await expect(starter().startProject(receipt.id, workspaceA, developer, start())).rejects.toMatchObject({ status: 403 });
+  await app.decline(receipt.id, workspaceA, pmA, { schemaVersion: 1, operationId: '50000000-0000-4000-8000-000000000003' });
+  await expect(starter().startProject(receipt.id, workspaceA, pmA, start())).rejects.toMatchObject({ status: 409 });
+  expect((await db.query('select id from public.projects')).rows).toHaveLength(0);
+ });
 });
