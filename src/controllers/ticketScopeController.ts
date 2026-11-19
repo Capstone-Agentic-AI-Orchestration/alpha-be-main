@@ -13,7 +13,7 @@ export interface PmTicketScopeApplication {
 function safeReceipt(value: TicketScopeProposalReceipt, ticketId: string): TicketScopeProposalReceipt {
   if (!value || value.ticketId !== ticketId || !opaqueTicketRequestValue(value.operationId)
     || !opaqueTicketRequestValue(value.scopeVersionId) || !Number.isSafeInteger(value.version)
-    || value.version < 1 || value.status !== 'awaiting_client') {
+    || value.version < 1 || (value.status !== 'awaiting_client' && value.status !== 'under_review')) {
     throw new TicketReadInvariantError();
   }
   return {

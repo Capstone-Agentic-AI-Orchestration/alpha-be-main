@@ -491,16 +491,16 @@ describe('ticket command transaction service', () => {
     expect(f.control.calls).toEqual(['authorize']);
   });
 
-  it('keeps agreement, work authorization, PM assessment, sharing, acceptance and closure separate', async () => {
+  it('keeps agreement, work authorization, PM assessment and sharing separate, and closes on client acceptance', async () => {
     const f = fixture();
     await shared(f);
     await expect(f.send({ type: 'close_accepted', deliveryId: 'delivery-a' })).rejects.toMatchObject({ code: 'client_acceptance_required' });
     const acceptance = await f.send({ type: 'accept_delivery', deliveryId: 'delivery-a' }, client);
-    expect(acceptance.status).toBe('ready_for_review');
+    expect(acceptance.status).toBe('closed');
     expect(Object.keys(acceptance).sort()).toEqual(['operationId', 'status', 'ticketId', 'version']);
-    expect(await f.send({ type: 'close_accepted', deliveryId: 'delivery-a' })).toMatchObject({ status: 'closed' });
+    await expect(f.send({ type: 'close_accepted', deliveryId: 'delivery-a' })).rejects.toMatchObject({ code: 'ticket_is_read_only' });
     expect(f.data.audits.map(audit => audit.event.type)).toEqual([
-      'review', 'propose_scope', 'agree_scope', 'authorize_work', 'assess_delivery', 'share_delivery', 'accept_delivery', 'close_accepted',
+      'review', 'propose_scope', 'agree_scope', 'authorize_work', 'assess_delivery', 'share_delivery', 'accept_delivery',
     ]);
     expect(f.data.state).not.toHaveProperty('projectCompleted');
     expect(f.data.state).not.toHaveProperty('releaseAuthorized');

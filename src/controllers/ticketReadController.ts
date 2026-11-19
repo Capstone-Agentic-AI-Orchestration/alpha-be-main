@@ -5,7 +5,7 @@ import { opaqueTicketRequestValue, pmTicketSubject, relayPmTicketRequest } from 
 import type { TicketSubject, TicketTarget } from '../store/ticketCommandStore.js';
 import type { ClientTicketDetail, InternalTicketNote, PmTicketDetail, PublicTicketMessage } from '../ticketing/readModels.js';
 import type { TicketMessagePage } from '../services/ticketReadService.js';
-import { TicketReadInvariantError } from '../ticketing/readModels.js';
+import { scopeApprovedBy, TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 
 export interface PmTicketReadApplication {
@@ -85,6 +85,7 @@ function safeDetail(value: PmTicketDetail): PmTicketDetail {
   };
   const scope = value.scope === null ? null : {
     id: value.scope.id, summary: value.scope.summary, proposedAt: value.scope.proposedAt, agreed: value.scope.agreed,
+    approvedBy: scopeApprovedBy(value.scope.agreed, value.scope.approvedBy),
   };
   const delivery = value.delivery === null ? null : {
     id: value.delivery.id, scopeVersionId: value.delivery.scopeVersionId, summary: value.delivery.summary,

@@ -77,6 +77,18 @@ describe('PM scope proposal application service', () => {
     expect(f.signals).toEqual([expect.objectContaining({ type: 'ticket_changed', version: 5 })]);
   });
 
+  it('records a PM decision to start without client approval in the plan and its audit entry', async () => {
+    const f = fixture();
+
+    const receipt = await f.service.propose(target, pm, { ...input, clientApproval: 'skipped' });
+
+    expect(receipt).toMatchObject({ status: 'under_review', scopeVersionId: 'scope-version-1' });
+    expect(f.state).toMatchObject({ agreedScopeVersionId: 'scope-version-1', scopeApprovedBy: 'pm', actionOwner: 'pm', nextAction: 'authorize_work' });
+    expect(f.audits).toEqual([expect.objectContaining({
+      envelope: expect.objectContaining({ command: { type: 'propose_scope', scopeVersionId: 'scope-version-1', clientApproval: 'skipped' } }),
+    })]);
+  });
+
   it('returns the saved outcome for an exact retry without adding a second scope version', async () => {
     const f = fixture();
     const first = await f.service.propose(target, pm, input);

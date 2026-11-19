@@ -74,7 +74,45 @@ describe('one ticket from inquiry to completion', () => {
     const state = newTicketWorkflow('ticket-a', 'workspace-a');
     expect(state).toMatchObject({ status: 'received', actionOwner: 'pm', version: 0, projectId: null, requiredIssueIds: [], authorizedScopeVersionId: null });
     expect(decide(state, { type: 'review' }).state).toMatchObject({ id: 'ticket-a', status: 'under_review', clientId: null });
-    expectRefusal(() => decide(state, { type: 'request_details', messageId: 'message-a' }), 409, 'invalid_ticket_transition');
+    // Questions still need a client who can answer them.
+    expectRefusal(() => decide(state, { type: 'request_details', messageId: 'message-a' }), 409, 'client_access_inactive');
+  });
+
+  it("treats a PM's first real action on a new request as the review", () => {
+    const state = newTicketWorkflow('ticket-a', 'workspace-a', 'client-a');
+    const facts = { ...evidence(), message: message(pm) };
+    expect(decide(state, { type: 'request_details', messageId: 'message-a' }, pm, facts).state)
+      .toMatchObject({ status: 'awaiting_client', actionOwner: 'client', nextAction: 'reply' });
+    expect(decide(state, { type: 'reply', messageId: 'message-a' }, pm, facts).state)
+      .toMatchObject({ status: 'under_review', actionOwner: 'pm', nextAction: 'review_ticket' });
+    expect(decide(state, { type: 'propose_scope', scopeVersionId: 'scope-a' }).state)
+      .toMatchObject({ status: 'awaiting_client', actionOwner: 'client', nextAction: 'agree_scope', scopeApprovedBy: null });
+    expect(decide(state, { type: 'answer_close', messageId: 'message-a' }, pm, facts).state)
+      .toMatchObject({ status: 'closed', closureReason: 'answered' });
+  });
+
+  it('lets the PM skip client approval when sending the plan', () => {
+    const state = newTicketWorkflow('ticket-a', 'workspace-a', 'client-a');
+    const planned = decide(state, { type: 'propose_scope', scopeVersionId: 'scope-a', clientApproval: 'skipped' });
+    expect(planned.state).toMatchObject({
+      status: 'under_review', scopeVersionId: 'scope-a', agreedScopeVersionId: 'scope-a', scopeApprovedBy: 'pm',
+      authorizedScopeVersionId: null, actionOwner: 'pm', nextAction: 'authorize_work',
+    });
+    expect(planned.event).toMatchObject({ type: 'propose_scope', actorKind: 'pm' });
+    expect(decide(planned.state, {
+      type: 'authorize_work', scopeVersionId: 'scope-a', projectId: 'project-a', issueIds: ['issue-a', 'issue-b'],
+    }, pm, startableEvidence()).state).toMatchObject({ status: 'in_progress', nextAction: 'execute_work' });
+    expectRefusal(() => decide(planned.state, { type: 'agree_scope', scopeVersionId: 'scope-a' }, client), 409, 'scope_already_agreed');
+  });
+
+  it('lets the PM stop waiting for approval of a plan already sent', () => {
+    const proposed = decide(newTicketWorkflow('ticket-a', 'workspace-a', 'client-a'), { type: 'propose_scope', scopeVersionId: 'scope-a' }).state;
+    expectRefusal(() => decide(proposed, { type: 'skip_scope_approval', scopeVersionId: 'scope-a' }, client), 403, 'ticket_action_forbidden');
+    expectRefusal(() => decide(proposed, { type: 'skip_scope_approval', scopeVersionId: 'scope-b' }), 409, 'scope_not_current');
+    const skipped = decide(proposed, { type: 'skip_scope_approval', scopeVersionId: 'scope-a' }).state;
+    expect(skipped).toMatchObject({ status: 'under_review', agreedScopeVersionId: 'scope-a', scopeApprovedBy: 'pm', nextAction: 'authorize_work' });
+    expectRefusal(() => decide(skipped, { type: 'skip_scope_approval', scopeVersionId: 'scope-a' }), 409, 'scope_already_agreed');
+    expect(agreedWork()).toMatchObject({ scopeApprovedBy: 'client' });
   });
 
   it('records agreement without launching work, then separately authorizes it', () => {
@@ -146,7 +184,7 @@ describe('one ticket from inquiry to completion', () => {
     expectRefusal(() => decide(decision.state, { type: 'share_delivery', deliveryId: 'delivery-a' }, pm, facts), 409, 'delivery_not_current');
   });
 
-  it('keeps PM assessment, sharing, client acceptance and PM closure distinct', () => {
+  it('keeps PM assessment and sharing distinct, and closes on client acceptance', () => {
     const started = startWork();
     const facts = completedEvidence();
     const assessed = decide(started, { type: 'assess_delivery', deliveryId: 'delivery-a' }, pm, facts).state;
@@ -154,12 +192,18 @@ describe('one ticket from inquiry to completion', () => {
     const shared = decide(assessed, { type: 'share_delivery', deliveryId: 'delivery-a' }, pm, facts).state;
     expectRefusal(() => decide(shared, { type: 'close_accepted', deliveryId: 'delivery-a' }), 409, 'client_acceptance_required');
     const accepted = decide(shared, { type: 'accept_delivery', deliveryId: 'delivery-a' }, client);
-    expect(accepted.state).toMatchObject({ status: 'ready_for_review', closureReason: null, nextAction: 'close_ticket', delivery: { acceptedByClientId: 'client-a' } });
-    const closed = decide(accepted.state, { type: 'close_accepted', deliveryId: 'delivery-a' });
-    expect(closed.state).toMatchObject({ status: 'closed', closureReason: 'accepted', actionOwner: null, nextAction: null });
-    expect(Object.keys(closed).sort()).toEqual(['event', 'reopenIssueIds', 'state']);
-    expect(closed.state).not.toHaveProperty('projectCompleted');
-    expect(closed.state).not.toHaveProperty('releaseAuthorized');
+    expect(accepted.state).toMatchObject({ status: 'closed', closureReason: 'accepted', actionOwner: null, nextAction: null, delivery: { acceptedByClientId: 'client-a' } });
+    expect(Object.keys(accepted).sort()).toEqual(['event', 'reopenIssueIds', 'state']);
+    expect(accepted.state).not.toHaveProperty('projectCompleted');
+    expect(accepted.state).not.toHaveProperty('releaseAuthorized');
+    expectRefusal(() => decide(accepted.state, { type: 'close_accepted', deliveryId: 'delivery-a' }), 409, 'ticket_is_read_only');
+  });
+
+  it('still lets a PM close a request accepted before automatic closure', () => {
+    const facts = completedEvidence();
+    const legacy = { ...ready(), delivery: { ...ready().delivery!, acceptedByClientId: 'client-a' }, actionOwner: 'pm' as const, nextAction: 'close_ticket' as const };
+    expect(decide(legacy, { type: 'close_accepted', deliveryId: 'delivery-a' }, pm, facts).state)
+      .toMatchObject({ status: 'closed', closureReason: 'accepted' });
   });
 
   it('records public clarification and leaves ordinary implementation replies in progress', () => {

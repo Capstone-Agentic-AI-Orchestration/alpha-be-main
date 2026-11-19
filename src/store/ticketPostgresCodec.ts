@@ -22,6 +22,7 @@ const workflowSchema = z.object({
   actionOwner: z.enum(actionOwners).nullable(), nextAction: z.enum(actions).nullable(),
   hold: z.object({ status: z.enum(statuses), actionOwner: z.enum(actionOwners).nullable(), nextAction: z.enum(actions).nullable() }).strict().nullable(),
   closureReason: z.enum(['accepted', 'answered', 'cancelled']).nullable(),
+  scopeApprovedBy: z.enum(['client', 'pm']).nullable().optional(),
 }).strict();
 
 function invalid(): never { throw new TicketReadInvariantError(); }

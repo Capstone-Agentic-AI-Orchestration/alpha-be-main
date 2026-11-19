@@ -34,7 +34,8 @@ export interface ClientTicketDetail {
   sharedProjectName: string | null;
   sharedProjectPreviewUrl?: string;
   relatedTicket: { id: string; reference: string; title: string } | null;
-  scope: { id: string; summary: string; proposedAt: string; agreed: boolean } | null;
+  /** approvedBy says who approved the plan: the client, or the PM using their discretion. */
+  scope: { id: string; summary: string; proposedAt: string; agreed: boolean; approvedBy: 'client' | 'pm' | null } | null;
   delivery: { id: string; scopeVersionId: string; summary: string; sharedAt: string; accepted: boolean } | null;
   request: { projectPreference: 'not_sure' | 'new_project' | 'shared_project'; projectLabel: string | null; requestedDeadline: string | null } | null;
 }
@@ -61,6 +62,17 @@ export interface PmTicketDetail extends ClientTicketDetail {
       immutable: boolean; clientVisible: boolean; shared: boolean;
     } | null;
   };
+}
+
+/** Who approved a plan, as shown to readers: older tickets were always approved by the client. */
+export function scopeApprovedBy(agreed: boolean, approvedBy: 'client' | 'pm' | null | undefined): 'client' | 'pm' | null {
+  if (!agreed) return null;
+  return approvedBy ?? 'client';
+}
+
+/** Read-model validation: absent on older payloads, otherwise one of the known approvers. */
+export function validScopeApprovedBy(value: unknown): boolean {
+  return value === undefined || value === null || value === 'client' || value === 'pm';
 }
 
 /** Explicit field mapping, not serialize-then-delete. Document history and
@@ -135,7 +147,10 @@ export function projectClientTicketDetail(ticket: LockedTicket, rows: TicketDeta
     ...(header.sharedProject?.clientVisible && header.sharedProject.preview
       ? { sharedProjectPreviewUrl: header.sharedProject.preview.url } : {}),
     relatedTicket: related,
-    scope: scope ? { id: scope.id, summary: scope.publicSummary, proposedAt: scope.proposedAt, agreed: state.agreedScopeVersionId === scope.id } : null,
+    scope: scope ? {
+      id: scope.id, summary: scope.publicSummary, proposedAt: scope.proposedAt, agreed: state.agreedScopeVersionId === scope.id,
+      approvedBy: scopeApprovedBy(state.agreedScopeVersionId === scope.id, state.scopeApprovedBy),
+    } : null,
     delivery,
     request: request ? { projectPreference: request.projectPreference.kind, projectLabel: request.requestedProjectLabel, requestedDeadline: request.requestedDeadline } : null,
   };

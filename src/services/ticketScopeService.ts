@@ -21,7 +21,7 @@ function sameKey(left: TicketOperationKey, right: TicketOperationKey): boolean {
 function validReceipt(value: TicketScopeProposalReceipt, ticketId: string, operationId: string): boolean {
   return value?.ticketId === ticketId && value.operationId === operationId
     && opaque(value.scopeVersionId) && Number.isSafeInteger(value.version) && value.version > 0
-    && value.status === 'awaiting_client';
+    && (value.status === 'awaiting_client' || value.status === 'under_review');
 }
 
 /** Creates one immutable, client-visible scope version and proposes it atomically. */
@@ -62,7 +62,8 @@ export function createTicketScopeService(
           schemaVersion: 1 as const,
           operationId: parsed.operationId,
           expectedVersion: parsed.expectedVersion,
-          command: { type: 'propose_scope' as const, scopeVersionId },
+          command: { type: 'propose_scope' as const, scopeVersionId,
+            ...(parsed.clientApproval === 'skipped' ? { clientApproval: 'skipped' as const } : {}) },
         };
         assertTicketCommandAccess(ticket.state, ticket.actor, envelope.command, ticket.mode ?? 'disabled');
 
