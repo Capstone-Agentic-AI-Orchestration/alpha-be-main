@@ -112,6 +112,27 @@ describe('failures', () => {
     await expect(call).rejects.toMatchObject({ status: 403 });
     await expect(call).rejects.toThrow(/403 .*Resource not accessible by integration/);
   });
+
+  /** A 422 names its reason only in `errors`; without it "Repository creation failed." says nothing. */
+  it('keeps the reasons GitHub lists for a refused request', async () => {
+    const { githubApi, withGitHubIdentity } = await load('cloud');
+    stubFetch({
+      'https://api.github.com/orgs/o/repos': {
+        status: 422,
+        body: { message: 'Repository creation failed.', errors: [
+          { resource: 'Repository', code: 'custom', field: 'description', message: 'description control characters are not allowed' },
+          { resource: 'Repository', code: 'already_exists', field: 'name' }
+        ] }
+      }
+    });
+
+    const call = withGitHubIdentity({ token: 't' }, () => githubApi().post('/orgs/o/repos', { name: 'r' }));
+
+    await expect(call).rejects.toMatchObject({ status: 422 });
+    await expect(call).rejects.toThrow(
+      'GitHub 422 on POST /orgs/o/repos: Repository creation failed. (description control characters are not allowed; name already_exists)'
+    );
+  });
 });
 
 /**

@@ -1,3 +1,4 @@
+import { githubRepoDescription } from './githubRepoDescription.js';
 import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
@@ -18,7 +19,7 @@ import {
   IS_DESKTOP
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
-import { githubApiWithToken, tokenForThisRequest } from './githubApi.js';
+import { githubApi, githubApiWithToken, tokenForThisRequest } from './githubApi.js';
 import { withIsolatedRepository, type IsolatedGit } from './isolatedGit.js';
 import { failedRunLogs } from './agentCiActions.js';
 import {
@@ -398,10 +399,38 @@ export interface RepoInspection {
   ownerRepo?: string;
 }
 
+/** An organization the signed-in person belongs to. */
+export interface GitHubOrgMembership {
+  login: string;
+  role: string;
+  /**
+   * Whether the org lets plain members create repositories. Absent when unknown:
+   * owners always can, and GitHub may not show the setting to a member.
+   */
+  membersCanCreateRepositories?: boolean;
+}
+
+/**
+ * Adds the org's rule for members, read only for orgs where the person is not an owner.
+ * Without it the panel warned every member that creation might be blocked, even in an
+ * org that allows it, and that warning was read as the reason any creation failed.
+ */
+export async function withMemberRepoPolicy(org: GitHubOrgMembership): Promise<GitHubOrgMembership> {
+  if (org.role === 'admin') return org;
+  try {
+    const settings = await githubApi().get<{ members_can_create_repositories?: unknown }>(`/orgs/${encodeURIComponent(org.login)}`);
+    return typeof settings.members_can_create_repositories === 'boolean'
+      ? { ...org, membersCanCreateRepositories: settings.members_can_create_repositories }
+      : org;
+  } catch {
+    return org;
+  }
+}
+
 export interface IGitHubService {
   checkAuth(): Promise<GitHubAuthInfo>;
   startDeviceLogin(profileLogin?: string): Promise<GitHubLoginStart>;
-  listOrganizations(): Promise<Array<{ login: string; role: string }>>;
+  listOrganizations(): Promise<GitHubOrgMembership[]>;
   logout(): Promise<void>;
   listRepositories(limit?: number): Promise<GitHubRepo[]>;
   /**
@@ -621,7 +650,8 @@ export class GhCliGitHubService implements IGitHubService {
   }
 
   async createRepository(opts: CreateRepoOptions): Promise<{ url: string; nameWithOwner: string }> {
-    const { name, visibility = 'private', description, org, sourceDir, initReadme = true } = opts;
+    const { name, visibility = 'private', org, sourceDir, initReadme = true } = opts;
+    const description = githubRepoDescription(opts.description);
     const target = org ? `${org}/${name}` : name;
     const args = ['repo', 'create', target, `--${visibility}`];
 
@@ -1558,12 +1588,13 @@ export class RestGitHubService implements IGitHubService {
   }
 
   async createRepository(opts: CreateRepoOptions): Promise<{ url: string; nameWithOwner: string }> {
-    const { name, visibility = 'private', description, org, initReadme = true } = opts;
+    const { name, visibility = 'private', org, initReadme = true } = opts;
     const endpoint = org ? `/orgs/${org}/repos` : '/user/repos';
+    const description = githubRepoDescription(opts.description);
     const body = {
       name,
       private: visibility === 'private',
-      description,
+      ...(description ? { description } : {}),
       auto_init: initReadme
     };
 
@@ -1850,12 +1881,12 @@ export class GitHubService implements IGitHubService {
     return this.cliService.startDeviceLogin(profileLogin);
   }
 
-  async listOrganizations(): Promise<Array<{ login: string; role: string }>> {
+  async listOrganizations(): Promise<GitHubOrgMembership[]> {
     const auth = await this.checkAuth();
-    if (auth.mode === 'rest' || auth.mode === 'github_app') {
-      return this.restService.listOrganizations();
-    }
-    return this.cliService.listOrganizations();
+    const orgs = auth.mode === 'rest' || auth.mode === 'github_app'
+      ? await this.restService.listOrganizations()
+      : await this.cliService.listOrganizations();
+    return Promise.all(orgs.map(withMemberRepoPolicy));
   }
 
   async logout(): Promise<void> {

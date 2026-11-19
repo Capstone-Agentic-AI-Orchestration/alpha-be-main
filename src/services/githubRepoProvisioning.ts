@@ -1,3 +1,4 @@
+import { githubRepoDescription } from './githubRepoDescription.js';
 import { githubApi, GitHubApiError, type GitHubApi } from './githubApi.js';
 import { logError, logInfo } from '../utils/logger.js';
 
@@ -104,10 +105,11 @@ export async function provisionRepository(
   if (!org) throw new Error('An organization is required. Alpha does not create personal repositories.');
   if (input.files.length === 0) throw new Error('A repository needs at least one file.');
 
+  const description = githubRepoDescription(input.description);
   const created = await api.post<CreatedRepo>(`/orgs/${org}/repos`, {
     name: input.name,
     private: (input.visibility ?? 'private') === 'private',
-    ...(input.description ? { description: input.description } : {}),
+    ...(description ? { description } : {}),
     auto_init: true
   });
   const repo = created.full_name;

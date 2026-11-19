@@ -113,6 +113,26 @@ export function nextPage(link: string | null): string | null {
   return null;
 }
 
+/**
+ * GitHub's error body as one sentence. A 422 puts the reason in `errors`, not in
+ * `message` -- "Repository creation failed." says nothing until it is followed by
+ * "description control characters are not allowed" -- so both are kept.
+ */
+export function githubErrorMessage(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const { message, errors } = body as { message?: unknown; errors?: unknown };
+  const reasons = (Array.isArray(errors) ? errors : []).map(error => {
+    if (typeof error === 'string') return error;
+    if (!error || typeof error !== 'object') return '';
+    const { message: text, field, code } = error as { message?: unknown; field?: unknown; code?: unknown };
+    if (typeof text === 'string' && text) return text;
+    return [field, code].filter(part => typeof part === 'string' && part).join(' ');
+  }).filter(Boolean);
+  const head = typeof message === 'string' && message ? message : undefined;
+  if (!reasons.length) return head;
+  return head ? `${head} (${reasons.join('; ')})` : reasons.join('; ');
+}
+
 async function call(method: string, url: string, body?: unknown, explicitToken?: string): Promise<Response> {
   const token = explicitToken ?? (await tokenForThisRequest());
   const res = await fetch(url.startsWith('http') ? url : `${API}${url}`, {
@@ -134,7 +154,7 @@ async function call(method: string, url: string, body?: unknown, explicitToken?:
     // integration") is the useful part; the rest is the path it refers to.
     let message = detail;
     try {
-      message = (JSON.parse(detail) as { message?: string }).message ?? detail;
+      message = githubErrorMessage(JSON.parse(detail)) ?? detail;
     } catch {
       /* not JSON */
     }
