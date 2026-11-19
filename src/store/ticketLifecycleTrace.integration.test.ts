@@ -151,7 +151,7 @@ describe('QA ticket identity chain', () => {
       const conversation = await reads.conversation(target, client);
       expect(conversation.items.map(item => item.body)).toEqual(['Client question', 'PM response', 'Please fix the requested behavior.']);
       await lifecycle.commands.execute(target, client, { schemaVersion: 1, operationId: randomUUID(), expectedVersion: await version(), command: { type: 'accept_delivery', deliveryId: corrected.deliveryId } });
-      await lifecycle.commands.execute(target, pm, { schemaVersion: 1, operationId: randomUUID(), expectedVersion: await version(), command: { type: 'close_accepted', deliveryId: corrected.deliveryId } });
+      // Client acceptance closes the request; there is no separate PM closing step.
       expect((await reads.detail(target, client)).status).toBe('closed');
     } finally {
       await pg.close();
