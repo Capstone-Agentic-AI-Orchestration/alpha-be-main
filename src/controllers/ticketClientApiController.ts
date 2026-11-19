@@ -125,8 +125,10 @@ function safeClientDetail(value: ClientTicketDetail | (ClientTicketDetail & { in
   if (value.scope !== null) {
     const current = value.scope;
     if (!current || !opaqueTicketRequestValue(current.id) || !text(current.summary, 4000)
-      || !date(current.proposedAt) || typeof current.agreed !== 'boolean') throw new TicketReadInvariantError();
-    scope = { id: current.id, summary: current.summary, proposedAt: current.proposedAt, agreed: current.agreed };
+      || !date(current.proposedAt) || typeof current.agreed !== 'boolean'
+      || ![undefined, null, 'client', 'pm'].includes(current.approvedBy)) throw new TicketReadInvariantError();
+    scope = { id: current.id, summary: current.summary, proposedAt: current.proposedAt, agreed: current.agreed,
+      approvedBy: current.agreed ? current.approvedBy ?? 'client' : null };
   }
   let delivery: ClientTicketDetail['delivery'] = null;
   if (value.delivery !== null) {

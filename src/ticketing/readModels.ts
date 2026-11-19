@@ -34,7 +34,8 @@ export interface ClientTicketDetail {
   sharedProjectName: string | null;
   sharedProjectPreviewUrl?: string;
   relatedTicket: { id: string; reference: string; title: string } | null;
-  scope: { id: string; summary: string; proposedAt: string; agreed: boolean } | null;
+  /** approvedBy says who approved the plan: the client, or the PM using their discretion. */
+  scope: { id: string; summary: string; proposedAt: string; agreed: boolean; approvedBy: 'client' | 'pm' | null } | null;
   delivery: { id: string; scopeVersionId: string; summary: string; sharedAt: string; accepted: boolean } | null;
   request: { projectPreference: 'not_sure' | 'new_project' | 'shared_project'; projectLabel: string | null; requestedDeadline: string | null } | null;
 }
@@ -135,7 +136,10 @@ export function projectClientTicketDetail(ticket: LockedTicket, rows: TicketDeta
     ...(header.sharedProject?.clientVisible && header.sharedProject.preview
       ? { sharedProjectPreviewUrl: header.sharedProject.preview.url } : {}),
     relatedTicket: related,
-    scope: scope ? { id: scope.id, summary: scope.publicSummary, proposedAt: scope.proposedAt, agreed: state.agreedScopeVersionId === scope.id } : null,
+    scope: scope ? {
+      id: scope.id, summary: scope.publicSummary, proposedAt: scope.proposedAt, agreed: state.agreedScopeVersionId === scope.id,
+      approvedBy: state.agreedScopeVersionId === scope.id ? state.scopeApprovedBy ?? 'client' : null,
+    } : null,
     delivery,
     request: request ? { projectPreference: request.projectPreference.kind, projectLabel: request.requestedProjectLabel, requestedDeadline: request.requestedDeadline } : null,
   };

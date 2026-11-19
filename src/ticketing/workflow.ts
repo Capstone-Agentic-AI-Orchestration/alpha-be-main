@@ -43,6 +43,12 @@ export interface TicketWorkflow {
   nextAction: NextAction;
   hold: { status: TicketStatus; actionOwner: ActionOwner; nextAction: NextAction } | null;
   closureReason: 'accepted' | 'answered' | 'cancelled' | null;
+  /**
+   * Who approved the current scope. 'pm' records that the project manager used
+   * their discretion to start without client approval. Absent on older tickets,
+   * which were always client-approved.
+   */
+  scopeApprovedBy?: 'client' | 'pm' | null;
 }
 
 /** Resolved server identities. Never cast a request body or editable JWT metadata. */
@@ -88,8 +94,9 @@ const commandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('decline'), reason }).strict(),
   z.object({ type: z.literal('request_details'), messageId: id }).strict(),
   z.object({ type: z.literal('reply'), messageId: id }).strict(),
-  z.object({ type: z.literal('propose_scope'), scopeVersionId: id }).strict(),
+  z.object({ type: z.literal('propose_scope'), scopeVersionId: id, clientApproval: z.enum(['required', 'skipped']).optional() }).strict(),
   z.object({ type: z.literal('agree_scope'), scopeVersionId: id }).strict(),
+  z.object({ type: z.literal('skip_scope_approval'), scopeVersionId: id }).strict(),
   z.object({ type: z.literal('authorize_work'), scopeVersionId: id, projectId: id, issueIds }).strict(),
   z.object({ type: z.literal('assess_delivery'), deliveryId: id }).strict(),
   z.object({ type: z.literal('share_delivery'), deliveryId: id }).strict(),
@@ -337,9 +344,10 @@ export function decideTicketCommand(
       if (state.authorizedScopeVersionId || state.requiredIssueIds.length) conflict('work_already_authorized', 'Use the cancellation process for authorized work.');
       next.status = 'declined'; action(null, null); break;
     case 'request_details':
-      requireStatus(state, ['under_review', 'awaiting_client', 'in_progress', 'ready_for_review']);
+      // A PM's first real action on a new request counts as reviewing it.
+      requireStatus(state, ['received', 'under_review', 'awaiting_client', 'in_progress', 'ready_for_review']);
       assertClientAvailable(state, facts); assertMessage(state, actor, command.messageId, facts);
-      if (['under_review', 'awaiting_client'].includes(state.status)) next.status = 'awaiting_client';
+      if (['received', 'under_review', 'awaiting_client'].includes(state.status)) next.status = 'awaiting_client';
       action('client', 'reply'); break;
     case 'reply':
       assertMessage(state, actor, command.messageId, facts);
@@ -349,26 +357,43 @@ export function decideTicketCommand(
           next.hold = { status: 'under_review', actionOwner: 'pm', nextAction: 'reply' };
         }
         action('pm', state.status === 'on_hold' ? 'resolve_hold' : state.withdrawalRequested ? 'handle_withdrawal' : 'reply');
-      }
+      } else if (state.status === 'received') next.status = 'under_review';
       // A PM's ordinary update is not automatically a request for client action.
       break;
     case 'propose_scope':
       if (state.authorizedScopeVersionId || state.requiredIssueIds.length > 0) {
         conflict('scope_change_requires_linked_ticket', 'New or changed work after authorization must use a linked ticket. Existing work is unchanged.');
       }
-      requireStatus(state, ['under_review', 'awaiting_client']);
+      requireStatus(state, ['received', 'under_review', 'awaiting_client']);
       assertClientAvailable(state, facts);
       if (!facts.scope || facts.scope.id !== command.scopeVersionId || facts.scope.ticketId !== state.id || facts.scope.workspaceId !== state.workspaceId) {
         conflict('scope_not_current', 'An authorized scope version for this ticket is required.');
       }
       if (command.scopeVersionId === state.scopeVersionId) conflict('scope_not_new', 'Propose a new immutable scope version.');
       next.scopeVersionId = command.scopeVersionId; next.agreedScopeVersionId = null; next.authorizedScopeVersionId = null;
-      next.delivery = null; next.correctionRequestedFor = null; next.status = 'awaiting_client'; action('client', 'agree_scope'); break;
+      next.delivery = null; next.correctionRequestedFor = null; next.scopeApprovedBy = null;
+      if (command.clientApproval === 'skipped') {
+        // PM discretion: the plan is shared with the client, and work can start without waiting.
+        next.agreedScopeVersionId = command.scopeVersionId; next.scopeApprovedBy = 'pm';
+        next.status = 'under_review'; action('pm', 'authorize_work');
+      } else {
+        next.status = 'awaiting_client'; action('client', 'agree_scope');
+      }
+      break;
     case 'agree_scope':
       requireStatus(state, ['awaiting_client', 'under_review']);
       if (command.scopeVersionId !== state.scopeVersionId) conflict('scope_not_current', 'Only the current proposed scope can be agreed.');
       if (state.agreedScopeVersionId === command.scopeVersionId) conflict('scope_already_agreed', 'Agreement is already recorded; reconcile the original operation.');
-      next.agreedScopeVersionId = command.scopeVersionId; next.status = 'under_review'; action('pm', 'authorize_work'); break;
+      next.agreedScopeVersionId = command.scopeVersionId; next.scopeApprovedBy = 'client';
+      next.status = 'under_review'; action('pm', 'authorize_work'); break;
+    case 'skip_scope_approval':
+      // PM discretion after sending a plan: stop waiting for the client's approval.
+      requireStatus(state, ['awaiting_client', 'under_review']);
+      if (!state.scopeVersionId || command.scopeVersionId !== state.scopeVersionId) conflict('scope_not_current', 'Only the current plan can be approved.');
+      if (state.agreedScopeVersionId === command.scopeVersionId) conflict('scope_already_agreed', 'This plan is already approved.');
+      if (state.authorizedScopeVersionId) conflict('work_already_authorized', 'Work has already started on this plan.');
+      next.agreedScopeVersionId = command.scopeVersionId; next.scopeApprovedBy = 'pm';
+      next.status = 'under_review'; action('pm', 'authorize_work'); break;
     case 'authorize_work':
       requireStatus(state, ['under_review']); assertClientAvailable(state, facts);
       if (state.authorizedScopeVersionId) conflict('work_already_authorized', 'Use targeted corrections or a newly agreed scope instead of replacing authorized work.');
@@ -408,13 +433,16 @@ export function decideTicketCommand(
     case 'accept_delivery':
       requireStatus(state, ['ready_for_review']); assertDelivery(state, command.deliveryId, facts, true);
       if (state.delivery!.acceptedByClientId) conflict('delivery_already_accepted', 'Acceptance is already recorded; reconcile the original operation.');
-      next.delivery!.acceptedByClientId = actor.userId; action('pm', 'close_ticket'); break;
+      // Accepting the result finishes the request; no separate PM closing step.
+      next.delivery!.acceptedByClientId = actor.userId;
+      next.status = 'closed'; next.closureReason = 'accepted'; action(null, null); break;
     case 'close_accepted':
+      // Kept for requests accepted before automatic closure existed.
       requireStatus(state, ['ready_for_review']); assertDelivery(state, command.deliveryId, facts, true);
       if (state.delivery!.acceptedByClientId !== state.clientId) conflict('client_acceptance_required', 'The client must accept this delivery before closure.');
       next.status = 'closed'; next.closureReason = 'accepted'; action(null, null); break;
     case 'answer_close':
-      requireStatus(state, ['under_review']); assertMessage(state, actor, command.messageId, facts);
+      requireStatus(state, ['received', 'under_review']); assertMessage(state, actor, command.messageId, facts);
       if (state.authorizedScopeVersionId || state.requiredIssueIds.length) conflict('implementation_outstanding', 'Authorized implementation cannot be closed as an answer-only request.');
       next.status = 'closed'; next.closureReason = 'answered'; action(null, null); break;
     case 'request_withdrawal':

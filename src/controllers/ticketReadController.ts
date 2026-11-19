@@ -85,6 +85,7 @@ function safeDetail(value: PmTicketDetail): PmTicketDetail {
   };
   const scope = value.scope === null ? null : {
     id: value.scope.id, summary: value.scope.summary, proposedAt: value.scope.proposedAt, agreed: value.scope.agreed,
+    approvedBy: value.scope.agreed ? value.scope.approvedBy ?? 'client' : null,
   };
   const delivery = value.delivery === null ? null : {
     id: value.delivery.id, scopeVersionId: value.delivery.scopeVersionId, summary: value.delivery.summary,
