@@ -31,6 +31,20 @@ export function boardCursor(workspaceId: string, value: string): BoardCursor {
   return { workspaceId, value, epoch: BOARD_SYNC_EPOCH };
 }
 
+/**
+ * Whether a well-formed cursor for this workspace was issued under the current sync
+ * version. A malformed one, or one for another workspace, is refused outright.
+ */
+function isCurrentCursor(workspaceId: string, cursor: BoardCursor): boolean {
+  if (cursor.workspaceId !== workspaceId) {
+    throw new BoardCursorError('The cursor workspace does not match the active workspace.');
+  }
+  if (!/^(0|[1-9]\d*)$/.test(cursor.value)) {
+    throw new BoardCursorError('The cursor value must be a non-negative decimal number.');
+  }
+  return (cursor.epoch ?? 1) === BOARD_SYNC_EPOCH;
+}
+
 export interface BoardChange {
   cursor: string;
   table: BoardTable;
@@ -160,14 +174,8 @@ export class BoardChangeSync {
   }
 
   async changes(workspaceId: string, cursor: BoardCursor, limit = 100): Promise<BoardChangePage> {
-    if (cursor.workspaceId !== workspaceId) {
-      throw new BoardCursorError('The cursor workspace does not match the active workspace.');
-    }
-    if (!/^(0|[1-9]\d*)$/.test(cursor.value)) {
-      throw new BoardCursorError('The cursor value must be a non-negative decimal number.');
-    }
     // Issued before a fix for skipped changes: what it skipped is behind it, so start over.
-    if ((cursor.epoch ?? 1) !== BOARD_SYNC_EPOCH) {
+    if (!isCurrentCursor(workspaceId, cursor)) {
       return { workspaceId, nextCursor: boardCursor(workspaceId, cursor.value), hasMore: false, resetRequired: true, changes: [] };
     }
 
