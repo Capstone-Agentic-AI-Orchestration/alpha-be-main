@@ -77,6 +77,19 @@ async function githubCliToken(): Promise<string | null> {
 
 /** How often to repeat a sync failure, so a broken uplink is visible once and not endlessly. */
 const FAILURE_LOG_INTERVAL_MS = 5 * 60 * 1000;
+
+/** How publishing one queued chat change went. */
+export type ChatSyncOutcome = 'delivered' | 'retry' | 'rejected';
+
+/**
+ * Postgres refusals no retry can change: row-level security (42501), a missing parent row
+ * (23503), a failed check (23514) and bad data (class 22). Anything else, including no
+ * connection and an expired session, may succeed later.
+ */
+export function isPermanentRefusal(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && (code === '42501' || code === '23503' || code === '23514' || /^22[0-9A-Z]{3}$/.test(code));
+}
 const WORKSPACE_MCP_CATALOG_TTL_MS = 60 * 1000;
 const WORKSPACE_MCP_CATALOG_TIMEOUT_MS = 10 * 1000;
 
@@ -376,52 +389,48 @@ export class SupabaseService {
    * `chat_messages` to the owner, with no project-manager bypass. What
    * oversight sees is the work -- runs, stages, patches -- not the prompts.
    */
-  async shareThread(thread: ChatThread, workspaceId = currentWorkspaceId(), ownerId = knownIdentity()?.login): Promise<boolean> {
-    if (!this.sharesBoard() || !this.client || !ownerId) return false;
+  async shareThread(thread: ChatThread, workspaceId = currentWorkspaceId(), ownerId = knownIdentity()?.login): Promise<ChatSyncOutcome> {
+    if (!this.sharesBoard() || !this.client || !ownerId) return 'retry';
     try {
       const { error } = await this.client.from('chat_threads').upsert(threadRow(workspaceId, ownerId, thread));
       if (error) throw error;
-      return true;
+      return 'delivered';
     } catch (err: any) {
-      this.reportFailure(`share conversation ${thread.id}`, err);
-      return false;
+      return this.chatSyncFailure(`share conversation ${thread.id}`, err);
     }
   }
 
-  async shareMessage(message: ChatMessage, _workspaceId = currentWorkspaceId()): Promise<boolean> {
-    if (!this.sharesBoard() || !this.client) return false;
+  async shareMessage(message: ChatMessage, _workspaceId = currentWorkspaceId()): Promise<ChatSyncOutcome> {
+    if (!this.sharesBoard() || !this.client) return 'retry';
     try {
       const { error } = await this.client.from('chat_messages').upsert(messageRow(message));
       if (error) throw error;
-      return true;
+      return 'delivered';
     } catch (err: any) {
-      this.reportFailure(`share message in ${message.threadId}`, err);
-      return false;
+      return this.chatSyncFailure(`share message in ${message.threadId}`, err);
     }
   }
 
   /** Its messages go with it, by the schema's `on delete cascade`. */
-  async unshareThread(threadId: string, _workspaceId = currentWorkspaceId()): Promise<boolean> {
-    if (!this.sharesBoard() || !this.client) return false;
+  async unshareThread(threadId: string, _workspaceId = currentWorkspaceId()): Promise<ChatSyncOutcome> {
+    if (!this.sharesBoard() || !this.client) return 'retry';
     try {
       const { error } = await this.client.from('chat_threads').delete().eq('id', threadId);
       if (error) throw error;
-      return true;
+      return 'delivered';
     } catch (err: any) {
-      this.reportFailure(`remove conversation ${threadId}`, err);
-      return false;
+      return this.chatSyncFailure(`remove conversation ${threadId}`, err);
     }
   }
 
-  async unshareMessages(threadId: string, _workspaceId = currentWorkspaceId()): Promise<boolean> {
-    if (!this.sharesBoard() || !this.client) return false;
+  async unshareMessages(threadId: string, _workspaceId = currentWorkspaceId()): Promise<ChatSyncOutcome> {
+    if (!this.sharesBoard() || !this.client) return 'retry';
     try {
       const { error } = await this.client.from('chat_messages').delete().eq('thread_id', threadId);
       if (error) throw error;
-      return true;
+      return 'delivered';
     } catch (err: any) {
-      this.reportFailure(`clear conversation ${threadId}`, err);
-      return false;
+      return this.chatSyncFailure(`clear conversation ${threadId}`, err);
     }
   }
 
@@ -661,6 +670,21 @@ export class SupabaseService {
    * silently does nothing" is exactly the state this service was in for
    * months.
    */
+  /**
+   * A refusal no retry can change is logged once, with its reason, and the change is given
+   * up; anything else is reported (throttled) and retried later.
+   */
+  private chatSyncFailure(what: string, err: unknown): ChatSyncOutcome {
+    if (!isPermanentRefusal(err)) {
+      this.reportFailure(what, err);
+      return 'retry';
+    }
+    const code = (err as { code?: string }).code;
+    const detail = (err as { message?: string })?.message ?? String(err);
+    logError(`Cloud refused to ${what} (${code}): ${detail}. It will not be retried; the copy on this computer is kept.`);
+    return 'rejected';
+  }
+
   private reportFailure(what: string, err: unknown): void {
     const now = Date.now();
     if (now - this.lastFailureLoggedAt < FAILURE_LOG_INTERVAL_MS) return;

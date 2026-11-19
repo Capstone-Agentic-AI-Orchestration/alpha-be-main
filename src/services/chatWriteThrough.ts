@@ -69,7 +69,11 @@ export function deleteThreadAndShare(threadId: string): boolean {
   const thread = sqliteService.getChatThreads().find(candidate => candidate.id === threadId);
   chatAttachmentService.deleteThread(threadId);
   const deleted = sqliteService.deleteChatThread(threadId);
-  if (deleted && thread) enqueue(thread.ownerId, threadId, 'delete_thread');
+  if (deleted && thread) {
+    // Its pending sends no longer matter, and one the cloud keeps refusing would hold the delete back for ever.
+    sqliteService.dropChatSyncForThread(threadId);
+    enqueue(thread.ownerId, threadId, 'delete_thread');
+  }
   return deleted;
 }
 
