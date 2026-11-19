@@ -444,3 +444,44 @@ describe('starting a project from an inquiry', () => {
   expect((await db.query('select id from public.projects')).rows).toHaveLength(0);
  });
 });
+
+describe('the client\'s own list after a proposal is accepted', () => {
+ const starter = () => createIntakeProjectStarter({
+  accept: (intakeId, workspaceId, subject, raw) => app.accept(intakeId, workspaceId, subject, raw),
+  link: createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)),
+  projects: new PostgresProjectStore(db),
+  bindProject: () => undefined,
+ });
+ const start = (clientVisible: boolean) => ({ schemaVersion: 1, operationId: '60000000-0000-4000-8000-000000000001',
+  clientVisible, project: { name: 'Informational Website' } });
+ const acceptedDaysAgo = (id: string, days: number) =>
+  db.query(`update alpha_private.ticket_central_intakes set accepted_at=now()-make_interval(days => $2) where id=$1`, [id, days]);
+
+ it('keeps an accepted proposal with the project the client can now see', async () => {
+  const { proposals, receipt } = await submitProposal();
+  const started = await starter().startProject(receipt.id, workspaceA, pmA, start(true));
+  await acceptedDaysAgo(receipt.id, 1);
+  expect((await proposals.list(proposalOwner)).items).toEqual([expect.objectContaining({ id: receipt.id, status: 'accepted',
+   acceptedAt: expect.any(String), project: { workspaceId: workspaceA, projectId: started.projectId, name: 'Informational Website' } })]);
+  // Another client never sees it.
+  expect((await proposals.list({ ...proposalOwner, userId: 'other-client' })).items).toEqual([]);
+ });
+
+ it('never names a project that is not shared with the client', async () => {
+  const { proposals, receipt } = await submitProposal();
+  await starter().startProject(receipt.id, workspaceA, pmA, start(false));
+  await acceptedDaysAgo(receipt.id, 1);
+  const [item] = (await proposals.list(proposalOwner)).items;
+  expect(item).toMatchObject({ status: 'accepted', project: null });
+  expect(JSON.stringify(item)).not.toContain('Informational Website');
+ });
+
+ it('shows an accepted proposal with no project yet as accepted, and drops it after 30 days', async () => {
+  const { proposals, receipt } = await submitProposal();
+  await app.accept(receipt.id, workspaceA, pmA, { schemaVersion: 1, operationId: '60000000-0000-4000-8000-000000000002' });
+  await acceptedDaysAgo(receipt.id, 29);
+  expect((await proposals.list(proposalOwner)).items).toEqual([expect.objectContaining({ status: 'accepted', project: null })]);
+  await acceptedDaysAgo(receipt.id, 31);
+  expect((await proposals.list(proposalOwner)).items).toEqual([]);
+ });
+});
