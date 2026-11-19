@@ -609,18 +609,24 @@ describe('creating repositories from the web', () => {
     files: [], commitSha: 'c'.repeat(40), branches: ['dev', 'uat', 'main'], protectedBranches: ['dev', 'uat', 'main'],
     deployTarget: 'vercel', requiredSecrets: [], deployVariable: null, ciSource: 'test' });
   let scaffoldError: unknown;
-  async function pmApi() {
+  let scaffoldInputs: Array<Record<string, unknown>> = [];
+  async function pmApi(projectFields: Record<string, unknown> = {}) {
     await db.exec(`insert into workspaces (id, name, slug) values ('ws-default', 'Alpha', 'alpha')`);
     await db.exec(`insert into workspace_members (id, workspace_id, user_id, role, status) values ('m-pm', 'ws-default', 'PM1', 'pm', 'active')`);
     session = { login: 'PM1', role: 'pm' };
     process.env.ALPHA_ORG = 'Capstone-Org';
     scaffoldError = undefined;
+    scaffoldInputs = [];
     vi.doMock('../services/repoScaffoldService.js', () => ({
-      createScaffoldedRepository: async (input: { repoName: string }) => { if (scaffoldError) throw scaffoldError; return repo(input.repoName); },
-      createPairedProject: async (input: { repoName: string }) => [repo(`${input.repoName}-be`), repo(`${input.repoName}-fe`)],
+      createScaffoldedRepository: async (input: { repoName: string }) => {
+        scaffoldInputs.push(input); if (scaffoldError) throw scaffoldError; return repo(input.repoName);
+      },
+      createPairedProject: async (input: { repoName: string }) => {
+        scaffoldInputs.push(input); return [repo(`${input.repoName}-be`), repo(`${input.repoName}-fe`)];
+      },
     }));
     const app = await startCloudApi();
-    const project = await createOwnedProject(app, { name: 'Informational Website', key: 'INF' });
+    const project = await createOwnedProject(app, { name: 'Informational Website', key: 'INF', ...projectFields });
     return { app, projectId: project.body.id as string };
   }
   afterEach(() => { delete process.env.ALPHA_ORG; vi.doUnmock('../services/repoScaffoldService.js'); });
@@ -634,6 +640,18 @@ describe('creating repositories from the web', () => {
     expect(project.resources.map((r: { name: string; stack: string; branchOrMachine: string }) => [r.name, r.stack, r.branchOrMachine])).toEqual([
       ['Capstone-Org/info-be', 'nodejs', 'dev'], ['Capstone-Org/info-fe', 'react', 'dev'],
     ]);
+  });
+
+  /**
+   * The project's description is the team's ground rules for agents: long, several lines, and
+   * never for clients. Sent along, GitHub refused it (422) and a public repository would have shown it.
+   */
+  it('does not put the project\'s ground rules on GitHub', async () => {
+    const { app, projectId } = await pmApi({ description: 'Goal: an info site.\n\nRules:\n- Internal budget notes stay private' });
+    const res = await call(app, 'POST', '/api/github/repos/scaffold', { projectId, repoName: 'info', org: 'Capstone-Org', shape: 'paired', frontendStack: 'react', backendStack: 'nodejs' });
+    expect(res.status).toBe(201);
+    expect(scaffoldInputs).toHaveLength(1);
+    expect(scaffoldInputs[0]).not.toHaveProperty('description');
   });
 
   it('keeps repositories in Alpha\'s own organization on the hosted server', async () => {

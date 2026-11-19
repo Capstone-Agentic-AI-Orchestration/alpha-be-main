@@ -56,6 +56,16 @@ const files = [
 ];
 
 describe('provisioning a repository', () => {
+  it('sends GitHub a one-line description, whatever it was given', async () => {
+    const { api, calls } = github();
+
+    await provisionRepository({ org: 'acme', name: 'shop', files, message: 'chore: scaffold shop',
+      description: 'Build the shop.\n\n- Use the brand colours\n\t- No tracking' }, api);
+
+    expect(calls[0]?.body).toEqual({ name: 'shop', private: true, auto_init: true,
+      description: 'Build the shop. - Use the brand colours - No tracking' });
+  });
+
   it('makes the whole history one commit, on dev, uat and main', async () => {
     const { api, calls } = github();
 

@@ -489,8 +489,10 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
       visibility: visibility ?? 'private',
       includeDocker: Boolean(includeDocker),
       workspaceId: req.workspace!.workspaceId,
-      ...(deploy === undefined ? {} : { deploy }),
-      ...(project.description ? { description: project.description } : {})
+      // Not the project's description: that is the team's ground rules for agents, often long and
+      // never for clients, and it would land in the repository's description and README -- in public
+      // repositories too. GitHub also refuses a multi-line description outright (422).
+      ...(deploy === undefined ? {} : { deploy })
     };
     // Standalone answers the repository itself, as before; paired answers both.
     const result = paired
