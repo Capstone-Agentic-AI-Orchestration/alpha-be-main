@@ -152,7 +152,7 @@ describe('one conversation per client and project', () => {
   it('gives the PM open requests for the task picker and the client’s project list', async () => {
     await app.setDone(target, 't-2', client, { done: true });
     const open = (await app.openRequests('workspace-a', 'project-a', pm)).items;
-    expect(open.map(r => r.ticketId).sort()).toEqual(['t-1', 't-other']);
+    expect(open.map(r => r.ticketId).sort((a, b) => a.localeCompare(b))).toEqual(['t-1', 't-other']);
     expect(open.find(r => r.ticketId === 't-1')?.clientName).toBe('Client client-a');
     const projects = (await app.clientProjects('workspace-a', pm, 'client-a')).items;
     expect(projects).toEqual([expect.objectContaining({ projectId: 'project-a', projectName: 'Project A', openRequests: 1 })]);
