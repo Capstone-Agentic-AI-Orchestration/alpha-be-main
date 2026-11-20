@@ -1205,7 +1205,7 @@ export class ChatService extends EventEmitter {
       const chosen = scoped ?? [...issues].sort((a, b) => updated(b).localeCompare(updated(a))).slice(0, 10);
       const records: BoardTaskRecord[] = chosen.map(issue => {
         const build = latest.get(issue.id);
-        return { identifier: issue.identifier, title: issue.title, status: issue.status,
+        return { identifier: issue.identifier, title: issue.title, status: issue.status, priority: issue.priority,
           snapshot: build ? sqliteService.getOrchestrationSnapshot(build.runId) : undefined };
       });
       const names = new Map(sqliteService.getAgents().map(agent => [agent.id, agent.name]));

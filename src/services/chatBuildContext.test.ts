@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { describeProjectBuild } from './chatBuildContext.js';
+import { describeBoardTasks, describeProjectBuild } from './chatBuildContext.js';
+
+describe('the board tasks the chat agent is told about', () => {
+  it('gives each task\'s priority beside its column, so the agent can rank them', () => {
+    const text = describeBoardTasks([
+      { identifier: 'PRO-101', title: 'Landing Page', status: 'todo', priority: 'medium' },
+      { identifier: 'PRO-102', title: 'Project setup and expense storage layer', status: 'backlog', priority: 'high' },
+      { identifier: 'PRO-107', title: 'Untriaged idea', status: 'backlog' }
+    ], id => id, { canSeeBuilds: true, scoped: false });
+
+    expect(text).toContain('### PRO-101 · Landing Page (board column: todo · priority: medium)');
+    expect(text).toContain('### PRO-102 · Project setup and expense storage layer (board column: backlog · priority: high)');
+    expect(text).toContain('### PRO-107 · Untriaged idea (board column: backlog)');
+  });
+});
 
 describe('the build the chat agent is told about', () => {
   it('gives the status, the reason it stopped, what each agent did and the open findings', () => {

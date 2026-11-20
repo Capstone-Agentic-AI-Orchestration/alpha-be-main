@@ -62,6 +62,11 @@ export interface BoardTaskRecord {
   title: string;
   /** The task's board column. */
   status: string;
+  /**
+   * The task's priority on the board (urgent, high, medium, low). Without it the agent
+   * had no way to answer "what is the highest priority task" and said so.
+   */
+  priority?: string;
   snapshot?: OrchestrationSnapshot;
 }
 
@@ -94,7 +99,8 @@ export function describeBoardTasks(
   let used = header.length + closing.length;
   let omitted = 0;
   for (const task of tasks) {
-    const lines = [`### ${task.identifier} · ${clip(task.title, 160)} (board column: ${task.status})`];
+    const placement = task.priority ? `board column: ${task.status} · priority: ${task.priority}` : `board column: ${task.status}`;
+    const lines = [`### ${task.identifier} · ${clip(task.title, 160)} (${placement})`];
     if (!options.canSeeBuilds) lines.push('- Build records are not available to this person\'s workspace role.');
     else if (!task.snapshot) lines.push('- No build has started for this task.');
     else {
