@@ -23,9 +23,10 @@ describe('continuing a stopped build', () => {
     expect(referencesAlphaRecords('Create a redesigned UI for Money tracker with clear navigation and responsive layouts.')).toBe(false);
   });
 
-  it('tells Alpha that build goals must stand on their own', () => {
+  it('tells Alpha that build goals must stand on their own, naming board cards by key', () => {
     const prompt = orchestratorRoutingPrompt({ projectName: 'Money tracker', repositories: ['org/app-fe'], canBuild: true });
-    expect(prompt).toContain('cannot read this conversation, issue keys such as MON-104, earlier builds');
+    expect(prompt).toContain('cannot read this conversation, earlier builds');
+    expect(prompt).toContain('name each card\'s key (such as MON-104) in the goal');
   });
 });
 

@@ -1,5 +1,6 @@
 import { featureSpecSourceHash, plannerRequirementsFromSpec, specPlanningBrief } from './featureSpecContract.js';
 import { manualChecklistRequirements } from './issueChecklist.js';
+import { boardCardSpec, selectBoardCards, type BoardCardSelection } from './boardCardBuild.js';
 import { isBoardThreadId } from './boardThreads.js';
 import { roleCanPlan } from './agentRoleContracts.js';
 import crypto from 'node:crypto';
@@ -47,6 +48,8 @@ export interface ProjectBuildStartResult {
   orchestrationCurrentTask?: { id: string; title: string; ownerAgentId: string };
   branchName?: string;
   reason?: string;
+  /** The planner needs the person to settle this before it can plan; nothing was started. */
+  decision?: { question: string; options: string[] };
 }
 
 interface StartProjectBuildInput {
@@ -377,6 +380,27 @@ async function startOrchestratedProjectBuild(input: {
       brief: [approvedSpec?.brief, 'The task acceptance checklist must be satisfied in full.'].filter(Boolean).join('\n')
     };
   }
+  // A chat request that names board cards, or asks for all of them, builds from the cards
+  // themselves: the planner and specialists cannot open the board.
+  let boardCards: BoardCardSelection | undefined;
+  if (!linkedIssueId && !input.deliveryRepair) {
+    boardCards = selectBoardCards(cleanGoal, (await issueStore().list(workspaceId)).filter(item => item.projectId === project.id));
+    if (boardCards.cards.length) {
+      approvedSpec = boardCardSpec(boardCards.cards, card => {
+        const record = runWithWorkspace(workspaceId, () => sqliteService.getFeatureSpec(card.id));
+        return record?.status === 'approved' && record.sourceHash === featureSpecSourceHash(card) ? record.spec : undefined;
+      });
+    }
+  }
+  const cardKeys = boardCards?.cards.map(card => card.identifier) ?? [];
+  const archivedKeys = boardCards?.archived ?? [];
+  const cardNote = [
+    cardKeys.length ? `Planned from board tasks ${cardKeys.join(', ')}, using their checklists as the requirements.` : '',
+    archivedKeys.length ? `Archived and left out: ${archivedKeys.join(', ')}.` : ''
+  ].filter(Boolean).join(' ') || undefined;
+  if (cardKeys.length && approvedSpec && approvedSpec.requirements.length > 20) {
+    return blocked(`Board tasks ${cardKeys.join(', ')} have ${approvedSpec.requirements.length} open checklist items, and one build covers at most 20. Ask for fewer tasks at a time.`, project, repository);
+  }
   if (approvedSpec && (approvedSpec.requirements.length > 20 || approvedSpec.requirements.some(item => item.description.length > 4_000))) {
     return blocked('This task has more acceptance criteria than one build can cover. Split it into smaller tasks (at most 20 requirements per build, each under 4,000 characters).', project, repository);
   }
@@ -574,6 +598,11 @@ async function startOrchestratedProjectBuild(input: {
     }
   } catch (error) {
     const detail = error instanceof OrchestrationPlanningError ? error.message : error instanceof Error ? error.message : 'The plan could not be validated.';
+    if (error instanceof OrchestrationPlanningError && error.decision) {
+      // A question only the person can answer: ask it now instead of starting a build to ask it.
+      await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
+      return { ...blocked(error.decision.question, project, repository), decision: error.decision };
+    }
     if (error instanceof OrchestrationPlanningError) saveRejectedPlans(error, { projectId: project.id, requestKey, goal: cleanGoal });
     const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
     const recoveryNote = cleanup.every(result => result === 'released') ? ''
@@ -593,6 +622,7 @@ async function startOrchestratedProjectBuild(input: {
       description: [
         fromBoard ? 'Build requested from the project board using the task-driven orchestrator.' : 'Build requested from project chat using the task-driven orchestrator.', '',
         'Original request:', cleanGoal, '',
+        ...(cardKeys.length ? [`Board tasks: ${cardKeys.join(', ')}`, ''] : []),
         'Build expectations:',
         '- Work is assigned as separate, role-qualified tasks by Alpha’s validated plan.',
         '- Each specialist receives only its task package and repository path scope.',
@@ -651,7 +681,8 @@ async function startOrchestratedProjectBuild(input: {
         extraReservation.requestKey, requestFingerprint, orchestrationOwnerSessionId
       ));
     }
-    return orchestrationStartResult(snapshot, project, repository);
+    const started = orchestrationStartResult(snapshot, project, repository);
+    return cardNote ? { ...started, reason: [cardNote, started.reason].filter(Boolean).join(' ') } : started;
   } catch (error) {
     const persisted = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
     let recoveryNote = '';
