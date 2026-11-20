@@ -284,6 +284,22 @@ export function isStartPreviewRequest(content: string): boolean {
   return asksToRun && aboutLocal;
 }
 
+/**
+ * A request for the Orchestrator to merge the finished build's pull request into dev:
+ * "merge it", "can you accept the pull request for me", "merge the PR into dev". Not a
+ * question about merging, not a negation, and nothing about UAT, main or production,
+ * which are separate steps.
+ */
+export function isMergeRequest(content: string): boolean {
+  const text = content.trim();
+  if (text.length > 120 || /\b(?:don'?t|do not|never|not yet|uat|main|master|production|prod|deploy|release)\b/i.test(text)) return false;
+  if (/^(?:should|shall|do|does|did|is|are|was|why|what|when|how|who|which)\b/i.test(text)) return false;
+  const request = text.replace(/^(?:ok(?:ay)?|now|please|yes)[, ]+/i, '').replace(/^(?:can|could|would) you (?:please )?/i, '');
+  const asksToMerge = /^(?:please )?(?:merge|accept|land)\b/i.test(request);
+  const aboutPullRequest = /^(?:please )?merge\b/i.test(request) || /\b(?:pull request|pr|it|this|the changes)\b/i.test(request);
+  return asksToMerge && aboutPullRequest;
+}
+
 export function isPreviewInvestigationRequest(content: string): boolean {
   return /\b(?:preview|browser|white screen|blank (?:page|screen)|npm run dev|local (?:run|server|website|dev))\b/i.test(content);
 }

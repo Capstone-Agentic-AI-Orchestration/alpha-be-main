@@ -53,6 +53,9 @@ export function describeProjectBuild(
     ...describeRun(snapshot, agentName)
   ];
   lines.push('Explain the build in plain words when asked. Plans, instructions and review evidence are in the right panel. The user replies and approves through the main chat. Never ask them to type into a side-panel approval box. Do not edit code in this chat.');
+  if (snapshot.run.status === 'completed' && (snapshot.run.publications?.length || snapshot.run.publication)) {
+    lines.push('You cannot merge pull requests yourself. To merge this build\'s pull request into dev, the person says "merge it" in this chat and the Orchestrator does it once the checks pass. Do not tell them to merge on GitHub.');
+  }
   return lines.join('\n');
 }
 

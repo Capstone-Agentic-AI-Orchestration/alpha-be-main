@@ -58,11 +58,17 @@ export class OrchestrationDeliveryService {
     }
     return snapshot;
   }
-  private assertIndependentReviews(snapshot: OrchestrationSnapshot) {
+  /**
+   * Every repository that has a pull request in this delivery needs accepted independent
+   * review and validation after its last code change. A repository the build left unchanged
+   * has no pull request and nothing to review; requiring evidence for it blocked delivery of
+   * the repositories that did change.
+   */
+  private assertIndependentReviews(snapshot: OrchestrationSnapshot, record: DeliveryRecord) {
     if (snapshot.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity))) {
       throw new DeliveryError('Resolve the blocking security findings before delivery.');
     }
-    for (const repo of snapshot.run.repositoryWorkspaces ?? [{ repository: snapshot.run.repository }]) {
+    for (const repo of record.repositories) {
       const tasks = snapshot.tasks.filter(task => (task.repository ?? snapshot.run.repository).toLowerCase() === repo.repository.toLowerCase());
       const owners = new Set(tasks.filter(task => ['backend', 'frontend', 'database', 'mobile'].includes(task.kind)).map(task => task.ownerAgentId));
       const reviews = tasks.filter(task => task.kind === 'review' && task.status === 'accepted' && !owners.has(task.ownerAgentId));
@@ -131,7 +137,7 @@ export class OrchestrationDeliveryService {
   }
   private async observe(record: DeliveryRecord): Promise<DeliveryRecord> {
     const next = structuredClone(record);
-    this.assertIndependentReviews(this.snapshot(record));
+    this.assertIndependentReviews(this.snapshot(record), record);
     if (record.repairRunId) {
       const child = this.store.getOrchestrationSnapshot(record.repairRunId);
       if (child?.run.publication) {
@@ -214,7 +220,7 @@ export class OrchestrationDeliveryService {
         throw new DeliveryError('Automatic delivery has no current authorization for these source commits.', 403);
       }
       if (input.action === 'enable_uat' || input.action === 'resume_delivery') {
-        this.assertIndependentReviews(snapshot);
+        this.assertIndependentReviews(snapshot, record);
         for (const target of record.repositories) this.assertPull(target, await this.github.pull(target.repository, target.prNumber), false);
         return this.save({ ...record, authorization: { actorId: input.context.userId, grantedAt: new Date().toISOString(), paused: false,
           sources: record.repositories.map(repo => ({ repository: repo.repository, head: repo.head })) },

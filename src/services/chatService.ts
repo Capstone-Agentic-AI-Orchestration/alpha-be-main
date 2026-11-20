@@ -45,6 +45,7 @@ import {
   alphaChatResponseSchema,
   readStructuredAlphaReply,
   isBareContinueRequest,
+  isMergeRequest,
   isStopPreviewRequest,
   isStartPreviewRequest,
   orchestratorRoutingPrompt,
@@ -702,6 +703,21 @@ export class ChatService extends EventEmitter {
         result = count ? 'The local preview has stopped. You can keep chatting.' : 'No Alpha-managed local preview is running in this conversation.';
       } catch (error) { result = `The local preview could not be stopped: ${(error as Error).message}`; }
       const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha', content: result, timestamp: new Date().toISOString() };
+      saveChatMessageAndShare(reply); this.emit('chat_message', reply);
+      return { userMessage, agentMessage: reply, agentMessages: [reply] };
+    }
+
+    // "Merge it": the Orchestrator merges the finished build's pull request into dev through
+    // delivery, with all of its guards. The chat agent's own GitHub access cannot merge, and
+    // used to answer that it couldn't. A pending plan or publication decision is handled above.
+    if (params.routing && !params.routing.answerOnly && !attachmentIds.length && thread.projectId && isMergeRequest(content)) {
+      const id = `${messageId}-merge`;
+      const saved = sqliteService.getChatMessages(threadId).find(message => message.id === id);
+      if (saved) return { userMessage, agentMessage: saved, agentMessages: [saved] };
+      const { mergeFromChat, defaultChatMergeDeps } = await import('./orchestrationChatMerge.js');
+      const result = await mergeFromChat({ context: params.routing.context, projectId: thread.projectId, threadId, messageId },
+        await defaultChatMergeDeps());
+      const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha Orchestrator', content: result, timestamp: new Date().toISOString() };
       saveChatMessageAndShare(reply); this.emit('chat_message', reply);
       return { userMessage, agentMessage: reply, agentMessages: [reply] };
     }

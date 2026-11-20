@@ -318,7 +318,8 @@ const TOOLS: Record<string, ToolDef> = {
     description:
       'Where a build stands in delivery to dev and UAT: stage, why it is waiting, failed and pending checks with links, the UAT ' +
       'deployment, repair attempts and recent events. Alpha merges and promotes by itself once a person enables delivery and the ' +
-      'checks pass; you cannot merge. When a check failed, read it with github_failed_run_logs and fix the cause on your branch.',
+      'checks pass; you cannot merge. A person can also say "merge it" in the project chat, and the Orchestrator merges the ' +
+      'reviewed pull request into dev once its checks pass. When a check failed, read it with github_failed_run_logs and fix the cause on your branch.',
     inputSchema: schema({ runId: str('The build (orchestration run) id.') }, ['runId']),
     run: async ({ runId }) => {
       const record = sqliteService.getOrchestrationDelivery(String(runId ?? '').trim());
