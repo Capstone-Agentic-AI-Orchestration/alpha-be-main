@@ -24,6 +24,7 @@ import { supabaseService } from '../services/supabaseService.js';
 import type { PrototypeRun } from '../models/index.js';
 import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
 import { isManagedTask, MANAGED_TASK_ACTION_ERROR } from '../services/managedTaskExecution.js';
+import { shareCard } from '../services/boardShareQueue.js';
 
 export const runRouter = Router();
 async function refuseManagedAction(req: Request, res: Response, run: PrototypeRun): Promise<boolean> {
@@ -277,15 +278,7 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
     }
     const rejected = { ...run, status: 'changes_requested' as any, updatedAt: now };
     await runStore().save(req.workspace!.workspaceId, rejected, req.workspace!.userId);
-    await issueStore().addComment(req.workspace!.workspaceId, {
-      id: `comm-${run.id}-rejected`,
-      issueId: run.issueId,
-      authorType: 'system',
-      authorName: 'Alpha Execution Engine',
-      content: 'Changes requested. The run stopped at the review gate.',
-      createdAt: now
-    });
-    await issueStore().update(req.workspace!.workspaceId, run.issueId, { status: 'todo' });
+    await moveCard(req.workspace!.workspaceId, run.issueId, 'todo');
     return res.json(rejected);
   }
 
@@ -295,10 +288,6 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
    * A run with no pull request is still approvable — a project with no remote
    * commits locally and never opens one, and that work is no less done.
    */
-  let mergeNote = approvedReplay
-    ? 'The run was already approved; its ticket review is being reconciled.'
-    : 'No pull request was opened, so there was nothing to merge.';
-
   if (run.prUrl && !approvedReplay) {
     const project = await projectStore().get(req.workspace!.workspaceId, run.projectId);
     /**
@@ -322,7 +311,7 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
         ? await githubService.mergePullRequest(workspace.dir, run.prUrl)
         : await mergePullRequestOverApi(run.prUrl);
       logInfo(`Merged ${run.prUrl} for run ${run.id}`);
-      mergeNote = `Merged ${run.prUrl}.${result ? ` ${result}` : ''}`;
+      if (result) logInfo(result);
       // A person did this, not an agent — the trail should say so.
       await runStore().recordRemoteAction(req.workspace!.workspaceId, {
         runId: run.id,
@@ -354,19 +343,6 @@ runRouter.post('/runs/:id/approve', route(async (req: Request, res: Response) =>
         target: run.prUrl,
         detail,
         succeeded: false
-      });
-
-      await issueStore().addComment(req.workspace!.workspaceId, {
-        id: `comm-${run.id}-merge-failed-${Date.parse(now)}`,
-        issueId: run.issueId,
-        authorType: 'system',
-        authorName: 'Alpha Execution Engine',
-        content: `Approved, but ${run.prUrl} could not be merged:
-
-${detail}
-
-The run is still at the review gate.`,
-        createdAt: now
       });
 
       return res.status(409).json({
@@ -404,17 +380,7 @@ The run is still at the review gate.`,
     return res.status(status).json({ error: err.message || 'Could not record the ticket-linked review decision. Retry approval to reconcile it.' });
   }
 
-  // Written to the comments table, not appended to an array in the browser.
-  await issueStore().addComment(req.workspace!.workspaceId, {
-    id: `comm-${run.id}-approved`,
-    issueId: run.issueId,
-    authorType: 'system',
-    authorName: 'Alpha Execution Engine',
-    content: `Review approved. ${mergeNote}`,
-    createdAt: now
-  });
-
-  await issueStore().update(req.workspace!.workspaceId, run.issueId, { status: 'done' });
+  await moveCard(req.workspace!.workspaceId, run.issueId, 'done');
   res.json(updated);
 }));
 
@@ -529,3 +495,13 @@ runRouter.post('/squad-runs/:id/cancel', desktopOnly, async (req: Request, res: 
 runRouter.post('/squads/:id/run', desktopOnly, (_req: Request, res: Response) => {
   res.status(410).json({ error: 'Squads were removed. Start a build with the Orchestrator from the task or project chat.' })
 });
+
+/**
+ * Move a run's card after a person's review decision, and tell the team's board.
+ * The decision is this machine's own change; the local store never publishes.
+ * The decision itself shows where it was made, so no comment is written.
+ */
+async function moveCard(workspaceId: string, issueId: string, status: 'todo' | 'done'): Promise<void> {
+  const updated = await issueStore().update(workspaceId, issueId, { status });
+  if (updated) void shareCard(updated, workspaceId);
+}

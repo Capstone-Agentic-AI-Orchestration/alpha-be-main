@@ -230,18 +230,15 @@ describe('reconcileInterruptedWork', () => {
     expect(byId['iss-2']).toBe('agent_running');
   });
 
-  it('explains itself on the issue', async () => {
+  it('moves the card back without commenting on it', async () => {
     const { svc, reconcile } = await startDaemon();
     plantIssue(svc, 'iss-1');
     plantRun(svc);
     reconcile();
 
-    const comments = svc.getIssues()[0].comments ?? [];
-    const note = comments[comments.length - 1];
-    expect(note.authorType).toBe('system');
-    expect(note.content).toContain('interrupted');
-    // The branch is the only thing that survived, so it has to be named.
-    expect(note.content).toContain('feat/alf-101-0001');
+    // Task comments are for people; the interrupted run is visible on the run itself.
+    expect(svc.getIssues()[0].status).toBe('in_progress');
+    expect(svc.getIssues()[0].comments ?? []).toEqual([]);
   });
 
   it('is safe to run twice', async () => {
@@ -252,6 +249,6 @@ describe('reconcileInterruptedWork', () => {
 
     reconcile();
     expect(reconcile()).toEqual({ runs: [], squadRuns: [], issues: [], agentCalls: [] });
-    expect((svc.getIssues()[0].comments ?? []).length).toBe(1);
+    expect(svc.getIssues()[0].comments ?? []).toEqual([]);
   });
 });

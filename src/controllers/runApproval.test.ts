@@ -173,14 +173,15 @@ describe('POST /runs/:id/approve', () => {
     expect(svc.getIssues()[0].status).toBe('done');
   });
 
-  it('records what it merged, not what it intended to', async () => {
+  it('marks the card done after the merge, writing no comment on it', async () => {
     const { svc, app } = await startApi();
     plantAwaitingRun(svc);
     await post(app, '/api/runs/run-1/approve', { approved: true });
 
-    const comments = svc.getIssues()[0].comments ?? [];
-    const note = comments[comments.length - 1].content;
-    expect(note).toContain('Merged https://github.com/o/r/pull/1');
+    expect(merge).toHaveBeenCalled();
+    expect(svc.getIssues()[0].status).toBe('done');
+    // Task comments are for people; the merge is in the run's remote-action trail.
+    expect(svc.getIssues()[0].comments ?? []).toEqual([]);
   });
 
   /**
@@ -202,14 +203,14 @@ describe('POST /runs/:id/approve', () => {
     expect(svc.getIssues()[0].status).not.toBe('done');
   });
 
-  it('says on the issue why a merge failed', async () => {
+  it('says why a merge failed to the person approving, not in a comment', async () => {
     const { svc, app } = await startApi();
     plantAwaitingRun(svc);
     merge.mockRejectedValueOnce(new Error('merge conflict between base and head'));
-    await post(app, '/api/runs/run-1/approve', { approved: true });
+    const res = await post(app, '/api/runs/run-1/approve', { approved: true });
 
-    const comments = svc.getIssues()[0].comments ?? [];
-    expect(comments[comments.length - 1].content).toContain('merge conflict');
+    expect(res.body.error).toContain('merge conflict');
+    expect(svc.getIssues()[0].comments ?? []).toEqual([]);
   });
 
   it('approves a run that opened no pull request', async () => {
@@ -223,7 +224,7 @@ describe('POST /runs/:id/approve', () => {
     expect(res.status).toBe(200);
     expect(merge).not.toHaveBeenCalled();
     expect(svc.getPrototypeRuns()[0].status).toBe('completed');
-    expect((svc.getIssues()[0].comments ?? []).pop().content).toContain('nothing to merge');
+    expect(svc.getIssues()[0].status).toBe('done');
   });
 
   it('refuses when the project has no working copy to merge from', async () => {

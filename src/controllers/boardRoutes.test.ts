@@ -290,6 +290,10 @@ describe('the cloud board change routes', () => {
       select last_cursor::text as cursor from workspace_board_cursors where workspace_id='ws-default'
     `);
     const created = await call(app, 'POST', '/api/issues', { title: 'Fix cart', projectId: project.id });
+    // A second change after the card, so a one-row page has more behind it.
+    await call(app, 'POST', `/api/issues/${created.body.id}/comments`, {
+      id: 'c-paging', authorType: 'user', authorName: 'LloydLim1', content: 'Seen on staging.'
+    });
 
     const bootstrap = await call(app, 'GET', '/api/board/bootstrap', undefined, clientHeaders);
     expect(bootstrap.status).toBe(200);
@@ -416,17 +420,15 @@ describe('the cloud issue routes', () => {
     return project.id as string;
   }
 
-  it('create a card, numbered in the project’s scheme, with its opening comment', async () => {
+  it('create a card, numbered in the project’s scheme, with no opening comment', async () => {
     const app = await startCloudApi();
     const projectId = await withProject(app);
 
     const created = await call(app, 'POST', '/api/issues', { title: 'Cart loses items', projectId });
     expect(created.status).toBe(201);
     expect(created.body).toMatchObject({ identifier: 'CHK-101', title: 'Cart loses items' });
-    // The opening comment is written where the real identifier is known.
-    expect(created.body.comments.map((c: any) => c.content)).toEqual([
-      expect.stringContaining('CHK-101 created by')
-    ]);
+    // The card shows who created it; comments are for people.
+    expect(created.body.comments).toEqual([]);
 
     const { rows } = await db.query<{ workspace_id: string }>('select workspace_id from issues');
     expect(rows).toEqual([{ workspace_id: 'ws-default' }]);

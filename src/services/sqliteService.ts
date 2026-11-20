@@ -55,6 +55,7 @@ import { BUILTIN_SKILLS } from './builtinSkills.js';
 import { normalizeBuildSteps } from '../store/buildSteps.js';
 import { MAX_PLAN_TASKS, parseOrchestrationPlan, validateOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
 import type { PersistedReviewFinding } from './orchestrationReviewWorkflow.js';
+import { assertPersonComment } from './taskComments.js';
 import {
   transitionTask,
   transitionRun,
@@ -3290,6 +3291,7 @@ export class SQLiteService {
   }
 
   addIssueComment(c: IssueComment): IssueComment {
+    assertPersonComment(c);
     if (!this.getIssues().some(issue => issue.id === c.issueId)) return c;
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO issue_comments (id, issue_id, author_type, author_name, author_avatar, agent_id, content, is_thinking, github_id, created_at)

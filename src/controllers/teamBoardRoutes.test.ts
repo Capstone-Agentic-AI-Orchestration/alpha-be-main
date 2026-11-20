@@ -622,13 +622,13 @@ describe('a card made on a team’s desktop', () => {
    * The database refuses a comment on an issue it does not have, and an issue
    * in a project it does not have: project, then card, then comment.
    */
-  it('is shared before its opening comment, after its project', async () => {
+  it('is shared after its project, with no opening comment', async () => {
     const { app } = await startApi();
     const project = await withProject(app);
 
     await call(app, 'POST', '/api/issues', { title: 'Add a thing', projectId: project.id });
 
-    expect(shared).toEqual([`project ${project.id}`, 'issue gh-issue-777', 'comment comm-gh-issue-777-created']);
+    expect(shared).toEqual([`project ${project.id}`, 'issue gh-issue-777']);
   });
 
   it('is still made, and says why, when GitHub refuses it', async () => {

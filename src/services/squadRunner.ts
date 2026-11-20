@@ -5,7 +5,7 @@ import { resolveAgent } from './personaService.js';
 import { totalTokens } from './runUsage.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { Agent, BuildStepPhase, PrototypeRun, Squad, SquadMemberAssignment, SquadRun } from '../models/index.js';
-import { addCommentAndShare, updateIssueAndPush } from './boardWriteThrough.js';
+import { updateIssueAndPush } from './boardWriteThrough.js';
 import { agentBranchName } from './githubRepoWorkspace.js';
 import type { TicketExecutionHandle } from './ticketExecutionRelay.js';
 import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
@@ -154,14 +154,6 @@ export class SquadRunner {
       if (activeMember) await runnerService.cancelRun(activeMember.id);
 
       updateIssueAndPush(squadRun.issueId, { status: 'in_progress' });
-      addCommentAndShare({
-        id: `comm-${squadRun.id}-cancelled`,
-        issueId: squadRun.issueId,
-        authorType: 'system',
-        authorName: 'Alpha Squad Runner',
-        content: `Build stopped by the user. Work already completed remains on \`${squadRun.branchName}\` for review.`,
-        createdAt: now
-      });
 
       const result = sqliteService.getSquadRun(squadRunId) ?? cancelled;
       runnerService.emit('squad_run_cancelled', result);
@@ -287,14 +279,6 @@ export class SquadRunner {
       };
       await this.persistSquadRun(stopped, params.workspaceId);
       updateIssueAndPush(issue.id, { status: 'in_progress' });
-      addCommentAndShare({
-        id: `comm-${squadRun.id}-stopped`,
-        issueId: squadRun.issueId,
-        authorType: 'system',
-        authorName: 'Alpha Squad Runner',
-        content: `Squad run stopped before its first agent started. ${reason} The issue is ready to retry.`,
-        createdAt: stopped.updatedAt
-      });
       runnerService.emit('squad_run_failed', stopped);
       throw error;
     }
@@ -402,14 +386,6 @@ export class SquadRunner {
     if (!succeeded) {
       const reason = `${who} did not finish (${finished.status}). Stopped at member ${position} of ${total}.`;
       await this.persistSquadRun({ ...squadRun, status: 'failed', stoppedReason: reason, updatedAt: now }, waiting.workspaceId);
-      addCommentAndShare({
-        id: `comm-${squadRun.id}-stopped`,
-        issueId: squadRun.issueId,
-        authorType: 'system',
-        authorName: 'Alpha Squad Runner',
-        content: `Squad run stopped. ${reason} Work committed before the failure is on \`${squadRun.branchName}\`.`,
-        createdAt: now
-      });
       logInfo(`Squad run ${squadRun.id} stopped: ${reason}`);
       runnerService.emit('squad_run_failed', sqliteService.getSquadRun(squadRun.id));
       this.ticketExecutions.delete(squadRun.id);
@@ -424,19 +400,6 @@ export class SquadRunner {
       const runs = sqliteService.getRunsForSquadRun(squadRun.id);
       const tokens = runs.reduce((sum, r) => sum + (totalTokens(r.usage) ?? 0), 0);
 
-      addCommentAndShare({
-        id: `comm-${squadRun.id}-done`,
-        issueId: squadRun.issueId,
-        authorType: 'system',
-        authorName: 'Alpha Squad Runner',
-        content:
-          `Squad run finished. ${runs.length} member(s) worked on \`${squadRun.branchName}\`:\n` +
-          runs.map(r => `- ${nameFor(r.agentId)} — ${describeWork(r)}`).join('\n') +
-          // Real measured usage, or nothing. See runUsage.ts — an unmeasured
-          // run is not a free one, and must not be reported as zero.
-          (tokens ? `\n\nTotal reported usage: ${tokens.toLocaleString()} tokens.` : ''),
-        createdAt: now
-      });
 
       logInfo(`Squad run ${squadRun.id} complete: ${runs.length} member(s), ${tokens} tokens`);
       runnerService.emit('squad_run_completed', sqliteService.getSquadRun(squadRun.id));

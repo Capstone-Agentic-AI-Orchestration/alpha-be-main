@@ -10,7 +10,7 @@ import {
   MappedIssue
 } from './githubIssueMapping.js';
 import { issueIdFor } from './githubRepoDiscovery.js';
-import { isBoardActivityComment } from './boardActivity.js';
+import { isPersonComment } from './taskComments.js';
 
 /**
  * Pull the shared board down from GitHub.
@@ -157,13 +157,14 @@ async function syncCommentsFor(issue: Issue, report: SyncReport, workspaceId: st
   for (const gh of remote) {
     if (known.has(gh.id)) continue;
     const { content, authorName } = bodyFromGitHub(gh.body ?? '');
+    // Text Alpha wrote to GitHub carries its prefix; Alpha already has it, and
+    // a card's comments are for people, so only a teammate's comment comes in.
+    if (authorName) continue;
     await issueStore().addComment(workspaceId, {
       id: `gh-${issue.githubRepo}-${gh.id}`,
       issueId: issue.id,
-      // Alpha's own comments come back as system or agent text; a teammate's
-      // is a person. The prefix is what distinguishes them.
-      authorType: authorName ? 'system' : 'user',
-      authorName: authorName ?? gh.user?.login ?? 'GitHub',
+      authorType: 'user',
+      authorName: gh.user?.login ?? 'GitHub',
       content,
       githubId: gh.id,
       createdAt: gh.created_at
@@ -181,8 +182,8 @@ async function pushCommentsFor(issue: Issue, report: SyncReport, workspaceId: st
     // A thinking placeholder is a spinner, not a statement. Publishing it would
     // put "…" on the issue for everyone to read.
     if (comment.isThinking) continue;
-    // Board activity (archived, restored, changed by an agent) stays on the board.
-    if (isBoardActivityComment(comment)) continue;
+    // Only people's comments: anything older from an agent or Alpha stays off GitHub.
+    if (!isPersonComment(comment)) continue;
 
     try {
       const created = await githubApi().post<{ id: number }>(

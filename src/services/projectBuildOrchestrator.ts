@@ -18,7 +18,6 @@ import { projectRunWorkspacePath, resolveProjectWorkspace, allowAttachedWorkspac
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
-import { addCommentAndShare } from './boardWriteThrough.js';
 import { supabaseService } from './supabaseService.js';
 import { shareCard } from './boardShareQueue.js';
 import { resolveAgent } from './personaService.js';
@@ -574,20 +573,6 @@ async function startOrchestratedProjectBuild(input: {
       });
       workspaceRegistry.bind('issues', issue.id, workspaceId);
       await shareCard(issue);
-      addCommentAndShare({
-        id: `comm-${issue.id}-chat-build`, issueId: issue.id,
-        authorType: 'system', authorName: 'Alpha Orchestrator',
-        content: `Task workflow planned by ${plannerCandidate.persona.name}.`, createdAt: issue.createdAt
-      });
-    } else if (linkedIssueId) {
-      addCommentAndShare({
-        id: `comm-${issue.id}-build-${requestKey}`, issueId: issue.id,
-        authorType: 'system', authorName: 'Alpha Orchestrator',
-        content: fromBoard
-          ? `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it on this task.`
-          : `Orchestrator build planned by ${plannerCandidate.persona.name}. Follow it in project chat and its Build review tab.`,
-        createdAt: new Date().toISOString()
-      });
     }
   } catch (error) {
     const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });

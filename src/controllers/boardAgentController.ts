@@ -10,7 +10,6 @@ import { BoardRuleError } from '../services/boardService.js';
 import {
   approveAgentChange,
   archiveForAgent,
-  commentForAgent,
   createCardForAgent,
   getCard,
   listAgentChanges,
@@ -40,7 +39,6 @@ const AGENT_OPERATIONS: Record<string, (grant: BoardGrant, args: Record<string, 
   create: createCardForAgent,
   update: updateCardForAgent,
   move: moveCardForAgent,
-  comment: commentForAgent,
   archive: archiveForAgent,
   restore: restoreForAgent
 };

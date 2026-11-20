@@ -6,9 +6,7 @@ import { supabaseService } from './supabaseService.js';
 import { sqliteService } from './sqliteService.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { runWithWorkspace } from './workspaceContext.js';
-import { randomUUID } from 'node:crypto';
 import type { Issue, IssueStatus } from '../models/index.js';
-import { BOARD_ACTIVITY_COMMENT_PREFIX } from './boardActivity.js';
 import { BOARD_SHARE_WARNING, shareCard, shareCardForReply } from './boardShareQueue.js';
 import { isManagedTask } from './managedTaskExecution.js';
 
@@ -226,13 +224,13 @@ export async function prepareCardCreate(workspaceId: string, body: Record<string
 
 /**
  * Create a checked card: published to GitHub first so it is born under
- * GitHub's id, then saved, opened with a comment, and shared with the team.
+ * GitHub's id, then saved and shared with the team. It opens with no comment:
+ * the card already shows who created it and when.
  */
 export async function createCard(
   workspaceId: string,
   rest: Record<string, any>,
-  creatorLogin: string,
-  openingComment?: (issue: Issue) => string
+  creatorLogin: string
 ): Promise<{ saved: Issue; syncWarning?: string }> {
   const draft = { status: 'todo', priority: 'medium', labels: [], ...rest, createdBy: rest.createdBy || creatorLogin } as unknown as Issue;
 
@@ -253,20 +251,8 @@ export async function createCard(
   });
   workspaceRegistry.bind('issues', issue.id, workspaceId);
 
-  // Written where the real identifier is known.
-  await issueStore().addComment(workspaceId, {
-    id: `comm-${issue.id}-created`,
-    issueId: issue.id,
-    authorType: 'system',
-    authorName: 'Alpha',
-    content: openingComment ? openingComment(issue) : `${issue.identifier} created by ${creatorLogin}.`,
-    createdAt: issue.createdAt
-  });
-
   const saved = await issueStore().get(workspaceId, issue.id) ?? issue;
-  // The issue first, since the database refuses a comment on an issue it does not have.
   const shared = await shareCard(saved, workspaceId);
-  for (const comment of saved.comments ?? []) void supabaseService.shareComment(comment);
   const syncWarning = [publishError, shared ? undefined : BOARD_SHARE_WARNING].filter(Boolean).join(' ');
   return syncWarning ? { saved, syncWarning } : { saved };
 }
@@ -371,18 +357,6 @@ export async function removeCard(workspaceId: string, issueId: string): Promise<
   return deleted;
 }
 
-/** A short system note on the card for the team. Not published to GitHub. */
-export async function addBoardActivityNote(workspaceId: string, issueId: string, content: string, kind: string): Promise<void> {
-  const comment = await issueStore().addComment(workspaceId, {
-    id: `${BOARD_ACTIVITY_COMMENT_PREFIX}${issueId}-${kind}-${Date.now()}-${randomUUID().slice(0, 8)}`,
-    issueId,
-    authorType: 'system',
-    authorName: 'Alpha',
-    content,
-    createdAt: new Date().toISOString()
-  });
-  void supabaseService.shareComment(comment);
-}
 
 /**
  * Take a card off the board, keeping its comments and history. Leaves any
@@ -394,7 +368,6 @@ export async function archiveCard(workspaceId: string, before: Issue, archivedBy
   const blocker = await cardRemovalBlocker(workspaceId, before, 'archiving');
   if (blocker) throw new BoardRuleError(blocker, 409);
   const result = await saveCardUpdate(workspaceId, before, { archivedAt: new Date().toISOString(), archivedBy });
-  await addBoardActivityNote(workspaceId, before.id, `Archived by ${archivedBy}.`, 'archived');
   return result;
 }
 
@@ -402,7 +375,6 @@ export async function archiveCard(workspaceId: string, before: Issue, archivedBy
 export async function restoreCard(workspaceId: string, before: Issue, restoredBy: string): Promise<{ saved: Issue; syncWarning?: string }> {
   if (!before.archivedAt) return { saved: before };
   const result = await saveCardUpdate(workspaceId, before, { archivedAt: undefined, archivedBy: undefined });
-  await addBoardActivityNote(workspaceId, before.id, `Restored by ${restoredBy}.`, 'restored');
   return result;
 }
 

@@ -1,5 +1,5 @@
 import { sqliteService } from './sqliteService.js';
-import { updateIssueAndPush, addCommentAndShare } from './boardWriteThrough.js';
+import { updateIssueAndPush } from './boardWriteThrough.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, SquadRun } from '../models/index.js';
 
@@ -116,19 +116,6 @@ export function reconcileInterruptedWork(now = new Date().toISOString()): Reconc
      * the run that would have is the one that died.
      */
     updateIssueAndPush(issueId, { status: 'in_progress' });
-    addCommentAndShare({
-      id: `comm-interrupted-${issueId}-${Date.parse(now)}`,
-      issueId,
-      authorType: 'system',
-      authorName: 'Alpha',
-      content:
-        'Work on this issue was interrupted when the Alpha daemon stopped, so it has been moved back to In Progress. ' +
-        (issue.branchName
-          ? `Anything committed before then is still on \`${issue.branchName}\`. `
-          : '') +
-        'Launch the agent or squad again to continue.',
-      createdAt: now
-    });
     result.issues.push(issueId);
   }
 

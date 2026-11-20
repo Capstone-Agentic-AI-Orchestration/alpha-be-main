@@ -82,10 +82,11 @@ describe('board card rules', () => {
     const { saved } = await archiveCard('ws', card, 'Manager Agent for lloyd');
     expect(saved.archivedAt).toBeTruthy();
     expect(saved.archivedBy).toBe('Manager Agent for lloyd');
-    expect(state.comments).toEqual([expect.objectContaining({ content: 'Archived by Manager Agent for lloyd.', authorType: 'system' })]);
+    // The card itself says who archived it; no comment is written.
+    expect(state.comments).toEqual([]);
     const restored = await restoreCard('ws', saved, 'lloyd');
     expect(restored.saved.archivedAt).toBeUndefined();
-    expect(state.comments).toHaveLength(2);
+    expect(state.comments).toEqual([]);
   });
 
   it('refuses to archive a card whose build is unfinished', async () => {
