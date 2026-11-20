@@ -9,6 +9,7 @@ import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import { ticketSqlIso } from './ticketPostgresCodec.js';
+import { clientProjectPreviewSql } from './clientProjectPreviewSql.js';
 
 interface TicketDetailDbRow {
   workspace_id: string;
@@ -98,12 +99,7 @@ class PostgresTicketReadTransaction implements TicketReadTransaction {
               t.project_id, t.project_display_name, t.project_client_visible,
               preview.repository as preview_repository,preview.branch as preview_branch,preview.url as preview_url
        from alpha_private.tickets t
-       left join lateral (
-         select r.build->'frontend'->>'repository' as repository,'uat'::text as branch,r.build->'frontend'->>'url' as url
-         from alpha_private.client_uat_rounds r
-         where r.workspace_id=t.workspace_id and r.project_id=t.project_id and r.client_user_id=t.client_user_id
-           and r.status in ('published','submitted') and r.published_at is not null order by r.number desc limit 1
-       ) published_preview on true
+       left join lateral (${clientProjectPreviewSql('t.workspace_id', 't.project_id', 't.client_user_id')}) published_preview on true
        left join alpha_private.ticket_project_client_previews legacy_preview
          on legacy_preview.workspace_id=t.workspace_id and legacy_preview.ticket_id=t.id and legacy_preview.project_id=t.project_id
        left join lateral (select

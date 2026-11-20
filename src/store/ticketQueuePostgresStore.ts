@@ -7,6 +7,7 @@ import { TicketWorkflowError, type TicketWorkflow } from '../ticketing/workflow.
 import { PostgresTicketAuthorization } from './ticketPostgresAuthorization.js';
 import { decodeTicketWorkflow, ticketSqlIso } from './ticketPostgresCodec.js';
 import { CLIENT_GROUP_KEY_SQL, CLIENT_TICKET_ACCESS_JOINS_SQL, CLIENT_VISIBLE_PROJECT_SQL, clientContactJoinsSql, clientGroupNameSql } from './ticketClientSql.js';
+import { clientProjectPreviewSql } from './clientProjectPreviewSql.js';
 
 interface ConversationDbRow {
   ticket_id: string | null; message_id: string | null; author_kind: string | null;
@@ -288,12 +289,8 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
        ), client_projects as (
          -- Exactly what the client portal lists for this client.
          select distinct ${CLIENT_GROUP_KEY_SQL} as client_group_key, t.project_id, p.name,
-                exists (
-                  select 1 from alpha_private.client_uat_rounds r
-                  where r.workspace_id = t.workspace_id and r.project_id = t.project_id
-                    and r.client_user_id = t.client_user_id
-                    and r.status in ('published','submitted') and r.published_at is not null
-                ) as preview_published
+                -- The same preview the client portal shows this client.
+                (select seen.url from (${clientProjectPreviewSql('t.workspace_id', 't.project_id', 't.client_user_id')}) seen) is not null as preview_published
          from alpha_private.tickets t
          ${CLIENT_TICKET_ACCESS_JOINS_SQL}
          join public.projects p on p.id = t.project_id and p.workspace_id = t.workspace_id

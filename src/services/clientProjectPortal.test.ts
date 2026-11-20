@@ -135,11 +135,30 @@ describe('client project portal on the complete migration schema', () => {
     await expect(app.setPreview(target,pm,{preview:{...preview,branch:'dev'}})).rejects.toMatchObject({status:400});
     await expect(app.setPreview(target,pm,{preview:{...preview,branch:'main'}})).rejects.toMatchObject({status:400});
     expect(await app.setPreview(target,pm,{preview})).toEqual({preview});
-    // Configuration stays internal until a PM-reviewed UAT round is published.
+    // Sharing is the PM's handoff: the client sees the shared UAT preview, and only the branch and URL.
     expect((await app.getPreview(target,pm)).preview).toEqual(preview);
-    expect((await app.projects(client)).items[0].preview).toBeNull();
+    expect((await app.projects(client)).items[0].preview).toEqual({ branch: 'uat', url: preview.url });
     await app.setPreview(target,pm,{preview:null});
     expect(await app.getPreview(target,pm)).toEqual({preview:null});
+    expect((await app.projects(client)).items[0].preview).toBeNull();
+  });
+
+  it('shows clients the shared preview first, falling back to a published UAT round only where nothing was shared', async () => {
+    const round = 'https://round.vercel.app/';
+    await db.query(`insert into alpha_private.client_uat_rounds(workspace_id,project_id,client_user_id,id,number,title,status,build,build_key,
+        reviewed_by,reviewed_at,reviewed_build_key,created_by,published_at)
+      values ('workspace-a','project-a','client-a','round-1',1,'First look','published',$1,'key','pm',now(),'key','pm',now())`,
+      [JSON.stringify({ frontend: { branch: 'uat', repository: 'org/repo', url: round } })]);
+    // Shared before the client-preview endpoint existed: the published round still reaches the client.
+    expect((await app.projects(client)).items[0].preview).toEqual({ branch: 'uat', url: round });
+    // A PM share replaces it.
+    await app.setPreview(target, pm, { preview });
+    expect((await app.projects(client)).items[0].preview).toEqual({ branch: 'uat', url: preview.url });
+    // Stop sharing hides the preview, even though the old round is still published.
+    await app.setPreview(target, pm, { preview: null });
+    expect((await app.projects(client)).items[0].preview).toBeNull();
+    // An older main-branch share never reaches clients.
+    await db.query(`update alpha_private.client_project_previews set repository='org/repo',branch='main',url='https://main.vercel.app/'`);
     expect((await app.projects(client)).items[0].preview).toBeNull();
   });
 

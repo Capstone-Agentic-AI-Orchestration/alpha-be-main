@@ -145,7 +145,8 @@ export function createTicketPmReadRouteBoundary(
     router.use(createTicketCentralIntakeRouter({ ...centralIntake, startProject: intakeProjects.startProject }, relayRequest));
   }
 
-  if (triageEnabled) router.use(createPmClientProjectRouter(new PostgresClientProjectPortal(db), relayRequest));
+  // Sharing a preview with clients is checked against the project's verified UAT build.
+  if (triageEnabled) router.use(createPmClientProjectRouter(new PostgresClientProjectPortal(db, createProjectUatBuilds(db)), relayRequest));
   if (triageEnabled) router.use(createPmClientConversationRouter(new ClientProjectConversation(db, new PostgresClientProjectPortal(db)), relayRequest));
   if (triageEnabled) router.use(createPmProjectUatRouter(new ProjectUat(db,new PostgresClientProjectPortal(db),createProjectUatBuilds(db),projectUatStorage()),relayRequest));
   router.use(createTicketQueueRouter(queue, relayRequest));

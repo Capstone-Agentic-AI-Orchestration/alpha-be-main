@@ -53,8 +53,11 @@ async function save(id:string,status='passed',extra={}) {const row=await app.get
 
 describe('project-scoped UAT against the complete migration schema',()=>{
   it('requires PM readiness for the exact build before handoff and hides configured previews and drafts',async()=>{
-    await portal.setPreview(target,pm,{preview:{repository:'org/frontend',branch:'uat',url:'https://unsafe-config-only.vercel.app'}});
-    expect((await portal.getPreview(target,pm)).preview?.url).toContain('unsafe-config-only');
+    // An address that is not the verified UAT build cannot be shared, so it never reaches clients.
+    const sharing=new PostgresClientProjectPortal(db,{resolve});
+    await expect(sharing.setPreview(target,pm,{preview:{repository:'org/frontend',branch:'uat',url:'https://unsafe-config-only.vercel.app'}}))
+      .rejects.toMatchObject({status:409,code:'uat_build_changed'});
+    expect((await portal.getPreview(target,pm)).preview).toBeNull();
     expect((await portal.projects(client)).items[0].preview).toBeNull();
     const id=await draft();expect((await app.list(target,client,{})).items).toEqual([]);
     await expect(app.get(target,client,id)).rejects.toMatchObject({status:404});
@@ -66,6 +69,25 @@ describe('project-scoped UAT against the complete migration schema',()=>{
     expect((await portal.projects(client)).items[0].preview?.url).toBe(build.frontend.url);
     const ticket=await createTicketReadService(new PostgresTicketReadStore(db)).detail({workspaceId:'workspace-a',ticketId:'ticket-client-a'},client);
     expect(ticket.sharedProjectPreviewUrl).toBe(build.frontend.url);
+  });
+  it('lets a PM share the verified UAT build, which every client of the project then sees, and stop sharing it',async()=>{
+    const sharing=new PostgresClientProjectPortal(db,{resolve});
+    const readTicket=(user:string,subject:TicketSubject)=>createTicketReadService(new PostgresTicketReadStore(db)).detail({workspaceId:'workspace-a',ticketId:`ticket-${user}`},subject);
+    await expect(sharing.setPreview(target,{...pm,userId:'outsider'},{preview:{repository:'org/frontend',branch:'uat',url:build.frontend.url}}))
+      .rejects.toMatchObject({status:404});
+    expect(resolve).not.toHaveBeenCalled();
+    await sharing.setPreview(target,pm,{preview:{repository:'org/frontend',branch:'uat',url:build.frontend.url}});
+    for(const [user,subject] of [['client-a',client],['client-b',other]] as const){
+      expect((await portal.projects(subject)).items[0].preview).toEqual({branch:'uat',url:build.frontend.url});
+      expect((await readTicket(user,subject)).sharedProjectPreviewUrl).toBe(build.frontend.url);
+    }
+    // A newer deployment replaces the verified build; sharing the old address is refused until the PM reloads.
+    build={...build,frontend:{...build.frontend,deploymentId:'deployment-b',url:'https://deployment-b.vercel.app'}};
+    await expect(sharing.setPreview(target,pm,{preview:{repository:'org/frontend',branch:'uat',url:'https://deployment-a.vercel.app'}}))
+      .rejects.toMatchObject({code:'uat_build_changed'});
+    await sharing.setPreview(target,pm,{preview:null});
+    expect((await portal.projects(client)).items[0].preview).toBeNull();
+    expect((await readTicket('client-a',client)).sharedProjectPreviewUrl).toBeUndefined();
   });
   it('keeps all data and receipts in the exact project, workspace and recipient',async()=>{
     const id=await published();
