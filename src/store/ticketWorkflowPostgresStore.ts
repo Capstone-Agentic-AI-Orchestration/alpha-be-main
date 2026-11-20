@@ -63,6 +63,13 @@ export async function ticketIssueFacts(sql: Sql, ticket: LockedTicket, ids: read
         where workspace_id=$1 and issue_id=$2 for update`, [ticket.state.workspaceId, id]);
     const binding = bindings[0];
     if (initial && binding) conflict('An Issue is already linked to authorized ticket work.');
+    if (initial) {
+      // A task linked to another client request from the conversation stays with that request.
+      const { rows: links } = await sql.query<{ ticket_id: string }>(
+        `select ticket_id from alpha_private.request_task_links where workspace_id=$1 and issue_id=$2 for share`,
+        [ticket.state.workspaceId, id]);
+      if (links.some(link => link.ticket_id !== ticket.state.id)) conflict('An Issue already belongs to another client request.');
+    }
     if (!initial && (!binding || binding.ticket_id !== ticket.state.id || binding.project_id !== issue.project_id)) continue;
     const { rows: activity } = await sql.query<{ active: boolean }>(
       `select (exists(select 1 from alpha_private.ticket_execution_claims where workspace_id=$1 and issue_id=$2 and phase in ('reserved','admitted'))

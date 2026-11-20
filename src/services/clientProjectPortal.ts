@@ -62,7 +62,9 @@ const needsAction = `status not in ('closed','declined','cancelled','on_hold')
  and workflow_state->>'actionOwner'='client' and workflow_state->>'nextAction' in ('reply','agree_scope','review_result')`;
 
 /** Owner-connection SQL: each transaction rechecks sessions, membership and grants.
- * Existing ticket chat, workflow and project-link approval remain separate. */
+ * The combined client conversation (clientProjectConversation.ts) reads this
+ * thread together with each request's messages; workflow and project-link
+ * approval remain separate. */
 export class PostgresClientProjectPortal {
   constructor(private readonly db: TransactionalSql) {}
 
@@ -282,6 +284,11 @@ export class PostgresClientProjectPortal {
       }
       return {items:[...clients.values()]};
     });
+  }
+
+  /** The one client whose project conversation this subject may read or write (same rules as the project thread). */
+  authorizeThread(sql: Sql, target: ProjectTarget, subject: TicketSubject, requestedClient: unknown, write: boolean): Promise<string> {
+    return this.threadClient(sql, target, subject, requestedClient, write);
   }
 
   private async threadClient(sql: Sql, target: ProjectTarget, subject: TicketSubject, requestedClient: unknown, write: boolean) {
