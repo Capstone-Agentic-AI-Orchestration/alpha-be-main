@@ -65,7 +65,13 @@ interface StartProjectBuildInput {
   issueId?: string;
 }
 
-interface SelectedProjectRepository { repository: string; checkoutDir: string }
+/**
+ * A repository a build works in. `named` is true when the person asked for it
+ * by name; otherwise it was selected only because it belongs to the project, and
+ * the plan may leave it without tasks (frontend-only work in a two-repository
+ * project needs nothing in the backend).
+ */
+interface SelectedProjectRepository { repository: string; checkoutDir: string; named?: boolean }
 
 /** A requested branch base is runner setup, never a specialist's Git task. */
 export function requestedBuildBase(goal: string): string | undefined {
@@ -190,6 +196,10 @@ async function reconcilePlanningReservations(input: {
     repositoryDir: byRepository.get(reservation.repository.toLowerCase()) ?? '',
     reservation
   })));
+}
+
+function namedRepository(repositories: readonly SelectedProjectRepository[], repository: string): boolean {
+  return repositories.some(item => item.named && item.repository.toLowerCase() === repository.toLowerCase());
 }
 
 function orchestrationBranchName(runId: string): string {
@@ -517,7 +527,8 @@ async function startOrchestratedProjectBuild(input: {
       repositories: planningContexts.map(item => ({
         repository: item.repository,
         repositoryContext: item.context.context,
-        availableScripts: item.context.scripts
+        availableScripts: item.context.scripts,
+        ...(namedRepository(repositories, item.repository) ? {} : { optional: true })
       })),
       eligibleAgents: availableAgents,
       planner: plannerIdentity,
@@ -725,7 +736,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
         return blocked(`The selected folder for ${repo} is not a Git checkout. Attach or clone it before starting a build.`, project, repo);
       }
       allowAttachedWorkspace(checkout, project.name);
-      selectedCheckouts.push({ repository: repo, checkoutDir: checkout.dir });
+      selectedCheckouts.push({ repository: repo, checkoutDir: checkout.dir, named: requestedRepos.length > 0 });
     }
     const repository = selectedRepositories[0];
     if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
