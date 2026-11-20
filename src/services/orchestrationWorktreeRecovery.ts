@@ -40,6 +40,28 @@ export async function worktreeChangesHash(worktree: string): Promise<string> {
 }
 
 /**
+ * Refuse a folder that is not the top of its own Git working copy.
+ *
+ * Git looks upward for a repository, so a folder whose own repository is missing or
+ * unfinished resolves to whatever repository encloses it. Restoring such a folder reset
+ * that outer repository instead: a test whose temporary build folder sat inside a
+ * developer's checkout hard-reset the developer's uncommitted work. Nothing is saved or
+ * reset unless the folder is exactly the working copy it claims to be.
+ */
+async function assertOwnWorkingCopy(worktree: string): Promise<void> {
+  let top = '';
+  try {
+    top = String((await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: worktree, encoding: 'utf8', windowsHide: true })).stdout ?? '').trim();
+  } catch {
+    throw new Error(`Refusing to restore ${worktree}: it is not a Git working copy.`);
+  }
+  const same = (a: string, b: string) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  if (!top || !same(path.resolve(top), worktree)) {
+    throw new Error(`Refusing to restore ${worktree}: its Git working copy is ${top || 'unknown'}, so restoring it would reset a different repository.`);
+  }
+}
+
+/**
  * Clear what a failed or interrupted attempt left in a build worktree, without losing it.
  *
  * A specialist that dies mid-task leaves edits, scratch folders or a half-written file
@@ -58,6 +80,7 @@ export async function preserveAndRestoreWorktree(input: {
   keepChanges?: boolean;
 }): Promise<PreservedWorktreeChanges | undefined> {
   const worktree = path.resolve(input.worktree);
+  await assertOwnWorkingCopy(worktree);
   if (await isGitWorkingTreeClean(worktree)) return undefined;
   const savedAt = (input.now ?? new Date()).toISOString();
   // Read at call time so a test or a relocated profile never writes into the real ~/.alpha.

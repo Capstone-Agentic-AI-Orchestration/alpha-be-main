@@ -91,6 +91,20 @@ describe('delivery authority and lifecycle', () => {
     expect(ready.reason).toMatch(/PM review; client handoff remains separate/);
     expect(ready.history.filter(event => event.actorId === 'person').length).toBeGreaterThan(0);
   });
+  /**
+   * A frontend + backend build that changed only the frontend: the backend got a planning
+   * task, no code, no review and no pull request. Delivery used to require review evidence for
+   * it anyway and stayed blocked, so the frontend pull request could never be merged.
+   */
+  it('checks review evidence only for repositories that have a pull request', async () => {
+    const f = fixture(['acme/shop']);
+    const run = f.snapshot.run as unknown as { repositoryWorkspaces: Array<{ repository: string }> };
+    run.repositoryWorkspaces.push({ repository: 'acme/api' });
+    (f.snapshot.tasks as unknown as Array<Record<string, unknown>>).push({ id: 'plan-api', kind: 'analysis', ownerAgentId: 'architect', status: 'accepted', repository: 'acme/api' });
+    expect((await f.refresh()).stage).toBe('dev_approval');
+    await f.act('merge_dev', 'dev');
+    expect(f.github.merge).toHaveBeenCalledTimes(1);
+  });
   it('requires both codebases to reach verified UAT', async () => {
     const f = fixture(['acme/front', 'acme/back']);
     await f.refresh(); await f.act('merge_dev'); await f.refresh(); await f.act('prepare_uat'); await f.refresh(); await f.act('merge_uat');
