@@ -48,6 +48,8 @@ async function startApi(role = 'admin') {
   };
 
   vi.doMock('../config/env.js', () => ({ IS_CLOUD: false, ALPHA_ORCHESTRATION_ENABLED: true }));
+  // Sending a card to the team's board is not what these routes test.
+  vi.doMock('../services/boardShareQueue.js', () => ({ shareCard: vi.fn(async () => true) }));
   vi.doMock('../store/stores.js', () => ({ projectStore: () => ({ get: vi.fn(async () => ({ id: 'project-1', name: 'Shop', resources: [] })) }) }));
   vi.doMock('../services/sqliteService.js', () => ({ sqliteService: {
     getOrchestrationPlanningRecovery: calls.getRecovery,
@@ -123,7 +125,7 @@ afterEach(() => {
     '../config/env.js', '../store/stores.js', '../services/sqliteService.js',
     '../services/orchestrationPlanningRecovery.js', '../services/workspaceService.js',
     '../services/orchestrationFinalization.js', '../services/orchestrationReviewService.js', '../services/orchestrationRuntime.js',
-    '../services/workspaceRegistry.js', '../services/orchestrationDeliveryRuntime.js', './workspaceContext.js'
+    '../services/workspaceRegistry.js', '../services/orchestrationDeliveryRuntime.js', './workspaceContext.js', '../services/boardShareQueue.js'
   ]) vi.doUnmock(mod);
   vi.resetModules();
 });

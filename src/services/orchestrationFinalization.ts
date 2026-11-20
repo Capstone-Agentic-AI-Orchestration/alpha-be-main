@@ -1,10 +1,45 @@
-import type { IssueSubtask } from '../models/index.js';
+import type { Issue, IssueSubtask } from '../models/index.js';
 import type { IssueStore } from '../store/issueStore.js';
 import { issueStore } from '../store/stores.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { checklistRequirementId } from './issueChecklist.js';
+import { shareCard } from './boardShareQueue.js';
+import { supabaseService } from './supabaseService.js';
+import { logError } from '../utils/logger.js';
 
-const PUBLISHED_COMMENT_SUFFIX = 'orchestration-published';
+/**
+ * The team's board, for a card this machine moved.
+ *
+ * On a desktop the issue store is the machine's own copy, and it deliberately
+ * never publishes (the board pull writes through it too). A finished build is
+ * this machine's own change, so it has to be sent on, or the card reads Todo
+ * for everyone but the person whose desktop ran the build.
+ */
+export interface TeamBoard {
+  /** Send the card; false when it was queued for a retry. */
+  share(issue: Issue, workspaceId: string): Promise<boolean>;
+  /**
+   * Whether the team board's copy of the card is behind this one, read before
+   * a repair so an unchanged card is never written: every write reaches every
+   * teammate's next sync, so a no-op write still costs each of them a download.
+   */
+  isBehind(issue: Issue): Promise<boolean>;
+}
+
+export const teamBoard: TeamBoard = {
+  share: (issue, workspaceId) => shareCard(issue, workspaceId),
+  async isBehind(issue) {
+    if (!supabaseService.sharesBoard()) return false;
+    try {
+      const shared = await supabaseService.sharedIssueState(issue.id);
+      return !shared || shared.status !== issue.status || shared.prUrl !== (issue.prUrl ?? null);
+    } catch (error) {
+      // Unreachable now; the next start checks again rather than queueing blind writes.
+      logError(`Could not compare ${issue.identifier} with the team board:`, error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
+};
 
 /** Evidence must cover every current required task, including validation.
  * Superseded work and earlier accepted attempts cannot prove the current work.
@@ -50,10 +85,16 @@ export function tickSpecChecklist(subtasks: readonly IssueSubtask[], snapshot: O
   });
 }
 
-/** Synchronize durable completion (a published change or a read-only report) to the board. */
+/**
+ * Synchronize durable completion (a published change or a read-only report) to the board.
+ *
+ * Moves the card and sends it to the team's board. It writes no comment: task
+ * comments are for people, and the build's progress lives in its chat.
+ */
 export async function synchronizePublishedOrchestrationIssue(
   snapshot: OrchestrationSnapshot,
-  store: Pick<IssueStore, 'get' | 'update' | 'addComment'> = issueStore()
+  store: Pick<IssueStore, 'get' | 'update'> = issueStore(),
+  board: TeamBoard = teamBoard
 ): Promise<void> {
   const publication = snapshot.run.publication;
   const reportOnly = snapshot.run.status === 'completed' && !publication && snapshot.tasks?.length > 0 &&
@@ -62,12 +103,10 @@ export async function synchronizePublishedOrchestrationIssue(
   if (reportOnly) {
     const issue = await store.get(snapshot.run.workspaceId, snapshot.run.issueId);
     if (!issue || issue.projectId !== snapshot.run.projectId) throw new Error('The project task for this completed report is unavailable. Retry to synchronize it.');
-    const commentId = `comm-${snapshot.run.id}-orchestration-report-completed`;
-    if (!issue.comments.some(comment => comment.id === commentId)) await store.addComment(snapshot.run.workspaceId, {
-      id: commentId, issueId: issue.id, authorType: 'system', authorName: 'Alpha Task Workflow',
-      content: 'Read-only investigation completed. No repository files changed. Review the specialist reports in this conversation.', createdAt: snapshot.run.updatedAt
-    });
-    if (issue.status !== 'done' && issue.status !== 'review' && !await store.update(snapshot.run.workspaceId, issue.id, { status: 'review' })) throw new Error('The report is complete, but its project task could not be synchronized.');
+    if (issue.status === 'done' || issue.status === 'review') return shareIfBehind(issue, snapshot, board);
+    const saved = await store.update(snapshot.run.workspaceId, issue.id, { status: 'review' });
+    if (!saved) throw new Error('The report is complete, but its project task could not be synchronized.');
+    await board.share(saved, snapshot.run.workspaceId);
     return;
   }
   if (snapshot.run.status !== 'completed' || !publication) {
@@ -77,20 +116,6 @@ export async function synchronizePublishedOrchestrationIssue(
   const issue = await store.get(snapshot.run.workspaceId, snapshot.run.issueId);
   if (!issue || issue.projectId !== snapshot.run.projectId) {
     throw new Error('The project task for this published build is unavailable. Retry to synchronize it.');
-  }
-
-  const commentId = `comm-${snapshot.run.id}-${PUBLISHED_COMMENT_SUFFIX}`;
-  const publications = snapshot.run.publications?.length ? snapshot.run.publications : [publication];
-  const pullRequests = publications.map(item => `${item.repository ?? snapshot.run.repository}: ${item.pullRequestUrl}`).join('\n');
-  if (!issue.comments.some(comment => comment.id === commentId)) {
-    await store.addComment(snapshot.run.workspaceId, {
-      id: commentId,
-      issueId: issue.id,
-      authorType: 'system',
-      authorName: 'Alpha Task Workflow',
-      content: `Orchestrator build approved and published for review:\n${pullRequests}`,
-      createdAt: publication.publishedAt
-    });
   }
 
   // A human may have completed the issue after the PR was opened; do not move
@@ -108,18 +133,28 @@ export async function synchronizePublishedOrchestrationIssue(
     if (!savedIssue) {
       throw new Error('The pull request is open, but the project task could not be synchronized. Retry to update it.');
     }
+    await board.share(savedIssue, snapshot.run.workspaceId);
+    return;
   }
+  // Already right here. The team board may not be: before this was sent on,
+  // a finished build moved the card on the machine that ran it and nowhere else.
+  await shareIfBehind(issue, snapshot, board);
+}
+
+async function shareIfBehind(issue: Issue, snapshot: OrchestrationSnapshot, board: TeamBoard): Promise<void> {
+  if (await board.isBehind(issue)) await board.share(issue, snapshot.run.workspaceId);
 }
 
 export async function replayPublishedOrchestrationIssueEffects(
   snapshots: readonly OrchestrationSnapshot[],
-  store: Pick<IssueStore, 'get' | 'update' | 'addComment'> = issueStore()
+  store: Pick<IssueStore, 'get' | 'update'> = issueStore(),
+  board: TeamBoard = teamBoard
 ): Promise<{ synchronized: string[]; failed: Array<{ runId: string; reason: string }> }> {
   const synchronized: string[] = [];
   const failed: Array<{ runId: string; reason: string }> = [];
   for (const snapshot of snapshots) {
     try {
-      await synchronizePublishedOrchestrationIssue(snapshot, store);
+      await synchronizePublishedOrchestrationIssue(snapshot, store, board);
       synchronized.push(snapshot.run.id);
     } catch (error) {
       failed.push({

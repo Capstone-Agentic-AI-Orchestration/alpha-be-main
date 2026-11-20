@@ -158,7 +158,7 @@ describe.each(backends)('the issue store ($name)', backend => {
     await stores.issues.addComment(WS, {
       id: 'c1',
       issueId: issue.id,
-      authorType: 'system',
+      authorType: 'user',
       authorName: 'Alpha',
       content: 'created',
       createdAt: new Date().toISOString()
@@ -181,7 +181,7 @@ describe.each(backends)('the issue store ($name)', backend => {
         {
           id: 'c-open',
           issueId: '',
-          authorType: 'system',
+          authorType: 'user',
           authorName: 'Alpha',
           content: 'opened',
           createdAt: new Date().toISOString()
@@ -191,6 +191,21 @@ describe.each(backends)('the issue store ($name)', backend => {
 
     const read = await stores.issues.get(WS, issue.id);
     expect(read!.comments[0]).toMatchObject({ content: 'opened', issueId: issue.id });
+  });
+
+  /** Task comments are for people: an agent's or Alpha's is refused before anything is written. */
+  it('refuses a comment from an agent or from Alpha', async () => {
+    const stores = await backend.open();
+    const projectId = await withProject(stores);
+    const issue = await stores.issues.create(WS, { title: 'Fix cart', projectId });
+    const comment = (authorType: 'agent' | 'system') => ({
+      id: `c-${authorType}`, issueId: issue.id, authorType, authorName: 'Frontend Agent',
+      content: 'Started autonomous execution.', createdAt: new Date().toISOString()
+    });
+
+    await expect(stores.issues.addComment(WS, comment('agent'))).rejects.toThrow(/written by people only/);
+    await expect(stores.issues.addComment(WS, comment('system'))).rejects.toThrow(/written by people only/);
+    expect((await stores.issues.get(WS, issue.id))!.comments).toEqual([]);
   });
 
   it('never reaches across workspaces', async () => {

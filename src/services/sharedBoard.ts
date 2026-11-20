@@ -11,6 +11,7 @@ import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { logInfo } from '../utils/logger.js';
 import type { SyncReport } from './githubBoardSync.js';
+import { isPersonComment } from './taskComments.js';
 import {
   boardChangeKey,
   type BoardChange,
@@ -1156,6 +1157,8 @@ function applyComments(comments: IssueComment[], report: PullReport): void {
 
   for (const cloud of comments) {
     if (!issueIds.has(cloud.issueId)) continue;
+    // An agent's or Alpha's comment from before they stopped commenting stays off this machine.
+    if (!isPersonComment(cloud)) continue;
     const mine = known.get(cloud.id);
     // New, or published to GitHub since -- the id is how the next sync knows.
     if (mine && mine.githubId === cloud.githubId && mine.content === cloud.content) continue;

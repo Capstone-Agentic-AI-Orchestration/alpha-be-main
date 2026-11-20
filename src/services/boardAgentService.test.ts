@@ -57,7 +57,7 @@ vi.mock('../store/stores.js', () => ({
 }));
 
 import {
-  approveAgentChange, archiveForAgent, commentForAgent, createCardForAgent, listCards, moveCardForAgent,
+  approveAgentChange, archiveForAgent, createCardForAgent, listCards, moveCardForAgent,
   rejectAgentChange, undoAgentChange, updateCardForAgent
 } from './boardAgentService.js';
 
@@ -101,15 +101,16 @@ describe('reading the board', () => {
 });
 
 describe('agent changes', () => {
-  it('moves a card as the developer, records before and after, and notes it on the card once per turn', async () => {
+  it('moves a card as the developer and records before and after, writing no comment on the card', async () => {
     const g = grant();
     const result = await moveCardForAgent(g, { card: 'CAP-1', column: 'in_progress', expected_updated_at: '2026-11-01T00:00:00.000Z' });
     expect(result).toMatchObject({ status: 'done', summary: 'Moved CAP-1 to In progress.' });
     expect(state.issues[0].status).toBe('in_progress');
     expect(state.changes[0]).toMatchObject({ action: 'move', status: 'applied', actorLogin: 'lloyd', before: { status: 'todo' }, after: { status: 'in_progress' } });
-    expect(state.comments).toEqual([expect.objectContaining({ id: expect.stringMatching(/^comm-activity-/), content: 'Changed by Manager Agent for lloyd: Moved CAP-1 to In progress.' })]);
+    // Who changed it and for whom is in the change log above, not in a comment.
+    expect(state.comments).toEqual([]);
     await updateCardForAgent(g, { card: 'CAP-1', title: 'Renamed', expected_updated_at: state.issues[0].updatedAt });
-    expect(state.comments).toHaveLength(1);
+    expect(state.comments).toEqual([]);
   });
 
   it.each([['done', /Only a person marks a card Done/], ['agent_running', /only when a developer starts a build/]])('never moves a card to %s', async (column, message) => {
@@ -132,12 +133,12 @@ describe('agent changes', () => {
     expect(state.issues.at(-1)?.subtasks?.[0]).toMatchObject({ title: 'Shows an error for a wrong password.', completed: false });
   });
 
-  it('refuses writes from an agent without write access, and comments outside its own card', async () => {
+  it('refuses writes from an agent without write access', async () => {
     await expect(moveCardForAgent(grant({ access: 'read' }), { card: 'CAP-1', column: 'backlog', expected_updated_at: 'x' }))
       .rejects.toThrow(/Only the Manager Agent changes cards/);
-    const specialist = grant({ access: 'comment', ownIssueId: 'issue-2' });
-    await expect(commentForAgent(specialist, { card: 'CAP-1', text: 'Done here.' })).rejects.toMatchObject({ status: 403 });
-    await expect(commentForAgent(specialist, { card: 'CAP-2', text: 'Done here.' })).resolves.toMatchObject({ status: 'done' });
+    // A specialist on its own card may read it, but no longer comments on it.
+    await expect(moveCardForAgent(grant({ access: 'comment', ownIssueId: 'issue-2' }), { card: 'CAP-2', column: 'backlog', expected_updated_at: 'x' }))
+      .rejects.toThrow(/Only the Manager Agent changes cards/);
   });
 
   it('refuses everything once the person may not use agents on this board', async () => {

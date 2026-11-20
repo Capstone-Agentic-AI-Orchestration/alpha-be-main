@@ -9,7 +9,6 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { boardAgentRefusal, type BoardGrant } from './boardGrant.js';
 import {
   BoardRuleError,
-  addBoardActivityNote,
   archiveCard,
   createCard,
   prepareCardCreate,
@@ -292,7 +291,7 @@ async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentCh
 
   if (change.action === 'create') {
     const rest = await prepareCardCreate(workspaceId, { ...(input.fields as object), projectId: change.projectId });
-    const { saved, syncWarning } = await createCard(workspaceId, rest, change.actorLogin, issue => issue.identifier + ' created by ' + by + '.');
+    const { saved, syncWarning } = await createCard(workspaceId, rest, change.actorLogin);
     return withSyncWarning({ ...change, issueId: saved.id, summary: 'Created ' + saved.identifier + ' "' + saved.title + '"', after: pick(saved, Object.keys(input.fields ?? {})) }, syncWarning);
   }
 
@@ -310,23 +309,9 @@ async function applyChange(change: BoardAgentChangeRecord): Promise<BoardAgentCh
     const { saved, syncWarning } = await restoreCard(workspaceId, card, by);
     return withSyncWarning({ ...change, after: pick(saved, ['archivedAt', 'archivedBy']) }, syncWarning);
   }
-  if (change.action === 'comment') return applyComment(change, card);
+  // Agents no longer comment on cards; a comment held from before is refused, not written.
+  if (change.action === 'comment') throw new BoardRuleError('Agents do not comment on cards. Say it in the project chat instead.', 409);
   return applyCardEdit(change, card, by);
-}
-
-/** A comment signed as the agent, on behalf of the developer. */
-async function applyComment(change: BoardAgentChangeRecord, card: Issue): Promise<BoardAgentChangeRecord> {
-  const comment = await issueStore().addComment(change.workspaceId, {
-    id: 'comm-' + card.id + '-agent-' + randomUUID().slice(0, 12),
-    issueId: card.id,
-    authorType: 'agent',
-    authorName: change.agentName,
-    ...(change.agentId ? { agentId: change.agentId } : {}),
-    content: String((change.input as Record<string, unknown>).text) + '\n\n(on behalf of ' + change.actorLogin + ')',
-    createdAt: new Date().toISOString()
-  });
-  void supabaseService.shareComment(comment);
-  return change;
 }
 
 /** An update or move: the card's own rules, then one activity note per card per turn. */
@@ -335,16 +320,7 @@ async function applyCardEdit(change: BoardAgentChangeRecord, card: Issue, by: st
   const input = change.input as Record<string, any>;
   const updates = await prepareCardUpdate(workspaceId, card, { ...(input.updates as object) });
   const { saved, syncWarning } = await saveCardUpdate(workspaceId, card, updates);
-  // One note per card per turn: the team sees who changed it and for whom,
-  // and the full detail stays in this desktop's change log (less to sync).
-  const notedThisTurn = store(workspaceId, () => sqliteService.listBoardAgentChanges(workspaceId, { runId: change.runId, limit: 200 }))
-    .some(other => other.issueId === card.id && other.status === 'applied' && (other.action === 'update' || other.action === 'move'));
-  if (!notedThisTurn) {
-    const assignedElsewhere = card.assignedHuman && card.assignedHuman.toLowerCase() !== change.actorLogin.toLowerCase();
-    await addBoardActivityNote(workspaceId, card.id,
-      'Changed by ' + by + ': ' + change.summary + '.' + (assignedElsewhere ? ' Assigned to ' + card.assignedHuman + '.' : ''),
-      'agent');
-  }
+  // Who changed it and for whom stays in this desktop's change log, not in a comment.
   return withSyncWarning({ ...change, after: pick(saved, Object.keys(input.updates ?? {})) }, syncWarning);
 }
 
@@ -429,15 +405,6 @@ export async function moveCardForAgent(grant: BoardGrant, args: Record<string, u
     if (!AGENT_MOVABLE.includes(status)) throw new BoardRuleError('column must be one of ' + AGENT_MOVABLE.join(', ') + '.', 400);
     requireCurrent(card, args.expected_updated_at);
     return { card, summary: 'Moved ' + card.identifier + ' to ' + COLUMN_LABEL[status], input: { updates: { status } }, beforeKeys: ['status'] };
-  });
-}
-
-export async function commentForAgent(grant: BoardGrant, args: Record<string, unknown>): Promise<BoardToolResult> {
-  return write(grant, 'comment', args, async () => {
-    const card = await resolveCard(grant, args.card);
-    const body = text(args.text, 4000);
-    if (!body) throw new BoardRuleError('A comment needs text.', 400);
-    return { card, summary: 'Commented on ' + card.identifier, input: { text: body }, beforeKeys: [] };
   });
 }
 
@@ -542,7 +509,6 @@ export async function undoAgentChange(context: WorkspaceContext, id: string): Pr
     const revert = Object.fromEntries(Object.entries(before).map(([key, value]) => [key, value === null ? (key === 'dependsOnIssueIds' ? [] : '') : value]));
     const updates = await prepareCardUpdate(workspaceId, card, revert);
     await saveCardUpdate(workspaceId, card, updates);
-    await addBoardActivityNote(workspaceId, card.id, 'Undid "' + change.summary + '" (' + by + ').', 'undo');
   }
   const undone = { ...change, status: 'undone' as const, decidedAt: new Date().toISOString(), decidedBy: context.userId };
   store(workspaceId, () => sqliteService.updateBoardAgentChange(undone));

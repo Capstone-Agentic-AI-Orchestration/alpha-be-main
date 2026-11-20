@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Issue, IssueComment, IssueSubtask } from '../models/index.js';
 import type { Sql } from './database.js';
 import { nextIssueIdentifier, oneOwner, type IssueStore } from './issueStore.js';
+import { assertPersonComment } from '../services/taskComments.js';
 
 /**
  * The board in the cloud.
@@ -216,6 +217,7 @@ export class PostgresIssueStore implements IssueStore {
    * race rather than a request to refuse.
    */
   async addComment(workspaceId: string, comment: IssueComment): Promise<IssueComment> {
+    assertPersonComment(comment);
     const { rows } = await this.sql.query(
       'select id from issues where workspace_id = $1 and id = $2',
       [workspaceId, comment.issueId]

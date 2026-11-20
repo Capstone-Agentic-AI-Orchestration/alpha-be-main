@@ -16,8 +16,9 @@ describe('board tool server', () => {
     expect(allowed('read')).toEqual(['board_list_cards', 'board_get_card']);
   });
 
-  it('adds commenting for a specialist on its own card', () => {
-    expect(allowed('comment')).toEqual(['board_list_cards', 'board_get_card', 'board_comment']);
+  it('gives a specialist on its own card no comment tool: agents do not comment on cards', () => {
+    expect(allowed('comment')).toEqual(['board_list_cards', 'board_get_card']);
+    expect(Object.keys(TOOLS)).not.toContain('board_comment');
   });
 
   it('offers the full set to the Manager Agent, with no delete tool', () => {

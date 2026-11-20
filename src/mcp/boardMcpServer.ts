@@ -96,12 +96,6 @@ export const TOOLS: Record<string, ToolDef> = {
     operation: 'move',
     level: 'write'
   },
-  board_comment: {
-    description: 'Add a comment to a card, signed as you on behalf of the developer.',
-    inputSchema: schema({ card: CARD, text: str('The comment.') }, ['card', 'text']),
-    operation: 'comment',
-    level: 'comment'
-  },
   board_archive_card: {
     description: 'Ask to archive a card: it leaves the board but keeps its history and can be restored. Always waits for the developer to confirm. There is no delete.',
     inputSchema: schema({ card: CARD, expected_updated_at: EXPECTED, reason: str('Why, in one short sentence.') }, ['card', 'expected_updated_at']),

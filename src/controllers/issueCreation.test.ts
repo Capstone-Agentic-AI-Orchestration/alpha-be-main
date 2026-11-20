@@ -181,16 +181,14 @@ describe('POST /issues', () => {
    * The client composed this against its guess, so the permanent record on the
    * issue referred to a name that never existed.
    */
-  it('writes an opening comment quoting the real identifier and author', async () => {
+  it('opens a new card with no comment: the card shows who created it', async () => {
     const { svc, app } = await startApi();
     svc.createProject({ id: 'p1', name: 'Repo', key: 'ALF' });
 
     const res = await post(app, '/api/issues', browserPayload('p1'));
-    const comments = res.body.comments ?? [];
 
-    expect(comments).toHaveLength(1);
-    expect(comments[0].content).toBe('ALF-101 created by octocat.');
-    expect(comments[0].content).not.toContain('WRONG-999');
+    expect(res.body.identifier).toBe('ALF-101');
+    expect(res.body.comments ?? []).toEqual([]);
   });
 
   it('drops a comment the client invented', async () => {
@@ -202,14 +200,13 @@ describe('POST /issues', () => {
     expect((res.body.comments ?? []).map((c: any) => c.content)).not.toContain('client-invented');
   });
 
-  it('returns the comment in the create response', async () => {
-    // The client clears its own optimistic comments, so a response without them
-    // would leave a new card with no history until the next reload.
+  it('returns the comments list in the create response', async () => {
+    // The client clears its own optimistic comments, so the response carries the list it should show.
     const { svc, app } = await startApi();
     svc.createProject({ id: 'p1', name: 'Repo', key: 'ALF' });
 
     const res = await post(app, '/api/issues', browserPayload('p1'));
-    expect(res.body.comments?.length).toBeGreaterThan(0);
+    expect(Array.isArray(res.body.comments)).toBe(true);
   });
 
   it('survives a payload carrying no comments at all', async () => {

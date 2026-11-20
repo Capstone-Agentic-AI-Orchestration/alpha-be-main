@@ -25,7 +25,7 @@ import { createBranch, createBranchFrom, checkoutBranch, getCurrentBranch, getHe
 import { agentBranchName } from './githubRepoWorkspace.js';
 import { githubService } from './githubService.js';
 import { supabaseService } from './supabaseService.js';
-import { updateIssueAndPush, addCommentAndShare } from './boardWriteThrough.js';
+import { updateIssueAndPush } from './boardWriteThrough.js';
 import { mcpAccessFor, McpAccess } from './autonomyPolicy.js';
 import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
@@ -472,23 +472,6 @@ export class RunnerService extends EventEmitter {
       }
     }
 
-    addCommentAndShare({
-      id: `comm-${runId}-start`,
-      issueId,
-      authorType: 'agent',
-      authorName: agent.name,
-      authorAvatar: agent.avatar,
-      agentId: agent.id,
-      // Says what is true right now. A run that is waiting for the workspace
-      // has not started anything, and the comment is a permanent record.
-      content: params.ticketExecution
-        ? `Execution reserved for **${issue.identifier}**. Project access and the approved work scope will be checked again before an agent starts.`
-        : queuedBehind
-          ? `Queued for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`. ${waitNote}`
-          : `Started autonomous execution for **${issue.identifier}** (${issue.title}) on branch \`${branchName}\`.`,
-      createdAt: now,
-      isThinking: true
-    });
 
     /**
      * Executed in the background, but one at a time per working directory.
@@ -1473,19 +1456,6 @@ ${issue.description}
         supabaseService.broadcastRunEvent(runId, { type: 'run_completed', payload: finalRun }).catch(() => {});
       }
 
-      addCommentAndShare({
-        id: `comm-${runId}-complete`,
-        issueId: issue.id,
-        authorType: 'agent',
-        authorName: 'Alpha Execution Engine',
-        content: orchestration
-          ? `Task attempt finished on \`${branchName}\` and was submitted to the orchestrator for acceptance.`
-          : finalRun.changedFiles
-          ? `Run finished. **+${finalRun.insertions}** / **-${finalRun.deletions}** across **${finalRun.changedFiles}** file(s) on \`${branchName}\`.` +
-            (prUrl ? ` Pull request: [${prUrl}](${prUrl}).` : ' No pull request was opened.')
-          : `Run finished without changing any files. Check the run log — the agent may not have been able to edit the workspace.`,
-        createdAt: now
-      });
 
       this.emit('run_completed', finalRun);
       this.ticketExecutions.delete(runId);

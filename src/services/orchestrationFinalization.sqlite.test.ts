@@ -42,7 +42,7 @@ describe('SQLite orchestration publication recovery', () => {
     home = undefined;
   });
 
-  it('replays the durable pull request record after a restart without duplicating its issue comment', async () => {
+  it('replays the durable pull request record after a restart, writing no comment', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-approval-replay-'));
     vi.stubEnv('ALPHA_HOME', home);
     vi.resetModules();
@@ -58,18 +58,16 @@ describe('SQLite orchestration publication recovery', () => {
     const issue = await issues.create(WORKSPACE_ID, { id: 'issue-approval-replay', title: 'Recover approval effects', projectId: project.id });
     const snapshot = publishedSnapshot(project.id, issue.id);
 
-    const interruptedStore: Pick<IssueStore, 'get' | 'update' | 'addComment'> = {
+    const interruptedStore: Pick<IssueStore, 'get' | 'update'> = {
       get: (...args) => issues.get(...args),
-      update: (...args) => issues.update(...args),
-      async addComment(...args) {
-        await issues.addComment(...args);
-        throw new Error('Simulated process interruption after comment persistence.');
+      async update() {
+        throw new Error('Simulated process interruption before the task update.');
       }
     };
 
     await expect(synchronizePublishedOrchestrationIssue(snapshot, interruptedStore))
       .rejects.toThrow(/process interruption/);
-    expect(await issues.get(WORKSPACE_ID, issue.id)).toMatchObject({ status: 'todo', comments: [{ id: 'comm-orchestration-restart-replay-orchestration-published' }] });
+    expect(await issues.get(WORKSPACE_ID, issue.id)).toMatchObject({ status: 'todo', comments: [] });
 
     firstDatabase.sqliteService.close();
     closeDatabase = undefined;
@@ -85,7 +83,7 @@ describe('SQLite orchestration publication recovery', () => {
     expect(await restartedIssues.get(WORKSPACE_ID, issue.id)).toMatchObject({
       status: 'review',
       prUrl: 'https://github.com/acme/shop/pull/42',
-      comments: [{ id: 'comm-orchestration-restart-replay-orchestration-published' }]
+      comments: []
     });
   });
 });

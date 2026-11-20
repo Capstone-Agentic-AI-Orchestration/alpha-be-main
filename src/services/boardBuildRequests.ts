@@ -5,6 +5,7 @@ import { reposForProject } from './githubIssueMapping.js';
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { workspaceRegistry, type WorkspaceContext } from './workspaceRegistry.js';
+import { shareCard } from './boardShareQueue.js';
 import type { ProjectBuildStartResult } from './projectBuildOrchestrator.js';
 
 export interface BoardBuildRequest {
@@ -119,7 +120,9 @@ export async function requestBoardBuild(input: { context: WorkspaceContext; issu
     if (blocker && !input.queue) throw new Error('Another build holds a selected repository. Open that task or explicitly queue this plan.');
     const spec = sqliteService.getFeatureSpec(issue.id);
     if (!issue.labels.includes('alpha:task-orchestration')) {
-      await issueStore().update(context.workspaceId, issue.id, { labels: [...issue.labels, 'alpha:task-orchestration'] });
+      const labelled = await issueStore().update(context.workspaceId, issue.id, { labels: [...issue.labels, 'alpha:task-orchestration'] });
+      // This machine's own change: the local store never publishes it, so send it on.
+      if (labelled) void shareCard(labelled, context.workspaceId);
     }
     const thread = input.threadId ? ownedProjectThread(input.threadId, context, project.id)
       : (await import('./boardThreadService.js')).ensureBoardThread({ workspaceId: context.workspaceId, ownerId: context.userId, projectId: project.id, issue }).thread;

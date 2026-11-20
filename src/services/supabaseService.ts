@@ -25,6 +25,7 @@ import type { McpServerSpec } from './mcpConfigService.js';
 const execFileAsync = promisify(execFile);
 
 import { isSessionAuthenticated, requiresSessionAuthentication, storedToken } from './alphaGitHubToken.js';
+import { assertPersonComment } from './taskComments.js';
 
 /**
  * The GitHub token the desktop presents as its identity.
@@ -317,6 +318,19 @@ export class SupabaseService {
     const { data, error } = await this.client.from('issues').select('updated_at').eq('id', issueId).maybeSingle();
     if (error) throw error;
     return (data as { updated_at?: string } | null)?.updated_at ?? null;
+  }
+
+  /**
+   * The team board's status and pull request for a card; null when it has no copy.
+   * Two columns only: this is read to decide whether a write is needed at all.
+   * Throws when unreachable.
+   */
+  async sharedIssueState(issueId: string): Promise<{ status: string; prUrl: string | null } | null> {
+    if (!this.sharesBoard() || !this.client) return null;
+    const { data, error } = await this.client.from('issues').select('status,pr_url').eq('id', issueId).maybeSingle();
+    if (error) throw error;
+    const row = data as { status?: string; pr_url?: string | null } | null;
+    return row?.status ? { status: row.status, prUrl: row.pr_url ?? null } : null;
   }
 
   /**
@@ -647,6 +661,7 @@ export class SupabaseService {
    */
   async shareComment(comment: IssueComment): Promise<void> {
     if (!this.sharesBoard() || !this.client) return;
+    assertPersonComment(comment);
     try {
       const { error } = await this.client
         .from('issue_comments')

@@ -2,8 +2,7 @@ import { sqliteService } from './sqliteService.js';
 import { currentWorkspaceId } from './workspaceContext.js';
 import { pushIssue } from './githubBoardWrite.js';
 import { logError } from '../utils/logger.js';
-import { Issue, IssueComment } from '../models/index.js';
-import { supabaseService } from './supabaseService.js';
+import { Issue } from '../models/index.js';
 import { shareCard } from './boardShareQueue.js';
 import { isManagedTask } from './managedTaskExecution.js';
 
@@ -26,20 +25,6 @@ import { isManagedTask } from './managedTaskExecution.js';
  * this daemon originated should be published, a change it just pulled should
  * not. The runner originates; the sync does not, and does not call this.
  */
-/**
- * Write a comment locally and give it to the team's board.
- *
- * For comments this daemon originates -- run summaries, review verdicts,
- * reconciliation notes -- by the same provenance rule as `updateIssueAndPush`.
- * On a desktop of its own, GitHub gets them from the next sync; on a team's,
- * that sync is the cloud's, so they have to reach the cloud first.
- */
-export function addCommentAndShare(comment: IssueComment): IssueComment {
-  const saved = sqliteService.addIssueComment(comment);
-  void supabaseService.shareComment(saved);
-  return saved;
-}
-
 export function updateIssueAndPush(issueId: string, updates: Partial<Issue>): void {
   const updated = sqliteService.updateIssue(issueId, updates);
   if (!updated) return;
