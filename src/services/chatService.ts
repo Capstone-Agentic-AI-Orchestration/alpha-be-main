@@ -1100,6 +1100,13 @@ export class ChatService extends EventEmitter {
           ].filter(Boolean).join(' · ')),
           'Use the Build review tab beside this conversation to inspect the saved builds, agents, changes and checks.'
         ].join('\n\n')
+      : build.decision
+        ? [
+            '**The Orchestrator needs one decision before it plans.**',
+            build.decision.question,
+            build.decision.options.length ? build.decision.options.map(option => `- ${option}`).join('\n') : undefined,
+            'Reply with your answer here and Alpha will plan the build with it. No branch was created and no specialist was started.'
+          ].filter(Boolean).join('\n\n')
       : build.status === 'blocked'
         ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
         : build.orchestrationRunId
