@@ -385,6 +385,37 @@ describe('project builds triggered from chat', () => {
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 
+  it('keeps a refused plan on this machine so the refusal can be read from the plan itself', async () => {
+    const previousHome = process.env.ALPHA_HOME;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-rejected-plan-'));
+    process.env.ALPHA_HOME = home;
+    try {
+      const service = await load();
+      const { OrchestrationPlanningError } = await import('./orchestrationPlanner.js');
+      const refusal = Object.assign(new OrchestrationPlanningError('Task t1-board-brief exceeds its milestone requirements or repositories.', 'invalid_plan'),
+        { rejectedPlans: { proposed: { tasks: [{ id: 't1-board-brief' }] }, corrected: { tasks: [{ id: 't1-board-brief' }] } } });
+      plannerCreatePlan.mockRejectedValueOnce(refusal);
+
+      const result = await service.startProjectBuild({
+        context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+        projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`,
+        content: 'Complete all remaining tasks in phases.'
+      });
+
+      expect(result).toMatchObject({ status: 'blocked', reason: expect.stringContaining('t1-board-brief') });
+      const directory = path.join(home, 'orchestration-plans', 'rejected');
+      const [file] = fs.readdirSync(directory);
+      const saved = JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8'));
+      expect(saved).toMatchObject({
+        projectId: project.id, goal: 'Complete all remaining tasks in phases.',
+        reason: expect.stringContaining('t1-board-brief'), proposed: { tasks: [{ id: 't1-board-brief' }] }, corrected: expect.any(Object)
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.ALPHA_HOME; else process.env.ALPHA_HOME = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('does not fall back to the legacy squad runner if the desktop orchestrator is unavailable', async () => {
     const service = await load(false);
     const result = await service.startProjectBuild({

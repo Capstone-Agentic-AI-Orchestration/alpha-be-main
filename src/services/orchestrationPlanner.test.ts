@@ -185,6 +185,43 @@ describe('read-only orchestration planner', () => {
     });
   });
 
+  /**
+   * A Manager brief the code did not wait for used to stop the build after one correction turn.
+   * Alpha now adds the ordering itself: it adds no work, so it needs no second opinion.
+   */
+  describe('safe corrections before the plan check', () => {
+    const requirements = [{ id: 'REQ-CREATE', description: 'Users can create tasks.' }];
+    const brief = { id: 'brief', title: 'Resolve overlaps', description: 'Resolve the overlap between the two board specifications.', kind: 'requirements',
+      ownerAgentId: 'manager-agent', dependsOn: [], requirementIds: ['REQ-CREATE'], acceptanceCriteria: ['The overlap is resolved.'], required: true };
+    const code = { id: 'create-task-ui', title: 'Create task UI', description: 'Build task creation.', kind: 'frontend', ownerAgentId: 'frontend-agent',
+      dependsOn: [], requirementIds: ['REQ-CREATE'], acceptanceCriteria: ['A task can be created.'], requiredChecks: ['test'],
+      scope: { includePaths: ['src/**'], excludePaths: [] }, required: true };
+    const correctionInput = (agents: readonly { id: string; role: string }[]) => ({ ...input, buildSteps: [],
+      eligibleAgents: agents as typeof input.eligibleAgents });
+
+    it('makes code wait for the Manager brief and plans in one turn', async () => {
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify({ schemaVersion: 1, goal: 'Implement task creation.', requirements, tasks: [brief, code] })));
+      const result = await new OrchestrationPlanner(turn).createPlan(correctionInput([
+        { id: 'manager-agent', role: 'Manager Agent' }, { id: 'frontend-agent', role: 'Frontend Agent' }
+      ]));
+      expect(turn).toHaveBeenCalledTimes(1);
+      expect(result.plan.tasks.find(task => task.id === 'create-task-ui')?.dependsOn).toEqual(['brief']);
+    });
+
+    it('still refuses code with no independent review, and keeps both refused plans', async () => {
+      const unreviewed = { schemaVersion: 1, goal: 'Implement task creation.', requirements, tasks: [brief, code] };
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(unreviewed)));
+      const refusal = await new OrchestrationPlanner(turn).createPlan(correctionInput([
+        { id: 'manager-agent', role: 'Manager Agent' }, { id: 'frontend-agent', role: 'Frontend Agent' },
+        { id: 'reviewer-agent', role: 'Security / Code Quality Agent' }
+      ])).catch(error => error);
+      expect(refusal.message).toMatch(/independent review/);
+      expect(turn).toHaveBeenCalledTimes(2);
+      expect(refusal.rejectedPlans.proposed.tasks.map((task: { id: string }) => task.id)).toEqual(['brief', 'create-task-ui']);
+      expect(refusal.rejectedPlans.corrected).toBeDefined();
+    });
+  });
+
   it('treats repositories as optional only when not named, or finished in an earlier milestone', () => {
     const repositories = [
       { repository: 'acme/api', repositoryContext: '', availableScripts: [], optional: true },
