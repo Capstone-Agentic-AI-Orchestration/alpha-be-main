@@ -9,7 +9,9 @@ vi.mock('./sqliteService.js', () => ({ sqliteService: {
   saveBoardBuildRequest: (record: any) => fixture.records.set(record.id, structuredClone(record)),
   getFeatureSpec: () => ({ version: fixture.spec }),
   getActiveOrchestrationForProject: () => fixture.blocker ? { runId: 'blocking-run', projectId: 'project', issueId: 'other-task', status: 'blocked' } : undefined,
-  getOrchestrationPlanningReservation: () => undefined
+  getOrchestrationPlanningReservation: () => undefined,
+  getChatThreads: () => [{ id: 'run-chat', ownerId: 'developer', projectId: 'project' }, { id: 'someone-elses', ownerId: 'other', projectId: 'project' }],
+  listBoardRuns: () => []
 } }));
 vi.mock('../store/stores.js', () => ({ issueStore: () => ({ get: async () => fixture.issue, update: vi.fn(async () => fixture.issue) }), projectStore: () => ({ get: async () => fixture.project }) }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessProjectBuilds: () => true, resolve: fixture.resolve } }));
@@ -29,6 +31,14 @@ describe('durable board planning requests', () => {
   });
   afterEach(() => { stop?.(); stop = undefined; vi.useRealTimers(); });
   const submit = (extra = {}) => requestBoardBuild({ context, issue: fixture.issue, project: fixture.project, requestId: 'request-one', instructions: 'Keep the saved scope.', queue: true, ...extra });
+
+  // A board run posts its builds into the project chat it was started from.
+  it('uses a chat the developer owns about this project, and refuses any other', async () => {
+    expect((await submit({ requestId: 'in-chat', threadId: 'run-chat' })).threadId).toBe('run-chat');
+    fixture.records.clear();
+    await expect(submit({ requestId: 'not-mine', threadId: 'someone-elses' })).rejects.toThrow(/not your chat about this project/);
+    await expect(submit({ requestId: 'missing', threadId: 'nowhere' })).rejects.toThrow(/not your chat about this project/);
+  });
 
   it('does not run or spend an attempt while waiting; replay resolves to one saved request', async () => {
     expect((await submit()).status).toBe('waiting');

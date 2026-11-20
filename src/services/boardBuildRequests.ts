@@ -91,7 +91,18 @@ async function dispatch(request: BoardBuildRequest, context: WorkspaceContext): 
   try { return await work; } finally { active.delete(request.id); }
 }
 
-export async function requestBoardBuild(input: { context: WorkspaceContext; issue: Issue; project: Project; requestId: string; instructions: string; queue: boolean }) {
+/** A chat thread the requester owns, about this project; anything else is refused. */
+function ownedProjectThread(threadId: string, context: WorkspaceContext, projectId: string) {
+  const thread = sqliteService.getChatThreads().find(item => item.id === threadId);
+  if (!thread || thread.ownerId !== context.userId || thread.projectId !== projectId) {
+    throw new Error('That conversation is not your chat about this project.');
+  }
+  return thread;
+}
+
+export async function requestBoardBuild(input: { context: WorkspaceContext; issue: Issue; project: Project; requestId: string; instructions: string; queue: boolean;
+  /** A board run posts its builds into the project chat it was started from, not each task's own thread. */
+  threadId?: string }) {
   const { context, issue, project } = input;
   if (context.role !== 'dev' || !workspaceRegistry.can(context.role, 'agent.run') || !workspaceRegistry.can(context.role, 'chat.write') || !workspaceRegistry.canAccessProjectBuilds(context, project.id)) throw new Error('Only an authorized developer can request AI planning.');
   return runWithWorkspace(context.workspaceId, async () => {
@@ -110,8 +121,8 @@ export async function requestBoardBuild(input: { context: WorkspaceContext; issu
     if (!issue.labels.includes('alpha:task-orchestration')) {
       await issueStore().update(context.workspaceId, issue.id, { labels: [...issue.labels, 'alpha:task-orchestration'] });
     }
-    const { ensureBoardThread } = await import('./boardThreadService.js');
-    const { thread } = ensureBoardThread({ workspaceId: context.workspaceId, ownerId: context.userId, projectId: project.id, issue });
+    const thread = input.threadId ? ownedProjectThread(input.threadId, context, project.id)
+      : (await import('./boardThreadService.js')).ensureBoardThread({ workspaceId: context.workspaceId, ownerId: context.userId, projectId: project.id, issue }).thread;
     const now = new Date().toISOString();
     const request: BoardBuildRequest = { id: input.requestId, workspaceId: context.workspaceId, ownerId: context.userId,
       projectId: project.id, issueId: issue.id, threadId: thread.id, instructions: input.instructions,
@@ -143,6 +154,9 @@ export function startBoardBuildQueue(): () => void {
           runWithWorkspace(request.workspaceId, () => save({ ...request, status: 'needs_review', reason: 'Execution access could not be verified. Review this queued request.' }));
         }
       }
+      // Board runs move to their next task here, on the same timer as the requests they queue.
+      const { advanceBoardRuns } = await import('./boardRunService.js');
+      await advanceBoardRuns();
     } finally { checking = false; }
   };
   const timer = setInterval(() => void tick().catch(() => undefined), 10_000);

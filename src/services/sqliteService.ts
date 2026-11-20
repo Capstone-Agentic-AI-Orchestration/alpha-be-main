@@ -1033,6 +1033,21 @@ export class SQLiteService {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_board_build_pending_issue
         ON board_build_requests(workspace_id, issue_id)
         WHERE json_extract(request_json, '$.status') IN ('waiting', 'planning');
+      /*
+       * A board run: a developer's explicit request that agents work through
+       * chosen board tasks one after another, within caps they set. Local like
+       * board build requests, because the builds it starts run on this desktop.
+       */
+      CREATE TABLE IF NOT EXISTS board_runs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_json TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_board_run_active_project
+        ON board_runs(workspace_id, project_id)
+        WHERE json_extract(run_json, '$.status') IN ('running', 'waiting_on_you', 'paused');
 
       /*
        * Every board change an agent made or asked to make, on behalf of whom.
@@ -4197,6 +4212,20 @@ export class SQLiteService {
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET request_json = excluded.request_json
       WHERE workspace_id = excluded.workspace_id AND owner_id = excluded.owner_id`)
       .run(record.id, record.workspaceId, record.ownerId, record.projectId, record.issueId, JSON.stringify(record));
+  }
+
+  saveBoardRun(record: { id: string; workspaceId: string; ownerId: string; projectId: string; [key: string]: unknown }): void {
+    this.db.prepare(`INSERT INTO board_runs (id, workspace_id, owner_id, project_id, run_json)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET run_json = excluded.run_json
+      WHERE workspace_id = excluded.workspace_id AND owner_id = excluded.owner_id`)
+      .run(record.id, record.workspaceId, record.ownerId, record.projectId, JSON.stringify(record));
+  }
+
+  listBoardRuns(workspaceId?: string): Array<Record<string, unknown>> {
+    const rows = workspaceId
+      ? this.db.prepare('SELECT run_json FROM board_runs WHERE workspace_id = ? ORDER BY rowid').all(workspaceId)
+      : this.db.prepare('SELECT run_json FROM board_runs ORDER BY rowid').all();
+    return (rows as Array<{ run_json: string }>).map(row => JSON.parse(row.run_json));
   }
 
   listBoardBuildRequests(workspaceId?: string): Array<Record<string, unknown>> {
