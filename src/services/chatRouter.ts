@@ -268,6 +268,22 @@ export function isStopPreviewRequest(content: string): boolean {
   return /^(?:(?:now|please)[, ]+)?(?:(?:can|could|would) you )?(?:please )?stop (?:the |my |this )?(?:local (?:run|preview|server|website|dev server)|preview|dev server|npm run dev)(?: please)?[.!?]*$/i.test(content.trim());
 }
 
+/**
+ * A plain request to run the build locally or open its preview ("can you run this locally
+ * again", "I mean can you run the system locally"). While a build waits on a decision, every
+ * other message is read as an answer to that decision; this one is not an answer and changes
+ * no code, so it goes to the ordinary chat, which starts the preview. It used to get "No
+ * publication was authorized" instead. Anything destructive or negated is left out.
+ */
+export function isStartPreviewRequest(content: string): boolean {
+  const text = content.trim();
+  if (text.length > 120 || /\b(?:stop|don'?t|do not|never|delete|remove|push|publish|merge|deploy|approve)\b/i.test(text)) return false;
+  const request = text.replace(/^(?:i mean|now|ok(?:ay)?|please)[, ]+/i, '').replace(/^(?:can|could|would) you (?:please )?/i, '');
+  const asksToRun = /^(?:please )?(?:run|start|launch|open|spin up|bring up|serve)\b/i.test(request);
+  const aboutLocal = /\b(?:locally|local|preview|on (?:my|this) (?:machine|computer))\b/i.test(request);
+  return asksToRun && aboutLocal;
+}
+
 export function isPreviewInvestigationRequest(content: string): boolean {
   return /\b(?:preview|browser|white screen|blank (?:page|screen)|npm run dev|local (?:run|server|website|dev))\b/i.test(content);
 }

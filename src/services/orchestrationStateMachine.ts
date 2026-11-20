@@ -146,8 +146,22 @@ export interface OrchestrationPublicationRecord {
   branchName: string;
   baseBranch: string;
   resultCommit: string;
+  /** Empty for a repository the build left unchanged: there was nothing to open a pull request for. */
   pullRequestUrl: string;
   publishedAt: string;
+  /**
+   * The build changed nothing in this repository (its validated result is its base commit).
+   * GitHub refuses a pull request with no commits, and that refusal used to stop the whole
+   * publication before the repositories that did change were pushed.
+   */
+  unchanged?: boolean;
+}
+
+/** Whether a saved publication record is a repository the build left unchanged, as validation recorded it. */
+export function isUnchangedPublication(record: Record<string, unknown> | undefined, validated: Record<string, unknown> | undefined): boolean {
+  return Boolean(record && record.unchanged === true && typeof validated?.baseCommit === 'string'
+    && validated.baseCommit === validated.resultCommit && record.resultCommit === validated.resultCommit
+    && (record.pullRequestUrl === '' || record.pullRequestUrl === undefined));
 }
 
 export interface OrchestrationRunRecord {

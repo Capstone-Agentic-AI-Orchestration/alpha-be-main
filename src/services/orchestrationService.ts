@@ -14,7 +14,7 @@ import {
 } from './orchestrationContract.js';
 import { parseAgentReport } from './orchestrationAgentReport.js';
 export { parseAgentReport } from './orchestrationAgentReport.js';
-import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationPublicationRecord, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { buildHumanReviewAmendment, type OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
@@ -394,8 +394,19 @@ export class OrchestrationService {
         (event.payload.evidence as Record<string, unknown>).decision === 'approved');
       if (!approval) throw new Error('The durable human approval event is missing. Reopen the final review before retrying publication.');
 
-      const publications = await this.publication.publishAll(snapshot);
-      const publication = publications.find(item => item.repository?.toLowerCase() === snapshot.run.repository.toLowerCase()) ?? publications[0];
+      let publications: OrchestrationPublicationRecord[];
+      try {
+        publications = await this.publication.publishAll(snapshot);
+      } catch (error) {
+        // The run stays publishing so a retry is safe, but the chat now hears why it stopped.
+        const { postPublicationFailedNotice } = await import('./orchestrationChatNotice.js');
+        await postPublicationFailedNotice(this.store, snapshot, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+      // The primary record is the run's repository when it has a pull request, else any that does.
+      const opened = publications.filter(item => !item.unchanged);
+      const publication = opened.find(item => item.repository?.toLowerCase() === snapshot.run.repository.toLowerCase())
+        ?? opened[0] ?? publications[0];
       if (!publication) throw new Error('No codebase pull request was published.');
       const completed = this.store.transitionOrchestrationRun({
         runId: input.runId,
@@ -410,6 +421,8 @@ export class OrchestrationService {
         }
       });
       await this.publication.synchronizePublishedIssue(completed);
+      const { postPublishedNotice } = await import('./orchestrationChatNotice.js');
+      await postPublishedNotice(this.store, completed, publications);
       if (typeof this.store.saveOrchestrationDelivery === 'function') {
         const { OrchestrationDeliveryService } = await import('./orchestrationDeliveryService.js');
         new OrchestrationDeliveryService(this.store).ensure(completed);
