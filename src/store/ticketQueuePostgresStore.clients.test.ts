@@ -121,6 +121,18 @@ describe('PM clients on the complete migration schema', () => {
     expect(ana.projects.map(project => project.projectId)).toEqual(portal.items.map(project => project.projectId));
   });
 
+  it('says a preview is shared exactly when the client portal shows one', async () => {
+    const shared = async () => (await service.listClients('workspace-a', pm))[0].projects[0].previewPublished;
+    const portal = async () => (await new PostgresClientProjectPortal(db).projects(clientA)).items[0].preview !== null;
+    expect([await shared(), await portal()]).toEqual([true, true]);
+    // Stopping the share hides the older published round too, on both sides.
+    await db.query(`insert into alpha_private.client_project_previews(workspace_id,project_id,repository,branch,url,updated_by)
+      values ('workspace-a','gh-repo-1',null,null,null,'pm')`);
+    expect([await shared(), await portal()]).toEqual([false, false]);
+    await db.query(`update alpha_private.client_project_previews set repository='org/repo',branch='uat',url='https://shared.vercel.app/'`);
+    expect([await shared(), await portal()]).toEqual([true, true]);
+  });
+
   it('agrees with the queue counters for the same client', async () => {
     const [ana, ben] = await service.listClients('workspace-a', pm);
     for (const client of [ana, ben]) {

@@ -10,6 +10,8 @@ import { TicketWorkflowError } from '../ticketing/workflow.js';
 import { TicketReadInvariantError } from '../ticketing/readModels.js';
 import { validTicketProjectPreview } from './ticketProjectManagementService.js';
 import type { TicketSharedPreview } from '../store/ticketProjectManagementStore.js';
+import { clientProjectPreviewSql } from '../store/clientProjectPreviewSql.js';
+import type { ProjectUatBuilds } from './projectUatBuilds.js';
 import { CLIENT_TICKET_ACCESS_JOINS_SQL, CLIENT_VISIBLE_PROJECT_SQL } from '../store/ticketClientSql.js';
 
 const id = z.string().min(1).max(200).refine(v => v.trim() === v);
@@ -66,7 +68,12 @@ const needsAction = `status not in ('closed','declined','cancelled','on_hold')
  * thread together with each request's messages; workflow and project-link
  * approval remain separate. */
 export class PostgresClientProjectPortal {
-  constructor(private readonly db: TransactionalSql) {}
+  /**
+   * `builds`, when given, checks a shared preview against the project's verified UAT build, so
+   * clients only ever see a build the hosting provider vouches for. Without it, a share is saved
+   * but not verified (readers that never share a preview do not need it).
+   */
+  constructor(private readonly db: TransactionalSql, private readonly builds?: Pick<ProjectUatBuilds, 'resolve'>) {}
 
   /** Shared authority for the project QA module; always called on its transaction. */
   async authorizeProject(sql: Sql, target: ProjectTarget, subject: TicketSubject, write = false) {
@@ -156,10 +163,7 @@ export class PostgresClientProjectPortal {
         select l.workspace_id,l.project_id,p.name,greatest(l.updated_at,pp.updated_at) as updated_at,
           pp.repository,pp.branch,pp.url from linked l
         join public.projects p on p.workspace_id=l.workspace_id and p.id=l.project_id
-        left join lateral (select r.updated_at,r.build->'frontend'->>'repository' as repository,
-          'uat'::text as branch,r.build->'frontend'->>'url' as url from alpha_private.client_uat_rounds r
-          where r.workspace_id=l.workspace_id and r.project_id=l.project_id and r.client_user_id=$1
-          and r.status in ('published','submitted') and r.published_at is not null order by r.number desc limit 1) pp on true
+        left join lateral (${clientProjectPreviewSql('l.workspace_id', 'l.project_id', '$1')}) pp on true
         order by updated_at desc,l.workspace_id collate "C",l.project_id collate "C"`, [client.userId, client.sessionId]);
       const items: ClientProject[] = [];
       for (const row of rows) {
@@ -251,10 +255,21 @@ export class PostgresClientProjectPortal {
     });
   }
 
+  /** A shared preview must be the project's current verified UAT build for that repository; access is checked first. */
+  private async requireVerifiedBuild(target: ProjectTarget, subject: TicketSubject, preview: TicketSharedPreview) {
+    if (!this.builds) return;
+    await this.db.transaction(sql => this.authorizeProject(sql, target, subject));
+    const build = await this.builds.resolve(target, preview.repository);
+    if (build.frontend.repository !== preview.repository || new URL(build.frontend.url).origin !== new URL(preview.url).origin) {
+      throw new TicketWorkflowError(409, 'uat_build_changed', 'Share the current verified UAT build. Reload the preview and try again.');
+    }
+  }
+
   async setPreview(target: ProjectTarget, subject: TicketSubject, input: unknown) {
     if (subject.kind !== 'internal') missing();
     const { preview } = parse(previewSchema, input);
     if (!validTicketProjectPreview(preview)) throw new TicketWorkflowError(400, 'invalid_project_preview', 'Use a hosted HTTPS Vercel preview.');
+    if (preview) await this.requireVerifiedBuild(target, subject, preview);
     return this.db.transaction(async sql => {
       await this.lockProject(sql, target, subject, true);
       await sql.query(`insert into alpha_private.client_project_previews(workspace_id,project_id,repository,branch,url,updated_by)
