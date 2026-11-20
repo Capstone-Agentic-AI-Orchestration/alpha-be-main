@@ -361,6 +361,8 @@ describe('project builds triggered from chat', () => {
     expect(startOrchestration.mock.calls[0][0].repositoryWorkspaces.map((item: any) => item.repository)).toEqual(repositoryList);
     expect(startOrchestration.mock.calls[0][0].plan.tasks.map((task: any) => task.repository)).toEqual(expect.arrayContaining(repositoryList));
     expect(startOrchestration.mock.calls[0][0].plan.tasks.find((task: any) => task.id === 'backend-task')).toMatchObject({ repository: 'acme/shop-be', ownerAgentId: 'agent-3' });
+    // Both were named, so each must get work: neither is optional for the planner.
+    expect(plannerCreatePlan.mock.calls[0][0].repositories.map((item: any) => item.optional ?? false)).toEqual([false, false]);
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 
@@ -377,6 +379,9 @@ describe('project builds triggered from chat', () => {
     expect(result).toMatchObject({ status: 'plan_ready', repositories: repositoryList });
     expect(createdIssue).toHaveBeenCalledTimes(1);
     expect(startOrchestration.mock.calls[0][0].repositoryWorkspaces.map((item: any) => item.repository)).toEqual(repositoryList);
+    // Every repository reaches the planner and stays attached to the run, so any task may change it;
+    // none was named, so the plan need not give each one work (frontend-only requests are fine).
+    expect(plannerCreatePlan.mock.calls[0][0].repositories.map((item: any) => [item.repository, item.optional])).toEqual(repositoryList.map((repo: string) => [repo, true]));
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 

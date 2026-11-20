@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
-import { OrchestrationPlanner } from './orchestrationPlanner.js';
+import { OrchestrationPlanner, optionalPlanRepositories } from './orchestrationPlanner.js';
 
 const plan = {
   schemaVersion: 1,
@@ -156,6 +156,43 @@ describe('read-only orchestration planner', () => {
       const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(clientOnly)));
       await expect(new OrchestrationPlanner(turn).createPlan(milestoneInput(false))).rejects.toThrow(/No task is assigned to selected repository acme\/api/);
     });
+
+    /**
+     * The reported build: "do all the tasks" in a project with a frontend and a backend
+     * repository, where every task was frontend work. Both repositories stay available,
+     * but the backend was selected only because it belongs to the project, so a plan
+     * with no backend task is right, not a reason to stop.
+     */
+    const firstPlanInput = (apiNamed: boolean) => ({ ...input, goal: clientOnly.goal, buildSteps: [],
+      eligibleAgents: [...input.eligibleAgents, { id: 'frontend-agent', role: 'Frontend Agent' as const }],
+      repositories: [
+        { repository: 'acme/api', repositoryContext: 'Account API', availableScripts: ['test'], ...(apiNamed ? {} : { optional: true }) },
+        { repository: 'acme/client', repositoryContext: 'Client scaffold', availableScripts: ['test'], ...(apiNamed ? {} : { optional: true }) }
+      ] });
+
+    it('accepts frontend-only work when the backend was selected only because it is in the project', async () => {
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(clientOnly)));
+      const result = await new OrchestrationPlanner(turn).createPlan(firstPlanInput(false));
+      expect(turn).toHaveBeenCalledTimes(1);
+      expect(result.plan.tasks.map(task => task.repository)).toEqual(['acme/client']);
+      // The planner sees both repositories, and is told the untouched one is optional rather than padding it.
+      expect(turn.mock.calls[0][0].prompt).toMatch(/"repository":\s*"acme\/api",\s*"optional":\s*true/);
+    });
+
+    it('still requires a task in a repository the person named', async () => {
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(clientOnly)));
+      await expect(new OrchestrationPlanner(turn).createPlan(firstPlanInput(true))).rejects.toThrow(/No task is assigned to selected repository acme\/api/);
+    });
+  });
+
+  it('treats repositories as optional only when not named, or finished in an earlier milestone', () => {
+    const repositories = [
+      { repository: 'acme/api', repositoryContext: '', availableScripts: [], optional: true },
+      { repository: 'acme/client', repositoryContext: '', availableScripts: [] },
+      { repository: 'acme/docs', repositoryContext: '', availableScripts: [], hasAcceptedWork: true }
+    ];
+    expect(optionalPlanRepositories({ repositories })).toEqual(['acme/api']);
+    expect(optionalPlanRepositories({ repositories, milestoneContext: { id: 'M2', title: 'Next', objective: 'Continue' } })).toEqual(['acme/api', 'acme/docs']);
   });
 
   it('validates role, checks, scope, and project-step mapping before returning the plan', async () => {
