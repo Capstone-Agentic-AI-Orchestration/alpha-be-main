@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import type { Agent, Project, ProjectBuildStep, RuntimeEngine } from '../models/index.js';
-import { ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
+import { ALPHA_DIR, ALPHA_ORCHESTRATION_ENABLED, IS_CLOUD } from '../config/env.js';
+import { logError, logInfo } from '../utils/logger.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { issueStore, projectStore } from '../store/stores.js';
 import { addBranchWorktree, assertSafeBranchName, fetchRemoteBranch, getCurrentBranch, getHeadCommit, isGitRepo, isGitWorkingTreeClean, remoteHasDevBranch } from '../utils/gitUtils.js';
@@ -200,6 +201,25 @@ async function reconcilePlanningReservations(input: {
 
 function namedRepository(repositories: readonly SelectedProjectRepository[], repository: string): boolean {
   return repositories.some(item => item.named && item.repository.toLowerCase() === repository.toLowerCase());
+}
+
+/**
+ * Keep a refused plan on this machine, beside the accepted plan files, so the
+ * reason a build stopped can be read from the plan itself. Best effort: a
+ * failure to save never changes what the person is told.
+ */
+function saveRejectedPlans(error: OrchestrationPlanningError, context: { projectId: string; requestKey: string; goal: string }): void {
+  if (!error.rejectedPlans || !ALPHA_DIR) return;
+  try {
+    const directory = path.join(ALPHA_DIR, 'orchestration-plans', 'rejected');
+    fs.mkdirSync(directory, { recursive: true });
+    const at = new Date().toISOString();
+    const file = path.join(directory, `${at.replace(/[:.]/g, '-')}-${context.requestKey.slice(0, 12)}.json`);
+    fs.writeFileSync(file, JSON.stringify({ at, ...context, reason: error.message, ...error.rejectedPlans }, null, 2), 'utf8');
+    logInfo(`Saved the refused plan for review: ${file}`);
+  } catch (saveError) {
+    logError('Could not save the refused plan:', saveError instanceof Error ? saveError.message : String(saveError));
+  }
 }
 
 function orchestrationBranchName(runId: string): string {
@@ -554,6 +574,7 @@ async function startOrchestratedProjectBuild(input: {
     }
   } catch (error) {
     const detail = error instanceof OrchestrationPlanningError ? error.message : error instanceof Error ? error.message : 'The plan could not be validated.';
+    if (error instanceof OrchestrationPlanningError) saveRejectedPlans(error, { projectId: project.id, requestKey, goal: cleanGoal });
     const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
     const recoveryNote = cleanup.every(result => result === 'released') ? ''
       : cleanup.includes('workspace_preserved')
