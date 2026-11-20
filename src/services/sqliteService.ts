@@ -59,6 +59,7 @@ import {
   transitionTask,
   transitionRun,
   selectNextReadyTask,
+  isUnchangedPublication,
   type OrchestrationRunRecord,
   type OrchestrationTaskRecord,
   type OrchestrationTaskStatus,
@@ -3750,11 +3751,12 @@ export class SQLiteService {
       const pullUrl = typeof item.pullRequestUrl === 'string' ? item.pullRequestUrl.toLowerCase() : '';
       const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(repo).toLowerCase()}/pull/`;
       const pullNumber = pullUrl.startsWith(expectedPullPrefix) ? pullUrl.slice(expectedPullPrefix.length) : '';
+      const unchanged = isUnchangedPublication(item, validated);
       return Boolean(workspace && isSafeOrchestrationBranchName(item.branchName) &&
         item.branchName === workspace.branchName && item.baseBranch !== item.branchName &&
         isSafeOrchestrationBranchName(item.baseBranch) && typeof resultCommit === 'string' &&
         /^[a-f0-9]{40,64}$/i.test(resultCommit) && item.resultCommit === resultCommit && item.branchName === branchName &&
-        /^\d+$/.test(pullNumber) && typeof item.publishedAt === 'string' && Number.isFinite(Date.parse(item.publishedAt)));
+        (unchanged || /^\d+$/.test(pullNumber)) && typeof item.publishedAt === 'string' && Number.isFinite(Date.parse(item.publishedAt)));
     });
     const publishedRepositoryKeys = validPublications.map(item => typeof item.repository === 'string'
       ? canonicalOrchestrationRepository(item.repository) : canonicalOrchestrationRepository(run.repository));
@@ -3770,7 +3772,8 @@ export class SQLiteService {
         pullRequestUrl: item.pullRequestUrl as string,
         publishedAt: item.publishedAt as string
       });
-      run.publications = validPublications.map(toRecord);
+      // Only real pull requests are listed; a repository the build left unchanged has none.
+      run.publications = validPublications.filter(item => item.unchanged !== true).map(toRecord);
       run.publication = run.publications.find(item => item.repository?.toLowerCase() === run.repository.toLowerCase()) ?? run.publications[0];
     }
     return {
@@ -4778,11 +4781,12 @@ export class SQLiteService {
             : workspace.repository === snapshot.run.repository ? validated.branchName : undefined;
           const pullUrl = typeof record?.pullRequestUrl === 'string' ? record.pullRequestUrl.toLowerCase() : '';
           const expectedPullPrefix = `https://github.com/${canonicalOrchestrationRepository(workspace.repository).toLowerCase()}/pull/`;
+          const unchanged = isUnchangedPublication(record, repoValidation);
           const checks = [
             !record || !isSafeOrchestrationBranchName(record.branchName) || record.branchName !== workspace.branchName ? 'branch' : '',
             !record || !isSafeOrchestrationBranchName(record.baseBranch) || record.baseBranch === record.branchName ? 'base branch' : '',
             typeof record?.resultCommit !== 'string' || record.resultCommit !== resultCommit || branchName !== record.branchName ? 'commit' : '',
-            !pullUrl.startsWith(expectedPullPrefix) || !/^\d+$/.test(pullUrl.slice(expectedPullPrefix.length)) ? 'pull request URL' : '',
+            !unchanged && (!pullUrl.startsWith(expectedPullPrefix) || !/^\d+$/.test(pullUrl.slice(expectedPullPrefix.length))) ? 'pull request URL' : '',
             typeof record?.publishedAt !== 'string' || !Number.isFinite(Date.parse(record.publishedAt)) ? 'publication time' : ''
           ].filter(Boolean);
           mismatchReasons.push(...checks);

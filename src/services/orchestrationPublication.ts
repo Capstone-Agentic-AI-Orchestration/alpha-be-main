@@ -98,7 +98,8 @@ function validationForRepository(snapshot: OrchestrationSnapshot, evidence: Retu
     : undefined;
   if (item) return {
     resultCommit: item.resultCommit as string,
-    branchName: item.branchName as string
+    branchName: item.branchName as string,
+    baseCommit: typeof item.baseCommit === 'string' ? item.baseCommit : undefined
   };
   if (repository === snapshot.run.repository) return { resultCommit: evidence.resultCommit, branchName: evidence.branchName };
   throw new Error(`Final validation evidence for ${repository} is missing. Run checks for every selected codebase before approval.`);
@@ -224,14 +225,20 @@ export class OrchestrationPublicationService {
       if (validated.resultCommit !== target.resultCommit || validated.branchName !== target.branchName) {
         throw new Error(`The validated branch for ${target.repository} no longer matches approval. Run final checks again.`);
       }
-      return { workspace, target };
+      return { workspace, target, unchanged: validated.baseCommit === target.resultCommit };
     });
     const issue = await this.issues.get(snapshot.run.workspaceId, snapshot.run.issueId);
     if (!issue || issue.projectId !== snapshot.run.projectId) {
       throw new Error('The linked project task is unavailable. Reconnect it before opening the pull requests.');
     }
     const published: OrchestrationPublicationRecord[] = [];
-    for (const { workspace, target } of targets) {
+    for (const { workspace, target, unchanged } of targets) {
+      if (unchanged) {
+        // Nothing to push or review here; the other repositories still get their pull requests.
+        published.push({ repository: canonicalRepo(target.repository), branchName: target.branchName, baseBranch: target.publicationBaseBranch,
+          resultCommit: target.resultCommit, pullRequestUrl: '', publishedAt: this.now(), unchanged: true });
+        continue;
+      }
       const { cwd, repo, branchName } = await assertPublishedWorkspace(workspace, this.store, this.github, target.resultCommit);
       await this.github.pushBranch(cwd, branchName, repo);
       const remoteBranches = await this.listRemoteBranches(repo);

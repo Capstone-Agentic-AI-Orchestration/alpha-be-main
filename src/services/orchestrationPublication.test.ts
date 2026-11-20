@@ -160,4 +160,70 @@ describe('orchestration publication', () => {
     await expect(service.publish(snapshot(cwd, 'publishing', resultCommit))).rejects.toThrow(/changed after validation/);
     expect(pushBranch).not.toHaveBeenCalled();
   });
+
+  /**
+   * A frontend + backend build that changed only the frontend. GitHub refuses a pull request
+   * with no commits, and that refusal on the unchanged backend used to stop publication
+   * before the frontend was even pushed, leaving the build "opening the pull request" for ever.
+   */
+  it('skips a repository the build left unchanged and still opens the other pull request', async () => {
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-publish-unchanged-'));
+    const branchName = 'alpha/orchestration/run-1';
+    execFileSync('git', ['init'], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['checkout', '-b', branchName], { cwd, stdio: 'ignore' });
+    fs.writeFileSync(path.join(cwd, 'index.html'), '<h1>Landing</h1>\n');
+    execFileSync('git', ['add', 'index.html'], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['-c', 'user.name=Alpha Test', '-c', 'user.email=alpha-test@example.invalid', 'commit', '-m', 'landing page'], { cwd, stdio: 'ignore' });
+    const frontendCommit = await getHeadCommit(cwd);
+    const backendCommit = 'b'.repeat(40);
+    const checks = { status: 'passed', missingScripts: [], observed: [{ command: 'npm test', exitCode: 0, signal: null }] };
+    const targets = [
+      { repository: 'acme/shop-be', branchName, resultCommit: backendCommit, publicationBaseBranch: 'dev' },
+      { repository: 'acme/shop-fe', branchName, resultCommit: frontendCommit, publicationBaseBranch: 'dev' }
+    ];
+    const events = [
+      event('run_awaiting_approval', { validationVersion: 1, resultCommit: backendCommit, branchName, noOpenBlockingFindings: true, checks,
+        repositories: [
+          { repository: 'acme/shop-be', baseCommit: backendCommit, resultCommit: backendCommit, branchName, checks },
+          { repository: 'acme/shop-fe', baseCommit: 'a'.repeat(40), resultCommit: frontendCommit, branchName, checks }
+        ] }),
+      event('run_publishing', { decision: 'approved', approvedBy: 'user-1', approvedAt: 'now', resultCommit: backendCommit, branchName,
+        publicationBaseBranch: 'dev', publicationTargets: targets })
+    ];
+    const run = snapshot(cwd, 'publishing', backendCommit);
+    run.run.repository = 'acme/shop-be';
+    run.run.repositoryWorkspaces = [
+      { repository: 'acme/shop-be', branchName, baseRef: 'dev', baseCommit: backendCommit, worktreePath: path.join(cwd, 'never-used') },
+      { repository: 'acme/shop-fe', branchName, baseRef: 'dev', baseCommit: 'a'.repeat(40), worktreePath: cwd }
+    ];
+    const pushBranch = vi.fn(async () => {});
+    const createPullRequest = vi.fn(async () => 'https://github.com/acme/shop-fe/pull/7');
+    const service = new OrchestrationPublicationService({
+      store: { isPathAllowed: (value: string) => value === cwd, listOrchestrationEvents: () => events } as any,
+      issues: {
+        async get() { return issueFixture(); },
+        async update() { return issueFixture(); },
+        async addComment(_workspaceId, comment) { return comment; }
+      },
+      github: {
+        async checkAuth() { return { authenticated: true }; },
+        async inspectLocalRepo() { return { isRepo: true, ownerRepo: 'acme/shop-fe', branch: branchName }; },
+        pushBranch,
+        createPullRequest
+      } as any,
+      listRemoteBranches: async () => [{ name: branchName, sha: frontendCommit, protected: false, pipeline: false, agent: false }],
+      findOpenPullRequest: async () => undefined,
+      now: () => '2026-11-20T14:00:00.000Z'
+    });
+
+    const published = await service.publishAll(run);
+
+    expect(published).toEqual([
+      { repository: 'acme/shop-be', branchName, baseBranch: 'dev', resultCommit: backendCommit, pullRequestUrl: '', publishedAt: '2026-11-20T14:00:00.000Z', unchanged: true },
+      { repository: 'acme/shop-fe', branchName, baseBranch: 'dev', resultCommit: frontendCommit, pullRequestUrl: 'https://github.com/acme/shop-fe/pull/7', publishedAt: '2026-11-20T14:00:00.000Z' }
+    ]);
+    expect(pushBranch).toHaveBeenCalledTimes(1);
+    expect(pushBranch).toHaveBeenCalledWith(cwd, branchName, 'acme/shop-fe');
+    expect(createPullRequest).toHaveBeenCalledTimes(1);
+  });
 });

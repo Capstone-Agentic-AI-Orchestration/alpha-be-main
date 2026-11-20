@@ -46,6 +46,7 @@ import {
   readStructuredAlphaReply,
   isBareContinueRequest,
   isStopPreviewRequest,
+  isStartPreviewRequest,
   orchestratorRoutingPrompt,
   parseAlphaRoute,
   parseChatOverride,
@@ -617,7 +618,7 @@ export class ChatService extends EventEmitter {
     const pendingDecisions = params.routing && thread.projectId
       ? runWithWorkspace(params.routing.context.workspaceId, () => sqliteService.listChatPendingDecisions(thread.projectId!, threadId)) : [];
     if (params.routing && !params.routing.answerOnly && !params.buildRequest &&
-        !parseChatOverride(content).override && !isStopPreviewRequest(content) &&
+        !parseChatOverride(content).override && !isStopPreviewRequest(content) && !isStartPreviewRequest(content) &&
         (params.buildDecision || pendingDecisions.length)) {
       const id = `${messageId}-build-decision`;
       const key = JSON.stringify([workspaceId, threadId, messageId]);
