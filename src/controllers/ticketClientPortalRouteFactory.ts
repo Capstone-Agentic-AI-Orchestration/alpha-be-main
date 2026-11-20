@@ -33,11 +33,13 @@ import { createTicketClientAccountRouter } from './ticketClientAccountController
 import type { PostgresTicketClientAccountStore } from '../store/ticketClientAccountPostgresStore.js';
 import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.js';
 import type { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
+import type { ClientProjectConversation } from '../services/clientProjectConversation.js';
 import type { ProjectUat } from '../services/projectUat.js';
 
 export interface TicketClientPortalRouteDependencies {
   projectProposals?: ClientProjectProposals;
   projectPortal?: PostgresClientProjectPortal;
+  projectConversation?: ClientProjectConversation;
   projectUat?: ProjectUat;
   sessionStore: TicketClientSessionStore;
   activationStore: TicketClientActivationStore;
@@ -106,6 +108,7 @@ export function createTicketClientPortalRouteBoundary(dependencies: TicketClient
     projectProposals: dependencies.projectProposals,
     emailFor: sessions.emailFor,
     projectPortal: dependencies.projectPortal,
+    projectConversation: dependencies.projectConversation,
     projectUat: dependencies.projectUat,
     authenticate: sessions.authenticate,
     listWorkspaces: workspaces.list,

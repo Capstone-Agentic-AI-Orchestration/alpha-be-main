@@ -1,6 +1,8 @@
 import { Router, type Response } from 'express';
 import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 import { createPmClientProjectRouter } from './clientProjectPortalController.js';
+import { createPmClientConversationRouter } from './clientProjectConversationController.js';
+import { ClientProjectConversation } from '../services/clientProjectConversation.js';
 import { createPmProjectUatRouter } from './projectUatController.js';
 import { ProjectUat } from '../services/projectUat.js';
 import { createProjectUatBuilds } from '../services/projectUatBuilds.js';
@@ -144,6 +146,7 @@ export function createTicketPmReadRouteBoundary(
   }
 
   if (triageEnabled) router.use(createPmClientProjectRouter(new PostgresClientProjectPortal(db), relayRequest));
+  if (triageEnabled) router.use(createPmClientConversationRouter(new ClientProjectConversation(db, new PostgresClientProjectPortal(db)), relayRequest));
   if (triageEnabled) router.use(createPmProjectUatRouter(new ProjectUat(db,new PostgresClientProjectPortal(db),createProjectUatBuilds(db),projectUatStorage()),relayRequest));
   router.use(createTicketQueueRouter(queue, relayRequest));
   router.use(createTicketReadRouter({ ...reads,

@@ -17,6 +17,7 @@ import type { TicketDocumentsApplication } from './ticketDocumentController.js';
 import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentResponse, sendTicketDocument } from './ticketDocumentController.js';
 import { route } from './asyncRoute.js';
 import type { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
+import type { ClientProjectConversation } from '../services/clientProjectConversation.js';
 import type { ProjectUat } from '../services/projectUat.js';
 import { sendUatEvidence } from './projectUatController.js';
 import {
@@ -37,6 +38,7 @@ export interface TicketClientApiApplication {
   projectProposals?: ClientProjectProposals;
   emailFor?(subject: Extract<TicketSubject,{kind:'client'}>): Promise<string|null>;
   projectPortal?: PostgresClientProjectPortal;
+  projectConversation?: ClientProjectConversation;
   projectUat?: ProjectUat;
   workflowCapabilities(): { phaseWorkflowEnabled: boolean };
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
@@ -329,6 +331,28 @@ export function createTicketClientApiRouter(
       if (subject) return res.json(await projects.operation(
         { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject, req.params.operationId));
     }));
+    if (application.projectConversation) {
+      // One conversation per project: the project thread, its requests and their messages together.
+      const conversation = application.projectConversation;
+      router.get(projectPath + '/conversation', route(async (req, res) => {
+        if (!available(res)) return;
+        const subject = await authenticate(req, res, false);
+        if (subject) return res.json(await conversation.timeline(
+          { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject));
+      }));
+      router.get(projectPath + '/conversation/requests', route(async (req, res) => {
+        if (!available(res)) return;
+        const subject = await authenticate(req, res, false);
+        if (subject) return res.json(await conversation.requests(
+          { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, subject));
+      }));
+      router.post(projectPath + '/conversation/requests/:ticketId/check', route(async (req, res) => {
+        if (!available(res) || !allowedWriteOrigin(req, res)) return;
+        const subject = await authenticate(req, res, true);
+        if (subject) return res.json(await conversation.setDone(
+          { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, req.params.ticketId, subject, req.body));
+      }));
+    }
   }
 
   if(application.projectUat) {
