@@ -120,13 +120,16 @@ describe('a plan in another conversation that blocks this request', () => {
   it('never touches a build that started, or someone else\'s plan', async () => {
     const started = deps([], { blockingPlan: () => blocking('executing') as any });
     expect(await run('set_aside_blocking_plan', 'set it aside', {}, started)).toEqual({ kind: 'reply', message: expect.stringContaining('already started') });
-    const theirs = deps([], { blockingPlan: () => blocking('awaiting_plan_approval', 'someone-else') as any });
-    expect(await run('set_aside_blocking_plan', 'set it aside', {}, theirs)).toEqual({ kind: 'reply', message: expect.stringContaining('someone else') });
+    const theirs = deps([], { blockingPlan: () => blocking('executing', 'someone-else') as any });
+    // Ownership is checked first, and someone else's conversation is never named.
+    const refused = await run('set_aside_blocking_plan', 'set it aside', {}, theirs);
+    expect(refused).toEqual({ kind: 'reply', message: expect.stringContaining('not yours') });
+    expect((refused as { message: string }).message).not.toContain('can you see this project');
     expect(started.cancel).not.toHaveBeenCalled(); expect(theirs.cancel).not.toHaveBeenCalled();
   });
 
   it('says so when nothing is in the way, and still needs the person\'s own words', async () => {
-    expect(await run('set_aside_blocking_plan', 'set it aside', {}, deps([]))).toEqual({ kind: 'reply', message: expect.stringContaining('Nothing from another conversation') });
+    expect(await run('set_aside_blocking_plan', 'set it aside', {}, deps([]))).toEqual({ kind: 'reply', message: expect.stringContaining('Nothing of yours') });
     const refused = deps([], { blockingPlan: () => blocking('awaiting_plan_approval') as any, confirmConsent: vi.fn(async () => false) });
     await run('set_aside_blocking_plan', 'summarize the README', {}, refused);
     expect(refused.cancel).not.toHaveBeenCalled();

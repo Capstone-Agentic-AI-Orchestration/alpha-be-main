@@ -743,6 +743,23 @@ describe('the Orchestrator decides about a build waiting in the chat', () => {
     expect(result.agentMessage.content).toContain('set aside plan v2 from your conversation "can you see this project"');
   });
 
+  it('keeps a teammate\'s blocking plan and conversation private', async () => {
+    const { chatService, sqlite, snapshot } = await decisionFixture();
+    sqlite.createChatThread({ id: 'thread-other', title: 'teammate private chat', projectId: 'project-1', ownerId: 'user-2' } as any);
+    snapshot.run.originChatThreadId = 'thread-other'; snapshot.run.createdBy = 'user-2';
+    const { SQLiteService } = await import('./sqliteService.js');
+    vi.spyOn(SQLiteService.prototype, 'listChatPendingDecisions').mockReturnValue([]);
+    startProjectBuildBatch.mockResolvedValueOnce([{ status: 'blocked', projectId: 'project-1', reason: 'Waiting for the existing awaiting plan approval build using acme/be.',
+      blockingBuild: { runId: 'run-1', projectId: 'project-1', status: 'awaiting_plan_approval', repository: 'acme/be' } }]);
+    cliReply = route({ route: 'build', goal: 'Add backend login.' });
+    const blocked = await send(chatService, 'add a backend login', { projectId: 'project-1' });
+    expect(blocked.agentMessage.content).not.toContain('teammate private chat');
+    cliReply = { content: 'It is waiting on another build.' };
+    await send(chatService, 'what is blocking it?', { projectId: 'project-1' });
+    expect(systemPrompts.at(-1)).not.toContain('teammate private chat');
+    expect(systemPrompts.at(-1)).not.toContain('"blockedBy"');
+  });
+
   it('merges into dev only on the whole message', async () => {
     const { chatService, snapshot } = await decisionFixture();
     snapshot.run.status = 'completed'; snapshot.run.publications = [{ pullRequestUrl: 'https://github.com/acme/fe/pull/1' }];

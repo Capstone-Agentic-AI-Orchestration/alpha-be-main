@@ -272,14 +272,16 @@ async function restorePlan(input: ChatActionInput, deps: ChatActionDeps): Promis
  * and never someone else's plan.
  */
 async function setAsideBlockingPlan(input: ChatActionInput, deps: ChatActionDeps): Promise<ChatActionOutcome> {
+  // Only this person's own unstarted plan is ever offered (blockingPlan filters the rest); these
+  // checks repeat that here, ownership first, and never name a conversation that is not theirs.
   const blocking = deps.blockingPlan(input.threadId);
-  if (!blocking) return reply('Nothing from another conversation is holding this request\'s codebases right now.');
+  if (!blocking) return reply('Nothing of yours from another conversation is holding this request\'s codebases that I can set aside. A build that has started, or someone else\'s, has to finish or be stopped where it runs.');
   const run = blocking.snapshot.run;
+  if (run.createdBy !== input.context.userId) {
+    return reply('The plan holding these codebases is not yours, so I left it alone. Ask its owner, or wait for it.');
+  }
   if (run.status !== 'awaiting_plan_approval' || blocking.snapshot.attempts.length) {
     return reply(`The build holding these codebases in "${blocking.conversation}" has already started, so I can't set it aside from here. Stop it in that conversation first, or wait for it to finish.`);
-  }
-  if (run.createdBy !== input.context.userId) {
-    return reply(`The plan holding these codebases belongs to someone else's conversation, so I left it alone. Ask them, or wait for it.`);
   }
   if (!deps.can(input.context.role, 'agent.run')) return reply('Your workspace role cannot start builds. A developer can.');
   await setAside(input, deps, blocking.snapshot);
