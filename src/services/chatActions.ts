@@ -24,7 +24,7 @@ export function isChatActionRoute(route: string): route is ChatActionRoute {
   return (CHAT_ACTION_ROUTES as readonly string[]).includes(route);
 }
 
-/** Actions that change code or reach GitHub: they run only on the person's own words. */
+/** Actions that change code or reach GitHub: the main turn must also quote the person's whole message. */
 const NEEDS_CONSENT = new Set<ChatActionRoute>(['start_plan', 'publish', 'retry_publication', 'request_changes', 'merge_dev']);
 
 /** A plan set aside from the chat (replaced or cancelled) is kept and can be restored. */
@@ -95,13 +95,16 @@ export function quotedConsent(message: string, evidence: string | undefined): bo
 const reply = (message: string): ChatActionOutcome => ({ kind: 'reply', message });
 
 /**
- * Consent for an action that changes code or reaches GitHub. All must hold: the person typed
- * it (no attachments, no @-address or slash command), the main turn quoted the whole message,
- * and the isolated check, which saw nothing but the message and the build's state, agrees.
+ * Whether the person asked for this action, before it changes a build. The person typed it
+ * (no attachments, no @-address or slash command), and the isolated check, which saw nothing but
+ * the message, the action and the build's state, agrees. For code or GitHub actions the main
+ * turn must also have quoted the whole message. Text planted in a file or attachment the main
+ * turn read can therefore neither start, publish or merge work nor revise, replace, cancel or
+ * restore a plan.
  */
 async function hasConsent(input: ChatActionInput, deps: ChatActionDeps): Promise<boolean> {
   if (input.hasAttachments || /^\s*[@/]/.test(input.message)) return false;
-  if (!quotedConsent(input.message, input.evidence)) return false;
+  if (NEEDS_CONSENT.has(input.route) && !quotedConsent(input.message, input.evidence)) return false;
   const status = deps.pending(input.projectId, input.threadId)[0]?.run.status ?? 'completed';
   try {
     return await deps.confirmConsent({ message: input.message, route: input.route, status });
@@ -113,7 +116,8 @@ async function hasConsent(input: ChatActionInput, deps: ChatActionDeps): Promise
 /** Run one chat action after its own checks. Never throws: every outcome is something to say. */
 export async function runChatAction(input: ChatActionInput, deps: ChatActionDeps): Promise<ChatActionOutcome> {
   try {
-    if (NEEDS_CONSENT.has(input.route) && !await hasConsent(input, deps)) return askForConsent(input, deps);
+    // Every action changes a build, so every one needs the person's own typed words, confirmed in isolation.
+    if (!await hasConsent(input, deps)) return askForConsent(input, deps);
     switch (input.route) {
       case 'start_plan': return await startPlan(input, deps);
       case 'publish': return await publish(input, deps, 'approve');
@@ -153,7 +157,10 @@ function askForConsent(input: ChatActionInput, deps: ChatActionDeps): ChatAction
     case 'retry_publication': return reply('Publishing stopped. Tell me to retry it when you want to.');
     case 'request_changes': return reply('Tell me what should change in the finished work, and I\'ll send it back to the specialists.');
     case 'merge_dev': return reply('Tell me to merge the pull request into dev when you want it merged.');
-    default: return reply('Tell me what you would like me to do.');
+    case 'revise_plan': return reply('Tell me how the plan should change, and I\'ll revise it.');
+    case 'replace_plan': return reply('Tell me what the new plan should cover, and I\'ll set this one aside and plan it instead.');
+    case 'cancel_plan': return reply('Tell me if you want the waiting plan dropped. It can be restored later.');
+    case 'restore_plan': return reply('Tell me if you want the plan you set aside back.');
   }
 }
 
