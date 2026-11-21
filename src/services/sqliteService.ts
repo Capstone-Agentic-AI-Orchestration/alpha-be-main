@@ -54,6 +54,7 @@ import { analyticsFrom } from './runAnalytics.js';
 import { BUILTIN_SKILLS } from './builtinSkills.js';
 import { normalizeBuildSteps } from '../store/buildSteps.js';
 import { MAX_PLAN_TASKS, parseOrchestrationPlan, validateOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
+import { planRepositoryCoverage } from './orchestrationWorkspace.js';
 import type { PersistedReviewFinding } from './orchestrationReviewWorkflow.js';
 import { assertPersonComment } from './taskComments.js';
 import {
@@ -3587,7 +3588,7 @@ export class SQLiteService {
       }
       const plan = parseOrchestrationPlan(input.plan);
       const problems = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), {
-        initialPlan: true, repositories: snapshot.run.repositoryWorkspaces?.map(item => item.repository) ?? [snapshot.run.repository]
+        initialPlan: true, ...planRepositoryCoverage(snapshot.run)
       });
       if (problems.length) throw new Error('The revised plan is invalid: ' + problems.map(item => item.detail).join(' '));
       if (JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements) ||
@@ -3669,9 +3670,7 @@ export class SQLiteService {
       const stageIssues = validateOrchestrationPlan(stage, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true, maxTaskCount: 12, repositories: next.repositories, auditMilestone: true });
       if (stageIssues.length) throw new Error(`Invalid milestone tasks: ${stageIssues.map(issue => issue.detail).join(' ')}`);
       const plan = parseOrchestrationPlan({ ...snapshot.run.plan, tasks: [...snapshot.run.plan.tasks, ...input.tasks] });
-      const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), {
-        repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository]
-      });
+      const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), planRepositoryCoverage(snapshot.run));
       if (issues.length) throw new Error(`Invalid milestone plan: ${issues.map(issue => issue.detail).join(' ')}`);
       const version = snapshot.run.planVersion + 1;
       this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')

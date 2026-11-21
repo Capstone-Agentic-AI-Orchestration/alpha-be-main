@@ -707,9 +707,14 @@ async function startOrchestratedProjectBuild(input: {
   }
 
   try {
+    // Saved on the run so every later plan check (start, revision, milestones) knows which
+    // codebases this plan may leave without tasks.
+    const optionalRepositories = new Set(planningContexts
+      .filter(item => !(namedRepository(repositories, item.repository) && mentionsRepository(cleanGoal, item.repository)))
+      .map(item => item.repository));
     const repositoryWorkspaces = reservations.map(item => ({
       repository: item.repository, branchName: item.branchName, baseRef: baseRefs.get(item.repository) ?? item.baseCommit,
-      baseCommit: item.baseCommit, worktreePath: item.worktreePath
+      baseCommit: item.baseCommit, worktreePath: item.worktreePath, optional: optionalRepositories.has(item.repository)
     }));
     const { orchestrationService } = await import('./orchestrationRuntime.js');
     const snapshot = await orchestrationService.start({
@@ -727,9 +732,7 @@ async function startOrchestratedProjectBuild(input: {
       eligibleAgents: availableAgents,
       plan: planned.plan,
       planSource: 'model',
-      optionalRepositories: planningContexts
-        .filter(item => !(namedRepository(repositories, item.repository) && mentionsRepository(cleanGoal, item.repository)))
-        .map(item => item.repository)
+      optionalRepositories: [...optionalRepositories]
     });
     for (const extraReservation of reservations.slice(1)) {
       runWithWorkspace(workspaceId, () => sqliteService.releaseOrchestrationPlanningReservation(

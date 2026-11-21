@@ -139,6 +139,12 @@ export interface OrchestrationRepositoryWorkspace {
   baseCommit: string;
   /** Executor-local path; never include this field in a shared cloud projection. */
   worktreePath: string;
+  /**
+   * True when the plan may leave this codebase without tasks: it was included only because it
+   * belongs to the project. Every later plan check reads it from here. Runs saved before this
+   * field existed have it unset on every codebase; see planRepositoryCoverage.
+   */
+  optional?: boolean;
 }
 
 export interface OrchestrationPublicationRecord {

@@ -141,7 +141,7 @@ describe('chat actions check their own rules', () => {
     const value = deps();
     expect(await run('start_plan', 'maybe later', { evidence: 'later' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('Plan v2 is ready') });
     expect(value.decide).not.toHaveBeenCalled();
-    expect(await run('start_plan', 'yes start it', { evidence: 'yes start it' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('Plan v2 started') });
+    expect(await run('start_plan', 'yes start it', { evidence: 'yes start it' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('Started plan v2') });
     expect(value.decide).toHaveBeenCalledWith(expect.objectContaining({ action: 'start', runId: 'run-1', expectedRevision: 3, planVersion: 2, threadId: 'thread-1' }));
   });
 
