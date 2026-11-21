@@ -35,6 +35,12 @@ import { repositoryFileOverview } from './repositoryOverview.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 
 export interface ProjectBuildStartResult {
+  /**
+   * Project codebases the build went ahead without, because they could not be cloned or are not
+   * a usable checkout here. Only ones the person did not limit the build to; agents can still read
+   * them on GitHub.
+   */
+  skippedRepositories?: Array<{ repository: string; reason: string }>;
   blockingBuild?: { runId: string; projectId?: string; issueId?: string; status: string; repository?: string };
   status: 'started' | 'queued' | 'in_progress' | 'plan_ready' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';
   projectId?: string;
@@ -239,6 +245,27 @@ function saveRejectedPlans(error: OrchestrationPlanningError, context: { project
   } catch (saveError) {
     logError('Could not save the refused plan:', saveError instanceof Error ? saveError.message : String(saveError));
   }
+}
+
+/** A usable local checkout of one project codebase, cloning it when missing, or why there is none. */
+async function prepareBuildCheckout(project: Project, repo: string): Promise<{ checkout: NonNullable<ReturnType<typeof resolveProjectWorkspace>> } | { reason: string }> {
+  let checkout = resolveProjectWorkspace(project, repo);
+  if (!checkout || !fs.existsSync(checkout.dir)) {
+    try {
+      await cloneAndBindProject(project, repo);
+      checkout = resolveProjectWorkspace(project, repo);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'repository connection failed';
+      return { reason: `Alpha could not connect ${repo} for this build: ${detail} Check the GitHub connection and repository access, then retry.` };
+    }
+  }
+  if (!checkout || !fs.existsSync(checkout.dir)) {
+    return { reason: `The ${repo} codebase is not checked out on this machine. Clone or attach it from the project’s Repository page, then try again.` };
+  }
+  if (!(await isGitRepo(checkout.dir))) {
+    return { reason: `The selected folder for ${repo} is not a Git checkout. Attach or clone it before starting a build.` };
+  }
+  return { checkout };
 }
 
 function orchestrationBranchName(runId: string): string {
@@ -800,28 +827,24 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     const selectedRepositories = requestedRepos.length ? [...new Set(requestedRepos)] : [...repos];
     if (!selectedRepositories.length) return blocked('Connect at least one repository to this project before starting a build.', project);
 
+    // Every codebase the build may use. One that cannot be prepared is skipped with its reason,
+    // unless the person limited the build to it: that still stops the build, as it always did.
     const selectedCheckouts: SelectedProjectRepository[] = [];
+    const skippedRepositories: Array<{ repository: string; reason: string }> = [];
     for (const repo of selectedRepositories) {
-      let checkout = resolveProjectWorkspace(project, repo);
-      if ((!checkout || !fs.existsSync(checkout.dir)) && repo) {
-        try {
-          await cloneAndBindProject(project, repo);
-          checkout = resolveProjectWorkspace(project, repo);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : 'repository connection failed';
-          return blocked(`Alpha could not connect ${repo} for this build: ${detail} Check the GitHub connection and repository access, then retry.`, project, repo);
-        }
+      const prepared = await prepareBuildCheckout(project, repo);
+      if ('reason' in prepared) {
+        if (requestedRepos.length) return blocked(prepared.reason, project, repo);
+        skippedRepositories.push({ repository: repo, reason: prepared.reason });
+        continue;
       }
-      if (!checkout || !fs.existsSync(checkout.dir)) {
-        return blocked(`The ${repo} codebase is not checked out on this machine. Clone or attach it from the project’s Repository page, then try again.`, project, repo);
-      }
-      if (!(await isGitRepo(checkout.dir))) {
-        return blocked(`The selected folder for ${repo} is not a Git checkout. Attach or clone it before starting a build.`, project, repo);
-      }
-      allowAttachedWorkspace(checkout, project.name);
-      selectedCheckouts.push({ repository: repo, checkoutDir: checkout.dir, named: requestedRepos.length > 0 });
+      allowAttachedWorkspace(prepared.checkout, project.name);
+      selectedCheckouts.push({ repository: repo, checkoutDir: prepared.checkout.dir, named: requestedRepos.length > 0 });
     }
-    const repository = selectedRepositories[0];
+    if (!selectedCheckouts.length) {
+      return blocked(skippedRepositories.map(item => item.reason).join(' ') || 'No codebase of this project is available for a build.', project, selectedRepositories[0]);
+    }
+    const repository = selectedCheckouts[0].repository;
     if (IS_CLOUD) return blocked('Task-based builds require the authorized Alpha desktop with the local repository checkout.', project, repository);
 
     const buildSteps = await projectStore().getBuildSteps(workspaceId, project.id);
@@ -832,7 +855,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     if (!projectAgents.length) {
       return blocked('No project-visible specialists are available. Add suitable specialists to the workspace or adjust their project access, then try again.', project, repository);
     }
-    return startOrchestratedProjectBuild({
+    const started = await startOrchestratedProjectBuild({
       context, project, repositories: selectedCheckouts, members: projectAgents,
       buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId,
       chatSkillIds: input.chatSkillIds, chatSkillGuidance: input.chatSkillGuidance,
@@ -841,5 +864,6 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       presetPlan: input.presetPlan,
       deliveryRepair: input.deliveryRepair
     });
+    return skippedRepositories.length ? { ...started, skippedRepositories } : started;
   });
 }

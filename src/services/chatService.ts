@@ -42,7 +42,7 @@ import { startProjectBuildBatch, type ProjectBuildStartResult } from './projectB
 import { processManager } from './processManager.js';
 import { chatAttachmentService } from './chatAttachmentService.js';
 import {
-  chooseBuildRepositories,
+  buildScope,
   alphaChatResponseSchema,
   readStructuredAlphaReply,
   orchestratorRoutingPrompt,
@@ -651,7 +651,7 @@ export class ChatService extends EventEmitter {
         threadId, thread, userMessage,
         context: params.buildRequest.context,
         request: parseChatOverride(content).content || content,
-        repositories: params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []),
+        repositories: buildScope(params.buildRequest.repositories ?? (params.buildRequest.repository ? [params.buildRequest.repository] : []), this.projectRepositories(thread)),
         attachmentIds,
         issueId: params.buildRequest.issueId
       });
@@ -758,11 +758,11 @@ export class ChatService extends EventEmitter {
         const assignments = decision.assignments ?? [];
         const selected = assignments.map(assignment => eligible.find(agent => agent.id === assignment.agentId &&
           roleCanOwnOrchestrationTask(assignment.kind, resolveAgent(agent, { includeMemory: false }).role)));
-        const repositories = chooseBuildRepositories(params.routing.repositories, decision.repositories);
         const attached = projectForChat ? reposForProject(projectForChat) : [];
-        if (!assignments.length || selected.some(agent => !agent) ||
-            repositories.some(repo => !attached.some(item => item.toLowerCase() === repo.toLowerCase()))) {
-          reply.content = 'I could not hand off this task: a selected specialist or codebase is unavailable, outside this project, or does not match the required expertise. Check the project agents and try again.';
+        // Specialists see every codebase in the project unless the person limited it.
+        const repositories = buildScope(params.routing.repositories, attached);
+        if (!assignments.length || selected.some(agent => !agent)) {
+          reply.content = 'I could not hand off this task: a selected specialist is unavailable or does not match the required expertise. Check the project agents and try again.';
         } else {
           addressed = selected as Agent[];
           handoffs = assignments;
@@ -961,6 +961,8 @@ export class ChatService extends EventEmitter {
     cards?: string[];
     /** A plan set aside earlier, restored exactly as it was instead of planned again. */
     presetPlan?: OrchestrationPlan;
+    /** Codebases the model expects the work to touch: told to the planner, never a limit. */
+    repositoryHint?: string[];
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
@@ -985,9 +987,12 @@ export class ChatService extends EventEmitter {
     const repositories = [...new Set((input.repositories ?? []).map(repository => repository.trim()).filter(Boolean))];
     const buildAttachmentContext = chatAttachmentService.promptContext(threadId, input.attachmentIds ?? [], messageId, false, false);
     const original = input.originalRequest?.trim();
-    const brief = original && original !== input.request.trim()
+    const hint = !repositories.length && input.repositoryHint?.length
+      ? `\n\nThe Orchestrator expects this to touch: ${input.repositoryHint.join(', ')}. Every codebase in the project is available; plan work wherever the request needs it.`
+      : '';
+    const brief = (original && original !== input.request.trim()
       ? `${input.request.trim()}\n\nThe user's original message:\n${original}`
-      : input.request.trim();
+      : input.request.trim()) + hint;
     const builds = await startProjectBuildBatch({
       context: input.context,
       projectId: thread.projectId,
@@ -1065,7 +1070,10 @@ export class ChatService extends EventEmitter {
     this.retireOpenDecisions(threadId);
     const blocker = build.status === 'blocked' && build.blockingBuild ? this.describeBlocker(build.blockingBuild) : undefined;
     const otherConversation = blocker ? this.otherConversationHold(blocker, threadId, input.context.userId) : undefined;
-    const content = [summary, otherConversation, input.note ? `_${input.note}_` : undefined].filter(Boolean).join('\n\n');
+    // Codebases the build went ahead without, and why; agents can still read them on GitHub.
+    const skipped = build.status === 'blocked' ? undefined : build.skippedRepositories?.map(item =>
+      `Planned without **${item.repository}**: ${item.reason} Agents can still read it on GitHub.`).join('\n\n');
+    const content = [summary, otherConversation, skipped, input.note ? `_${input.note}_` : undefined].filter(Boolean).join('\n\n');
     const reply: ChatMessage = {
       id: `${messageId}-build`,
       threadId,
@@ -1075,7 +1083,7 @@ export class ChatService extends EventEmitter {
       messageType: build.decision ? 'build_decision' : 'build',
       orchestrationRunId: build.orchestrationRunId,
       // The brief the planner received, so "Try again" replans this goal rather than a bare "do that".
-      routeProposal: { sourceMessageId: messageId, goal: input.request.trim(), repositories, status: 'accepted', ...(input.cards?.length ? { cards: input.cards } : {}) },
+      routeProposal: { sourceMessageId: messageId, goal: input.request.trim(), repositories, limitedByPerson: repositories.length > 0, status: 'accepted', ...(input.cards?.length ? { cards: input.cards } : {}) },
       ...(build.decision ? { decision: {
         question: build.decision.question,
         options: build.decision.options,
@@ -1083,6 +1091,7 @@ export class ChatService extends EventEmitter {
         request: input.request.trim(),
         ...(input.originalRequest?.trim() ? { originalRequest: input.originalRequest.trim() } : {}),
         repositories,
+        limitedByPerson: repositories.length > 0,
         ...(input.issueId ? { issueId: input.issueId } : {}),
         settled: input.settledDecisions ?? [],
         ...(input.cards?.length ? { cards: input.cards } : {})
@@ -1169,7 +1178,8 @@ export class ChatService extends EventEmitter {
       threadId: thread.id, thread, userMessage, context: input.routing.context,
       request: decision.request,
       originalRequest: decision.originalRequest,
-      repositories: decision.repositories,
+      // Only a limit the person set carries over; older records' lists were sometimes the model's guess.
+      repositories: decision.limitedByPerson ? decision.repositories : [],
       issueId: decision.issueId,
       settledDecisions: [...decision.settled, { question: decision.question, answer }],
       cards: decision.cards
@@ -1330,7 +1340,14 @@ export class ChatService extends EventEmitter {
     const other = sqliteService.getChatThreads().find(item => item.id === blocker.threadId);
     if (!snapshot || !other || other.ownerId !== userId || snapshot.run.createdBy !== userId) return undefined;
     if (snapshot.run.status !== 'awaiting_plan_approval' || snapshot.attempts.length) return undefined;
-    return { snapshot, request: latest.routeProposal.goal, repositories: latest.routeProposal.repositories ?? [], conversation: other.title };
+    return { snapshot, request: latest.routeProposal.goal,
+      repositories: latest.routeProposal.limitedByPerson ? latest.routeProposal.repositories ?? [] : [], conversation: other.title };
+  }
+
+  /** Every codebase attached to this conversation's project. */
+  private projectRepositories(thread: ChatThread): string[] {
+    const project = thread.projectId ? sqliteService.getProjects().find(item => item.id === thread.projectId) : undefined;
+    return project ? reposForProject(project) : [];
   }
 
   /** The most recent plan in this conversation set aside from the chat and never started. */
@@ -1423,7 +1440,7 @@ export class ChatService extends EventEmitter {
     return orchestratorRoutingPrompt({
       projectName: project?.name,
       repositories: project ? reposForProject(project) : [],
-      selectedRepositories: routing.repositories,
+      selectedRepositories: project ? buildScope(routing.repositories, reposForProject(project)) : undefined,
       workspaceProjects: workspaceRegistry.scopeProjects(sqliteService.getProjects(), routing.context)
         .map(item => item.key ? `${item.name} (${item.key})` : item.name),
       canBuild: routing.canBuild,
@@ -1491,7 +1508,9 @@ export class ChatService extends EventEmitter {
     // An unreadable decision becomes a question to the user, never a build.
     const decision = parsed.decision ?? { route: 'confirm_build' as const, goal: request, repositories: [] };
     const goal = decision.goal || request;
-    const repositories = chooseBuildRepositories(routing.repositories, decision.repositories);
+    // Every project codebase is in scope unless the person limited it; the model's list is a hint.
+    const repositories = buildScope(routing.repositories, this.projectRepositories(thread));
+    const repositoryHint = decision.repositories;
 
     if (decision.route === 'stop_preview') {
       try {
@@ -1525,7 +1544,7 @@ export class ChatService extends EventEmitter {
     if (decision.route === 'build' && projectId) {
       return this.startChatBuild({
         threadId: thread.id, thread, userMessage, context: routing.context,
-        request: goal, originalRequest: request, repositories, attachmentIds: input.attachmentIds,
+        request: goal, originalRequest: request, repositories, repositoryHint, attachmentIds: input.attachmentIds,
         issueId: routing.issueId,
         cards: decision.cards
       });
@@ -1533,7 +1552,7 @@ export class ChatService extends EventEmitter {
 
     const needsProject = !projectId;
     reply.messageType = needsProject ? 'project_needed' : 'build_proposal';
-    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, status: 'open', ...(routing.issueId ? { issueId: routing.issueId } : {}), ...(decision.cards?.length ? { cards: decision.cards } : {}) };
+    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, limitedByPerson: repositories.length > 0, status: 'open', ...(routing.issueId ? { issueId: routing.issueId } : {}), ...(decision.cards?.length ? { cards: decision.cards } : {}) };
     if (!reply.content) {
       reply.content = needsProject
         ? 'Which project is this for? Choose one in the header and I will plan the build.'
@@ -1584,11 +1603,14 @@ export class ChatService extends EventEmitter {
         throw new ChatRouteError('Alpha did not offer a build for that message. Ask for the build directly if you want one.', 409);
       }
       const proposal = proposals.at(-1)?.routeProposal;
+      // The picker now, else a limit the person set on the offer; never an older record's guess.
+      const savedLimit = proposal?.limitedByPerson ? proposal.repositories : [];
+      const scope = input.routing.repositories?.length ? buildScope(input.routing.repositories, this.projectRepositories(thread)) : savedLimit;
       const result = await this.startChatBuild({
         threadId: thread.id, thread, userMessage, context: input.routing.context,
         request: proposal?.goal || request,
         originalRequest: request,
-        repositories: input.routing.repositories?.length ? input.routing.repositories : proposal?.repositories,
+        repositories: scope,
         attachmentIds,
         // The offer was for a task handed over from the board: build that task, not a new one.
         issueId: proposal?.issueId,

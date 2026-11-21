@@ -198,22 +198,23 @@ export function parseChatOverride(content: string): { override?: 'build' | 'ask'
 }
 
 /**
- * Keep only codebases that belong to this build.
+ * The codebases a build or handoff is limited to: [] means all of the project's.
  *
- * The composer's codebase picker is the user's explicit scope. Alpha may narrow
- * it (a frontend-only change) but never widen it. With no picker selection,
- * Alpha's choice stands and the build path rejects anything not attached.
+ * Every codebase in a project is always in scope. Only the person narrows it, by
+ * deliberately unticking codebases in the composer's picker, which ticks all of them
+ * by default. The model's own list is a hint and never narrows anything: it used to,
+ * and a build "for the backend" then never saw the frontend repository at all.
  */
-export function chooseBuildRepositories(selected: readonly string[] | undefined, proposed: readonly string[]): string[] {
-  const picked = (selected ?? []).map(item => item.trim()).filter(Boolean);
-  if (!picked.length) return [...proposed];
-  const narrowed = proposed.filter(repo => picked.some(item => item.toLowerCase() === repo.toLowerCase()));
-  return narrowed.length ? narrowed : picked;
+export function buildScope(picker: readonly string[] | undefined, projectRepositories: readonly string[]): string[] {
+  const inProject = (repo: string) => projectRepositories.find(item => item.toLowerCase() === repo.trim().toLowerCase());
+  const picked = [...new Set((picker ?? []).map(inProject).filter((repo): repo is string => Boolean(repo)))];
+  return picked.length && picked.length < projectRepositories.length ? picked : [];
 }
 
 export interface OrchestratorPromptContext {
   projectName?: string;
   repositories: readonly string[];
+  /** Codebases the person limited builds to; empty or absent means every codebase. */
   selectedRepositories?: readonly string[];
   /** Projects this user can open, so Alpha can list them and suggest one. */
   workspaceProjects?: readonly string[];
@@ -251,8 +252,8 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
         `Project: ${context.projectName}`,
         `Codebases: ${context.repositories.length ? context.repositories.join(', ') : 'none connected yet'}`,
         context.selectedRepositories?.length
-          ? `Codebases the user selected for builds: ${context.selectedRepositories.join(', ')}`
-          : undefined
+          ? `The person limited builds to: ${context.selectedRepositories.join(', ')}`
+          : 'Every codebase above is in scope for builds and specialists.'
       ].filter(Boolean).join('\n')
     : 'Project: none selected in this conversation. The user picks one with the project selector in the chat header.';
   const scope = [
@@ -276,7 +277,7 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     'You lead product builds in Alpha. For every message, decide what the user wants before you reply.',
     '',
     '1. A simple explanation, short example, summary of supplied information, status already in context, or ordinary conversation: answer it yourself. "Show me an example" is a question. When the answer needs repository investigation, debugging, research, architecture, database analysis, security review, or validation expertise, hand it to the relevant specialists using route 5. Decide before calling any tools: do not inspect code, CLI transcripts, sessions, or Alpha internal files yourself to avoid handing off the task.',
-    '2. A request to change this product\'s code (build a feature, add or remove behaviour, fix a bug, change the UI, refactor): use a build decision with the change as a self-contained goal and connected repositories ([] means all selected).',
+    '2. A request to change this product\'s code (build a feature, add or remove behaviour, fix a bug, change the UI, refactor): use a build decision with the change as a self-contained goal. In repositories, name the codebases you expect the work to touch, as a hint only: the plan always sees every codebase in the project ([] when unsure).',
     '3. Probably a code change, but you cannot tell what to change or whether they only want an answer: use confirm_build with your best reading as goal and one short clarifying question in message.',
     '4. A code change while no project is selected: use need_project with the change as goal and one sentence asking which project it is for in message.',
     '5. Specialist analysis or an explicit request to use agents for checking/review/research: choose only the necessary ready specialists by their expertise, role and description, and return a delegate decision:',

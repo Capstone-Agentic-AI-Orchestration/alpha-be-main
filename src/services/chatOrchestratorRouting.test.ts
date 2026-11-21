@@ -28,6 +28,7 @@ const requestReviewChanges = vi.fn();
 const reviseBoardPlan = vi.fn();
 
 const context = { workspaceId: 'ws-default', userId: 'user-1', role: 'admin', access: {} } as any;
+const twoRepos = [{ type: 'github_repo', pathOrUrl: 'https://github.com/org/fe' }, { type: 'github_repo', pathOrUrl: 'https://github.com/org/be' }];
 
 async function load() {
   process.env.ALPHA_HOME = tmp;
@@ -219,6 +220,16 @@ describe('specialist analysis handoffs', () => {
     expect(turnInputs).toHaveLength(3);
   });
 
+  it('hands off with every project codebase, whatever codebases the model named', async () => {
+    const { chatService } = await specialistFixture();
+    // The model's list is only a hint now: naming a codebase used to narrow, or here refuse, the handoff.
+    cliReply = { content: 'ALPHA_ROUTE ' + JSON.stringify({ route: 'delegate', goal: 'Review the API', repositories: ['org/elsewhere'], assignments: [assignment] }) };
+    cliReplies = [cliReply.content, 'API finding: missing error mapping.'];
+    const result = await send(chatService, 'Use my agents to review the API', { projectId: 'project-1' });
+    expect(result.agentMessages[0].content).toContain('Handing off read-only analysis');
+    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist']);
+  });
+
   it.each(['unknown', 'role-mismatch', 'inaccessible', 'offline', 'stale-model'])('refuses a %s assignment without starting any specialist', async problem => {
     const { chatService, sqlite, access } = await specialistFixture();
     if (problem === 'inaccessible') access.mockResolvedValue(false);
@@ -303,7 +314,8 @@ describe('Alpha routes unaddressed chat messages', () => {
   });
 
   it('starts the Orchestrator with Alpha\'s goal and the user\'s words when Alpha decides to build', async () => {
-    const { chatService } = await load();
+    const { chatService, sqlite } = await load();
+    sqlite.createProject({ id: 'project-1', name: 'Task app', key: 'TASK', resources: twoRepos } as any);
     cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Fix the login page losing its session on refresh","repositories":["org/fe"]}' };
     const result = await send(chatService, 'The login page breaks when I refresh, please look into it', {
       projectId: 'project-1',
@@ -313,11 +325,51 @@ describe('Alpha routes unaddressed chat messages', () => {
     const input = startProjectBuildBatch.mock.calls[0][0];
     expect(input.content).toContain('Fix the login page losing its session on refresh');
     expect(input.content).toContain('The login page breaks when I refresh');
-    expect(input.repositories).toEqual(['org/fe']);
+    // Every codebase stays in scope: the model's "org/fe" is told to the planner as a hint, not a limit.
+    expect(input.repositories).toEqual([]);
+    expect(input.content).toContain('The Orchestrator expects this to touch: org/fe');
     expect(result.agentMessage.messageType).toBe('build');
     expect(result.agentMessage.orchestrationRunId).toBe('orchestration-1');
     // "Try again" replans this goal, never the user's bare words.
-    expect(result.agentMessage.routeProposal).toMatchObject({ goal: 'Fix the login page losing its session on refresh', repositories: ['org/fe'], status: 'accepted' });
+    expect(result.agentMessage.routeProposal).toMatchObject({ goal: 'Fix the login page losing its session on refresh', repositories: [], limitedByPerson: false, status: 'accepted' });
+  });
+
+  /** Project A's chat: "do the remaining tasks" was planned with only the backend, again and again. */
+  describe('every codebase in a project is in scope', () => {
+    async function projectWithTwoRepos() {
+      const loaded = await load();
+      loaded.sqlite.createProject({ id: 'project-1', name: 'Task app', key: 'TASK', resources: twoRepos } as any);
+      return loaded;
+    }
+
+    it('plans with every codebase even when the model names only the backend', async () => {
+      const { chatService } = await projectWithTwoRepos();
+      cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add backend login with a local database","repositories":["org/be"]}' };
+      await send(chatService, 'do the remaining tasks', { projectId: 'project-1' });
+      expect(startProjectBuildBatch.mock.calls[0][0].repositories).toEqual([]);
+    });
+
+    it('keeps a limit the person set with the picker', async () => {
+      const { chatService } = await projectWithTwoRepos();
+      cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Restyle the header","repositories":["org/fe"]}' };
+      const result = await send(chatService, 'restyle the header', { projectId: 'project-1', routing: { context, canBuild: true, repositories: ['org/fe'] } });
+      expect(startProjectBuildBatch.mock.calls[0][0].repositories).toEqual(['org/fe']);
+      expect(result.agentMessage.routeProposal).toMatchObject({ repositories: ['org/fe'], limitedByPerson: true });
+      expect(systemPrompts[0]).toContain('The person limited builds to: org/fe');
+    });
+
+    it('re-plans an older answer with every codebase, not the list it saved', async () => {
+      const { chatService, sqlite } = await projectWithTwoRepos();
+      sqlite.createChatThread({ id: 'thread-1', title: 'Build', projectId: 'project-1', ownerId: 'user-1' } as any);
+      sqlite.saveChatMessage({ id: 'asked', threadId: 'thread-1', senderType: 'agent', senderName: 'Alpha Orchestrator', content: 'Which frontend repository?',
+        messageType: 'build_decision', timestamp: new Date().toISOString(),
+        decision: { question: 'Which frontend repository should the plan use?', options: [], status: 'open', request: 'Expense tracker with login.',
+          repositories: ['org/be'], settled: [] } } as any);
+      await chatService.answerDecision({ threadId: 'thread-1', messageId: 'asked', answer: 'we already have a frontend repository for this',
+        routing: { context, canBuild: true }, senderName: 'You' });
+      expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
+      expect(startProjectBuildBatch.mock.calls[0][0].repositories).toEqual([]);
+    });
   });
 
   it('asks for a project instead of failing when no project is selected', async () => {
