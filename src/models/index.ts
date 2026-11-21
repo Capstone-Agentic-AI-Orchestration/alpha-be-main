@@ -739,6 +739,8 @@ export interface ChatDecision {
   request: string;
   originalRequest?: string;
   repositories: string[];
+  /** As on ChatRouteProposal: only a person's limit narrows a replayed build. */
+  limitedByPerson?: boolean;
   issueId?: string;
   /** Answers already given for this request; the planner treats them as settled. */
   settled: Array<{ question: string; answer: string }>;
@@ -762,6 +764,12 @@ export interface ChatRouteProposal {
   goal: string;
   repositories: string[];
   status: 'open' | 'accepted' | 'dismissed';
+  /**
+   * The person limited this build to `repositories` with the composer's picker. Otherwise
+   * `repositories` is empty and every project codebase is in scope. Older records lack the
+   * flag; their lists were sometimes the model's guess, so they count as unlimited.
+   */
+  limitedByPerson?: boolean;
   /** The board task the message was handed, built in place when the offer is accepted. */
   issueId?: string;
   /** Board cards the request is for: ['all'] or card keys. */

@@ -368,6 +368,24 @@ describe('project builds triggered from chat', () => {
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 
+  it('goes ahead without a codebase that cannot be cloned, and says why, unless the person limited the build to it', async () => {
+    const service = await load();
+    const { resolveProjectWorkspace } = await import('./workspaceService.js');
+    const { cloneAndBindProject } = await import('./projectBindings.js');
+    vi.mocked(resolveProjectWorkspace).mockImplementation(((_project: unknown, repo?: string) =>
+      repo === 'acme/shop-be' ? null : { dir: checkoutDir, repo: selectedRepo, owner: 'acme' }) as any);
+    vi.mocked(cloneAndBindProject).mockRejectedValue(new Error('Repository access denied.'));
+    const context = { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any;
+
+    const result = await service.startProjectBuild({ context, projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`, content: 'Build it.' });
+    expect(result).toMatchObject({ status: 'plan_ready', skippedRepositories: [{ repository: 'acme/shop-be', reason: expect.stringContaining('Repository access denied.') }] });
+    expect(startOrchestration.mock.calls[0][0].repositoryWorkspaces.map((item: any) => item.repository)).toEqual([selectedRepo]);
+
+    const limited = await service.startProjectBuild({ context, projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`,
+      content: 'Build it.', requestedRepositories: ['acme/shop-be'] });
+    expect(limited).toMatchObject({ status: 'blocked', reason: expect.stringContaining('could not connect acme/shop-be') });
+  });
+
   it('selects every attached repository when the user starts a product build without narrowing the list', async () => {
     const service = await load();
     const result = await service.startProjectBuild({

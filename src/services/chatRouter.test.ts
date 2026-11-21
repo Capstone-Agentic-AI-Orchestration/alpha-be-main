@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALPHA_ROUTE_MARKER,
-  chooseBuildRepositories,
+  buildScope,
   orchestratorRoutingPrompt,
   parseAlphaRoute,
   parseChatOverride,
@@ -152,17 +152,20 @@ describe('parseChatOverride', () => {
   });
 });
 
-describe('chooseBuildRepositories', () => {
-  it('lets Alpha narrow the composer selection', () => {
-    expect(chooseBuildRepositories(['org/fe', 'org/be'], ['org/fe'])).toEqual(['org/fe']);
+/** Every codebase in a project is in scope; only the person narrows it, never the model. */
+describe('buildScope', () => {
+  const project = ['org/fe', 'org/be'];
+  it('means every codebase when all or none are ticked', () => {
+    expect(buildScope(['org/fe', 'org/be'], project)).toEqual([]);
+    expect(buildScope(undefined, project)).toEqual([]);
+    expect(buildScope([], project)).toEqual([]);
   });
-
-  it('never widens the composer selection', () => {
-    expect(chooseBuildRepositories(['org/fe'], ['org/be'])).toEqual(['org/fe']);
+  it('keeps a deliberate limit the person set', () => {
+    expect(buildScope(['ORG/FE'], project)).toEqual(['org/fe']);
   });
-
-  it('uses Alpha\'s choice when nothing was selected', () => {
-    expect(chooseBuildRepositories(undefined, ['org/be'])).toEqual(['org/be']);
+  it('drops codebases outside the project, and never takes the model\'s list', () => {
+    expect(buildScope(['org/other'], project)).toEqual([]);
+    expect(buildScope(['org/fe', 'org/other'], project)).toEqual(['org/fe']);
   });
 });
 
