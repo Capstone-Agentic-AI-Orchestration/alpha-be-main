@@ -1064,12 +1064,14 @@ export class ChatService extends EventEmitter {
     // Only one question is open at a time: a new one, or a new build, retires the earlier ones.
     this.retireOpenDecisions(threadId);
     const blocker = build.status === 'blocked' && build.blockingBuild ? this.describeBlocker(build.blockingBuild) : undefined;
+    const otherConversation = blocker ? this.otherConversationHold(blocker, threadId, input.context.userId) : undefined;
+    const content = [summary, otherConversation, input.note ? `_${input.note}_` : undefined].filter(Boolean).join('\n\n');
     const reply: ChatMessage = {
       id: `${messageId}-build`,
       threadId,
       senderType: 'agent',
       senderName: 'Alpha Orchestrator',
-      content: input.note ? `${summary}\n\n_${input.note}_` : summary,
+      content,
       messageType: build.decision ? 'build_decision' : 'build',
       orchestrationRunId: build.orchestrationRunId,
       // The brief the planner received, so "Try again" replans this goal rather than a bare "do that".
@@ -1092,6 +1094,19 @@ export class ChatService extends EventEmitter {
     bindToChat(build.orchestrationRunId, reply.id);
     this.emit('chat_message', reply);
     return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
+  }
+
+  /**
+   * When an unstarted plan of this person's in another conversation is in the way, say so and
+   * offer the way through in the chat, instead of only pointing at another screen.
+   */
+  private otherConversationHold(blocker: NonNullable<ChatMessage['buildBlocker']>, threadId: string, userId: string): string | undefined {
+    if (blocker.status !== 'awaiting_plan_approval' || !blocker.threadId || blocker.threadId === threadId) return undefined;
+    const run = sqliteService.getOrchestrationSnapshot(blocker.runId)?.run;
+    const other = sqliteService.getChatThreads().find(item => item.id === blocker.threadId);
+    // Only this person's own plan in their own conversation is named; anyone else's stays private.
+    if (!run || run.createdBy !== userId || !other || other.ownerId !== userId) return undefined;
+    return `That plan is waiting for your approval in "${other.title}". Tell me to set it aside and plan this request instead; you can restore it there.`;
   }
 
   /** The build in the way, with the task and conversation the chat can link to. */
@@ -1282,6 +1297,12 @@ export class ChatService extends EventEmitter {
       const restorable = Boolean(this.setAsidePlan(thread.id));
       const extra: ChatActionRoute[] = restorable ? ['restore_plan'] : [];
       if (pending.length > 1) return { status: 'several_waiting', waitingCount: pending.length, allowedRoutes: [] };
+      const blocking = this.blockingPlanFor(thread.id, routing.context.userId);
+      if (blocking && !pending.length) {
+        return { status: 'blocked_by_another_conversation', allowedRoutes: ['set_aside_blocking_plan', ...extra],
+          blockedBy: { conversation: blocking.conversation, planVersion: blocking.snapshot.run.planVersion,
+            repository: blocking.snapshot.run.repository, status: blocking.snapshot.run.status } };
+      }
       const snapshot = pending[0] ?? sqliteService.getLatestOrchestrationSnapshot(projectId, thread.id);
       if (!snapshot) return { status: 'none', allowedRoutes: extra };
       const run = snapshot.run;
@@ -1293,6 +1314,23 @@ export class ChatService extends EventEmitter {
         allowedRoutes: allowed
       };
     });
+  }
+
+  /**
+   * This person's own unstarted plan, in another of their own conversations, that blocked this
+   * conversation's latest build request: with that request, its codebases and the conversation's
+   * title. Undefined for anyone else's plan or conversation: chats are private, so nothing about
+   * them (not even a title) reaches this person's prompt or reply.
+   */
+  private blockingPlanFor(threadId: string, userId: string) {
+    const latest = [...sqliteService.getChatMessages(threadId)].reverse().find(message => message.messageType === 'build');
+    const blocker = latest?.buildBlocker;
+    if (!latest || !blocker || !blocker.threadId || blocker.threadId === threadId || !latest.routeProposal?.goal) return undefined;
+    const snapshot = sqliteService.getOrchestrationSnapshot(blocker.runId);
+    const other = sqliteService.getChatThreads().find(item => item.id === blocker.threadId);
+    if (!snapshot || !other || other.ownerId !== userId || snapshot.run.createdBy !== userId) return undefined;
+    if (snapshot.run.status !== 'awaiting_plan_approval' || snapshot.attempts.length) return undefined;
+    return { snapshot, request: latest.routeProposal.goal, repositories: latest.routeProposal.repositories ?? [], conversation: other.title };
   }
 
   /** The most recent plan in this conversation set aside from the chat and never started. */
@@ -1349,6 +1387,7 @@ export class ChatService extends EventEmitter {
       }),
       pending: (projectId, threadId) => runWithWorkspace(workspaceId, () => sqliteService.listChatPendingDecisions(projectId, threadId)),
       setAside: threadId => runWithWorkspace(workspaceId, () => this.setAsidePlan(threadId)),
+      blockingPlan: threadId => runWithWorkspace(workspaceId, () => this.blockingPlanFor(threadId, routing.context.userId)),
       can: (role, capability) => workspaceRegistry.can(role, capability as Parameters<typeof workspaceRegistry.can>[1]),
       orchestrationEnabled: ALPHA_ORCHESTRATION_ENABLED,
       decide: async decision => (await import('./orchestrationDecision.js')).executeOrchestrationDecision(decision),

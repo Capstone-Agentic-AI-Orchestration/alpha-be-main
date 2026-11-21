@@ -90,6 +90,7 @@ function depsFor(state: State) {
   const value: ChatActionDeps = {
     pending: () => state === 'completed' ? [] : [snapshot],
     setAside: () => previous,
+    blockingPlan: () => undefined,
     can: () => true,
     orchestrationEnabled: true,
     confirmConsent,

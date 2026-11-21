@@ -72,6 +72,24 @@ describe('safe plan corrections', () => {
     expect(correctPlanSafely(unreviewed, agents).plan.tasks.map(item => item.id)).toEqual(['t1-board-brief', 't1-storage']);
   });
 
+  /** The refused Project A plan: milestone 2's frontend tasks were detailed in the first plan. */
+  it('keeps only the first milestone\'s tasks, and leaves the roadmap alone', () => {
+    const original = phasedPlan();
+    const early = { ...original, tasks: [...original.tasks,
+      task({ id: 't2-edit', kind: 'frontend', ownerAgentId: 'frontend', milestoneId: 'M2', repository: 'acme/web', requirementIds: ['R-EDIT'], dependsOn: ['t1-review'] })] } as OrchestrationPlan;
+    const { plan, corrections } = correctPlanSafely(early, agents);
+    expect(plan.tasks.map(item => item.id)).toEqual(['t1-board-brief', 't1-storage', 't1-review']);
+    expect(plan.milestones?.map(item => item.id)).toEqual(['M1', 'M2']);
+    expect(corrections.some(item => item.includes('later task'))).toBe(true);
+  });
+
+  it('does not trim when a first-milestone task depends on a later one', () => {
+    const original = phasedPlan();
+    const tangled = { ...original, tasks: [...original.tasks.map(item => item.id === 't1-review' ? { ...item, dependsOn: ['t1-storage', 't2-edit'] } : item),
+      task({ id: 't2-edit', kind: 'frontend', ownerAgentId: 'frontend', milestoneId: 'M2', repository: 'acme/web', requirementIds: ['R-EDIT'] })] } as OrchestrationPlan;
+    expect(correctPlanSafely(tangled, agents).plan.tasks.map(item => item.id)).toContain('t2-edit');
+  });
+
   it('leaves a plan with nothing to correct exactly as it was', () => {
     const corrected = correctPlanSafely(phasedPlan(), agents).plan;
     const again = correctPlanSafely(corrected, agents);

@@ -28,6 +28,10 @@ export interface PlanCorrections<P> {
  * - Code work that does not yet wait for its milestone's required Manager brief
  *   is made to wait for it. This only adds ordering, never work.
  *
+ * - A phased plan that details tasks for later milestones keeps only the first
+ *   milestone's tasks. The roadmap stays; later milestones are planned from the work
+ *   the first one delivers, so this only narrows what runs now.
+ *
  * Anything that would mean inventing work (a missing review, a missing task in a
  * named repository) is left for the planner and the check.
  */
@@ -36,10 +40,27 @@ export function correctPlanSafely<P extends OrchestrationPlan>(
   agents: readonly { id: string; role: string }[]
 ): PlanCorrections<P> {
   const corrections: string[] = [];
-  const tasks = plan.tasks.map(task => ({ ...task, dependsOn: [...task.dependsOn], requirementIds: [...task.requirementIds] }));
+  let tasks = plan.tasks.map(task => ({ ...task, dependsOn: [...task.dependsOn], requirementIds: [...task.requirementIds] }));
+  tasks = firstMilestoneTasksOnly(tasks, plan.milestones ?? [], corrections);
   narrowAnalysisTasks(tasks, plan.milestones ?? [], corrections);
   waitForManagerBriefs(tasks, agents, corrections);
   return corrections.length ? { plan: { ...plan, tasks }, corrections } : { plan, corrections };
+}
+
+/**
+ * Keep only the first milestone's tasks in a phased plan. Skipped when a kept task depends on
+ * a later one (that plan needs the planner, not a trim) or when the first milestone has none.
+ */
+function firstMilestoneTasksOnly(tasks: PlanTask[], milestones: readonly Milestone[], corrections: string[]): PlanTask[] {
+  const first = milestones[0]?.id;
+  if (!first || !tasks.some(task => task.milestoneId === first)) return tasks;
+  const kept = tasks.filter(task => task.milestoneId === first);
+  const dropped = tasks.filter(task => task.milestoneId !== first);
+  if (!dropped.length) return tasks;
+  const droppedIds = new Set(dropped.map(task => task.id));
+  if (kept.some(task => task.dependsOn.some(id => droppedIds.has(id)))) return tasks;
+  corrections.push(`Kept only milestone ${first}'s tasks; ${dropped.length} later task(s) are planned when their milestone comes up.`);
+  return kept;
 }
 
 function narrowAnalysisTasks(tasks: PlanTask[], milestones: readonly Milestone[], corrections: string[]): void {
