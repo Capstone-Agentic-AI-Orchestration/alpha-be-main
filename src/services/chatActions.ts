@@ -16,7 +16,7 @@ import type { ChatBuildDecision } from './chatBuildDecision.js';
  */
 export const CHAT_ACTION_ROUTES = [
   'start_plan', 'revise_plan', 'replace_plan', 'cancel_plan', 'restore_plan',
-  'publish', 'retry_publication', 'request_changes', 'merge_dev'
+  'publish', 'retry_publication', 'request_changes', 'merge_dev', 'set_aside_blocking_plan'
 ] as const;
 export type ChatActionRoute = typeof CHAT_ACTION_ROUTES[number];
 
@@ -61,6 +61,11 @@ export interface ChatActionDeps {
   pending(projectId: string, threadId: string): OrchestrationSnapshot[];
   /** The most recent plan in this conversation that was set aside from the chat and never started. */
   setAside(threadId: string): OrchestrationSnapshot | undefined;
+  /**
+   * The build from another conversation that blocked this conversation's latest request, with
+   * that request and the other conversation's title. Undefined when nothing is in the way.
+   */
+  blockingPlan(threadId: string): { snapshot: OrchestrationSnapshot; request: string; repositories: string[]; conversation: string } | undefined;
   can(role: WorkspaceContext['role'], capability: string): boolean;
   orchestrationEnabled: boolean;
   decide(input: { context: WorkspaceContext; projectId: string; runId: string; action: 'start' | 'approve' | 'retry_publication';
@@ -127,6 +132,7 @@ export async function runChatAction(input: ChatActionInput, deps: ChatActionDeps
       case 'replace_plan': return await replacePlan(input, deps);
       case 'cancel_plan': return await cancelPlan(input, deps);
       case 'restore_plan': return await restorePlan(input, deps);
+      case 'set_aside_blocking_plan': return await setAsideBlockingPlan(input, deps);
       case 'merge_dev': return reply(await deps.merge({ context: input.context, projectId: input.projectId, threadId: input.threadId, messageId: input.messageId }));
     }
   } catch (error) {
@@ -161,6 +167,7 @@ function askForConsent(input: ChatActionInput, deps: ChatActionDeps): ChatAction
     case 'replace_plan': return reply('Tell me what the new plan should cover, and I\'ll set this one aside and plan it instead.');
     case 'cancel_plan': return reply('Tell me if you want the waiting plan dropped. It can be restored later.');
     case 'restore_plan': return reply('Tell me if you want the plan you set aside back.');
+    case 'set_aside_blocking_plan': return reply('Tell me if you want the plan in your other conversation set aside so I can plan this one. You can restore it there.');
   }
 }
 
@@ -257,6 +264,27 @@ async function restorePlan(input: ChatActionInput, deps: ChatActionDeps): Promis
   return { kind: 'build', request: previous.run.plan.goal, presetPlan: previous.run.plan,
     repositories: (previous.run.repositoryWorkspaces ?? []).map(item => item.repository),
     note: 'I restored the plan you set aside, exactly as it was. Review it on the right and tell me to start it when you are ready.' };
+}
+
+/**
+ * A request here was blocked by a plan waiting in another of this person's conversations: set
+ * that plan aside (it can be restored there) and plan this request. Never a build that started,
+ * and never someone else's plan.
+ */
+async function setAsideBlockingPlan(input: ChatActionInput, deps: ChatActionDeps): Promise<ChatActionOutcome> {
+  const blocking = deps.blockingPlan(input.threadId);
+  if (!blocking) return reply('Nothing from another conversation is holding this request\'s codebases right now.');
+  const run = blocking.snapshot.run;
+  if (run.status !== 'awaiting_plan_approval' || blocking.snapshot.attempts.length) {
+    return reply(`The build holding these codebases in "${blocking.conversation}" has already started, so I can't set it aside from here. Stop it in that conversation first, or wait for it to finish.`);
+  }
+  if (run.createdBy !== input.context.userId) {
+    return reply(`The plan holding these codebases belongs to someone else's conversation, so I left it alone. Ask them, or wait for it.`);
+  }
+  if (!deps.can(input.context.role, 'agent.run')) return reply('Your workspace role cannot start builds. A developer can.');
+  await setAside(input, deps, blocking.snapshot);
+  return { kind: 'build', request: blocking.request, repositories: blocking.repositories,
+    note: `I set aside plan v${run.planVersion} from your conversation "${blocking.conversation}" (you can restore it there) and planned this request.` };
 }
 
 async function setAside(input: ChatActionInput, deps: ChatActionDeps, snapshot: OrchestrationSnapshot): Promise<void> {

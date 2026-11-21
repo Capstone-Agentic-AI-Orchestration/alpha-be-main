@@ -16,7 +16,7 @@ import { runWithWorkspace } from './workspaceContext.js';
  * runs only when both agree.
  */
 export type ConsentTarget = 'start_plan' | 'publish' | 'retry_publication' | 'request_changes' | 'merge_dev'
-  | 'revise_plan' | 'replace_plan' | 'cancel_plan' | 'restore_plan';
+  | 'revise_plan' | 'replace_plan' | 'cancel_plan' | 'restore_plan' | 'set_aside_blocking_plan';
 
 const ACTION_TEXT: Record<ConsentTarget, string> = {
   start_plan: 'start implementing the plan that is waiting for approval',
@@ -27,7 +27,8 @@ const ACTION_TEXT: Record<ConsentTarget, string> = {
   revise_plan: 'change how the waiting plan organises the same work',
   replace_plan: 'replace the waiting plan with a new plan that includes different or extra work',
   cancel_plan: 'drop the waiting plan without a replacement',
-  restore_plan: 'bring back the plan that was set aside earlier'
+  restore_plan: 'bring back the plan that was set aside earlier',
+  set_aside_blocking_plan: 'set aside the plan waiting in another conversation so this request can be planned'
 };
 
 const consentSchema = z.object({ consent: z.boolean(), evidence: z.string().max(4000) }).strict();

@@ -240,6 +240,8 @@ export interface PendingBuildContext {
   allowedRoutes: ChatActionRoute[];
   /** More than one build is waiting: ask which one. */
   waitingCount?: number;
+  /** This conversation's latest request was blocked by a plan waiting in another conversation. */
+  blockedBy?: { conversation: string; planVersion?: number; repository?: string; status: string };
 }
 
 /** Instructions that make the default assistant act as the Orchestrator. */
@@ -294,6 +296,7 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     '   - publish: at final review, push the reviewed changes and open the pull request. retry_publication: publishing stopped and should be tried again.',
     '   - request_changes: at final review, change the finished work before it is published. Put the change in instruction.',
     '   - merge_dev: merge the open pull request into dev.',
+    '   - set_aside_blocking_plan: this conversation\'s request was blocked by a plan waiting in another conversation (blockedBy), and the person wants that plan set aside so this one is planned.',
     '   For start_plan, publish, retry_publication, request_changes and merge_dev, copy the WHOLE current message into evidence, word for word. Never use earlier messages or part of a message. A question, a negation ("don\'t start yet"), a condition ("start once the tests pass"), or a wish to wait is not a request: answer or ask instead, with decision null.',
     '   Questions about the build are answered (decision null). If the person wants something its state does not allow, say what is possible now instead of choosing another route.',
     '',

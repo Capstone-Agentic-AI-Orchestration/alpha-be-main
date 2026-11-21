@@ -721,6 +721,28 @@ describe('the Orchestrator decides about a build waiting in the chat', () => {
     expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
   });
 
+  it('offers, then sets aside, a plan from another conversation that blocks this request', async () => {
+    const { chatService, sqlite, snapshot } = await decisionFixture();
+    sqlite.createChatThread({ id: 'thread-other', title: 'can you see this project', projectId: 'project-1', ownerId: 'user-1' } as any);
+    snapshot.run.originChatThreadId = 'thread-other'; snapshot.run.createdBy = 'user-1';
+    const { SQLiteService } = await import('./sqliteService.js');
+    vi.spyOn(SQLiteService.prototype, 'listChatPendingDecisions').mockReturnValue([]);
+    startProjectBuildBatch.mockResolvedValueOnce([{ status: 'blocked', projectId: 'project-1', reason: 'Waiting for the existing awaiting plan approval build using acme/be.',
+      blockingBuild: { runId: 'run-1', projectId: 'project-1', status: 'awaiting_plan_approval', repository: 'acme/be' } }]);
+    cliReply = route({ route: 'build', goal: 'Add backend login with a local database.' });
+    const blocked = await send(chatService, 'add a backend login with a local database', { projectId: 'project-1' });
+    expect(blocked.agentMessage.content).toContain('waiting for your approval in "can you see this project"');
+    expect(blocked.agentMessage.content).toContain('set it aside and plan this request');
+
+    cliReply = route({ route: 'set_aside_blocking_plan' });
+    const result = await send(chatService, 'yes, set that plan aside and plan this', { projectId: 'project-1' });
+    expect(systemPrompts.at(-2)).toContain('"blockedBy"');
+    expect(cancelRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1' }));
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(2);
+    expect(startProjectBuildBatch.mock.calls[1][0].content).toContain('Add backend login with a local database.');
+    expect(result.agentMessage.content).toContain('set aside plan v2 from your conversation "can you see this project"');
+  });
+
   it('merges into dev only on the whole message', async () => {
     const { chatService, snapshot } = await decisionFixture();
     snapshot.run.status = 'completed'; snapshot.run.publications = [{ pullRequestUrl: 'https://github.com/acme/fe/pull/1' }];
