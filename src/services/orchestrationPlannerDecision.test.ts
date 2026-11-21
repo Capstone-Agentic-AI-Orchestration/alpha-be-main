@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
-import { MAX_PLANNING_QUESTIONS, OrchestrationPlanner, OrchestrationPlanningError } from './orchestrationPlanner.js';
+import { MAX_PLANNING_QUESTIONS, OrchestrationPlanner, OrchestrationPlanningError, type OrchestrationPlanningInput } from './orchestrationPlanner.js';
 
 const response = (content: string): CliTurnResult => ({ content, thinking: '', tools: [], sessionId: null, bin: 'fixture', failureDetail: null, failureKind: null });
-const input = {
+const input: OrchestrationPlanningInput = {
   runId: 'run-decision', cwd: 'D:/repositories/project-a', goal: 'Build the expense workflow.',
   projectContext: 'I want project a to be a informational website', repositoryContext: '', availableScripts: ['test'],
   eligibleAgents: [{ id: 'frontend-agent', role: 'Frontend Agent' }],
