@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { isMergeRequest } from './chatRouter.js';
 import type { DeliveryRecord } from './orchestrationDelivery.js';
 import { mergeFromChat, type ChatMergeDeps } from './orchestrationChatMerge.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
@@ -63,19 +62,5 @@ describe('merging from chat', () => {
     const { value, act } = deps({ canPromote: () => false });
     expect(await ask(value, { ...dev, role: 'client' } as WorkspaceContext)).toMatch(/cannot merge builds/);
     expect(act).not.toHaveBeenCalled();
-  });
-});
-
-describe('a request to merge', () => {
-  it('is recognised in the ways people ask', () => {
-    for (const text of ['merge it', 'can you accept the pull request for me', 'please merge the PR into dev', 'ok merge it', 'accept the pull request']) {
-      expect(isMergeRequest(text)).toBe(true);
-    }
-  });
-
-  it('never covers a question, a negation, or a later stage', () => {
-    for (const text of ['should I merge it?', "don't merge it", 'merge it into main', 'merge to production', 'what does merge do', 'accept the plan', 'how do I merge']) {
-      expect(isMergeRequest(text)).toBe(false);
-    }
   });
 });

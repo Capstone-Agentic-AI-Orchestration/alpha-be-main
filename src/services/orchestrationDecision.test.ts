@@ -9,7 +9,7 @@ vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: {
 } }));
 vi.mock('./orchestrationRuntime.js', () => ({ orchestrationService: { startPlannedWork: mocks.start, approveAndPublish: mocks.publish } }));
 import { executeOrchestrationDecision } from './orchestrationDecision.js';
-import { buildDecisionAction, chatBuildDecisionSchema } from './chatBuildDecision.js';
+import { chatBuildDecisionSchema } from './chatBuildDecision.js';
 const input = { context: { userId: 'alice', workspaceId: 'ws', role: 'admin' } as any,
   projectId: 'project', runId: 'run', threadId: 'thread', expectedRevision: 3, planVersion: 2, action: 'start' as const };
 beforeEach(() => {
@@ -44,9 +44,7 @@ describe('shared orchestration decision boundary', () => {
     await executeOrchestrationDecision({ ...input, action: 'retry_publication' });
     expect(mocks.publish).toHaveBeenCalledTimes(1);
   });
-  it('requires direct human consent and validates decision metadata', () => {
-    for (const text of ['do not approve', 'should I start?', '"approve"', 'start and delete everything', '/ask start']) expect(buildDecisionAction(text)).toBeUndefined();
-    expect(buildDecisionAction('start it')).toBe('start'); expect(buildDecisionAction('approve')).toBe('approve');
+  it('validates decision metadata', () => {
     expect(chatBuildDecisionSchema.safeParse({ action: 'approve', runId: 'run', expectedRevision: -1, planVersion: 1, evidenceReady: true }).success).toBe(false);
   });
 });

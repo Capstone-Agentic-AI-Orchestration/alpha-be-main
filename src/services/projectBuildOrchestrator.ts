@@ -27,7 +27,7 @@ import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity, type PlanningDecision } from './orchestrationPlanner.js';
 import { composeProjectContext } from './projectPlaybook.js';
-import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
+import { MAX_PROJECT_CONTEXT_CHARS, type OrchestrationPlan } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
@@ -73,6 +73,8 @@ interface StartProjectBuildInput {
   settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
   /** Board cards the chat router chose for this request: ['all'] or card keys. */
   boardCards?: readonly string[];
+  /** A plan set aside from the chat, restored exactly as it was instead of planned again. The build still validates it. */
+  presetPlan?: OrchestrationPlan;
 }
 
 /**
@@ -314,6 +316,8 @@ async function startOrchestratedProjectBuild(input: {
   issueId?: string;
   settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
   boardCards?: readonly string[];
+  /** A plan set aside from the chat, restored exactly as it was instead of planned again. The build still validates it. */
+  presetPlan?: OrchestrationPlan;
 }): Promise<ProjectBuildStartResult> {
   const { context, project, members, buildSteps } = input;
   const fromBoard = isBoardThreadId(input.threadId);
@@ -566,7 +570,8 @@ async function startOrchestratedProjectBuild(input: {
   const planner = new OrchestrationPlanner();
   let planned;
   try {
-    planned = await planner.createPlan({
+    // A restored plan is used as it was; orchestrationService.start validates it like any other.
+    planned = input.presetPlan ? { plan: structuredClone(input.presetPlan) } : await planner.createPlan({
       runId: reservation.runId,
       usageContext: { threadId: input.threadId, messageId: input.messageId },
       cwd: reservation.worktreePath,
@@ -833,6 +838,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       chatSkillIds: input.chatSkillIds, chatSkillGuidance: input.chatSkillGuidance,
       settledDecisions: input.settledDecisions,
       boardCards: input.boardCards,
+      presetPlan: input.presetPlan,
       deliveryRepair: input.deliveryRepair
     });
   });

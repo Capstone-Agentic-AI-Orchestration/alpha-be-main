@@ -2,20 +2,38 @@ import { describe, expect, it } from 'vitest';
 import {
   ALPHA_ROUTE_MARKER,
   chooseBuildRepositories,
-  isBareContinueRequest,
   orchestratorRoutingPrompt,
   parseAlphaRoute,
   parseChatOverride,
   readCards,
-  referencesAlphaRecords
+  referencesAlphaRecords,
+  alphaChatResponseSchema
 } from './chatRouter.js';
 
+describe('decisions about the build waiting in the chat', () => {
+  it('lets the Orchestrator choose build actions, with the evidence and instruction it acts on', () => {
+    const decision = (alphaChatResponseSchema.properties.decision as any).anyOf[1];
+    expect(decision.required).toEqual(expect.arrayContaining(['evidence', 'instruction']));
+    expect(decision.properties.route.enum).toEqual(expect.arrayContaining(['start_plan', 'revise_plan', 'replace_plan', 'cancel_plan', 'restore_plan', 'publish', 'retry_publication', 'request_changes', 'merge_dev']));
+    const parsed = parseAlphaRoute(JSON.stringify({ contract: 'alpha_chat_v1', message: '', decision: { route: 'revise_plan', goal: '', repositories: [], cards: [], assignments: [], evidence: 'split it', instruction: 'Split the UI task.' } }));
+    expect(parsed.decision).toMatchObject({ route: 'revise_plan', evidence: 'split it', instruction: 'Split the UI task.' });
+  });
+
+  it('shows the router what is waiting and the only actions allowed now', () => {
+    const prompt = orchestratorRoutingPrompt({ canBuild: true, repositories: ['acme/fe'], projectName: 'A',
+      pendingBuild: { status: 'awaiting_plan_approval', planVersion: 2, allowedRoutes: ['start_plan', 'replace_plan'] } });
+    expect(prompt).toContain('Build waiting on you');
+    expect(prompt).toContain('"allowedRoutes":["start_plan","replace_plan"]');
+    expect(prompt).toContain('copy the WHOLE current message into evidence');
+    expect(orchestratorRoutingPrompt({ canBuild: true, repositories: [] })).toContain('"status":"none"');
+  });
+});
+
 describe('continuing a stopped build', () => {
-  it('recognises short requests to carry on that name no change of their own', () => {
-    for (const message of ['continue', 'Continue.', 'can you continue with the plan', 'ok, go ahead', 'try again', 'retry the build', 'keep going please'])
-      expect(isBareContinueRequest(message), message).toBe(true);
-    for (const message of ['continue and add a dark mode toggle', 'why did it stop?', 'add a budget page', 'continue explaining the login flow'])
-      expect(isBareContinueRequest(message), message).toBe(false);
+  it('gives the router the stopped goal to continue, instead of matching words', () => {
+    const prompt = orchestratorRoutingPrompt({ canBuild: true, repositories: ['acme/site'], projectName: 'Site', restartableGoal: 'Redesign the landing page.' });
+    expect(prompt).toContain('The last build in this conversation stopped');
+    expect(prompt).toContain('Redesign the landing page.');
   });
 
   it('flags goals that point at records a specialist cannot open', () => {

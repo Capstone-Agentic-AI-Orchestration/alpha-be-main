@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { localPreviewService } from './localPreviewService.js';
 import { previewChatContext } from './previewChatContext.js';
-import { buildDecisionAction, type ChatBuildDecision } from './chatBuildDecision.js';
-import { interpretBuildIntent } from './chatBuildIntent.js';
+import type { ChatBuildDecision } from './chatBuildDecision.js';
+import { isChatActionRoute, runChatAction, SET_ASIDE_REASON, type ChatActionDeps, type ChatActionRoute } from './chatActions.js';
 import { executeOrchestrationDecision } from './orchestrationDecision.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,8 +31,9 @@ import { describeChatToolPolicy, describeAlphaWorkspace, skillsForChatApproval, 
 import { agentReadiness } from './agentReadiness.js';
 import { boardAgentRefusal, type BoardAccess } from './boardGrant.js';
 import { logInfo } from '../utils/logger.js';
+import type { OrchestrationPlan } from './orchestrationContract.js';
 import { workspaceRegistry, WorkspaceRole } from './workspaceRegistry.js';
-import { RUNS_DIR } from '../config/env.js';
+import { ALPHA_ORCHESTRATION_ENABLED, RUNS_DIR } from '../config/env.js';
 import { saveChatMessageAndShare, createThreadAndShare } from './chatWriteThrough.js';
 import { agentCallService } from './agentCallService.js';
 import { randomUUID } from 'node:crypto';
@@ -44,13 +45,11 @@ import {
   chooseBuildRepositories,
   alphaChatResponseSchema,
   readStructuredAlphaReply,
-  isBareContinueRequest,
-  isMergeRequest,
-  isStopPreviewRequest,
-  isStartPreviewRequest,
   orchestratorRoutingPrompt,
+  type PendingBuildContext,
   parseAlphaRoute,
   parseChatOverride,
+  pointsAtEarlierBuild,
   referencesAlphaRecords,
   type SpecialistHandoff
 } from './chatRouter.js';
@@ -437,7 +436,23 @@ function sessionMemoryPrompt(threadId: string, ownerId?: string): string | undef
 }
 
 export class ChatService extends EventEmitter {
-  private buildDecisions = new Map<string, Promise<SendMessageResult>>();
+  private readonly inFlightSends = new Map<string, Promise<SendMessageResult>>();
+
+  constructor() {
+    super();
+    // One send per message id: a transport retry while the first send is still running shares
+    // its result, so an action the Orchestrator takes is never taken twice.
+    const send = this.sendMessage.bind(this);
+    this.sendMessage = params => {
+      if (!params.clientMessageId) return send(params);
+      const key = JSON.stringify([params.workspaceId ?? '', params.threadId, params.clientMessageId]);
+      const running = this.inFlightSends.get(key);
+      if (running) return running;
+      const job = send(params).finally(() => this.inFlightSends.delete(key));
+      this.inFlightSends.set(key, job);
+      return job;
+    };
+  }
   private readonly activeTurns = new Map<string, ActiveChatTurn>();
 
   /** Agent replies being written in this process right now, without their content. */
@@ -624,111 +639,9 @@ export class ChatService extends EventEmitter {
     // Replayed messages keep their saved outcome even if the build has since moved on.
     const savedDecision = sqliteService.getChatMessages(threadId).find(message => message.id === `${messageId}-build-decision`);
     if (savedDecision) return { userMessage, agentMessage: savedDecision, agentMessages: [savedDecision] };
-    const pendingDecisions = params.routing && thread.projectId
-      ? runWithWorkspace(params.routing.context.workspaceId, () => sqliteService.listChatPendingDecisions(thread.projectId!, threadId)) : [];
-    if (params.routing && !params.routing.answerOnly && !params.buildRequest &&
-        !parseChatOverride(content).override && !isStopPreviewRequest(content) && !isStartPreviewRequest(content) &&
-        (params.buildDecision || pendingDecisions.length)) {
-      const id = `${messageId}-build-decision`;
-      const key = JSON.stringify([workspaceId, threadId, messageId]);
-      const saved = sqliteService.getChatMessages(threadId).find(message => message.id === id);
-      if (saved) return { userMessage, agentMessage: saved, agentMessages: [saved] };
-      const pending = this.buildDecisions.get(key);
-      if (pending) return pending;
-      const job = (async () => {
-        const decision = params.buildDecision;
-        const turn: ActiveChatTurn = { threadId, messageId, startedAt: new Date().toISOString(), stopRequested: false, steering: [] };
-        this.activeTurns.set(this.turnKey(threadId, messageId), turn);
-        let result: string;
-        try {
-          if (!thread.projectId || thread.ownerId !== params.routing!.context.userId) throw new Error('This build is not available in this conversation.');
-          if (!workspaceRegistry.canAccessProjectBuilds(params.routing!.context, thread.projectId)) throw new Error('Your workspace role cannot access this build review.');
-          const snapshot = decision
-            ? runWithWorkspace(params.routing!.context.workspaceId, () => sqliteService.getOrchestrationSnapshot(decision.runId))
-            : pendingDecisions[0];
-          if (!snapshot || snapshot.run.projectId !== thread.projectId || snapshot.run.workspaceId !== params.routing!.context.workspaceId || snapshot.run.originChatThreadId !== threadId) throw new Error('This build does not belong to this conversation and project.');
-          // Keep the small explicit-command fast path; everything else receives semantic interpretation.
-          let action = buildDecisionAction(content);
-          if (!/\b(?:plan|planned work|publication|pull request|this build)\b/i.test(content)) action = undefined;
-          if (attachmentIds.length || /^\s*[@/]/.test(content)) action = undefined;
-          let intent: 'consent' | 'clarify' | 'none' = attachmentIds.length || /^\s*[@/]/.test(content) ? 'none' : action ? 'consent' : 'clarify';
-          if (!action && !attachmentIds.length && !/^\s*[@/]/.test(content)) {
-            turn.currentRunId = `chat-decision-${randomUUID()}`;
-            const interpretation = await interpretBuildIntent({
-              workspaceId: params.routing!.context.workspaceId, threadId, runId: turn.currentRunId,
-              cwd: chatScratchFolder(threadId, 'Alpha'), message: content,
-              status: snapshot.run.status, goal: snapshot.run.plan?.goal, pendingCount: pendingDecisions.length,
-              recentConversation: sqliteService.getChatMessages(threadId).filter(message => message.id !== messageId)
-                .slice(-6).map(message => ({ role: message.senderType, content: message.content.slice(0, 2000) }))
-            });
-            intent = interpretation.intent;
-            if (intent === 'consent') action = interpretation.target === 'plan' ? 'start'
-              : interpretation.target === 'publication' ? 'approve' : 'retry_publication';
-          }
-          if (turn.stopRequested || turn.steering.length) throw new Error('The approval reply was stopped or changed during interpretation. Send the updated decision again.');
-          if (intent === 'none') {
-            turn.currentRunId = `chat-decision-answer-${randomUUID()}`;
-            const answer = await this.generateDefaultReply(appendSkillGuidance(content + attachmentContext.text, selectedSkills.guidance), threadId, workspaceId, turn.currentRunId,
-              undefined, await this.routingPromptFor({ ...params.routing!, answerOnly: true }, thread), params.userId, params.routing!.context);
-            if (turn.stopRequested) throw new Error('The reply was stopped. No build action was applied.');
-            result = answer.content;
-          } else if (!action || pendingDecisions.length > 1) {
-            result = pendingDecisions.length > 1
-              ? 'More than one build is awaiting a decision in this conversation. Resolve the extra pending build before authorizing work.'
-              : snapshot.run.status === 'awaiting_plan_approval'
-                ? 'No build action was applied. Do you want to start the displayed plan as it stands, or change it first?'
-                : 'No publication was authorized. Do you want Alpha to push the reviewed changes and open the pull request? Please make that publication intent explicit.';
-          } else {
-            if (!decision?.evidenceReady) throw new Error('The current plan or validated diff is not loaded yet. Read it in the right panel, then reply again here.');
-            if (decision.action && decision.action !== action) throw new Error('The approval context does not match your reply. Refresh the review and send your decision again.');
-            const next = await executeOrchestrationDecision({ context: params.routing!.context, projectId: thread.projectId,
-              threadId, ...decision, action });
-            result = action === 'start'
-              ? next.run.status === 'executing' ? `Plan v${next.run.planVersion} started. Follow the agents and instructions in the right panel.`
-                : `The start request returned build status: ${next.run.status}. Check the right panel for its current outcome.`
-              : next.run.status === 'completed' ? 'Publication completed. The pull request and review details are in the right panel.'
-                : next.run.status === 'publishing' ? 'Publication is in progress. Its review details are in the right panel.'
-                  : `Publication has not completed. The build reports: ${next.run.status}.`;
-          }
-        } catch (error) { result = `Build action not applied: ${(error as Error).message}`; }
-        finally { this.activeTurns.delete(this.turnKey(threadId, messageId)); }
-        const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha', content: result, timestamp: new Date().toISOString() };
-        saveChatMessageAndShare(reply); this.emit('chat_message', reply);
-        return { userMessage, agentMessage: reply, agentMessages: [reply] };
-      })();
-      this.buildDecisions.set(key, job);
-      try { return await job; } finally { this.buildDecisions.delete(key); }
-    }
-
-    // Preview control is not a model turn or a build. Never queue it behind an agent.
-    if (params.routing && !params.routing.answerOnly && !attachmentIds.length && isStopPreviewRequest(content)) {
-      const id = `${messageId}-preview-stop`;
-      const saved = sqliteService.getChatMessages(threadId).find(message => message.id === id);
-      if (saved) return { userMessage, agentMessage: saved, agentMessages: [saved] };
-      let result: string;
-      try {
-        const count = await localPreviewService.stopForThread(params.routing.context, threadId);
-        result = count ? 'The local preview has stopped. You can keep chatting.' : 'No Alpha-managed local preview is running in this conversation.';
-      } catch (error) { result = `The local preview could not be stopped: ${(error as Error).message}`; }
-      const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha', content: result, timestamp: new Date().toISOString() };
-      saveChatMessageAndShare(reply); this.emit('chat_message', reply);
-      return { userMessage, agentMessage: reply, agentMessages: [reply] };
-    }
-
-    // "Merge it": the Orchestrator merges the finished build's pull request into dev through
-    // delivery, with all of its guards. The chat agent's own GitHub access cannot merge, and
-    // used to answer that it couldn't. A pending plan or publication decision is handled above.
-    if (params.routing && !params.routing.answerOnly && !attachmentIds.length && thread.projectId && isMergeRequest(content)) {
-      const id = `${messageId}-merge`;
-      const saved = sqliteService.getChatMessages(threadId).find(message => message.id === id);
-      if (saved) return { userMessage, agentMessage: saved, agentMessages: [saved] };
-      const { mergeFromChat, defaultChatMergeDeps } = await import('./orchestrationChatMerge.js');
-      const result = await mergeFromChat({ context: params.routing.context, projectId: thread.projectId, threadId, messageId },
-        await defaultChatMergeDeps());
-      const reply: ChatMessage = { id, threadId, senderType: 'agent', senderName: 'Alpha Orchestrator', content: result, timestamp: new Date().toISOString() };
-      saveChatMessageAndShare(reply); this.emit('chat_message', reply);
-      return { userMessage, agentMessage: reply, agentMessages: [reply] };
-    }
+    // A build waiting on a decision no longer captures the message: the Orchestrator's own
+    // turn below reads it with the build's state and chooses what to do (answer, start,
+    // revise, replace, cancel, publish, merge...). Each action checks its own rules.
 
     if (params.buildRequest) {
       if (!workspaceRegistry.can(params.buildRequest.context.role, 'agent.run')) {
@@ -868,7 +781,8 @@ export class ChatService extends EventEmitter {
           userMessage,
           reply,
           request: parseChatOverride(content).content || content,
-          attachmentIds
+          attachmentIds,
+          buildDecision: params.buildDecision
         });
         if (routed) {
           if (activityCallId) agentCallService.completeChatTurn(activityCallId, routed.agentMessage.id);
@@ -1045,6 +959,8 @@ export class ChatService extends EventEmitter {
     settledDecisions?: Array<{ question: string; answer: string }>;
     /** Board cards the build is for, as the router chose them: ['all'] or card keys. */
     cards?: string[];
+    /** A plan set aside earlier, restored exactly as it was instead of planned again. */
+    presetPlan?: OrchestrationPlan;
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
@@ -1083,7 +999,8 @@ export class ChatService extends EventEmitter {
       repositories,
       issueId: input.issueId,
       settledDecisions: input.settledDecisions,
-      boardCards: input.cards
+      boardCards: input.cards,
+      presetPlan: input.presetPlan
     });
     const build = builds[0];
     const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
@@ -1353,6 +1270,113 @@ export class ChatService extends EventEmitter {
     return eligible.filter((agent): agent is Agent => Boolean(agent));
   }
 
+  /**
+   * The build in this conversation that waits on the person, for the router: its state,
+   * and the only action routes the server will accept now. Without it the router could
+   * not tell "start it" from "add a backend task" about the plan on the right.
+   */
+  private pendingBuildContext(routing: ChatRoutingContext, thread: ChatThread): PendingBuildContext {
+    const projectId = thread.projectId!;
+    return runWithWorkspace(routing.context.workspaceId, () => {
+      const pending = sqliteService.listChatPendingDecisions(projectId, thread.id);
+      const restorable = Boolean(this.setAsidePlan(thread.id));
+      const extra: ChatActionRoute[] = restorable ? ['restore_plan'] : [];
+      if (pending.length > 1) return { status: 'several_waiting', waitingCount: pending.length, allowedRoutes: [] };
+      const snapshot = pending[0] ?? sqliteService.getLatestOrchestrationSnapshot(projectId, thread.id);
+      if (!snapshot) return { status: 'none', allowedRoutes: extra };
+      const run = snapshot.run;
+      const allowed = allowedChatActions(run, extra);
+      return {
+        status: run.status, planVersion: run.planVersion, goal: run.plan?.goal?.slice(0, 2_000),
+        tasks: snapshot.tasks.slice(0, 20).map(task => ({ title: task.title, kind: task.kind, ...(task.repository ? { repository: task.repository } : {}) })),
+        ...(run.publications?.length ? { pullRequests: run.publications.map(item => item.pullRequestUrl) } : {}),
+        allowedRoutes: allowed
+      };
+    });
+  }
+
+  /** The most recent plan in this conversation set aside from the chat and never started. */
+  private setAsidePlan(threadId: string) {
+    const runIds = [...new Set(sqliteService.getChatMessages(threadId)
+      .filter(message => message.messageType === 'build' && message.orchestrationRunId)
+      .reverse()
+      .map(message => message.orchestrationRunId!))];
+    for (const runId of runIds) {
+      const snapshot = sqliteService.getOrchestrationSnapshot(runId);
+      if (snapshot?.run.status === 'cancelled' && snapshot.run.stoppedReason === SET_ASIDE_REASON && !snapshot.attempts.length) return snapshot;
+    }
+    return undefined;
+  }
+
+  /** Run one build action the Orchestrator chose, after its own checks, and say what happened. */
+  private async applyChatAction(input: {
+    routing: ChatRoutingContext; thread: ChatThread; userMessage: ChatMessage; reply: ChatMessage;
+    request: string; attachmentIds: string[]; buildDecision?: ChatBuildDecision;
+    route: ChatActionRoute; decision: { goal: string; evidence?: string; instruction?: string };
+  }): Promise<SendMessageResult | null> {
+    const { routing, thread, userMessage, reply } = input;
+    if (!thread.projectId || thread.ownerId !== routing.context.userId) {
+      reply.content = 'This build belongs to another conversation, so I did not change it here.';
+      return null;
+    }
+    const outcome = await runChatAction({
+      route: input.route, context: routing.context, projectId: thread.projectId, threadId: thread.id,
+      messageId: userMessage.id, message: input.request, evidence: input.decision.evidence,
+      instruction: input.decision.instruction, goal: input.decision.goal, buildDecision: input.buildDecision,
+      hasAttachments: input.attachmentIds.length > 0
+    }, this.chatActionDeps(routing, thread.id));
+    logInfo(`Chat decision ${input.route} in ${thread.id}: "${(input.decision.evidence ?? '').slice(0, 200)}" -> ${outcome.kind === 'reply' ? outcome.message.slice(0, 200) : 'build'}`);
+    if (outcome.kind === 'reply') {
+      // The id a replayed message looks for first, so a retry returns this outcome instead of acting again.
+      reply.id = `${userMessage.id}-build-decision`;
+      reply.senderName = 'Alpha Orchestrator';
+      reply.content = outcome.message;
+      return null;
+    }
+    return this.startChatBuild({
+      threadId: thread.id, thread, userMessage, context: routing.context,
+      request: outcome.request, originalRequest: input.request, repositories: outcome.repositories,
+      attachmentIds: input.attachmentIds, note: outcome.note, presetPlan: outcome.presetPlan
+    });
+  }
+
+  private chatActionDeps(routing: ChatRoutingContext, threadId: string): ChatActionDeps {
+    const workspaceId = routing.context.workspaceId;
+    return {
+      confirmConsent: async check => (await import('./chatConsentCheck.js')).confirmConsentInIsolation({
+        workspaceId, threadId, runId: `chat-consent-${randomUUID()}`, cwd: chatScratchFolder(threadId, 'Alpha'),
+        message: check.message, action: check.route as import('./chatConsentCheck.js').ConsentTarget, status: check.status
+      }),
+      pending: (projectId, threadId) => runWithWorkspace(workspaceId, () => sqliteService.listChatPendingDecisions(projectId, threadId)),
+      setAside: threadId => runWithWorkspace(workspaceId, () => this.setAsidePlan(threadId)),
+      can: (role, capability) => workspaceRegistry.can(role, capability as Parameters<typeof workspaceRegistry.can>[1]),
+      orchestrationEnabled: ALPHA_ORCHESTRATION_ENABLED,
+      decide: async decision => (await import('./orchestrationDecision.js')).executeOrchestrationDecision(decision),
+      revise: async (context, runId, revision, instruction) => (await import('./boardPlanRevision.js')).reviseBoardPlan(context, runId, revision, instruction),
+      cancel: async cancel => (await import('./orchestrationRuntime.js')).orchestrationService.cancelRun(cancel),
+      requestChanges: async change => {
+        const { orchestrationService } = await import('./orchestrationRuntime.js');
+        const agents = runWithWorkspace(workspaceId, () => sqliteService.getAgents()).filter(agent => !agent.isArchived);
+        const visible = await Promise.all(agents.map(agent => workspaceRegistry.canAccessProjectAgentRun(change.context, change.projectId, agent.id)));
+        const next = await orchestrationService.requestReviewChanges({ workspaceId, runId: change.runId, expectedRunRevision: change.expectedRunRevision,
+          actorId: change.context.userId, feedback: change.feedback,
+          eligibleAgents: agents.filter((_agent, index) => visible[index]).map(agent => ({ id: agent.id, role: agent.role })) });
+        try {
+          const { orchestrationRecoveryService } = await import('./orchestrationRecoveryService.js');
+          orchestrationRecoveryService.reconcileSnapshot(next);
+          await orchestrationRecoveryService.flushPendingMilestones();
+        } catch {
+          // Recovery messages are durable in the outbox; a later read or startup pass retries delivery.
+        }
+        return next;
+      },
+      merge: async merge => {
+        const { mergeFromChat, defaultChatMergeDeps } = await import('./orchestrationChatMerge.js');
+        return mergeFromChat(merge, await defaultChatMergeDeps());
+      }
+    };
+  }
+
   private async routingPromptFor(routing: ChatRoutingContext, thread: ChatThread): Promise<string> {
     const project = thread.projectId
       ? sqliteService.getProjects().find(item => item.id === thread.projectId)
@@ -1366,6 +1390,8 @@ export class ChatService extends EventEmitter {
       canBuild: routing.canBuild,
       answerOnly: routing.answerOnly,
       canUseBoardAgent: Boolean(project) && routing.context.role === 'dev',
+      pendingBuild: project ? this.pendingBuildContext(routing, thread) : undefined,
+      restartableGoal: project ? this.restartableGoal(thread.id) : undefined,
       specialists: (await this.eligibleChatSpecialists(routing, thread)).map(agent => {
         const persona = resolveAgent(agent, { includeMemory: false });
         return { id: agent.id, name: persona.name, role: persona.role, description: (agent.description ?? '').slice(0, 240),
@@ -1388,6 +1414,8 @@ export class ChatService extends EventEmitter {
     reply: ChatMessage;
     request: string;
     attachmentIds: string[];
+    /** The plan or review revision the person was looking at, when the app sent one. */
+    buildDecision?: ChatBuildDecision;
   }): Promise<SendMessageResult | null> {
     const { routing, thread, userMessage, reply, request } = input;
     const projectId = thread.projectId;
@@ -1405,6 +1433,11 @@ export class ChatService extends EventEmitter {
     if (parsed.decision?.route === 'board') {
       reply.content = 'Card changes are made by the Manager Agent for developers, in a project\'s chat or on its board. Select a project, or ask a developer.';
       return null;
+    }
+
+    // Actions on this conversation's build check their own role, revision and consent rules.
+    if (parsed.decision && isChatActionRoute(parsed.decision.route) && !routing.answerOnly) {
+      return this.applyChatAction({ ...input, route: parsed.decision.route, decision: parsed.decision });
     }
 
     if (routing.answerOnly || !routing.canBuild) {
@@ -1439,11 +1472,9 @@ export class ChatService extends EventEmitter {
       return null;
     }
 
-    // "continue" after a build stopped: plan that build's own goal again. A goal that points at
-    // the stopped build ("continue MON-104 from the saved plan") gives specialists nothing they can open.
-    const restartGoal = projectId && (decision.route === 'build' || decision.route === 'confirm_build') && isBareContinueRequest(request)
-      ? this.restartableGoal(thread.id)
-      : undefined;
+    // A goal that points back at a stopped build gives specialists nothing they can open:
+    // plan that build's own goal again instead.
+    const restartGoal = projectId && decision.route === 'build' && pointsAtEarlierBuild(goal) ? this.restartableGoal(thread.id) : undefined;
     if (restartGoal && projectId) {
       return this.startChatBuild({
         threadId: thread.id, thread, userMessage, context: routing.context,
@@ -1467,7 +1498,7 @@ export class ChatService extends EventEmitter {
     if (!reply.content) {
       reply.content = needsProject
         ? 'Which project is this for? Choose one in the header and I will plan the build.'
-        : 'Do you want me to plan a build for this, or only answer it?';
+        : `Should I plan this as a build ("${goal.slice(0, 200)}"), or would you rather I just answer?`;
     }
     return null;
   }
@@ -1736,7 +1767,11 @@ export class ChatService extends EventEmitter {
       if (routingPrompt?.includes('## Structured chat response')) {
         const structured = readStructuredAlphaReply(turn.content);
         if (!structured) {
-          const failed: ChatMessage = { ...base, content: 'Alpha could not form a valid action response. No action was dispatched. Please try your request again.' };
+          // Prose is still an answer worth showing; it only cannot act. Nothing is dispatched either way.
+          const prose = parseAlphaRoute(turn.content).message.trim();
+          const failed: ChatMessage = { ...base, content: prose && !prose.startsWith('{')
+            ? note + prose
+            : 'I could not finish that reply properly, so I did nothing. Send it again or put it another way, and I will try again.' };
           this.failedDefaultReplies.add(failed);
           return failed;
         }
@@ -1983,6 +2018,15 @@ ${priorTurn}` : prompt
       failed: Boolean(turn.failureKind)
     };
   }
+}
+
+/** The action routes the server accepts for a build in this state. */
+function allowedChatActions(run: { status: string; stoppedReason?: string; publications?: unknown[] }, extra: ChatActionRoute[]): ChatActionRoute[] {
+  if (run.status === 'awaiting_plan_approval') return ['start_plan', 'revise_plan', 'replace_plan', 'cancel_plan', ...extra];
+  if (run.status === 'awaiting_approval') return ['publish', 'request_changes'];
+  if (run.status === 'publishing') return run.stoppedReason ? ['retry_publication'] : [];
+  if (run.status === 'completed' && run.publications?.length) return ['merge_dev', ...extra];
+  return extra;
 }
 
 export const chatService = new ChatService();

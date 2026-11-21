@@ -465,6 +465,23 @@ describe('project builds triggered from chat', () => {
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 
+  it('restores a set-aside plan exactly as it was, without planning it again', async () => {
+    const service = await load();
+    const restored = { schemaVersion: 1, goal: 'Restored calculator plan.', exclusions: [], requirements: [{ id: 'R1', description: 'Adds numbers.' }],
+      tasks: [{ id: 'restored-task', title: 'Calculator', description: 'Build it.', kind: 'frontend', ownerAgentId: 'agent-2', repository: selectedRepo,
+        dependsOn: [], requirementIds: ['R1'], acceptanceCriteria: ['Adds.'], requiredChecks: ['test'], scope: { includePaths: ['src/**'], excludePaths: [] }, required: true }] };
+    const result = await service.startProjectBuildBatch({
+      context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
+      projectId: project.id, threadId: 'thread-1', messageId: `message-${crypto.randomUUID()}`,
+      content: 'Restored calculator plan.', repositories: [selectedRepo], presetPlan: restored as any
+    });
+    expect(result[0]).toMatchObject({ status: 'plan_ready' });
+    expect(plannerCreatePlan).not.toHaveBeenCalled();
+    // The orchestrator still receives and validates it like any planned build.
+    expect(startOrchestration.mock.calls[0][0].plan).toMatchObject({ goal: 'Restored calculator plan.', tasks: [expect.objectContaining({ id: 'restored-task' })] });
+    expect(startOrchestration.mock.calls[0][0].plan).not.toBe(restored);
+  });
+
   it('builds an existing board issue instead of creating a second one', async () => {
     const service = await load();
     issueRows.push({ id: 'issue-7', identifier: 'CALC-7', projectId: project.id, title: 'Keyboard input', status: 'todo', labels: [] });
