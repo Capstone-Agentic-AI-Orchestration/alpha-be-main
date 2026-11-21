@@ -151,6 +151,8 @@ export interface OrchestrationPlanningInput {
    * fixed and every exclusion is kept, but a milestone roadmap is still allowed.
    */
   approvedSpec?: { requirements: OrchestrationPlan['requirements']; exclusions: readonly string[]; brief: string };
+  /** Answers the person already gave for this request. Settled: never asked again. */
+  settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
   milestoneContext?: { id: string; title: string; objective: string };
   acceptedEvidence?: string;
 }
@@ -184,12 +186,29 @@ export class OrchestrationPlanningError extends Error {
 }
 
 /** A product decision only the person can make, asked before any branch or specialist starts. */
-export interface PlanningDecision { question: string; options: string[] }
+export interface PlanningDecision { question: string; options: Array<{ label: string; description?: string }> }
+
+/** After this many answers for one request the planner must plan with reasonable defaults. */
+export const MAX_PLANNING_QUESTIONS = 3;
 
 function decisionError(decision: PlanningDecision): OrchestrationPlanningError {
   const error = new OrchestrationPlanningError(decision.question, 'needs_decision');
   error.decision = decision;
   return error;
+}
+
+/** Up to four options, as plain strings or {label, description}; anything else is dropped. */
+function decisionOptions(raw: unknown): PlanningDecision['options'] {
+  if (!Array.isArray(raw)) return [];
+  const options: PlanningDecision['options'] = [];
+  for (const item of raw) {
+    const label = typeof item === 'string' ? item : (item as { label?: unknown } | null)?.label;
+    if (typeof label !== 'string' || !label.trim()) continue;
+    const description = typeof item === 'object' && item && typeof (item as { description?: unknown }).description === 'string'
+      ? (item as { description: string }).description.trim().slice(0, 200) : '';
+    options.push({ label: label.trim().slice(0, 120), ...(description ? { description } : {}) });
+  }
+  return options.slice(0, 4);
 }
 
 function withRejectedPlans(error: OrchestrationPlanningError, proposed: unknown, corrected?: unknown): OrchestrationPlanningError {
@@ -264,6 +283,7 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
     })),
     configuredBuildSteps: enabledSteps,
     approvedSpec: input.approvedSpec,
+    ...(input.settledDecisions?.length ? { settledDecisions: input.settledDecisions } : {}),
     milestone: input.milestoneContext,
     acceptedEvidence: input.acceptedEvidence,
     repositoryContext: input.repositoryContext.slice(0, MAX_REPOSITORY_CONTEXT_CHARS),
@@ -291,7 +311,12 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
     `Allowed enum values (these are schema rules, not plan fields): task.kind = ${orchestrationTaskKindSchema.options.join(', ')}; task.requiredChecks = ${orchestrationRequiredCheckSchema.options.join(', ')}. For each repository, choose requiredChecks only from that repository’s availableScripts list.`,
     'Optional task.dependencyAudit is {scanner:"npm",purpose:"baseline"|"verification"|"self-check",level:"low"|"moderate"|"high"|"critical"}. Independent baseline/verification belongs to Security audit/review tasks. Self-check belongs only to an implementation or validation task and cannot satisfy final Security assessment. The server starts with low severity; do not weaken it to evade findings.',
     'Every final Security dependency verification needs a committed npm lockfile. If its repository has no package-lock.json or npm-shrinkwrap.json, assign its implementation specialist to generate one and make verification depend on that task, even when the baseline found no vulnerabilities. Security must stay read-only.',
-    'If the request leaves a product decision only the person can make (for example, it conflicts with projectContext and nothing supplied settles which is current, or it depends on details that were not supplied to you), do not plan. Return exactly {"needsDecision":{"question":"<one plain question for the person>","options":["<two to four short answers>"]}} instead. Do not ask about anything the supplied material, the repository files, or a reasonable default already settles.',
+    input.settledDecisions?.length
+      ? 'settledDecisions are answers the person already gave for this request. They are final and take priority over projectContext: plan with them and never ask about them again, even in other words.'
+      : '',
+    (input.settledDecisions?.length ?? 0) >= MAX_PLANNING_QUESTIONS
+      ? 'The person has answered the maximum number of questions for this request. Do not return needsDecision. Where something is still open, choose the most reasonable option and state it in the affected task\'s description.'
+      : 'If the request leaves a product decision only the person can make (for example, it conflicts with projectContext and nothing supplied settles which is current, or it depends on details that were not supplied to you), do not plan. Return exactly {"needsDecision":{"question":"<one plain question for the person>","options":[{"label":"<short answer, under 60 characters>","description":"<optional: what it means, under 120 characters>"}]}} with two to four options instead. Do not ask about anything approvedSpec, the task checklists, the repository files, or a reasonable default already settles; for example, a checklist that says localStorage settles where data is stored.',
     'Return the plan JSON now.',
     JSON.stringify(context, null, 2),
     'Plan schema shape:',
@@ -348,6 +373,7 @@ function semanticRepairInstructions(
     configuredBuildSteps: (input.buildSteps ?? []).slice().sort((a, b) => a.position - b.position),
     approvedRequirements: input.approvedRequirements,
     approvedSpec: input.approvedSpec,
+    ...(input.settledDecisions?.length ? { settledDecisions: input.settledDecisions } : {}),
     milestone: input.milestoneContext,
     acceptedEvidence: input.acceptedEvidence
   };
@@ -383,8 +409,7 @@ function parseCandidatePlan(text: string): { plan?: OrchestrationPlan; decision?
   }
   const asked = (candidate as { needsDecision?: { question?: unknown; options?: unknown } } | null)?.needsDecision;
   if (asked && typeof asked.question === 'string' && asked.question.trim()) {
-    const options = Array.isArray(asked.options) ? asked.options.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())) : [];
-    return { decision: { question: asked.question.trim().slice(0, 600), options: options.slice(0, 4).map(item => item.trim().slice(0, 200)) } };
+    return { decision: { question: asked.question.trim().slice(0, 600), options: decisionOptions(asked.options) } };
   }
   const parsed = orchestrationPlanSchema.safeParse(candidate);
   if (!parsed.success) {

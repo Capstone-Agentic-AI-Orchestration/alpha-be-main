@@ -1033,6 +1033,8 @@ export class ChatService extends EventEmitter {
     note?: string;
     /** Board issue to build in place instead of filing a new chat-build issue. */
     issueId?: string;
+    /** Answers already given to the Orchestrator's questions about this request. */
+    settledDecisions?: Array<{ question: string; answer: string }>;
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
@@ -1069,7 +1071,8 @@ export class ChatService extends EventEmitter {
       chatSkillIds: selectedSkills.skillIds,
       chatSkillGuidance: selectedSkills.guidance,
       repositories,
-      issueId: input.issueId
+      issueId: input.issueId,
+      settledDecisions: input.settledDecisions
     });
     const build = builds[0];
     const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
@@ -1104,8 +1107,8 @@ export class ChatService extends EventEmitter {
         ? [
             '**The Orchestrator needs one decision before it plans.**',
             build.decision.question,
-            build.decision.options.length ? build.decision.options.map(option => `- ${option}`).join('\n') : undefined,
-            'Reply with your answer here and Alpha will plan the build with it. No branch was created and no specialist was started.'
+            build.decision.options.length ? build.decision.options.map(option => `- ${option.label}`).join('\n') : undefined,
+            'Choose an answer or reply in your own words, and Alpha will plan the build with it. No branch was created and no specialist was started.'
           ].filter(Boolean).join('\n\n')
       : build.status === 'blocked'
         ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
@@ -1129,22 +1132,102 @@ export class ChatService extends EventEmitter {
             build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
             'Open the Build review tab to follow each agent, handoff, changed file, and verification result.'
           ].filter(Boolean).join('\n\n');
+    // Only one question is open at a time: a new one, or a new build, retires the earlier ones.
+    this.retireOpenDecisions(threadId);
+    const blocker = build.status === 'blocked' && build.blockingBuild ? this.describeBlocker(build.blockingBuild) : undefined;
     const reply: ChatMessage = {
       id: `${messageId}-build`,
       threadId,
       senderType: 'agent',
       senderName: 'Alpha Orchestrator',
       content: input.note ? `${summary}\n\n_${input.note}_` : summary,
-      messageType: 'build',
+      messageType: build.decision ? 'build_decision' : 'build',
       orchestrationRunId: build.orchestrationRunId,
       // The brief the planner received, so "Try again" replans this goal rather than a bare "do that".
       routeProposal: { sourceMessageId: messageId, goal: input.request.trim(), repositories, status: 'accepted' },
+      ...(build.decision ? { decision: {
+        question: build.decision.question,
+        options: build.decision.options,
+        status: 'open' as const,
+        request: input.request.trim(),
+        ...(input.originalRequest?.trim() ? { originalRequest: input.originalRequest.trim() } : {}),
+        repositories,
+        ...(input.issueId ? { issueId: input.issueId } : {}),
+        settled: input.settledDecisions ?? []
+      } } : {}),
+      ...(blocker ? { buildBlocker: blocker } : {}),
       timestamp: new Date().toISOString()
     };
     saveChatMessageAndShare(reply);
     bindToChat(build.orchestrationRunId, reply.id);
     this.emit('chat_message', reply);
     return { userMessage, agentMessage: reply, agentMessages: [reply], build, builds: builds.length > 1 ? builds : undefined };
+  }
+
+  /** The build in the way, with the task and conversation the chat can link to. */
+  private describeBlocker(blocking: NonNullable<ProjectBuildStartResult['blockingBuild']>): NonNullable<ChatMessage['buildBlocker']> {
+    const issue = blocking.issueId ? sqliteService.getIssues().find(item => item.id === blocking.issueId) : undefined;
+    const threadId = sqliteService.getOrchestrationSnapshot(blocking.runId)?.run.originChatThreadId;
+    return {
+      runId: blocking.runId,
+      status: blocking.status,
+      ...(blocking.repository ? { repository: blocking.repository } : {}),
+      ...(blocking.issueId ? { issueId: blocking.issueId } : {}),
+      ...(issue?.identifier ? { issueIdentifier: issue.identifier } : {}),
+      ...(threadId ? { threadId } : {})
+    };
+  }
+
+  private retireOpenDecisions(threadId: string): void {
+    for (const message of sqliteService.getChatMessages(threadId)) {
+      if (message.decision?.status !== 'open') continue;
+      const decision = { ...message.decision, status: 'superseded' as const };
+      sqliteService.updateChatMessageDecision(threadId, message.id, decision);
+      this.emit('chat_message', { ...message, decision });
+    }
+  }
+
+  /**
+   * The person's answer to an Orchestrator question: saved as their message,
+   * then the original request is planned again with every answer so far, which
+   * the planner treats as settled. Idempotent on the question.
+   */
+  async answerDecision(input: { threadId: string; messageId: string; answer: string; routing: ChatRoutingContext; senderName: string }): Promise<SendMessageResult> {
+    const thread = sqliteService.getChatThreads().find(item => item.id === input.threadId);
+    if (!thread) throw new ChatRouteError('Conversation not found.', 404);
+    const messages = sqliteService.getChatMessages(thread.id);
+    const asked = messages.find(message => message.id === input.messageId);
+    const decision = asked?.decision;
+    if (!asked || !decision) throw new ChatRouteError('That question is no longer in this conversation.', 404);
+    const answerId = `${asked.id}-answer`;
+    const existing = messages.find(message => message.id === answerId);
+    if (existing) {
+      const reply = messages.find(message => message.id === `${answerId}-build`);
+      return { userMessage: existing, agentMessage: reply ?? existing, agentMessages: reply ? [reply] : [] };
+    }
+    if (decision.status !== 'open') throw new ChatRouteError('That question was already answered or replaced by a newer one.', 409);
+    if (!input.routing.canBuild) throw new ChatRouteError('Your workspace role cannot start builds. Ask a developer or admin to run this task.', 403);
+    if (!thread.projectId) throw new ChatRouteError('Choose a project for this conversation before planning a build.', 409);
+    const answer = input.answer.trim().slice(0, 2_000);
+    if (!answer) throw new ChatRouteError('Write an answer first.', 400);
+
+    const userMessage: ChatMessage = {
+      id: answerId, threadId: thread.id, senderType: 'user', senderName: input.senderName,
+      content: answer, timestamp: new Date().toISOString()
+    };
+    saveChatMessageAndShare(userMessage);
+    this.emit('chat_message', userMessage);
+    const answered = { ...decision, status: 'answered' as const, answer };
+    sqliteService.updateChatMessageDecision(thread.id, asked.id, answered);
+    this.emit('chat_message', { ...asked, decision: answered });
+    return this.startChatBuild({
+      threadId: thread.id, thread, userMessage, context: input.routing.context,
+      request: decision.request,
+      originalRequest: decision.originalRequest,
+      repositories: decision.repositories,
+      issueId: decision.issueId,
+      settledDecisions: [...decision.settled, { question: decision.question, answer }]
+    });
   }
 
   /**

@@ -706,12 +706,16 @@ export interface ChatMessage {
   content: string;
   thinkingProcess?: string;
   toolsExecuted?: ToolExecutionRecord[];
-  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build' | 'build_milestone' | 'build_proposal' | 'project_needed';
+  messageType?: 'user' | 'assistant' | 'agent' | 'system' | 'agent_call' | 'build' | 'build_milestone' | 'build_proposal' | 'project_needed' | 'build_decision';
   agentCallId?: string;
   /** The task workflow shown beneath an Orchestrator build message. */
   orchestrationRunId?: string;
   /** A build Alpha proposed instead of starting, awaiting the user's answer. */
   routeProposal?: ChatRouteProposal;
+  /** A question the Orchestrator asked before planning, answered with one click or in the person's own words. */
+  decision?: ChatDecision;
+  /** The build that kept this one from starting, so the chat can offer to stop it. */
+  buildBlocker?: ChatBuildBlocker;
   squadId?: string;
   operationMode?: AgentCallMode;
   agentCallStatus?: AgentCallStatus;
@@ -724,6 +728,32 @@ export interface ChatMessage {
 }
 
 /** A build Alpha proposed in chat, kept so the user's answer can start it later. */
+export interface ChatDecisionOption { label: string; description?: string }
+
+export interface ChatDecision {
+  question: string;
+  options: ChatDecisionOption[];
+  status: 'open' | 'answered' | 'superseded';
+  answer?: string;
+  /** The planning brief the answer is added to, so the build is planned from the request, not the reply. */
+  request: string;
+  originalRequest?: string;
+  repositories: string[];
+  issueId?: string;
+  /** Answers already given for this request; the planner treats them as settled. */
+  settled: Array<{ question: string; answer: string }>;
+}
+
+export interface ChatBuildBlocker {
+  runId: string;
+  status: string;
+  repository?: string;
+  issueId?: string;
+  issueIdentifier?: string;
+  /** The conversation that started the blocking build, when it came from chat. */
+  threadId?: string;
+}
+
 export interface ChatRouteProposal {
   /** The user message the proposal answers. */
   sourceMessageId: string;
