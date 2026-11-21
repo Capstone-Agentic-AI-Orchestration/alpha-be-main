@@ -6,6 +6,7 @@ import {
   orchestratorRoutingPrompt,
   parseAlphaRoute,
   parseChatOverride,
+  readCards,
   referencesAlphaRecords
 } from './chatRouter.js';
 
@@ -26,7 +27,24 @@ describe('continuing a stopped build', () => {
   it('tells Alpha that build goals must stand on their own, naming board cards by key', () => {
     const prompt = orchestratorRoutingPrompt({ projectName: 'Money tracker', repositories: ['org/app-fe'], canBuild: true });
     expect(prompt).toContain('cannot read this conversation, earlier builds');
-    expect(prompt).toContain('name each card\'s key (such as MON-104) in the goal');
+    expect(prompt).toContain('set decision.cards');
+    expect(prompt).toContain('Use ["all"] when the user wants every open task built');
+  });
+});
+
+describe('the board cards Alpha chose for a build', () => {
+  it('reads all, or card keys, from the structured decision', () => {
+    const reply = (cards: unknown) => JSON.stringify({ contract: 'alpha_chat_v1', message: '',
+      decision: { route: 'build', goal: 'Build the expense tasks', repositories: [], cards, assignments: [] } });
+    expect(parseAlphaRoute(reply(['all'])).decision?.cards).toEqual(['all']);
+    expect(parseAlphaRoute(reply(['pro-103', 'PRO-104', 'PRO-104'])).decision?.cards).toEqual(['PRO-103', 'PRO-104']);
+    expect(parseAlphaRoute(reply([])).decision?.cards).toBeUndefined();
+  });
+
+  it('keeps only all or well-formed keys', () => {
+    expect(readCards(['PRO-1', 'All'])).toEqual(['all']);
+    expect(readCards(['the landing page', 'PRO-7', 42])).toEqual(['PRO-7']);
+    expect(readCards('PRO-7')).toEqual([]);
   });
 });
 

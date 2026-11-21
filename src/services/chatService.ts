@@ -1043,6 +1043,8 @@ export class ChatService extends EventEmitter {
     issueId?: string;
     /** Answers already given to the Orchestrator's questions about this request. */
     settledDecisions?: Array<{ question: string; answer: string }>;
+    /** Board cards the build is for, as the router chose them: ['all'] or card keys. */
+    cards?: string[];
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
@@ -1080,7 +1082,8 @@ export class ChatService extends EventEmitter {
       chatSkillGuidance: selectedSkills.guidance,
       repositories,
       issueId: input.issueId,
-      settledDecisions: input.settledDecisions
+      settledDecisions: input.settledDecisions,
+      boardCards: input.cards
     });
     const build = builds[0];
     const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
@@ -1153,7 +1156,7 @@ export class ChatService extends EventEmitter {
       messageType: build.decision ? 'build_decision' : 'build',
       orchestrationRunId: build.orchestrationRunId,
       // The brief the planner received, so "Try again" replans this goal rather than a bare "do that".
-      routeProposal: { sourceMessageId: messageId, goal: input.request.trim(), repositories, status: 'accepted' },
+      routeProposal: { sourceMessageId: messageId, goal: input.request.trim(), repositories, status: 'accepted', ...(input.cards?.length ? { cards: input.cards } : {}) },
       ...(build.decision ? { decision: {
         question: build.decision.question,
         options: build.decision.options,
@@ -1162,7 +1165,8 @@ export class ChatService extends EventEmitter {
         ...(input.originalRequest?.trim() ? { originalRequest: input.originalRequest.trim() } : {}),
         repositories,
         ...(input.issueId ? { issueId: input.issueId } : {}),
-        settled: input.settledDecisions ?? []
+        settled: input.settledDecisions ?? [],
+        ...(input.cards?.length ? { cards: input.cards } : {})
       } } : {}),
       ...(blocker ? { buildBlocker: blocker } : {}),
       timestamp: new Date().toISOString()
@@ -1235,7 +1239,8 @@ export class ChatService extends EventEmitter {
       originalRequest: decision.originalRequest,
       repositories: decision.repositories,
       issueId: decision.issueId,
-      settledDecisions: [...decision.settled, { question: decision.question, answer }]
+      settledDecisions: [...decision.settled, { question: decision.question, answer }],
+      cards: decision.cards
     });
   }
 
@@ -1451,13 +1456,14 @@ export class ChatService extends EventEmitter {
       return this.startChatBuild({
         threadId: thread.id, thread, userMessage, context: routing.context,
         request: goal, originalRequest: request, repositories, attachmentIds: input.attachmentIds,
-        issueId: routing.issueId
+        issueId: routing.issueId,
+        cards: decision.cards
       });
     }
 
     const needsProject = !projectId;
     reply.messageType = needsProject ? 'project_needed' : 'build_proposal';
-    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, status: 'open', ...(routing.issueId ? { issueId: routing.issueId } : {}) };
+    reply.routeProposal = { sourceMessageId: userMessage.id, goal, repositories, status: 'open', ...(routing.issueId ? { issueId: routing.issueId } : {}), ...(decision.cards?.length ? { cards: decision.cards } : {}) };
     if (!reply.content) {
       reply.content = needsProject
         ? 'Which project is this for? Choose one in the header and I will plan the build.'
@@ -1515,7 +1521,8 @@ export class ChatService extends EventEmitter {
         repositories: input.routing.repositories?.length ? input.routing.repositories : proposal?.repositories,
         attachmentIds,
         // The offer was for a task handed over from the board: build that task, not a new one.
-        issueId: proposal?.issueId
+        issueId: proposal?.issueId,
+        cards: proposal?.cards
       });
       settle('accepted');
       return result;

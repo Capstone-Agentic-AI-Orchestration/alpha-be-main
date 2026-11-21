@@ -71,6 +71,8 @@ interface StartProjectBuildInput {
   issueId?: string;
   /** Answers the person gave to the planner's earlier questions about this request. */
   settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
+  /** Board cards the chat router chose for this request: ['all'] or card keys. */
+  boardCards?: readonly string[];
 }
 
 /**
@@ -311,6 +313,7 @@ async function startOrchestratedProjectBuild(input: {
   chatSkillGuidance?: string;
   issueId?: string;
   settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
+  boardCards?: readonly string[];
 }): Promise<ProjectBuildStartResult> {
   const { context, project, members, buildSteps } = input;
   const fromBoard = isBoardThreadId(input.threadId);
@@ -398,7 +401,7 @@ async function startOrchestratedProjectBuild(input: {
   // themselves: the planner and specialists cannot open the board.
   let boardCards: BoardCardSelection | undefined;
   if (!linkedIssueId && !input.deliveryRepair) {
-    boardCards = selectBoardCards(cleanGoal, (await issueStore().list(workspaceId)).filter(item => item.projectId === project.id));
+    boardCards = selectBoardCards(cleanGoal, (await issueStore().list(workspaceId)).filter(item => item.projectId === project.id), input.boardCards);
     if (boardCards.cards.length) {
       approvedSpec = boardCardSpec(boardCards.cards, card => {
         const record = runWithWorkspace(workspaceId, () => sqliteService.getFeatureSpec(card.id));
@@ -829,6 +832,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId,
       chatSkillIds: input.chatSkillIds, chatSkillGuidance: input.chatSkillGuidance,
       settledDecisions: input.settledDecisions,
+      boardCards: input.boardCards,
       deliveryRepair: input.deliveryRepair
     });
   });
