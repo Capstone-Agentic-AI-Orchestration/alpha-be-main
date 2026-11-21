@@ -18,10 +18,14 @@ let cliReply: { content: string; failureKind?: string };
 let systemPrompts: string[];
 let turnInputs: any[];
 let cliReplies: string[];
+/** The isolated consent check's answer (it sees only the message, the action and the build's state). */
+let consentAnswer = true;
 const startProjectBuildBatch = vi.fn();
 const cancelRun = vi.fn();
 const startPlannedWork = vi.fn();
 const approveAndPublish = vi.fn();
+const requestReviewChanges = vi.fn();
+const reviseBoardPlan = vi.fn();
 
 const context = { workspaceId: 'ws-default', userId: 'user-1', role: 'admin', access: {} } as any;
 
@@ -33,6 +37,10 @@ async function load() {
     runCliTurn: vi.fn(async (input: { systemPrompt?: string; mcpServers?: string[]; responseSchema?: any }) => {
       systemPrompts.push(input.systemPrompt ?? '');
       turnInputs.push(input);
+      if (input.responseSchema?.properties?.consent) {
+        const asked = JSON.parse((input as { prompt: string }).prompt);
+        return { content: JSON.stringify({ consent: consentAnswer, evidence: consentAnswer ? asked.message : '' }), bin: 'claude', thinking: '', tools: [], sessionId: undefined };
+      }
       let content = cliReplies.shift() ?? cliReply.content;
       if (input.responseSchema?.properties?.contract) {
         const { parseAlphaRoute } = await import('./chatRouter.js');
@@ -52,7 +60,8 @@ async function load() {
     })
   }));
   vi.doMock('./projectBuildOrchestrator.js', () => ({ startProjectBuildBatch }));
-  vi.doMock('./orchestrationRuntime.js', () => ({ orchestrationService: { cancelRun, startPlannedWork, approveAndPublish } }));
+  vi.doMock('./orchestrationRuntime.js', () => ({ orchestrationService: { cancelRun, startPlannedWork, approveAndPublish, requestReviewChanges } }));
+  vi.doMock('./boardPlanRevision.js', () => ({ reviseBoardPlan }));
   const sql = await import('./sqliteService.js');
   opened.push(sql.sqliteService as any);
   opened.push((await import('./workspaceRegistry.js')).workspaceRegistry as any);
@@ -86,6 +95,7 @@ describe('board cards from the routing decision', () => {
 });
 
 beforeEach(() => {
+  consentAnswer = true;
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-chat-routing-'));
   opened = [];
   systemPrompts = [];
@@ -128,23 +138,23 @@ async function specialistFixture() {
 }
 
 describe('specialist analysis handoffs', () => {
-  it('stops the preview directly without calling a model or changing the build, and is idempotent', async () => {
+  it('stops the preview when the Orchestrator decides to, without changing the build', async () => {
     const { chatService } = await specialistFixture();
     const { localPreviewService } = await import('./localPreviewService.js');
     const stop = vi.spyOn(localPreviewService, 'stopForThread').mockResolvedValue(1);
-    const result = await send(chatService, 'now stop the local run', { projectId: 'project-1', clientMessageId: 'stop-preview-message' });
+    cliReply = { content: 'ALPHA_ROUTE {"route":"stop_preview"}' };
+    const result = await send(chatService, 'now stop the local run', { projectId: 'project-1' });
     expect(result.agentMessage.content).toContain('preview has stopped');
     expect(stop).toHaveBeenCalledWith(context, 'thread-1');
-    await send(chatService, 'now stop the local run', { projectId: 'project-1', clientMessageId: 'stop-preview-message' });
-    expect(stop).toHaveBeenCalledTimes(1); expect(turnInputs).toHaveLength(0);
     expect(startProjectBuildBatch).not.toHaveBeenCalled(); expect(cancelRun).not.toHaveBeenCalled();
   });
   it('reports a preview shutdown failure instead of claiming success', async () => {
     const { chatService } = await specialistFixture();
     const { localPreviewService } = await import('./localPreviewService.js');
     vi.spyOn(localPreviewService, 'stopForThread').mockRejectedValue(new Error('shutdown not confirmed'));
+    cliReply = { content: 'ALPHA_ROUTE {"route":"stop_preview"}' };
     const result = await send(chatService, 'stop the preview', { projectId: 'project-1' });
-    expect(result.agentMessage.content).toContain('could not be stopped: shutdown not confirmed'); expect(turnInputs).toHaveLength(0);
+    expect(result.agentMessage.content).toContain('could not be stopped: shutdown not confirmed');
   });
   it('hands runtime evidence and the preview source to a read-only specialist rather than the ordinary checkout', async () => {
     const { chatService } = await specialistFixture();
@@ -409,7 +419,9 @@ describe('Alpha routes unaddressed chat messages', () => {
     cliReply = { content: 'ALPHA_ROUTE {broken' };
     const result = await send(chatService, 'add search', { projectId: 'project-1' });
     expect(startProjectBuildBatch).not.toHaveBeenCalled();
-    expect(result.agentMessage.content).toContain('No action was dispatched');
+    // Nothing acts, and no decision line leaks into the reply.
+    expect(result.agentMessage.content).toMatch(/did nothing/);
+    expect(result.agentMessage.content).not.toContain('ALPHA_ROUTE');
     expect(startProjectBuildBatch).not.toHaveBeenCalled();
   });
 
@@ -511,165 +523,215 @@ describe('Alpha routes unaddressed chat messages', () => {
 
 
 
-describe('durable main-chat approvals', () => {
+/**
+ * A build waiting on the person no longer captures their messages behind a narrow gate.
+ * The Orchestrator's own turn reads the message with the build's state and chooses an
+ * action; each action checks role, revision, status, and (for anything that changes code
+ * or reaches GitHub) that the person's whole message asked for it.
+ */
+describe('the Orchestrator decides about a build waiting in the chat', () => {
   async function decisionFixture() {
     const loaded = await specialistFixture();
     loaded.sqlite.createChatThread({ id: 'thread-1', title: 'Build', projectId: 'project-1', ownerId: 'user-1' } as any);
     const { workspaceRegistry } = await import('./workspaceRegistry.js');
     vi.spyOn(workspaceRegistry, 'canAccessProjectBuilds').mockReturnValue(true);
-    const snapshot = { run: { id: 'run-1', projectId: 'project-1', workspaceId: 'ws-default', originChatThreadId: 'thread-1', revision: 3, planVersion: 2, status: 'awaiting_plan_approval' }, tasks: [] } as any;
+    const plan = { schemaVersion: 1, goal: 'Build the expense app with localStorage.', requirements: [], tasks: [] };
+    const snapshot = { run: { id: 'run-1', projectId: 'project-1', workspaceId: 'ws-default', originChatThreadId: 'thread-1', revision: 3, planVersion: 2,
+      status: 'awaiting_plan_approval', plan, repositoryWorkspaces: [{ repository: 'acme/fe' }, { repository: 'acme/be' }] },
+      tasks: [{ title: 'Build the expense UI', kind: 'frontend', repository: 'acme/fe' }], attempts: [], findings: [] } as any;
     const { SQLiteService } = await import('./sqliteService.js');
     vi.spyOn(SQLiteService.prototype, 'getOrchestrationSnapshot').mockReturnValue(snapshot);
     vi.spyOn(SQLiteService.prototype, 'listChatPendingDecisions').mockImplementation(() =>
       ['awaiting_plan_approval', 'awaiting_approval', 'publishing'].includes(snapshot.run.status) ? [snapshot] : []);
+    vi.spyOn(SQLiteService.prototype, 'getLatestOrchestrationSnapshot').mockReturnValue(snapshot);
     vi.spyOn(SQLiteService.prototype, 'getOrchestrationPlans').mockReturnValue([{ version: 2, plan: {} as any }]);
     startPlannedWork.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'executing' } });
     approveAndPublish.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'completed' } });
-    return { ...loaded, snapshot, decision: { action: 'start', runId: 'run-1', expectedRevision: 3, planVersion: 2, evidenceReady: true } };
+    cancelRun.mockImplementation(async () => ({ ...snapshot, run: { ...snapshot.run, status: 'cancelled' } }));
+    return { ...loaded, snapshot, plan, decision: { runId: 'run-1', expectedRevision: 3, planVersion: 2, evidenceReady: true } };
   }
-  it('saves explicit plan consent and its real outcome without calling a model, including concurrent transport retry', async () => {
-    const { chatService, sqlite, decision } = await decisionFixture();
-    const options = { buildDecision: decision, clientMessageId: 'approval-message' };
-    const [first, retry] = await Promise.all([send(chatService, 'start the plan', options), send(chatService, 'start the plan', options)]);
-    expect(first.agentMessage.content).toContain('Plan v2 started'); expect(retry.agentMessage.id).toBe(first.agentMessage.id);
-    expect(startPlannedWork).toHaveBeenCalledTimes(1); expect(turnInputs).toHaveLength(0);
-    expect(sqlite.getChatMessages('thread-1').map(message => message.content)).toEqual(['start the plan', first.agentMessage.content]);
-    await send(chatService, 'start the plan', options); expect(startPlannedWork).toHaveBeenCalledTimes(1);
-  });
-  it('keeps stale and unloaded-review refusals in history and never starts a new build', async () => {
-    const { chatService, sqlite, decision } = await decisionFixture();
-    const stale = await send(chatService, 'start the plan', { buildDecision: { ...decision, expectedRevision: 1 } });
-    expect(stale.agentMessage.content).toContain('changed');
-    const unloaded = await send(chatService, 'start the plan', { buildDecision: { ...decision, evidenceReady: false } });
-    expect(unloaded.agentMessage.content).toContain('not loaded');
-    expect(sqlite.getChatMessages('thread-1')).toHaveLength(4);
+  const route = (decision: Record<string, unknown>) => ({ content: `ALPHA_ROUTE ${JSON.stringify(decision)}` });
+  // Revising a plan and sending work back need chat.write, which developers hold (as on the HTTP routes).
+  const developer = { routing: { context: { ...context, role: 'dev' }, canBuild: true } };
+
+  it('tells the Orchestrator what is waiting and which actions it may take', async () => {
+    const { chatService } = await decisionFixture();
+    cliReply = { content: 'The plan builds the expense UI in acme/fe; the backend needs no change.' };
+    const result = await send(chatService, 'why is it not selected but project-a-be is shown here', { projectId: 'project-1' });
+    expect(result.agentMessage.content).toContain('backend needs no change');
+    expect(systemPrompts[0]).toContain('Build waiting on you');
+    expect(systemPrompts[0]).toContain('"status":"awaiting_plan_approval"');
+    expect(systemPrompts[0]).toContain('"allowedRoutes":["start_plan","revise_plan","replace_plan","cancel_plan"]');
     expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
   });
-  it('requires separate publication words and forwards failures without claiming success', async () => {
-    const { chatService, snapshot, decision } = await decisionFixture();
-    snapshot.run.status = 'awaiting_approval';
-    cliReply = { content: JSON.stringify({ intent: 'clarify', target: 'none', evidence: '' }) };
-    const mismatch = await send(chatService, 'continue', { buildDecision: { ...decision, action: 'approve' } });
-    expect(mismatch.agentMessage.content).toContain('No publication'); expect(approveAndPublish).not.toHaveBeenCalled();
-    approveAndPublish.mockRejectedValueOnce(new Error('Blocking findings must be resolved'));
-    const refused = await send(chatService, 'approve publication', { buildDecision: { ...decision, action: 'approve' } });
-    expect(refused.agentMessage.content).toContain('Blocking findings');
-    expect(refused.agentMessage.content).not.toContain('completed');
-  });
-  it.each(['yes', 'yes, do it', 'okay start now', 'I approve this plan', 'go ahed with the plan'])('dispatches interpreted plan consent without a frontend action: %s', async content => {
-    const { chatService, sqlite, decision } = await decisionFixture();
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: content }) };
-    const result = await send(chatService, content, { buildDecision: { ...decision, action: undefined } });
+
+  it.each(['yes', 'yes, do it', 'okay start now', 'I approve this plan', 'go ahed with the plan'])('starts the plan when the whole message asks for it: %s', async content => {
+    const { chatService, decision } = await decisionFixture();
+    cliReply = route({ route: 'start_plan', evidence: content });
+    const result = await send(chatService, content, { projectId: 'project-1', buildDecision: decision });
     expect(startPlannedWork).toHaveBeenCalledTimes(1);
-    expect(result.agentMessage.content).toContain('started');
-    expect(sqlite.getChatMessages('thread-1')[0].content).toBe(content);
-    expect(turnInputs[0]).toMatchObject({ priorSession: null, skills: [], projectRoots: [], mcpServers: [], timeoutMs: 60000 });
-    expect(turnInputs[0].responseSchema.required).toContain('evidence');
+    expect(result.agentMessage.content).toContain('Plan v2 started');
     expect(approveAndPublish).not.toHaveBeenCalled();
   });
-  it.each(['Do not start', 'Should I approve?', '"start the plan"', 'start if the tests pass', 'start and delete the database'])('does not dispatch when interpretation withholds consent: %s', async content => {
+
+  it('starts nothing when the isolated check disagrees with the main turn', async () => {
     const { chatService, decision } = await decisionFixture();
-    cliReply = { content: JSON.stringify({ intent: 'clarify', target: 'none', evidence: '' }) };
-    const result = await send(chatService, content, { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('No build action');
+    consentAnswer = false;
+    cliReply = route({ route: 'start_plan', evidence: 'summarize the README' });
+    const result = await send(chatService, 'summarize the README', { projectId: 'project-1', buildDecision: decision });
+    expect(startPlannedWork).not.toHaveBeenCalled();
+    expect(result.agentMessage.content).toContain('Plan v2 is ready');
+    // The second look had no tools, repository, attachments or history.
+    const check = turnInputs.find(input => input.responseSchema?.properties?.consent);
+    expect(check).toMatchObject({ toolFree: true, mcpServers: [], projectRoots: [], skills: [], priorSession: null });
+    expect(JSON.parse(check.prompt)).toEqual({ message: 'summarize the README', action: expect.any(String), buildStatus: 'awaiting_plan_approval' });
+  });
+
+  it('never acts on an approving fragment lifted out of the message', async () => {
+    const { chatService, decision } = await decisionFixture();
+    cliReply = route({ route: 'start_plan', evidence: 'start' });
+    const result = await send(chatService, 'do not start', { projectId: 'project-1', buildDecision: decision });
+    expect(startPlannedWork).not.toHaveBeenCalled();
+    // It asks, specifically, instead of repeating a canned refusal.
+    expect(result.agentMessage.content).toContain('Plan v2 is ready');
+  });
+
+  it.each(['Do not start', 'Should I approve?', 'start if the tests pass', "don't start yet"])('answers instead of acting when the Orchestrator reads no request: %s', async content => {
+    const { chatService, decision } = await decisionFixture();
+    cliReply = { content: 'Understood. The plan stays as it is until you tell me to start it.' };
+    const result = await send(chatService, content, { projectId: 'project-1', buildDecision: decision });
+    expect(result.agentMessage.content).toContain('stays as it is');
     expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
   });
-  it('answers a question with action routing disabled while a review is pending', async () => {
-    const { chatService, decision } = await decisionFixture();
-    cliReplies = [JSON.stringify({ intent: 'none', target: 'none', evidence: '' }), 'The plan adds search to the header.'];
-    const result = await send(chatService, 'What will this plan change?', { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toBe('The plan adds search to the header.');
-    expect(systemPrompts[1]).toContain('answer only');
-    expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
+
+  it('acts once on a retried message, and a later retry returns the saved outcome', async () => {
+    const { chatService, sqlite, decision } = await decisionFixture();
+    cliReply = route({ route: 'start_plan', evidence: 'start the plan' });
+    const options = { projectId: 'project-1', buildDecision: decision, clientMessageId: 'approval-message' };
+    const [first, retry] = await Promise.all([send(chatService, 'start the plan', options), send(chatService, 'start the plan', options)]);
+    expect(retry.agentMessage.id).toBe(first.agentMessage.id);
+    expect(startPlannedWork).toHaveBeenCalledTimes(1);
+    const later = await send(chatService, 'start the plan', options);
+    expect(later.agentMessage.id).toBe(first.agentMessage.id);
+    expect(startPlannedWork).toHaveBeenCalledTimes(1);
+    expect(sqlite.getChatMessages('thread-1').filter((message: any) => message.content.includes('Plan v2 started'))).toHaveLength(1);
   });
-  it('rejects a model that quotes only an approving fragment', async () => {
-    const { chatService, decision } = await decisionFixture();
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'start' }) };
-    await send(chatService, 'do not start', { buildDecision: { ...decision, action: undefined } });
+
+  it('revises the plan in place for the same work organised differently', async () => {
+    const { chatService, snapshot } = await decisionFixture();
+    reviseBoardPlan.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, planVersion: 3 } });
+    cliReply = route({ route: 'revise_plan', instruction: 'Split the UI task into form and list.' });
+    const result = await send(chatService, 'split the ui task into the form and the list', { projectId: 'project-1', ...developer });
+    expect(reviseBoardPlan).toHaveBeenCalledWith(expect.objectContaining({ role: 'dev' }), 'run-1', 3, 'Split the UI task into form and list.');
+    expect(result.agentMessage.content).toContain('plan v3');
     expect(startPlannedWork).not.toHaveBeenCalled();
   });
-  it.each(['{broken', 'I have started it.', 'ALPHA_ROUTE {"route":"build","goal":"start"}'])('fails closed for a missing structured intent: %s', async content => {
-    const { chatService, decision } = await decisionFixture(); cliReply = { content };
-    const result = await send(chatService, 'yes, do it', { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('No build action'); expect(startPlannedWork).not.toHaveBeenCalled();
+
+  it('replaces the plan for extra work, keeping the old one restorable', async () => {
+    const { chatService } = await decisionFixture();
+    const goal = 'Build the expense app with localStorage, plus a local database and login credentials in the backend.';
+    cliReply = route({ route: 'replace_plan', goal });
+    const result = await send(chatService, 'I want you to create a backend task for this, a local database and a login credential', { projectId: 'project-1' });
+    const { SET_ASIDE_REASON } = await import('./chatActions.js');
+    expect(cancelRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', expectedRevision: 3, reason: SET_ASIDE_REASON }));
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
+    expect(startProjectBuildBatch.mock.calls[0][0].content).toContain('local database and login credentials');
+    expect(result.agentMessage.content).toContain('set aside plan v2');
   });
-  it('revalidates a revision changed during interpretation', async () => {
+
+  it('restores a set-aside plan exactly as it was', async () => {
+    const { chatService, sqlite, snapshot, plan } = await decisionFixture();
+    const { SET_ASIDE_REASON } = await import('./chatActions.js');
+    sqlite.saveChatMessage({ id: 'build-msg', threadId: 'thread-1', senderType: 'agent', senderName: 'Alpha', content: 'Plan ready',
+      messageType: 'build', orchestrationRunId: 'run-1', timestamp: new Date().toISOString() } as any);
+    snapshot.run.status = 'cancelled'; snapshot.run.stoppedReason = SET_ASIDE_REASON;
+    cliReply = route({ route: 'restore_plan' });
+    const result = await send(chatService, 'bring the previous plan back', { projectId: 'project-1' });
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(1);
+    expect(startProjectBuildBatch.mock.calls[0][0]).toMatchObject({ presetPlan: plan, repositories: ['acme/fe', 'acme/be'] });
+    expect(result.agentMessage.content).toContain('restored the plan you set aside');
+  });
+
+  it('publishes at final review only on the whole message, and reports a blocked result honestly', async () => {
     const { chatService, snapshot, decision } = await decisionFixture();
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'yes' }) };
-    const { runCliTurn } = await import('./cliRunner.js');
-    vi.mocked(runCliTurn).mockImplementationOnce(async () => { snapshot.run.revision = 4; return { ...cliReply, tools: [] } as any; });
-    const result = await send(chatService, 'yes', { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('changed'); expect(startPlannedWork).not.toHaveBeenCalled();
+    snapshot.run.status = 'awaiting_approval';
+    approveAndPublish.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'blocked' } });
+    const content = 'Please send the reviewed changes to GitHub and create the PR.';
+    cliReply = route({ route: 'publish', evidence: content });
+    const result = await send(chatService, content, { projectId: 'project-1', buildDecision: decision });
+    expect(approveAndPublish).toHaveBeenCalledTimes(1);
+    expect(result.agentMessage.content).toContain('blocked'); expect(result.agentMessage.content).not.toContain('in progress');
+    expect(startPlannedWork).not.toHaveBeenCalled();
   });
-  it('refuses ambiguous multiple pending decisions even for an explicit command', async () => {
-    const { chatService, snapshot, decision, sqlite } = await decisionFixture();
+
+  it('sends finished work back with the requested change', async () => {
+    const { chatService, snapshot } = await decisionFixture();
+    snapshot.run.status = 'awaiting_approval';
+    requestReviewChanges.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'executing' } });
+    const content = 'make the header sticky before you publish';
+    cliReply = route({ route: 'request_changes', evidence: content, instruction: 'Make the header sticky.' });
+    const result = await send(chatService, content, { projectId: 'project-1', ...developer });
+    expect(requestReviewChanges).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', expectedRunRevision: 3, feedback: 'Make the header sticky.' }));
+    expect(result.agentMessage.content).toContain('sent the work back');
+    expect(approveAndPublish).not.toHaveBeenCalled();
+  });
+
+  it('says what is possible when the build is not in the state the action needs', async () => {
+    const { chatService, snapshot } = await decisionFixture();
+    snapshot.run.status = 'awaiting_approval';
+    cliReply = route({ route: 'start_plan', evidence: 'start it' });
+    const result = await send(chatService, 'start it', { projectId: 'project-1' });
+    expect(result.agentMessage.content).toContain('no plan waiting');
+    expect(startPlannedWork).not.toHaveBeenCalled();
+  });
+
+  it('asks which build when more than one is waiting', async () => {
+    const { chatService, snapshot, decision } = await decisionFixture();
     const { SQLiteService } = await import('./sqliteService.js');
     vi.spyOn(SQLiteService.prototype, 'listChatPendingDecisions').mockReturnValue([snapshot, { ...snapshot, run: { ...snapshot.run, id: 'run-2' } }]);
-    const result = await send(chatService, 'start the plan', { buildDecision: decision });
+    cliReply = route({ route: 'start_plan', evidence: 'start the plan' });
+    const result = await send(chatService, 'start the plan', { projectId: 'project-1', buildDecision: decision });
     expect(result.agentMessage.content).toContain('More than one'); expect(startPlannedWork).not.toHaveBeenCalled();
   });
-  it('does not execute a contextual yes without a displayed revision', async () => {
-    const { chatService } = await decisionFixture();
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'yes' }) };
-    const result = await send(chatService, 'yes');
-    expect(result.agentMessage.content).toContain('not loaded'); expect(startPlannedWork).not.toHaveBeenCalled();
-  });
-  it('keeps publication consent separate and dispatches an explicit paraphrase', async () => {
-    const { chatService, snapshot, decision } = await decisionFixture(); snapshot.run.status = 'awaiting_approval';
-    const content = 'Please send the reviewed changes to GitHub and create the PR.';
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'publication', evidence: content }) };
-    const result = await send(chatService, content, { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('Publication completed'); expect(approveAndPublish).toHaveBeenCalledTimes(1);
-    expect(startPlannedWork).not.toHaveBeenCalled();
-  });
-  it('returns the durable semantic outcome on concurrent and later transport retries', async () => {
-    const { chatService, snapshot, decision } = await decisionFixture();
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'yes' }) };
-    const options = { buildDecision: { ...decision, action: undefined }, clientMessageId: 'semantic-approval' };
-    await Promise.all([send(chatService, 'yes', options), send(chatService, 'yes', options)]);
-    snapshot.run.status = 'executing';
-    await send(chatService, 'yes', { clientMessageId: 'semantic-approval' });
-    expect(startPlannedWork).toHaveBeenCalledTimes(1); expect(turnInputs).toHaveLength(1);
-  });
-  it('allows stopping an interpretation before dispatch', async () => {
+
+  it('refuses a stale or still-loading review with a reason, and starts nothing', async () => {
     const { chatService, decision } = await decisionFixture();
-    const { runCliTurn } = await import('./cliRunner.js');
-    vi.mocked(runCliTurn).mockImplementationOnce(async () => {
-      await chatService.stopTurn('thread-1', 'stop-consent');
-      return { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'yes' }), tools: [] } as any;
-    });
-    const result = await send(chatService, 'yes', { clientMessageId: 'stop-consent', buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('stopped'); expect(startPlannedWork).not.toHaveBeenCalled();
-  });
-  it('rejects semantic consent after permission revocation', async () => {
-    const { chatService, decision } = await decisionFixture();
-    const { workspaceRegistry } = await import('./workspaceRegistry.js');
-    const { runCliTurn } = await import('./cliRunner.js');
-    vi.mocked(runCliTurn).mockImplementationOnce(async () => {
-      vi.spyOn(workspaceRegistry, 'can').mockReturnValue(false);
-      return { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'yes' }), tools: [] } as any;
-    });
-    const result = await send(chatService, 'yes', { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('role'); expect(startPlannedWork).not.toHaveBeenCalled();
-  });
-  it('never turns a model plan classification into publication', async () => {
-    const { chatService, snapshot, decision } = await decisionFixture(); snapshot.run.status = 'awaiting_approval';
-    cliReply = { content: JSON.stringify({ intent: 'consent', target: 'plan', evidence: 'yes' }) };
-    await send(chatService, 'yes', { buildDecision: { ...decision, action: undefined } });
-    expect(approveAndPublish).not.toHaveBeenCalled(); expect(startPlannedWork).not.toHaveBeenCalled();
-  });
-  it('fails closed on runtime outage instead of sending the message to ordinary action routing', async () => {
-    const { chatService, decision } = await decisionFixture();
-    cliReply = { content: '', failureKind: 'spawn' };
-    const result = await send(chatService, 'yes', { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('Nothing was authorized'); expect(turnInputs).toHaveLength(1);
+    cliReply = route({ route: 'start_plan', evidence: 'start the plan' });
+    const stale = await send(chatService, 'start the plan', { projectId: 'project-1', buildDecision: { ...decision, expectedRevision: 1 } });
+    expect(stale.agentMessage.content).toContain('changed');
+    const unloaded = await send(chatService, 'start the plan', { projectId: 'project-1', buildDecision: { ...decision, evidenceReady: false } });
+    expect(unloaded.agentMessage.content).toContain('still loading');
     expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
   });
-  it('reports a blocked publication result without claiming it is in progress', async () => {
-    const { chatService, snapshot, decision } = await decisionFixture(); snapshot.run.status = 'awaiting_approval';
-    approveAndPublish.mockResolvedValue({ ...snapshot, run: { ...snapshot.run, status: 'blocked' } });
-    const result = await send(chatService, 'publish this build', { buildDecision: { ...decision, action: undefined } });
-    expect(result.agentMessage.content).toContain('blocked'); expect(result.agentMessage.content).not.toContain('in progress');
+
+  it('rejects an action after permission is revoked', async () => {
+    const { chatService, decision } = await decisionFixture();
+    const { workspaceRegistry } = await import('./workspaceRegistry.js');
+    vi.spyOn(workspaceRegistry, 'can').mockReturnValue(false);
+    cliReply = route({ route: 'start_plan', evidence: 'yes' });
+    const result = await send(chatService, 'yes', { projectId: 'project-1', buildDecision: decision });
+    expect(result.agentMessage.content).toContain('role'); expect(startPlannedWork).not.toHaveBeenCalled();
+  });
+
+  it('takes no action when the runtime is down, and says so', async () => {
+    const { chatService, decision } = await decisionFixture();
+    cliReply = { content: '', failureKind: 'spawn' };
+    const result = await send(chatService, 'yes', { projectId: 'project-1', buildDecision: decision });
+    expect(result.agentMessage.content).toMatch(/could not reach/);
+    expect(startPlannedWork).not.toHaveBeenCalled(); expect(startProjectBuildBatch).not.toHaveBeenCalled();
+  });
+
+  it('merges into dev only on the whole message', async () => {
+    const { chatService, snapshot } = await decisionFixture();
+    snapshot.run.status = 'completed'; snapshot.run.publications = [{ pullRequestUrl: 'https://github.com/acme/fe/pull/1' }];
+    const merge = vi.fn(async () => 'Merged acme/fe pull request #1 into dev.');
+    vi.doMock('./orchestrationChatMerge.js', () => ({ mergeFromChat: merge, defaultChatMergeDeps: async () => ({}) }));
+    cliReply = route({ route: 'merge_dev', evidence: 'merge' });
+    const refused = await send(chatService, 'merge it please', { projectId: 'project-1' });
+    expect(merge).not.toHaveBeenCalled(); expect(refused.agentMessage.content).toContain('Tell me to merge');
+    cliReply = route({ route: 'merge_dev', evidence: 'merge it please' });
+    const merged = await send(chatService, 'merge it please', { projectId: 'project-1' });
+    expect(merge).toHaveBeenCalledTimes(1); expect(merged.agentMessage.content).toContain('Merged acme/fe');
   });
 });
 

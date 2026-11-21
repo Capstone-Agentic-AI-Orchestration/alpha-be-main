@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { isStartPreviewRequest } from './chatRouter.js';
 import { publishedNotice } from './orchestrationChatNotice.js';
 import { isUnchangedPublication } from './orchestrationStateMachine.js';
 
@@ -30,20 +29,5 @@ describe('a repository recorded as unchanged', () => {
     expect(isUnchangedPublication({ unchanged: true, resultCommit: 'abc', pullRequestUrl: '' }, { baseCommit: 'old', resultCommit: 'abc' })).toBe(false);
     expect(isUnchangedPublication({ unchanged: true, resultCommit: 'abc', pullRequestUrl: 'https://github.com/a/b/pull/1' }, validated)).toBe(false);
     expect(isUnchangedPublication({ resultCommit: 'abc', pullRequestUrl: '' }, validated)).toBe(false);
-  });
-});
-
-/** While a build waits on a decision, a plain "run it locally" is not read as that decision. */
-describe('a request to run the build locally', () => {
-  it('is recognised in the ways people ask', () => {
-    for (const text of ['can you run this locally again', 'I mean can you run the system locally', 'start the preview', 'please open the preview again', 'run it on my machine']) {
-      expect(isStartPreviewRequest(text)).toBe(true);
-    }
-  });
-
-  it('never covers a decision, a stop, or anything destructive', () => {
-    for (const text of ['push it and run it locally', 'stop the preview', "don't run it locally", 'run the migration and delete the database locally', 'approve and open the preview', 'what is the highest priority task']) {
-      expect(isStartPreviewRequest(text)).toBe(false);
-    }
   });
 });

@@ -4,7 +4,7 @@ vi.mock('./sqliteService.js', () => ({ sqliteService: { listLocalPreviews: () =>
 vi.mock('../store/stores.js', () => ({ chatStore: () => ({ listThreads: async () => mocks.threads }), projectStore: () => ({ get: async () => mocks.project }) }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => mocks.can, canAccessProject: () => true } }));
 import { localPreviewService, LocalPreviewService, previewAdapter, previewEnvironment, redactPreviewLog } from './localPreviewService.js';
-import { parseAlphaRoute, orchestratorRoutingPrompt, isStopPreviewRequest } from './chatRouter.js';
+import { parseAlphaRoute, orchestratorRoutingPrompt } from './chatRouter.js';
 const context = { workspaceId: 'workspace', userId: 'alice', role: 'dev' } as any;
 
 describe('local preview admission and isolation', () => {
@@ -39,9 +39,7 @@ describe('local preview admission and isolation', () => {
     expect(parseAlphaRoute('ALPHA_ROUTE {"route":"preview","repositories":["acme/site"]}').decision?.route).toBe('preview');
     expect(orchestratorRoutingPrompt({ canBuild: true, repositories: ['acme/site'] })).toContain('"route":"preview"');
   });
-  it('recognizes explicit stop commands without mistaking build stops or quoted questions for controls', () => {
-    for (const command of ['now stop the local run', 'please stop the preview', 'can you stop npm run dev?']) expect(isStopPreviewRequest(command)).toBe(true);
-    for (const command of ['stop', 'stop the build', 'why did the preview stop?', 'do not stop the preview', 'stop the preview and delete the project']) expect(isStopPreviewRequest(command)).toBe(false);
+  it('reads a stop decision the Orchestrator made, with no keyword shortcut', () => {
     expect(parseAlphaRoute('ALPHA_ROUTE {"route":"stop_preview"}').decision?.route).toBe('stop_preview');
   });
   it('omits capabilities and unrelated repository evidence and rechecks access', async () => {

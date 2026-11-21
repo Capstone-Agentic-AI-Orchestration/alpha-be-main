@@ -26,7 +26,7 @@ const SITES: Record<string, { calls: number; memory: boolean; why: string }> = {
   'services/boardPlanRevision.ts': { calls: 1, memory: true, why: 'Plan revision, memory read at the planning checkpoints.' },
   'services/personaService.ts': { calls: 3, memory: true, why: 'Defines resolveAgent, which places repositoryMemory first.' },
   'services/cliRunner.ts': { calls: 1, memory: false, why: 'Defines runCliTurn; callers supply the prompt.' },
-  'services/chatBuildIntent.ts': { calls: 2, memory: false, why: 'Classifies whether a message asks for a build: a fixed utility prompt, and a role lookup.' },
+  'services/chatConsentCheck.ts': { calls: 2, memory: false, why: 'Isolated consent check before code or GitHub actions: deliberately sees only the message, the action and the build state, never repository memory.' },
   'services/agentBuilderService.ts': { calls: 1, memory: false, why: 'Drafts an agent definition: a fixed utility prompt with no project.' },
   'services/githubRepoArchitecture.ts': { calls: 1, memory: false, why: 'Summarises sampled source into a diagram: a fixed utility prompt over the code itself.' },
   'services/squadRunner.ts': { calls: 2, memory: false, why: 'Role and settings lookups; the squad member runs go through runnerService.' },
