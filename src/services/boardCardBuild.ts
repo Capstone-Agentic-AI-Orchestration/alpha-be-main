@@ -35,12 +35,22 @@ const asksForAllCards = (request: string) => [...request.matchAll(ALL_CARDS_STAR
 
 export function selectBoardCards(request: string, projectIssues: readonly Issue[]): BoardCardSelection {
   const byKey = new Map(projectIssues.map(issue => [issue.identifier.toUpperCase(), issue]));
-  const named = [...new Set([...request.matchAll(CARD_KEY)].map(match => match[1].toUpperCase()))]
-    .map(key => byKey.get(key))
-    .filter((issue): issue is Issue => Boolean(issue) && !isBuildRecord(issue!));
+  const keysIn = (text: string) => [...new Set([...text.matchAll(CARD_KEY)].map(match => match[1].toUpperCase()))]
+    .map(key => byKey.get(key)).filter((issue): issue is Issue => Boolean(issue));
+  const mentioned = keysIn(request);
+  // Alpha's own build cards ("Build: …") are records of a request, not tasks. Naming one
+  // means the work that request covered: the tasks it lists, or every open task when it asked for all.
+  let wantsAll = asksForAllCards(request);
+  const expanded: Issue[] = [];
+  for (const record of mentioned.filter(isBuildRecord)) {
+    const text = record.description ?? record.title;
+    if (asksForAllCards(text)) wantsAll = true;
+    expanded.push(...keysIn(text).filter(issue => !isBuildRecord(issue)));
+  }
+  const named = [...mentioned.filter(issue => !isBuildRecord(issue)), ...expanded];
   const archived = named.filter(issue => issue.archivedAt).map(issue => issue.identifier);
   const chosen = new Map(named.filter(issue => !issue.archivedAt).map(issue => [issue.id, issue]));
-  if (asksForAllCards(request)) {
+  if (wantsAll) {
     for (const issue of projectIssues) {
       if (!issue.archivedAt && !isBuildRecord(issue) && OPEN_STATUSES.has(issue.status)) chosen.set(issue.id, issue);
     }
