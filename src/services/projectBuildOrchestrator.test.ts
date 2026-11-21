@@ -361,8 +361,10 @@ describe('project builds triggered from chat', () => {
     expect(startOrchestration.mock.calls[0][0].repositoryWorkspaces.map((item: any) => item.repository)).toEqual(repositoryList);
     expect(startOrchestration.mock.calls[0][0].plan.tasks.map((task: any) => task.repository)).toEqual(expect.arrayContaining(repositoryList));
     expect(startOrchestration.mock.calls[0][0].plan.tasks.find((task: any) => task.id === 'backend-task')).toMatchObject({ repository: 'acme/shop-be', ownerAgentId: 'agent-3' });
-    // Both were named, so each must get work: neither is optional for the planner.
-    expect(plannerCreatePlan.mock.calls[0][0].repositories.map((item: any) => item.optional ?? false)).toEqual([false, false]);
+    // Selecting codebases does not force work in each: the agents decide, and a
+    // codebase they leave alone is reported as a decision. The start check agrees.
+    expect(plannerCreatePlan.mock.calls[0][0].repositories.map((item: any) => item.optional ?? false)).toEqual([true, true]);
+    expect(startOrchestration.mock.calls[0][0].optionalRepositories).toEqual(repositoryList);
     expect(startSquadRun).not.toHaveBeenCalled();
   });
 

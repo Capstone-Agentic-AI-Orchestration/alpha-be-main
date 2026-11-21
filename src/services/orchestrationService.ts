@@ -307,6 +307,8 @@ export interface StartOrchestrationInput {
   eligibleAgents: readonly Pick<Agent, 'id' | 'role'>[];
   plan: unknown;
   planSource?: 'template' | 'model' | 'manual';
+  /** Selected repositories the planner was allowed to leave without tasks. */
+  optionalRepositories?: readonly string[];
   startingCommit?: string;
   now?: string;
 }
@@ -437,7 +439,8 @@ export class OrchestrationService {
       const issues = validateOrchestrationPlan(plan, input.eligibleAgents, {
         maxTaskCount: MAX_INITIAL_PLAN_TASKS,
         initialPlan: true,
-        repositories: input.repositoryWorkspaces?.map(item => item.repository)
+        repositories: input.repositoryWorkspaces?.map(item => item.repository),
+        optionalRepositories: input.optionalRepositories
       });
       if (issues.length) throw new OrchestrationPlanError(issues);
 

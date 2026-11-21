@@ -119,6 +119,14 @@ export class ChatRouteError extends Error {
   }
 }
 
+/** What the Orchestrator decided on its own, and how to change it, for the plan-ready reply. */
+export function describePlanDecisions(decisions: ProjectBuildStartResult['decisions']): string | undefined {
+  if (!decisions?.length) return undefined;
+  return ['**What the Orchestrator decided**',
+    ...decisions.map(item => '- **' + item.about + ':** ' + item.decision + (item.toChange ? ' _' + item.toChange + '_' : '')),
+    'Tell Alpha in your own words to change any of these before you start the plan.'].join('\n');
+}
+
 export const MAX_CHAT_SKILLS = 5;
 const MAX_CHAT_SKILL_CONTEXT_CHARS = 18_000;
 const MAX_CHAT_SKILL_FILE_CHARS = 8_000;
@@ -1119,6 +1127,7 @@ export class ChatService extends EventEmitter {
               build.status === 'plan_ready'
                 ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Build review tab, then tell Alpha in the main chat whether to start the plan. You can use your own words.`
                 : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
+              describePlanDecisions(build.decisions),
               build.reason,
               build.repository ? `**Repository:** ${build.repository}` : undefined,
               build.branchName ? `**Working branch:** ${build.branchName}` : undefined,

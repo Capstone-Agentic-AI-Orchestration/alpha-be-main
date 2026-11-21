@@ -50,6 +50,8 @@ export interface ProjectBuildStartResult {
   reason?: string;
   /** The planner needs the person to settle this before it can plan; nothing was started. */
   decision?: PlanningDecision;
+  /** Calls the Orchestrator made instead of stopping, shown with the plan. */
+  decisions?: Array<{ about: string; decision: string; toChange?: string }>;
 }
 
 interface StartProjectBuildInput {
@@ -365,6 +367,7 @@ async function startOrchestratedProjectBuild(input: {
 
   const issueId = expectedIssueId;
   const idempotencyLabel = `alpha:chat-build-${requestKey}`;
+  let createdIssue = false;
   let issue = linkedIssueId
     ? await issueStore().get(workspaceId, linkedIssueId)
     : (await issueStore().list(workspaceId)).find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));
@@ -584,8 +587,8 @@ async function startOrchestratedProjectBuild(input: {
         repository: item.repository,
         repositoryContext: item.context.context,
         availableScripts: item.context.scripts,
-        // A build from board cards lets the cards decide which codebases need work, unless the request names one.
-        ...(namedRepository(repositories, item.repository) && (!cardKeys.length || mentionsRepository(cleanGoal, item.repository)) ? {} : { optional: true })
+        // The agents decide which codebases need work; one the request names in words must get some.
+        ...(namedRepository(repositories, item.repository) && mentionsRepository(cleanGoal, item.repository) ? {} : { optional: true })
       })),
       eligibleAgents: availableAgents,
       planner: plannerIdentity,
@@ -626,6 +629,7 @@ async function startOrchestratedProjectBuild(input: {
   }
 
   try {
+    createdIssue = !issue;
     if (!issue) {
       issue = await issueStore().create(workspaceId, {
       id: issueId,
@@ -687,7 +691,10 @@ async function startOrchestratedProjectBuild(input: {
       startingCommit: reservation.baseCommit,
       eligibleAgents: availableAgents,
       plan: planned.plan,
-      planSource: 'model'
+      planSource: 'model',
+      optionalRepositories: planningContexts
+        .filter(item => !(namedRepository(repositories, item.repository) && mentionsRepository(cleanGoal, item.repository)))
+        .map(item => item.repository)
     });
     for (const extraReservation of reservations.slice(1)) {
       runWithWorkspace(workspaceId, () => sqliteService.releaseOrchestrationPlanningReservation(
@@ -695,11 +702,14 @@ async function startOrchestratedProjectBuild(input: {
       ));
     }
     const started = orchestrationStartResult(snapshot, project, repository);
-    return cardNote ? { ...started, reason: [cardNote, started.reason].filter(Boolean).join(' ') } : started;
+    const withDecisions = planned.plan.decisions?.length ? { ...started, decisions: planned.plan.decisions } : started;
+    return cardNote ? { ...withDecisions, reason: [cardNote, started.reason].filter(Boolean).join(' ') } : withDecisions;
   } catch (error) {
     const persisted = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));
     let recoveryNote = '';
     if (!persisted) {
+      // No build started, so the "Build: …" card made for it would only clutter the board.
+      if (createdIssue && issue) await issueStore().remove(workspaceId, issue.id).catch(() => false);
       const cleanup = await reconcilePlanningReservations({ workspaceId, projectId: project.id, repositories, reservations });
       recoveryNote = cleanup.includes('workspace_preserved')
         ? ' Alpha preserved the private planning workspace because it changed after reservation; the repository remains paused for recovery.'

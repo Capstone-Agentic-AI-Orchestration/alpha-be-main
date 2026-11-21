@@ -10,6 +10,8 @@ export function orchestrationPlanDocument(plan: OrchestrationPlan, version: numb
     '', 'Review this document before starting planned work. Publication requires separate approval.', '', '## Requirements', ''];
   for (const requirement of plan.requirements) lines.push(`- **${prose(requirement.id)}**: ${prose(requirement.description)}`);
   if (plan.exclusions.length) lines.push('', '## Exclusions', '', ...plan.exclusions.map(value => `- ${prose(value)}`));
+  if (plan.decisions?.length) lines.push('', '## What the Orchestrator decided', '',
+    ...plan.decisions.map(item => '- **' + prose(item.about) + '**: ' + prose(item.decision) + (item.toChange ? ' To change this: ' + prose(item.toChange) : '')));
   if (plan.projectContext) lines.push('', '## Project guidance', '', prose(plan.projectContext));
   if (plan.milestones?.length) {
     lines.push('', '## Milestone roadmap', '');
