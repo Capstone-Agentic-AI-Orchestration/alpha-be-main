@@ -742,6 +742,8 @@ export interface ChatDecision {
   issueId?: string;
   /** Answers already given for this request; the planner treats them as settled. */
   settled: Array<{ question: string; answer: string }>;
+  /** Board cards the request is for, as Alpha's router chose them. */
+  cards?: string[];
 }
 
 export interface ChatBuildBlocker {
@@ -762,6 +764,8 @@ export interface ChatRouteProposal {
   status: 'open' | 'accepted' | 'dismissed';
   /** The board task the message was handed, built in place when the offer is accepted. */
   issueId?: string;
+  /** Board cards the request is for: ['all'] or card keys. */
+  cards?: string[];
 }
 
 export type OrchestrationRecoveryCategory =

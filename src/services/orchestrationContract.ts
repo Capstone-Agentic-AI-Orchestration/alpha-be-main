@@ -67,6 +67,15 @@ export const orchestrationPlanSchema = z.object({
   chatSkillIds: z.array(z.string().trim().min(1).max(160)).max(5).optional(),
   chatSkillGuidance: z.string().max(20_000).optional(),
   exclusions: z.array(shortText).max(20).default([]),
+  /**
+   * Calls the Orchestrator made instead of stopping to ask: what it decided, what the
+   * agents will do, and how the person can change it. Shown with the plan.
+   */
+  decisions: z.array(z.object({
+    about: shortText,
+    decision: detailText,
+    toChange: detailText.optional()
+  }).strict()).max(12).optional(),
   requirements: z.array(z.object({
     id: identifier,
     description: detailText

@@ -16,6 +16,7 @@ import { z } from 'zod';
 const structuredDecisionSchema = z.object({
   route: z.enum(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview', 'board']),
   goal: z.string().max(4000), repositories: z.array(z.string().min(1).max(300)).max(30),
+  cards: z.array(z.string().min(1).max(40)).max(20).optional(),
   assignments: z.array(z.object({ agentId: z.string().min(1).max(200), kind: orchestrationTaskKindSchema,
     instruction: z.string().min(1).max(4000), reason: z.string().min(1).max(500) }).strict()).max(4)
 }).strict();
@@ -26,10 +27,11 @@ export const alphaChatResponseSchema = {
   properties: {
     contract: { type: 'string', enum: ['alpha_chat_v1'] }, message: { type: 'string' },
     decision: { anyOf: [{ type: 'null' }, {
-      type: 'object', additionalProperties: false, required: ['route', 'goal', 'repositories', 'assignments'],
+      type: 'object', additionalProperties: false, required: ['route', 'goal', 'repositories', 'cards', 'assignments'],
       properties: {
         route: { type: 'string', enum: ['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview', 'board'] },
         goal: { type: 'string' }, repositories: { type: 'array', items: { type: 'string' } },
+        cards: { type: 'array', items: { type: 'string' } },
         assignments: { type: 'array', items: { type: 'object', additionalProperties: false,
           required: ['agentId', 'kind', 'instruction', 'reason'], properties: {
             agentId: { type: 'string' }, kind: { type: 'string', enum: orchestrationTaskKindSchema.options },
@@ -63,6 +65,12 @@ export interface AlphaRouteDecision {
   goal: string;
   /** Codebases Alpha believes the change touches. Validated by the server. */
   repositories: string[];
+  /**
+   * Board cards the build is for: ['all'] for every open task, card keys for
+   * specific ones, empty when the request is not about board cards. Checked
+   * against the board by the server.
+   */
+  cards?: string[];
   assignments?: SpecialistHandoff[];
 }
 
@@ -150,7 +158,18 @@ function readDecision(payload: string): AlphaRouteDecision | undefined {
     if (new Set(assignments.map(item => item.agentId)).size !== assignments.length) return undefined;
     return { route: 'delegate', goal, repositories, assignments };
   }
-  return { route: record.route as AlphaRoute, goal, repositories };
+  const cards = readCards(record.cards);
+  return { route: record.route as AlphaRoute, goal, repositories, ...(cards.length ? { cards } : {}) };
+}
+
+const CARD_KEY_SHAPE = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+
+/** ['all'], or up to 20 card keys; anything else is dropped. */
+export function readCards(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const items = value.filter((item): item is string => typeof item === 'string').map(item => item.trim().toUpperCase());
+  if (items.includes('ALL')) return ['all'];
+  return [...new Set(items.filter(item => CARD_KEY_SHAPE.test(item)))].slice(0, 20);
 }
 
 /** Hidden overrides that replace the old mode buttons for people who want certainty. */
@@ -247,7 +266,7 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     '- "Use/deploy my agents for that" means hand off the concrete work discussed in the conversation; it does not mean deploy software. Restate the work in the instruction. Use route 5 for analysis and route 2 for requested code changes.',
     '- Use the conversation. After you proposed a build, "yes", "go ahead", or "do it" means route 2.',
     '- Write the goal so it stands on its own. The planner and the specialists see only the repository and the goal; they cannot read this conversation, earlier builds, saved plans, or failure details. Never point at those. When the user asks to continue, retry, or redo earlier work, restate that work in full as concrete product changes.',
-    '- Board cards are the exception: when the user asks to build cards on this project\'s board, name each card\'s key (such as MON-104) in the goal, or write "do all remaining tasks" when they want every open card (including "start the tasks", "do them phase by phase"). Alpha looks those cards up and gives the planner their descriptions and checklists. Cards titled "Build: …" are Alpha\'s own build records, not tasks: never name them; write "do all remaining tasks" instead.',
+    '- Board cards: set decision.cards to say which cards on this project\'s board the build is for. Use ["all"] when the user wants every open task built, however they say it ("do all the tasks", "build the backlog", "start them phase by phase", even with typos). Use the card keys (such as ["MON-103","MON-104"]) when they mean specific cards, including cards they describe by title. Use [] when the request is not about board cards. Alpha looks the cards up and gives the planner their descriptions and checklists, so you may also name the keys in the goal (such as MON-104). Cards titled "Build: …" are Alpha\'s own build records, not tasks: never list them; use ["all"] or the real task keys instead.',
     '- Return exactly one structured response, never a fenced code block or multiple decisions.',
     '- When unsure between a question and a build, prefer route 3 over starting a build.',
     ...(!context.canBuild ? ['This user\'s workspace role cannot start builds. Never write a build or confirm_build decision. Read-only delegation to eligible specialists is permitted; explain the access limit for code changes.'] : []),
@@ -259,7 +278,7 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     '## Structured chat response',
     'The routing examples above describe decisions. Return the actual response as one JSON object matching the supplied schema, never a marker line or fenced block.',
     'Use {"contract":"alpha_chat_v1","message":"<answer or clarifying question>","decision":null} for an answer.',
-    'For an action use the same envelope with decision containing route, goal, repositories, and assignments (empty arrays when unused). Do not write ALPHA_ROUTE in the response.',
+    'For an action use the same envelope with decision containing route, goal, repositories, cards, and assignments (empty arrays when unused). Do not write ALPHA_ROUTE in the response.',
     'The message must not claim any action was queued, started, finished or published. Only the server dispatch receipt can confirm that. For build/delegate/preview/stop_preview leave message empty; for confirm_build/need_project put the question in message.'
   ].join('\n');
 }

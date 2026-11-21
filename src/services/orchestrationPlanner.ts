@@ -6,6 +6,7 @@ import { agentRoleContract, roleCanOwnTask, roleCanPlan } from './agentRoleContr
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { runCliTurn } from './cliRunner.js';
 import { correctPlanSafely } from './orchestrationPlanCorrections.js';
+import { splitOversizedTasks } from './orchestrationPlanSize.js';
 import { logInfo } from '../utils/logger.js';
 import type { ProjectRoot } from './projectFiles.js';
 import type { AgentRole } from '../models/index.js';
@@ -15,6 +16,7 @@ import {
   orchestrationTaskKindSchema,
   MAX_INITIAL_PLAN_TASKS,
   MAX_PROJECT_CONTEXT_CHARS,
+  MAX_TASK_REQUIREMENTS,
   validateOrchestrationPlan,
   type OrchestrationPlan,
   type OrchestrationTaskKind
@@ -220,7 +222,27 @@ function withRejectedPlans(error: OrchestrationPlanningError, proposed: unknown,
 function correctedPlan<P extends Parameters<typeof correctPlanSafely>[0]>(plan: P, input: OrchestrationPlanningInput): P {
   const { plan: corrected, corrections } = correctPlanSafely(plan, input.eligibleAgents);
   if (corrections.length) logInfo(`Plan corrected before its checks: ${corrections.join(' ')}`);
-  return corrected;
+  return noteUntouchedRepositories(corrected, input);
+}
+
+/**
+ * A selected repository the plan leaves alone is a decision, not an error: say so
+ * with the plan, so the person sees why and can ask for work there.
+ */
+function noteUntouchedRepositories<P extends OrchestrationPlan>(plan: P, input: OrchestrationPlanningInput): P {
+  const untouched = (input.repositories ?? []).map(item => item.repository).filter(repository => {
+    const name = repository.toLowerCase();
+    return !plan.tasks.some(task => task.repository?.toLowerCase() === name) &&
+      !(plan.milestones ?? []).some(milestone => milestone.repositories.some(repo => repo.toLowerCase() === name));
+  });
+  const decisions = [...(plan.decisions ?? [])];
+  for (const repository of untouched) {
+    const short = repository.split('/').pop() ?? repository;
+    if (decisions.some(item => `${item.about} ${item.decision}`.toLowerCase().includes(short.toLowerCase()))) continue;
+    decisions.push({ about: short, decision: 'No changes planned here: the requested work does not need this repository.',
+      toChange: `Say what ${short} should do and Alpha will add tasks for it.` });
+  }
+  return decisions.length === (plan.decisions ?? []).length ? plan : { ...plan, decisions: decisions.slice(0, 12) };
 }
 
 const phaseKinds: Record<PlannerBuildStep['phase'], ReadonlySet<OrchestrationTaskKind>> = {
@@ -254,7 +276,7 @@ function plannerSystemPrompt(agent: PlannerAgentIdentity, repositoryMemory?: str
     'Assign each task to one eligible agent whose role fits and name the selected repository it belongs to. Put frontend work in the frontend repository and server/data work in the backend repository. Do not assign work by roster order, include unused agents, or combine distinct configured project steps merely because they share an owner.',
     'A repository marked optional was selected only because it belongs to the project. Plan tasks there only when the request needs changes in it; when it needs none, leave it out entirely and never invent planning, review or validation work just to give it a task. Every repository not marked optional must get at least one task.',
     'Each eligible agent comes with its name and description. Choose owners by role fit first, then description. When an official Alpha agent (official: true) and another agent can both own a task, choose the official one unless a configured build step names the other.',
-    'Use the supplied roleContracts as capability limits. The Orchestrator is the coordinator, not a requirements worker. Research supplies facts, Manager clarifies requirements, and Architecture defines technical contracts. Assign Manager at most once in the current plan, only for ambiguity it can settle from material written into its task or for an explicit requirements step; do not duplicate clear requirements. All affected implementation must depend on that brief. Specialists, Manager included, cannot ask the person or read the chat or the board, so never give one a decision only the person can make; return needsDecision instead. Unresolved product decisions are never permission to invent scope. Analysis outputs belong in the structured report, not repository edits.',
+    'Use the supplied roleContracts as capability limits. The Orchestrator is the coordinator, not a requirements worker. Research supplies facts, Manager clarifies requirements, and Architecture defines technical contracts. Assign Manager at most once in the current plan, only for ambiguity it can settle from material written into its task or for an explicit requirements step; do not duplicate clear requirements. All affected implementation must depend on that brief. Specialists, Manager included, cannot ask the person or read the chat or the board, so never give one a decision only the person can make; make the call yourself and record it in decisions. Unresolved product decisions are never permission to invent scope. Analysis outputs belong in the structured report, not repository edits.',
     'Security & Code Quality leads independent security/dependency audits; specialists may self-check their own work. You decide the audit scope and fix assignments. For dependency vulnerability remediation with missing audit evidence, assign one Security kind:audit baseline task per affected repository before code changes. Give it dependencyAudit:{scanner:"npm",purpose:"baseline",level:"low"} and no requiredChecks. For a direct plan include a required Security audit with purpose:"verification" after the implementation/review in each affected repository; functional validation follows that verification. Implementation must depend on its baseline audit, consume the findings, and create/update package-lock.json for reproducible final verification. A baseline-only first adaptive milestone is allowed; later milestones consume its accepted evidence and add remediation and final Security verification. Never ask a backend-only task to audit both repositories. This operation is a built-in capability, not an availableScripts entry. Do not invent shell access or support for other scanners. A specifically named unsupported CI scanner requires its actual report or a setup clarification.',
     'When required code work and an eligible independent reviewer are both available, include required read-only review per affected repository, owned by an agent who owns none of that code work. Each review depends on all required code tasks in its own repository; required functional validation in that repository follows the review. For dependency remediation combine the independent code review and final scan in ONE kind:"review" task with dependencyAudit:{scanner:"npm",purpose:"verification",level:"low"}; that task must return reviewFindings as well as auditEvidenceIds. The complete per-repository chain is kind:audit/purpose:baseline -> kind:backend or frontend (fixes and lockfile) -> kind:review/purpose:verification -> kind:validation. Do not use a standalone kind:audit task instead of the independent review after fixes. If no independent reviewer is available, leave semantic review to the existing human approval step.',
     'Use explicit dependencies and relative path scopes. Keep the plan within the stated goal and exclusions. Use only verification scripts listed in availableScripts. Code tasks need at least one configured check.',
@@ -315,8 +337,10 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
       ? 'settledDecisions are answers the person already gave for this request. They are final and take priority over projectContext: plan with them and never ask about them again, even in other words.'
       : '',
     (input.settledDecisions?.length ?? 0) >= MAX_PLANNING_QUESTIONS
-      ? 'The person has answered the maximum number of questions for this request. Do not return needsDecision. Where something is still open, choose the most reasonable option and state it in the affected task\'s description.'
-      : 'If the request leaves a product decision only the person can make (for example, it conflicts with projectContext and nothing supplied settles which is current, or it depends on details that were not supplied to you), do not plan. Return exactly {"needsDecision":{"question":"<one plain question for the person>","options":[{"label":"<short answer, under 60 characters>","description":"<optional: what it means, under 120 characters>"}]}} with two to four options instead. Do not ask about anything approvedSpec, the task checklists, the repository files, or a reasonable default already settles; for example, a checklist that says localStorage settles where data is stored.',
+      ? 'The person has answered the maximum number of questions for this request. Do not return needsDecision. Where something is still open, choose the most reasonable option and record it in decisions.'
+      : 'Do not stop to ask. When something is open (which repositories need work, where data is stored, how far a feature goes, a conflict between the request and projectContext), choose the most reasonable option from approvedSpec, the task checklists, the repository files, and the request, plan it, and record it in decisions: about (the topic, or a repository name), decision (what you chose and what the agents will do, in plain words), toChange (what the person can say to choose differently). The person reviews the plan before any agent starts, so a recorded decision is cheap to change. Only when every reasonable choice would likely waste the build, return exactly {"needsDecision":{"question":"<one plain question>","options":[{"label":"<short answer>","description":"<optional>"}]}} instead of a plan.',
+    'Repositories marked optional need a task only when the work calls for it. For each selected repository you give no task, add a decision saying why it needs no change and what would add work there; about is the repository name, decision says in one sentence why the requested work does not touch it, and toChange says what the person could ask for to add work there.',
+    `A task may list at most ${MAX_TASK_REQUIREMENTS} requirementIds. When review or validation must cover more, give it one task per group of tasks it checks.`,
     'Return the plan JSON now.',
     JSON.stringify(context, null, 2),
     'Plan schema shape:',
@@ -340,6 +364,7 @@ function planSchemaShape() {
     schemaVersion: 1,
     goal: 'string',
     exclusions: ['string'],
+    decisions: [{ about: 'topic or repository', decision: 'what you chose and what the agents will do', toChange: 'what the person can say to choose differently' }],
     requirements: [{ id: 'REQ-1', description: 'string' }],
     tasks: [{
       id: 'task-id', buildStepId: 'configured-step-id (omit for added specialist work)', title: 'string',
@@ -411,12 +436,14 @@ function parseCandidatePlan(text: string): { plan?: OrchestrationPlan; decision?
   if (asked && typeof asked.question === 'string' && asked.question.trim()) {
     return { decision: { question: asked.question.trim().slice(0, 600), options: decisionOptions(asked.options) } };
   }
-  const parsed = orchestrationPlanSchema.safeParse(candidate);
+  const split = splitOversizedTasks(candidate);
+  const parsed = orchestrationPlanSchema.safeParse(split.candidate);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return { error: `${issue?.path.join('.') || 'unknown field'} ${issue?.message ?? 'invalid value'}.` };
   }
-  return { plan: parsed.data };
+  if (!split.decisions.length) return { plan: parsed.data };
+  return { plan: { ...parsed.data, decisions: [...(parsed.data.decisions ?? []), ...split.decisions].slice(0, 12) } };
 }
 
 function buildStepIssues(plan: OrchestrationPlan, steps: readonly PlannerBuildStep[]): string[] {

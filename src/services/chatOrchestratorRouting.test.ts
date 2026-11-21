@@ -72,6 +72,19 @@ const send = (chatService: any, content: string, over: Record<string, unknown> =
   ...over
 });
 
+describe('board cards from the routing decision', () => {
+  it('passes the router\'s card choice to the build, and keeps it on a proposal', async () => {
+    const { chatService } = await load();
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Build the remaining tasks","repositories":[],"cards":["all"]}' };
+    await send(chatService, 'start will the task, do it per phase', { projectId: 'project-1' });
+    expect(startProjectBuildBatch.mock.calls[0][0].boardCards).toEqual(['all']);
+
+    cliReply = { content: 'ALPHA_ROUTE {"route":"confirm_build","goal":"Build the scaffold","repositories":[],"cards":["PRO-103"]}\nShall I plan the scaffold?' };
+    const proposal = await send(chatService, 'maybe do the scaffold', { projectId: 'project-1' });
+    expect(proposal.agentMessage.routeProposal).toMatchObject({ status: 'open', cards: ['PRO-103'] });
+  });
+});
+
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-chat-routing-'));
   opened = [];

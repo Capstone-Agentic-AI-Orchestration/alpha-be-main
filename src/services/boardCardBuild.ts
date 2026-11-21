@@ -33,14 +33,22 @@ const clip = (text: string, max: number) => text.length > max ? `${text.slice(0,
 const asksForAllCards = (request: string) => [...request.matchAll(ALL_CARDS_START)]
   .some(match => CARD_NOUN_SOON.test(request.slice(match.index + match[0].length)));
 
-export function selectBoardCards(request: string, projectIssues: readonly Issue[]): BoardCardSelection {
+/**
+ * `requested` is the router's own choice (['all'] or card keys). It is used when
+ * present; reading the request text is the fallback for when it is missing.
+ */
+export function selectBoardCards(request: string, projectIssues: readonly Issue[], requested?: readonly string[]): BoardCardSelection {
   const byKey = new Map(projectIssues.map(issue => [issue.identifier.toUpperCase(), issue]));
   const keysIn = (text: string) => [...new Set([...text.matchAll(CARD_KEY)].map(match => match[1].toUpperCase()))]
     .map(key => byKey.get(key)).filter((issue): issue is Issue => Boolean(issue));
-  const mentioned = keysIn(request);
+  const chosenByRouter = requested?.length ? requested : undefined;
+  const routerWantsAll = Boolean(chosenByRouter?.some(key => key.toLowerCase() === 'all'));
+  const mentioned = chosenByRouter
+    ? [...new Set(chosenByRouter.map(key => key.toUpperCase()))].map(key => byKey.get(key)).filter((issue): issue is Issue => Boolean(issue))
+    : keysIn(request);
   // Alpha's own build cards ("Build: …") are records of a request, not tasks. Naming one
   // means the work that request covered: the tasks it lists, or every open task when it asked for all.
-  let wantsAll = asksForAllCards(request);
+  let wantsAll = chosenByRouter ? routerWantsAll : asksForAllCards(request);
   const expanded: Issue[] = [];
   for (const record of mentioned.filter(isBuildRecord)) {
     const text = record.description ?? record.title;
