@@ -875,6 +875,8 @@ export class SQLiteService {
         agent_call_status TEXT,
         revision_target TEXT,
         route_proposal TEXT,
+        decision_json TEXT,
+        build_blocker_json TEXT,
         timestamp TEXT NOT NULL,
         attachments_json TEXT NOT NULL DEFAULT '[]',
         skill_ids TEXT NOT NULL DEFAULT '[]'
@@ -1694,6 +1696,8 @@ export class SQLiteService {
       ,['chat_messages', 'agent_call_status TEXT']
       ,['chat_messages', 'revision_target TEXT']
       ,['chat_messages', 'route_proposal TEXT']
+      ,['chat_messages', 'decision_json TEXT']
+      ,['chat_messages', 'build_blocker_json TEXT']
       ,['agent_calls', "activities TEXT NOT NULL DEFAULT '[]'"]
       ,['agent_calls', 'working_branch TEXT']
       ,['agent_calls', 'working_commit TEXT']
@@ -6238,6 +6242,8 @@ export class SQLiteService {
       agentCallStatus: r.agent_call_status ?? undefined,
       revisionTarget: parseJson<AgentCallTarget | undefined>(r.revision_target, undefined),
       routeProposal: parseJson<ChatMessage['routeProposal']>(r.route_proposal, undefined),
+      decision: parseJson<ChatMessage['decision']>(r.decision_json, undefined),
+      buildBlocker: parseJson<ChatMessage['buildBlocker']>(r.build_blocker_json, undefined),
       attachments: parseJson<ChatMessage['attachments']>(r.attachments_json, []),
       skillIds: parseJson<ChatMessage['skillIds']>(r.skill_ids, []),
       timestamp: r.timestamp
@@ -6522,12 +6528,12 @@ export class SQLiteService {
       INSERT INTO chat_messages (
         id, thread_id, sender_type, sender_name, agent_id, content,
         thinking_process, tools_executed, message_type, agent_call_id,
-        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, route_proposal, timestamp, attachments_json, skill_ids
+        orchestration_run_id, squad_id, operation_mode, agent_call_status, revision_target, route_proposal, decision_json, build_blocker_json, timestamp, attachments_json, skill_ids
       )
       VALUES (
         @id, @threadId, @senderType, @senderName, @agentId, @content,
         @thinkingProcess, @toolsExecuted, @messageType, @agentCallId,
-        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @routeProposal, @timestamp, @attachments, @skillIds
+        @orchestrationRunId, @squadId, @operationMode, @agentCallStatus, @revisionTarget, @routeProposal, @decision, @buildBlocker, @timestamp, @attachments, @skillIds
       )
     `);
     stmt.run({
@@ -6543,6 +6549,8 @@ export class SQLiteService {
       agentCallStatus: msg.agentCallStatus || null,
       revisionTarget: msg.revisionTarget ? JSON.stringify(msg.revisionTarget) : null,
       routeProposal: msg.routeProposal ? JSON.stringify(msg.routeProposal) : null,
+      decision: msg.decision ? JSON.stringify(msg.decision) : null,
+      buildBlocker: msg.buildBlocker ? JSON.stringify(msg.buildBlocker) : null,
       attachments: JSON.stringify(msg.attachments ?? []),
       skillIds: JSON.stringify(msg.skillIds ?? [])
     });
@@ -6564,6 +6572,12 @@ export class SQLiteService {
   updateChatMessageRouteProposal(threadId: string, messageId: string, proposal: NonNullable<ChatMessage['routeProposal']>): boolean {
     return this.db.prepare('UPDATE chat_messages SET route_proposal = ? WHERE id = ? AND thread_id = ?')
       .run(JSON.stringify(proposal), messageId, threadId).changes > 0;
+  }
+
+  /** Record the answer to (or retirement of) an Orchestrator question in chat. */
+  updateChatMessageDecision(threadId: string, messageId: string, decision: NonNullable<ChatMessage['decision']>): boolean {
+    return this.db.prepare('UPDATE chat_messages SET decision_json = ? WHERE id = ? AND thread_id = ?')
+      .run(JSON.stringify(decision), messageId, threadId).changes > 0;
   }
 
   saveChatAttachment(record: ChatAttachmentRecord): ChatAttachmentRecord {

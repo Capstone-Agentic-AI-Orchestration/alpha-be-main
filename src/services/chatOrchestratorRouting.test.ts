@@ -799,3 +799,54 @@ describe('The Manager Agent keeps the board for a developer', () => {
     expect(turnInputs[0].systemPrompt).toContain('Only the Manager Agent changes cards');
   });
 });
+
+describe('Orchestrator questions before planning', () => {
+  const question = 'Keep Project A informational, or add the expense workflow?';
+
+  it('saves the question with its options, then plans the original request with the answer as settled', async () => {
+    const { chatService, sqlite } = await load();
+    startProjectBuildBatch.mockResolvedValueOnce([{ status: 'blocked', reason: question,
+      decision: { question, options: [{ label: 'Add the expense workflow' }, { label: 'Keep it informational' }] } }]);
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Build the remaining expense tasks"}' };
+    const first = await send(chatService, 'do all remaining tasks', { projectId: 'project-1' });
+    expect(first.agentMessage.messageType).toBe('build_decision');
+    expect(first.agentMessage.decision).toMatchObject({ question, status: 'open', request: 'Build the remaining expense tasks', settled: [] });
+
+    const answer = { threadId: 'thread-1', messageId: first.agentMessage.id, answer: 'Add the expense workflow', senderName: 'Lloyd', routing: { context, canBuild: true } };
+    const answered = await chatService.answerDecision(answer);
+    expect(answered.userMessage.content).toBe('Add the expense workflow');
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(2);
+    const replanned = startProjectBuildBatch.mock.calls[1][0];
+    expect(replanned.content).toContain('Build the remaining expense tasks');
+    expect(replanned.settledDecisions).toEqual([{ question, answer: 'Add the expense workflow' }]);
+    expect(sqlite.getChatMessages('thread-1').find((message: any) => message.id === first.agentMessage.id)?.decision)
+      .toMatchObject({ status: 'answered', answer: 'Add the expense workflow' });
+
+    // A second click returns the same answer instead of planning again.
+    await chatService.answerDecision(answer);
+    expect(startProjectBuildBatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('retires an open question when the person starts something else', async () => {
+    const { chatService, sqlite } = await load();
+    startProjectBuildBatch.mockResolvedValueOnce([{ status: 'blocked', reason: question, decision: { question, options: [] } }]);
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Build the remaining expense tasks"}' };
+    const first = await send(chatService, 'do all remaining tasks', { projectId: 'project-1' });
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Add a dark mode toggle"}' };
+    await send(chatService, 'add dark mode', { projectId: 'project-1' });
+    expect(sqlite.getChatMessages('thread-1').find((message: any) => message.id === first.agentMessage.id)?.decision?.status).toBe('superseded');
+    await expect(chatService.answerDecision({ threadId: 'thread-1', messageId: first.agentMessage.id, answer: 'Add it', senderName: 'Lloyd', routing: { context, canBuild: true } }))
+      .rejects.toThrow('already answered or replaced');
+  });
+
+  it('names the build in the way so the chat can offer to stop it', async () => {
+    const { chatService } = await load();
+    startProjectBuildBatch.mockResolvedValueOnce([{ status: 'blocked', reason: 'Waiting for the existing blocked build using org/app-be.',
+      blockingBuild: { runId: 'run-old', status: 'blocked', repository: 'org/app-be' } }]);
+    cliReply = { content: 'ALPHA_ROUTE {"route":"build","goal":"Build the remaining expense tasks"}' };
+    const result = await send(chatService, 'do all remaining tasks', { projectId: 'project-1' });
+    expect(result.agentMessage.messageType).toBe('build');
+    expect(result.agentMessage.buildBlocker).toEqual({ runId: 'run-old', status: 'blocked', repository: 'org/app-be' });
+  });
+});
+

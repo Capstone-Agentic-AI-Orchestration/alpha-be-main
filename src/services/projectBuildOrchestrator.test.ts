@@ -702,3 +702,14 @@ describe('project builds triggered from chat', () => {
     expect(reservePlanning).not.toHaveBeenCalled();
   });
 });
+
+describe('codebases a board-card build must touch', () => {
+  it('counts a codebase as named only when the request mentions it', async () => {
+    const { mentionsRepository } = await import('./projectBuildOrchestrator.js');
+    expect(mentionsRepository('Do all remaining tasks', 'org/project-a-be')).toBe(false);
+    expect(mentionsRepository('Add the API in project-a-be too', 'org/project-a-be')).toBe(true);
+    expect(mentionsRepository('Build in org/project-a-fe', 'org/project-a-fe')).toBe(true);
+    expect(mentionsRepository('Only touch project-a-fe-legacy', 'org/project-a-fe')).toBe(false);
+  });
+});
+

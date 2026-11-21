@@ -413,6 +413,41 @@ chatRouter.post('/chat/threads/:threadId/messages/:messageId/route', desktopOnly
 }));
 
 /**
+ * Answer a question the Orchestrator asked before planning, with one of its
+ * options or in the person's own words. Alpha plans the original request again
+ * with every answer given so far; repeating the call returns the same build reply.
+ */
+chatRouter.post('/chat/threads/:threadId/decisions/:messageId/answer', desktopOnly, route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'chat.write')) return;
+  const { answer, senderName } = req.body ?? {};
+  if (typeof answer !== 'string' || !answer.trim() || answer.length > 2_000) {
+    return res.status(400).json({ error: 'answer must be between 1 and 2,000 characters' });
+  }
+  if (req.workspace!.role === 'client') {
+    return res.status(403).json({ error: 'Project builds are available to the internal project team.' });
+  }
+  const thread = sqliteService.getChatThreads().find(item => item.id === req.params.threadId);
+  if (!thread || thread.ownerId !== req.workspace!.userId) {
+    return res.status(404).json({ error: 'Conversation not found.' });
+  }
+  if (thread.projectId && !requireProjectWorkspace(req, res, thread.projectId)) return;
+  try {
+    const result = await chatService.answerDecision({
+      threadId: thread.id,
+      messageId: req.params.messageId,
+      answer,
+      senderName: typeof senderName === 'string' && senderName.trim() ? senderName.trim().slice(0, 120) : 'You',
+      routing: { context: req.workspace!, canBuild: workspaceRegistry.can(req.workspace!.role, 'agent.run') }
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    const status = error instanceof ChatRouteError ? error.status : 500;
+    res.status(status).json({ error: error instanceof Error ? error.message : 'Alpha could not record that answer.' });
+  }
+}));
+
+
+/**
  * Delete a conversation, or empty one.
  *
  * Neither existed. The UI has had a Delete and a Clear button since the chat

@@ -25,7 +25,7 @@ import { shareCard } from './boardShareQueue.js';
 import { resolveAgent } from './personaService.js';
 import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity } from './orchestrationPlanner.js';
+import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity, type PlanningDecision } from './orchestrationPlanner.js';
 import { composeProjectContext } from './projectPlaybook.js';
 import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
@@ -35,7 +35,7 @@ import { repositoryFileOverview } from './repositoryOverview.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 
 export interface ProjectBuildStartResult {
-  blockingBuild?: { runId: string; projectId?: string; issueId?: string; status: string };
+  blockingBuild?: { runId: string; projectId?: string; issueId?: string; status: string; repository?: string };
   status: 'started' | 'queued' | 'in_progress' | 'plan_ready' | 'awaiting_review' | 'completed' | 'failed' | 'blocked';
   projectId?: string;
   projectName?: string;
@@ -49,7 +49,7 @@ export interface ProjectBuildStartResult {
   branchName?: string;
   reason?: string;
   /** The planner needs the person to settle this before it can plan; nothing was started. */
-  decision?: { question: string; options: string[] };
+  decision?: PlanningDecision;
 }
 
 interface StartProjectBuildInput {
@@ -67,6 +67,8 @@ interface StartProjectBuildInput {
   requestedRepositories?: string[];
   /** Existing board issue to build. Omitted for chat requests, which get their own issue. */
   issueId?: string;
+  /** Answers the person gave to the planner's earlier questions about this request. */
+  settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
 }
 
 /**
@@ -206,6 +208,14 @@ function namedRepository(repositories: readonly SelectedProjectRepository[], rep
   return repositories.some(item => item.named && item.repository.toLowerCase() === repository.toLowerCase());
 }
 
+/** Whether the request names a codebase, by its full name or its short name (project-a-fe). */
+export function mentionsRepository(request: string, repository: string): boolean {
+  const text = request.toLowerCase();
+  const full = repository.toLowerCase();
+  const short = full.split('/').pop() ?? full;
+  return text.includes(full) || new RegExp(`(^|[^a-z0-9-])${short.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9-]|$)`).test(text);
+}
+
 /**
  * Keep a refused plan on this machine, beside the accepted plan files, so the
  * reason a build stopped can be read from the plan itself. Best effort: a
@@ -298,6 +308,7 @@ async function startOrchestratedProjectBuild(input: {
   chatSkillIds?: string[];
   chatSkillGuidance?: string;
   issueId?: string;
+  settledDecisions?: ReadonlyArray<{ question: string; answer: string }>;
 }): Promise<ProjectBuildStartResult> {
   const { context, project, members, buildSteps } = input;
   const fromBoard = isBoardThreadId(input.threadId);
@@ -348,7 +359,7 @@ async function startOrchestratedProjectBuild(input: {
     if (activeWorkflow && !stillOwnsPlanning) {
       return { ...blocked(activeBuildReason(activeWorkflow.status, selected.repository), project, selected.repository),
         ...(activeWorkflow.projectId && workspaceRegistry.canAccessProjectBuilds(context, activeWorkflow.projectId)
-          ? { blockingBuild: { runId: activeWorkflow.runId, projectId: activeWorkflow.projectId, issueId: activeWorkflow.issueId, status: activeWorkflow.status } } : {}) };
+          ? { blockingBuild: { runId: activeWorkflow.runId, projectId: activeWorkflow.projectId, issueId: activeWorkflow.issueId, status: activeWorkflow.status, repository: selected.repository } } : {}) };
     }
   }
 
@@ -558,6 +569,7 @@ async function startOrchestratedProjectBuild(input: {
       goal: cleanGoal,
       chatSkillIds: input.chatSkillIds,
       chatSkillGuidance: input.chatSkillGuidance,
+      settledDecisions: input.settledDecisions,
       // The team's notes (AGENTS.md) as committed at each planning checkpoint, first in the planner's context.
       repositoryMemory: renderProjectMemory(await Promise.all(reservations.map(item =>
         readMemoryAtCommit(item.repository, item.worktreePath, item.baseCommit)))),
@@ -572,7 +584,8 @@ async function startOrchestratedProjectBuild(input: {
         repository: item.repository,
         repositoryContext: item.context.context,
         availableScripts: item.context.scripts,
-        ...(namedRepository(repositories, item.repository) ? {} : { optional: true })
+        // A build from board cards lets the cards decide which codebases need work, unless the request names one.
+        ...(namedRepository(repositories, item.repository) && (!cardKeys.length || mentionsRepository(cleanGoal, item.repository)) ? {} : { optional: true })
       })),
       eligibleAgents: availableAgents,
       planner: plannerIdentity,
@@ -805,6 +818,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       context, project, repositories: selectedCheckouts, members: projectAgents,
       buildSteps: buildSteps ?? [], threadId, messageId, content, issueId: input.issueId,
       chatSkillIds: input.chatSkillIds, chatSkillGuidance: input.chatSkillGuidance,
+      settledDecisions: input.settledDecisions,
       deliveryRepair: input.deliveryRepair
     });
   });
