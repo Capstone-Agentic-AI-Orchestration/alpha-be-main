@@ -1303,16 +1303,20 @@ export class ChatService extends EventEmitter {
     if (!projectId) return undefined;
     return runWithWorkspace(routing.context.workspaceId, () => {
       const issues = sqliteService.getIssues().filter(issue => issue.projectId === projectId);
+      const active = issues.filter(issue => !issue.archivedAt);
       const canSeeBuilds = workspaceRegistry.canAccessProjectBuilds(routing.context, projectId);
       const latest = new Map((canSeeBuilds ? sqliteService.listLatestIssueBuilds([projectId]) : []).map(build => [build.issueId, build]));
       const scoped = routing.scopeIssueIds?.length
         ? routing.scopeIssueIds.map(id => issues.find(issue => issue.id === id)).filter((issue): issue is NonNullable<typeof issue> => Boolean(issue))
         : undefined;
       const updated = (issue: typeof issues[number]) => latest.get(issue.id)?.updatedAt ?? issue.updatedAt ?? '';
-      const chosen = scoped ?? [...issues].sort((a, b) => updated(b).localeCompare(updated(a))).slice(0, 10);
+      // Archived cards are off the board; they were listed as if still open.
+      const chosen = scoped ?? [...active].sort((a, b) => updated(b).localeCompare(updated(a))).slice(0, 10);
       const records: BoardTaskRecord[] = chosen.map(issue => {
         const build = latest.get(issue.id);
         return { identifier: issue.identifier, title: issue.title, status: issue.status, priority: issue.priority,
+          description: issue.description,
+          checklist: (issue.subtasks ?? []).filter(item => item.title.trim()).map(item => ({ title: item.title, completed: Boolean(item.completed) })),
           snapshot: build ? sqliteService.getOrchestrationSnapshot(build.runId) : undefined };
       });
       const names = new Map(sqliteService.getAgents().map(agent => [agent.id, agent.name]));

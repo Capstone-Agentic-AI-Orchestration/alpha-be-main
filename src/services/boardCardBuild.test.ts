@@ -42,3 +42,17 @@ describe('board cards named in a chat build request', () => {
     expect(spec.brief).toContain('follow these tasks');
   });
 });
+
+describe('a request that names one of Alpha\'s own build cards', () => {
+  it('builds the open tasks that build covered instead of nothing', () => {
+    const record = card('PRO-108', { labels: ['alpha:chat-build'], status: 'todo', title: 'Build: Complete the remaining Project A expense workflow tasks',
+      description: 'Original request:\nComplete the remaining Project A expense workflow tasks in dependency order.' });
+    const { cards } = selectBoardCards('Build PRO-108, Complete the remaining expense workflow, phase by phase.', [...board.filter(item => item.identifier !== 'PRO-108'), record]);
+    expect(cards.map(item => item.identifier)).toEqual(['PRO-103', 'PRO-106', 'PRO-104']);
+  });
+
+  it('builds the tasks a build card lists', () => {
+    const record = card('PRO-110', { labels: ['alpha:chat-build'], description: 'Original request:\nBuild it\n\nBoard tasks: PRO-103, PRO-106' });
+    expect(selectBoardCards('continue PRO-110', [...board, record]).cards.map(item => item.identifier)).toEqual(['PRO-103', 'PRO-106']);
+  });
+});

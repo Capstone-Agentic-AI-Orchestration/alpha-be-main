@@ -70,11 +70,14 @@ export interface BoardTaskRecord {
    * had no way to answer "what is the highest priority task" and said so.
    */
   priority?: string;
+  /** The card's description and checklist, so a question about what a task needs is answered from the card itself. */
+  description?: string;
+  checklist?: Array<{ title: string; completed: boolean }>;
   snapshot?: OrchestrationSnapshot;
 }
 
-/** Enough for twenty tasks with short plans, small enough to leave room for the question. */
-const BOARD_RECORDS_MAX_CHARS = 6_000;
+/** Enough for ten tasks with their checklists and short plans, small enough to leave room for the question. */
+const BOARD_RECORDS_MAX_CHARS = 12_000;
 
 /**
  * The Orchestrator's records for the tasks on the board, for Ask Alpha.
@@ -104,6 +107,14 @@ export function describeBoardTasks(
   for (const task of tasks) {
     const placement = task.priority ? `board column: ${task.status} · priority: ${task.priority}` : `board column: ${task.status}`;
     const lines = [`### ${task.identifier} · ${clip(task.title, 160)} (${placement})`];
+    const description = task.description?.trim();
+    if (description && description !== task.title.trim()) lines.push(`- Description: ${clip(description, 400)}`);
+    if (task.checklist?.length) {
+      lines.push('- Checklist:', ...task.checklist.slice(0, 12).map(item => `  - [${item.completed ? 'x' : ' '}] ${clip(item.title, 200)}`));
+      if (task.checklist.length > 12) lines.push(`  - …and ${task.checklist.length - 12} more items`);
+    } else {
+      lines.push('- Checklist: none');
+    }
     if (!options.canSeeBuilds) lines.push('- Build records are not available to this person\'s workspace role.');
     else if (!task.snapshot) lines.push('- No build has started for this task.');
     else {
