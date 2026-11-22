@@ -218,6 +218,17 @@ function withRejectedPlans(error: OrchestrationPlanningError, proposed: unknown,
   return error;
 }
 
+/** The fields every saved plan carries from its planning input, whatever the model returned. */
+function withRunFields(plan: OrchestrationPlan, input: OrchestrationPlanningInput): OrchestrationPlan {
+  return {
+    ...plan,
+    roleContractVersion: 2 as const,
+    projectContext: input.projectContext?.trim() ?? '',
+    ...(input.chatSkillIds?.length ? { chatSkillIds: [...input.chatSkillIds] } : {}),
+    ...(input.chatSkillGuidance?.trim() ? { chatSkillGuidance: input.chatSkillGuidance.trim() } : {})
+  };
+}
+
 /** Apply the corrections that have one safe answer (see orchestrationPlanCorrections), and say what changed. */
 function correctedPlan<P extends Parameters<typeof correctPlanSafely>[0]>(plan: P, input: OrchestrationPlanningInput): P {
   const { plan: corrected, corrections } = correctPlanSafely(plan, input.eligibleAgents);
@@ -571,7 +582,14 @@ export class OrchestrationPlanner {
     }
     if ((input.acceptedEvidence?.length ?? 0) > 32_000) throw new OrchestrationPlanningError('Accepted milestone evidence exceeds its bounded context.', 'invalid_plan');
 
-    const common = {
+    const common = this.turnBase(input);
+    const initial = await this.turn({ ...common, prompt: outputInstructions(input) });
+    return this.finishPlan(input, common, initial);
+  }
+
+  /** The planner turn's fixed settings: identity, model, read-only planning checkouts. */
+  private turnBase(input: OrchestrationPlanningInput) {
+    return {
       usageContext: { ...input.usageContext, orchestrationRunId: input.usageContext?.orchestrationRunId ?? input.runId, agentId: input.planner.id },
       runId: `orchestration-plan-${input.runId ?? randomUUID()}`,
       cwd: input.cwd,
@@ -588,7 +606,9 @@ export class OrchestrationPlanner {
       projectRoots: planningRoots(input),
       autonomyLevel: 'Supervised' as const
     };
-    const initial = await this.turn({ ...common, prompt: outputInstructions(input) });
+  }
+
+  private async finishPlan(input: OrchestrationPlanningInput, common: ReturnType<OrchestrationPlanner['turnBase']>, initial: Awaited<ReturnType<PlannerTurn>>): Promise<OrchestrationPlanningResult> {
     if (initial.failureKind) {
       throw new OrchestrationPlanningError(
         `The configured planning model could not produce a plan: ${planningFailureDetail(initial)}.`,
@@ -626,61 +646,12 @@ export class OrchestrationPlanner {
       }
     }
 
-    let plan = correctedPlan({
-      ...candidatePlan.plan,
-      roleContractVersion: 2 as const,
-      projectContext: input.projectContext?.trim() ?? '',
-      ...(input.chatSkillIds?.length ? { chatSkillIds: [...input.chatSkillIds] } : {}),
-      ...(input.chatSkillGuidance?.trim() ? { chatSkillGuidance: input.chatSkillGuidance.trim() } : {})
-    }, input);
+    let plan = correctedPlan(withRunFields(candidatePlan.plan, input), input);
     try {
       validatePlan(plan, input);
     } catch (error) {
       if (!(error instanceof OrchestrationPlanningError)) throw error;
-      const proposedPlan = JSON.stringify(plan);
-      if (proposedPlan.length > MAX_SEMANTIC_REPAIR_PLAN_CHARS) {
-        throw withRejectedPlans(new OrchestrationPlanningError(
-          `The proposed plan exceeded the safe size for one correction attempt. No specialist was started. ${error.message}`,
-          error.code
-        ), plan);
-      }
-
-      const correction = await this.turn({
-        ...common,
-        prompt: semanticRepairInstructions(input, plan, error)
-      });
-      if (correction.failureKind) {
-        throw withRejectedPlans(new OrchestrationPlanningError(
-          `The proposed plan did not pass a safety check, and the Orchestrator could not correct it automatically. No specialist was started. ${error.message}`,
-          error.code
-        ), plan);
-      }
-      const correctedCandidate = parseCandidatePlan(correction.content);
-      if (correctedCandidate.decision) throw decisionError(correctedCandidate.decision);
-      if (!correctedCandidate.plan) {
-        throw withRejectedPlans(new OrchestrationPlanningError(
-          `The proposed plan did not pass a safety check, and its one correction was not a valid plan. No specialist was started. ${error.message}`,
-          error.code
-        ), plan, correction.content.slice(0, MAX_SEMANTIC_REPAIR_PLAN_CHARS));
-      }
-
-      const proposed = plan;
-      plan = correctedPlan({
-        ...correctedCandidate.plan,
-        roleContractVersion: 2 as const,
-        projectContext: input.projectContext?.trim() ?? '',
-        ...(input.chatSkillIds?.length ? { chatSkillIds: [...input.chatSkillIds] } : {}),
-        ...(input.chatSkillGuidance?.trim() ? { chatSkillGuidance: input.chatSkillGuidance.trim() } : {})
-      }, input);
-      try {
-        validatePlan(plan, input);
-      } catch (correctionError) {
-        if (!(correctionError instanceof OrchestrationPlanningError)) throw correctionError;
-        throw withRejectedPlans(new OrchestrationPlanningError(
-          `The Orchestrator tried one correction, but the plan still did not pass its checks. No specialist was started. ${correctionError.message}`,
-          correctionError.code
-        ), proposed, plan);
-      }
+      plan = await this.correctPlan(input, plan, error, common);
     }
     return {
       plan,
@@ -691,5 +662,54 @@ export class OrchestrationPlanner {
       planHash: createHash('sha256').update(JSON.stringify(plan)).digest('hex'),
       formatRepairCount
     };
+  }
+
+  /**
+   * The Orchestrator's one correction of a plan that failed a check: it gets the plan and what was
+   * wrong, and returns a plan that passes, or an error holding both plans. Planning uses it, and so
+   * does any later check (starting a plan, the next milestone), so a failed check goes back to the
+   * Orchestrator before it ever reaches the person. Exactly one attempt: cost and wait stay bounded.
+   */
+  async correctPlan(input: OrchestrationPlanningInput, plan: OrchestrationPlan, error: OrchestrationPlanningError,
+    common: ReturnType<OrchestrationPlanner['turnBase']> = this.turnBase(input)): Promise<OrchestrationPlan> {
+    const proposedPlan = JSON.stringify(plan);
+    if (proposedPlan.length > MAX_SEMANTIC_REPAIR_PLAN_CHARS) {
+      throw withRejectedPlans(new OrchestrationPlanningError(
+        `The proposed plan exceeded the safe size for one correction attempt. No specialist was started. ${error.message}`,
+        error.code
+      ), plan);
+    }
+
+    const correction = await this.turn({
+      ...common,
+      prompt: semanticRepairInstructions(input, plan, error)
+    });
+    if (correction.failureKind) {
+      throw withRejectedPlans(new OrchestrationPlanningError(
+        `The proposed plan did not pass a safety check, and the Orchestrator could not correct it automatically. No specialist was started. ${error.message}`,
+        error.code
+      ), plan);
+    }
+    const correctedCandidate = parseCandidatePlan(correction.content);
+    if (correctedCandidate.decision) throw decisionError(correctedCandidate.decision);
+    if (!correctedCandidate.plan) {
+      throw withRejectedPlans(new OrchestrationPlanningError(
+        `The proposed plan did not pass a safety check, and its one correction was not a valid plan. No specialist was started. ${error.message}`,
+        error.code
+      ), plan, correction.content.slice(0, MAX_SEMANTIC_REPAIR_PLAN_CHARS));
+    }
+
+    const proposed = plan;
+    const corrected = correctedPlan(withRunFields(correctedCandidate.plan, input), input);
+    try {
+      validatePlan(corrected, input);
+    } catch (correctionError) {
+      if (!(correctionError instanceof OrchestrationPlanningError)) throw correctionError;
+      throw withRejectedPlans(new OrchestrationPlanningError(
+        `The Orchestrator tried one correction, but the plan still did not pass its checks. No specialist was started. ${correctionError.message}`,
+        correctionError.code
+      ), proposed, corrected);
+    }
+    return corrected;
   }
 }

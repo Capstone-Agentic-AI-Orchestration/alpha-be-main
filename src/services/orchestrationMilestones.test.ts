@@ -122,6 +122,27 @@ describe('adaptive milestone boundaries', () => {
       milestoneId: 'second', ...expansion, actorId: 'user' })).toThrow(/changed/);
   });
 
+  it('gives refused milestone tasks back to the Orchestrator once, with the reason', async () => {
+    const refused: MilestoneExpansion = { ...expansion, tasks: [{ ...expansion.tasks[0], ownerAgentId: 'ghost' }] };
+    const next = vi.fn<PlanNextMilestone>().mockResolvedValueOnce(refused).mockResolvedValueOnce(expansion);
+    const { service, active } = await setup(next);
+    const expanded = await (await submit(service, active))();
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(next.mock.calls[1][2]).toMatch(/^Invalid milestone tasks: .*ghost/);
+    expect(expanded.run.planVersion).toBe(2);
+    expect(expanded.run.currentTaskId).toBe('design-client');
+  });
+
+  it('stops with the reason when the corrected milestone is refused too', async () => {
+    const refused: MilestoneExpansion = { ...expansion, tasks: [{ ...expansion.tasks[0], ownerAgentId: 'ghost' }] };
+    const next = vi.fn<PlanNextMilestone>(async () => refused);
+    const { service, active } = await setup(next);
+    const stopped = await (await submit(service, active))();
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(stopped.run.status).toBe('blocked');
+    expect(stopped.run.stoppedReason).toMatch(/Milestone planning stopped before dispatch: Invalid milestone tasks/);
+  });
+
   it('keeps an unfinished roadmap blocked when planning fails', async () => {
     const { service, active, launch } = await setup(async () => { throw new Error('Provider unavailable'); });
     const accept = await submit(service, active);

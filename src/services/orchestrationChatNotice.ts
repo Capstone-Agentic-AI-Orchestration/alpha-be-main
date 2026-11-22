@@ -60,6 +60,16 @@ export async function postStartedNotice(store: NoticeStore, snapshot: Orchestrat
     'build').catch(() => undefined);
 }
 
+/** A plan the Orchestrator corrected before it could start: what failed, what changed, and that it waits for Start. */
+export async function postPlanCorrectedNotice(store: NoticeStore, snapshot: OrchestrationSnapshot, reason: string, changes: string[]): Promise<void> {
+  await post(store, snapshot, `${snapshot.run.id}-corrected-v${snapshot.run.planVersion}`, [
+    `**The plan needed a fix before it could start.** ${reason}`,
+    `I made plan v${snapshot.run.planVersion}:`,
+    ...changes.map(line => `- ${line}`),
+    'Read it on the right, then press Start plan when you are happy with it.'
+  ].join('\n'), 'build').catch(() => undefined);
+}
+
 export async function postPublishedNotice(store: NoticeStore, snapshot: OrchestrationSnapshot, publications: OrchestrationPublicationRecord[]): Promise<void> {
   await post(store, snapshot, `${snapshot.run.id}-published`, publishedNotice(publications)).catch(() => undefined);
 }

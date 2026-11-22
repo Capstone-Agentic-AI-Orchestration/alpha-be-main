@@ -50,8 +50,8 @@ export function planRepositoryCoverage(run: OrchestrationRunRecord): { repositor
   // Saved before the flag existed. That plan passed the full check when it was made, so a codebase
   // it left without tasks or milestone was optional then and stays optional.
   const used = new Set([
-    ...run.plan.tasks.map(task => task.repository),
-    ...(run.plan.milestones ?? []).flatMap(milestone => milestone.repositories)
+    ...(run.plan?.tasks ?? []).map(task => task.repository),
+    ...(run.plan?.milestones ?? []).flatMap(milestone => milestone.repositories)
   ].filter((value): value is string => Boolean(value)).map(canonicalRepository));
   return { repositories, optionalRepositories: repositories.filter(repository => !used.has(canonicalRepository(repository))) };
 }

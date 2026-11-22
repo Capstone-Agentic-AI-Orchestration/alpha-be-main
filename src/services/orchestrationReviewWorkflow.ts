@@ -5,12 +5,12 @@ import {
   MAX_PLAN_TASKS,
   orchestrationPlanSchema,
   roleCanOwnOrchestrationTask,
-  validateOrchestrationPlan,
   type OrchestrationAgentReport,
   type OrchestrationPlan,
   type OrchestrationTaskDefinition
 } from './orchestrationContract.js';
 import type { OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
+import { checkRunPlan } from './orchestrationRunChecks.js';
 
 export type OrchestrationReviewFinding = NonNullable<OrchestrationAgentReport['reviewFindings']>[number];
 
@@ -242,7 +242,7 @@ export function buildOrchestrationReviewAmendment(
   if (parsedPlan.tasks.length > MAX_PLAN_TASKS) {
     throw new OrchestrationReviewPlanError(`The corrected workflow would exceed the ${MAX_PLAN_TASKS}-task plan limit. Keep the build blocked for a human plan decision.`);
   }
-  const issues = validateOrchestrationPlan(parsedPlan, eligibleAgents);
+  const issues = checkRunPlan(snapshot.run, parsedPlan, 'review_correction', eligibleAgents);
   if (issues.length) {
     throw new OrchestrationReviewPlanError(`The correction plan did not pass its graph and role checks: ${issues.map(issue => issue.detail).join(' ')}`);
   }
@@ -421,7 +421,7 @@ function routeOwnerFindings(
     if (plan.tasks.length > MAX_PLAN_TASKS) {
       throw new OrchestrationReviewPlanError(`The correction plan would exceed the ${MAX_PLAN_TASKS}-task limit. ${copy.keep}`);
     }
-    const issues = validateOrchestrationPlan(plan, eligibleAgents);
+    const issues = checkRunPlan(snapshot.run, plan, 'review_correction', eligibleAgents);
     if (issues.length) {
       throw new OrchestrationReviewPlanError(`The fresh validation gate did not pass its role and dependency checks: ${issues.map(issue => issue.detail).join(' ')}`);
     }

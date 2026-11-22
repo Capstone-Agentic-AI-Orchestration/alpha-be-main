@@ -69,7 +69,7 @@ export interface ChatActionDeps {
   can(role: WorkspaceContext['role'], capability: string): boolean;
   orchestrationEnabled: boolean;
   decide(input: { context: WorkspaceContext; projectId: string; runId: string; action: 'start' | 'approve' | 'retry_publication';
-    expectedRevision?: number; threadId: string; planVersion?: number }): Promise<OrchestrationSnapshot>;
+    expectedRevision?: number; threadId: string; planVersion?: number }): Promise<OrchestrationSnapshot & { corrected?: { planVersion: number } }>;
   revise(context: WorkspaceContext, runId: string, revision: number, instruction: string): Promise<OrchestrationSnapshot>;
   cancel(input: { workspaceId: string; runId: string; expectedRevision: number; actorId: string; reason: string }): Promise<OrchestrationSnapshot>;
   requestChanges(input: { context: WorkspaceContext; projectId: string; runId: string; expectedRunRevision: number; feedback: string }): Promise<OrchestrationSnapshot>;
@@ -184,6 +184,9 @@ async function startPlan(input: ChatActionInput, deps: ChatActionDeps): Promise<
   }
   const next = await deps.decide({ context: input.context, projectId: input.projectId, runId: snapshot.run.id, action: 'start',
     threadId: input.threadId, ...revisionFor(input, snapshot) });
+  if (next.corrected) {
+    return reply(`The plan needed a fix before it could start, so I made plan v${next.corrected.planVersion}; what changed is just above. Read it on the right, then tell me to start it or press Start plan.`);
+  }
   return reply(next.run.status === 'executing'
     ? `Started plan v${next.run.planVersion}, as you asked.`
     : `The start request returned build status: ${next.run.status}. Check the right panel for its current outcome.`);
