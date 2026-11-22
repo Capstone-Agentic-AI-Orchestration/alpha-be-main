@@ -233,7 +233,7 @@ export function mentionsRepository(request: string, repository: string): boolean
  * reason a build stopped can be read from the plan itself. Best effort: a
  * failure to save never changes what the person is told.
  */
-function saveRejectedPlans(error: OrchestrationPlanningError, context: { projectId: string; requestKey: string; goal: string }): void {
+export function saveRejectedPlans(error: OrchestrationPlanningError, context: { projectId: string; requestKey: string; goal: string }): void {
   if (!error.rejectedPlans || !ALPHA_DIR) return;
   try {
     const directory = path.join(ALPHA_DIR, 'orchestration-plans', 'rejected');

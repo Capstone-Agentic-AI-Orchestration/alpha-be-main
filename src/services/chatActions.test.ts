@@ -137,6 +137,13 @@ describe('a plan in another conversation that blocks this request', () => {
 });
 
 describe('chat actions check their own rules', () => {
+  it('says when the Orchestrator corrected the plan instead of starting it', async () => {
+    const value = deps();
+    vi.mocked(value.decide).mockResolvedValueOnce({ run: { status: 'awaiting_plan_approval', planVersion: 3 }, corrected: { planVersion: 3 } } as any);
+    expect(await run('start_plan', 'yes start it', { evidence: 'yes start it' }, value)).toEqual({ kind: 'reply',
+      message: expect.stringContaining('The plan needed a fix before it could start, so I made plan v3') });
+  });
+
   it('asks for a go-ahead instead of starting without one, and starts with one', async () => {
     const value = deps();
     expect(await run('start_plan', 'maybe later', { evidence: 'later' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('Plan v2 is ready') });

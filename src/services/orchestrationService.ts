@@ -5,10 +5,9 @@ import path from 'node:path';
 import type { Agent, PrototypeRun } from '../models/index.js';
 import {
   ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
-  MAX_INITIAL_PLAN_TASKS,
   ensureTaskAssignmentReasons,
   parseOrchestrationPlan,
-  validateOrchestrationPlan,
+  type PlanValidationIssue,
   type OrchestrationRequiredCheck,
   type OrchestrationTaskKind
 } from './orchestrationContract.js';
@@ -18,13 +17,15 @@ import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type
 import { SQLiteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { buildHumanReviewAmendment, type OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
-import type { PlanNextMilestone } from './orchestrationMilestonePlanner.js';
+import type { Milestone, MilestoneExpansion, PlanNextMilestone } from './orchestrationMilestonePlanner.js';
 import { getCurrentBranch, getGitChangedPaths, getGitDiffNumstat, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { pathMatchesScope } from '../utils/pathScope.js';
 import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
-import { authorizedRepositoriesForRun, planRepositoryCoverage, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { authorizedRepositoriesForRun, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { checkNewRunPlan, checkRunPlan } from './orchestrationRunChecks.js';
+import { DomainRefusal } from './domainRefusal.js';
 import { memorySources, readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 import { isBuildWorkspaceLost, latestCheckpointCommit } from './orchestrationCheckpoints.js';
@@ -313,9 +314,10 @@ export interface StartOrchestrationInput {
   now?: string;
 }
 
-export class OrchestrationPlanError extends Error {
-  constructor(readonly issues: ReturnType<typeof validateOrchestrationPlan>) {
-    super(issues.map(issue => issue.detail).join(' '));
+/** A plan that failed its check. An expected refusal: the start path hands it to the Orchestrator to correct. */
+export class OrchestrationPlanError extends DomainRefusal {
+  constructor(readonly issues: PlanValidationIssue[]) {
+    super(issues.map(issue => issue.detail).join(' '), 'plan_check', ['ask_orchestrator', 'open_plan', 'stop_plan'], issues);
     this.name = 'OrchestrationPlanError';
   }
 }
@@ -436,9 +438,7 @@ export class OrchestrationService {
   async start(input: StartOrchestrationInput): Promise<OrchestrationSnapshot> {
     return runWithWorkspace(input.workspaceId, async () => {
       const plan = ensureTaskAssignmentReasons(parseOrchestrationPlan(input.plan), input.eligibleAgents);
-      const issues = validateOrchestrationPlan(plan, input.eligibleAgents, {
-        maxTaskCount: MAX_INITIAL_PLAN_TASKS,
-        initialPlan: true,
+      const issues = checkNewRunPlan(plan, input.eligibleAgents, {
         repositories: input.repositoryWorkspaces?.map(item => item.repository),
         optionalRepositories: input.optionalRepositories
       });
@@ -530,6 +530,23 @@ export class OrchestrationService {
     }));
   }
 
+  /**
+   * Plan and add the next milestone. When the build's checks refuse the tasks, the Orchestrator
+   * plans them once more with the reason (one correction, as everywhere); a second refusal stops
+   * the build with that reason, as before.
+   */
+  private async appendMilestone(snapshot: OrchestrationSnapshot, milestone: Milestone, actorId: string): Promise<OrchestrationSnapshot> {
+    const append = (expansion: MilestoneExpansion) => this.store.appendOrchestrationMilestone({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision,
+      expectedPlanVersion: snapshot.run.planVersion, milestoneId: milestone.id, ...expansion, actorId });
+    const first = await this.planNextMilestone!(snapshot, milestone);
+    try {
+      return append(first);
+    } catch (error) {
+      if (!(error instanceof DomainRefusal) || error.code !== 'plan_check') throw error;
+      return append(await this.planNextMilestone!(snapshot, milestone, error.message));
+    }
+  }
+
   async startPlannedWork(input: {
     workspaceId: string;
     runId: string;
@@ -559,11 +576,7 @@ export class OrchestrationService {
           snapshot.run.plan.tasks.find(task => task.id === id)?.dependsOn.forEach(include);
         };
         snapshot.run.plan.tasks.filter(task => task.required).forEach(task => include(task.id));
-        const issues = validateOrchestrationPlan({ ...snapshot.run.plan, tasks: snapshot.run.plan.tasks.filter(task => executableIds.has(task.id)) }, eligibleAgents, {
-          maxTaskCount: MAX_INITIAL_PLAN_TASKS,
-          initialPlan: true,
-          ...planRepositoryCoverage(snapshot.run)
-        });
+        const issues = checkRunPlan(snapshot.run, { ...snapshot.run.plan, tasks: snapshot.run.plan.tasks.filter(task => executableIds.has(task.id)) }, 'start', eligibleAgents);
         if (issues.length) throw new OrchestrationPlanError(issues);
       }
       const executing = this.store.transitionOrchestrationRun({
@@ -1587,10 +1600,8 @@ export class OrchestrationService {
         // The planner reads the working copies; repair or rebuild them first.
         await this.executor.ensureWorkspaces?.(snapshot);
         this.planningMilestones.add(planningKey);
-        const expansion = await this.planNextMilestone(snapshot, milestone);
+        const expanded = await this.appendMilestone(snapshot, milestone, actorId);
         this.planningMilestones.delete(planningKey);
-        const expanded = this.store.appendOrchestrationMilestone({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision,
-          expectedPlanVersion: snapshot.run.planVersion, milestoneId: milestone.id, ...expansion, actorId });
         return await this.dispatchNextUnlocked(expanded, actorId);
       } catch (error) {
         const latest = this.store.getOrchestrationSnapshot(snapshot.run.id)!;

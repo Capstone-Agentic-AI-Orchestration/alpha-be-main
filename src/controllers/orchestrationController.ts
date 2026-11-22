@@ -1,4 +1,5 @@
 import { executeOrchestrationDecision } from '../services/orchestrationDecision.js';
+import { errorResponse } from './workflowErrorResponse.js';
 import { localPreviewService } from '../services/localPreviewService.js';
 import { Request, Response, Router } from 'express';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
@@ -137,14 +138,6 @@ async function reconcileRecovery(snapshot: OrchestrationSnapshot): Promise<void>
   } catch {
     // Recovery messages are durable in the outbox; a later read or startup pass retries delivery.
   }
-}
-
-function errorResponse(res: Response, error: unknown): void {
-  const message = error instanceof Error ? error.message : 'The task workflow action failed.';
-  const status = /not found|unavailable/i.test(message) ? 404
-    : /cannot|only |already|changed|retry|stale|no longer|disabled|validation|review|action key|refresh|under \d+ characters|add the direction/i.test(message) ? 409
-      : 500;
-  res.status(status).json({ error: message });
 }
 
 function authorizedProject(req: Request, res: Response, capability: Parameters<typeof workspaceRegistry.can>[1] = 'squad.run'): boolean {
@@ -397,7 +390,8 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/start', des
       action: 'start', expectedRevision
     });
     await reconcileRecovery(started);
-    res.json({ runId: started.run.id, status: started.run.status, currentTaskId: started.run.currentTaskId });
+    res.json({ runId: started.run.id, status: started.run.status, currentTaskId: started.run.currentTaskId,
+      ...(started.corrected ? { corrected: started.corrected } : {}) });
   } catch (error) {
     errorResponse(res, error);
   }

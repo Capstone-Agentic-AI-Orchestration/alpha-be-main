@@ -53,8 +53,9 @@ import { currentWorkspaceId, DEFAULT_WORKSPACE_ID, runWithWorkspace } from './wo
 import { analyticsFrom } from './runAnalytics.js';
 import { BUILTIN_SKILLS } from './builtinSkills.js';
 import { normalizeBuildSteps } from '../store/buildSteps.js';
-import { MAX_PLAN_TASKS, parseOrchestrationPlan, validateOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
-import { planRepositoryCoverage } from './orchestrationWorkspace.js';
+import { MAX_PLAN_TASKS, parseOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
+import { checkMilestoneStage, checkRunPlan } from './orchestrationRunChecks.js';
+import { DomainRefusal } from './domainRefusal.js';
 import type { PersistedReviewFinding } from './orchestrationReviewWorkflow.js';
 import { assertPersonComment } from './taskComments.js';
 import {
@@ -3587,9 +3588,7 @@ export class SQLiteService {
         throw new Error('The plan changed or execution has begun. Refresh before revising.');
       }
       const plan = parseOrchestrationPlan(input.plan);
-      const problems = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), {
-        initialPlan: true, ...planRepositoryCoverage(snapshot.run)
-      });
+      const problems = checkRunPlan(snapshot.run, plan, 'revision', this.getAgents().filter(agent => !agent.isArchived));
       if (problems.length) throw new Error('The revised plan is invalid: ' + problems.map(item => item.detail).join(' '));
       if (JSON.stringify(plan.requirements) !== JSON.stringify(snapshot.run.plan.requirements) ||
           (snapshot.run.plan.exclusions ?? []).some(item => !plan.exclusions?.includes(item))) throw new Error('Revise the task requirements separately; a plan revision must preserve approved requirements and exclusions.');
@@ -3619,8 +3618,7 @@ export class SQLiteService {
           snapshot.attempts.some(attempt => ['starting', 'running', 'submitted'].includes(attempt.status))) throw new Error('The blocked build changed or still has active work. Refresh before replanning.');
       const plan = parseOrchestrationPlan(input.plan);
       const additions = plan.tasks.filter(task => !snapshot.tasks.some(old => old.id === task.id));
-      const issues = validateOrchestrationPlan({ ...plan, tasks: additions }, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true,
-        repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository] });
+      const issues = checkRunPlan(snapshot.run, { ...plan, tasks: additions }, 'audit_replan', this.getAgents().filter(agent => !agent.isArchived));
       if (issues.length) throw new Error('The revised audit plan is invalid: ' + issues.map(issue => issue.detail).join(' '));
       if (snapshot.tasks.some(task => !plan.tasks.some(definition => definition.id === task.id && !definition.required))) throw new Error('A revised plan must retain the old task history as optional work.');
       if (!additions.some(task => task.kind === 'audit' && task.dependencyAudit?.purpose === 'baseline')) throw new Error('The revised plan needs a Security baseline audit.');
@@ -3667,11 +3665,11 @@ export class SQLiteService {
       const stage = parseOrchestrationPlan({ schemaVersion: 1, roleContractVersion: snapshot.run.plan.roleContractVersion, goal: next.objective,
         requirements: snapshot.run.plan.requirements.filter(item => next.requirementIds.includes(item.id)),
         tasks: input.tasks.map(({ milestoneId: _milestoneId, ...task }) => task) });
-      const stageIssues = validateOrchestrationPlan(stage, this.getAgents().filter(agent => !agent.isArchived), { initialPlan: true, maxTaskCount: 12, repositories: next.repositories, auditMilestone: true });
-      if (stageIssues.length) throw new Error(`Invalid milestone tasks: ${stageIssues.map(issue => issue.detail).join(' ')}`);
+      const stageIssues = checkMilestoneStage(stage, next.repositories, this.getAgents().filter(agent => !agent.isArchived));
+      if (stageIssues.length) throw new DomainRefusal(`Invalid milestone tasks: ${stageIssues.map(issue => issue.detail).join(' ')}`, 'plan_check', [], stageIssues);
       const plan = parseOrchestrationPlan({ ...snapshot.run.plan, tasks: [...snapshot.run.plan.tasks, ...input.tasks] });
-      const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived), planRepositoryCoverage(snapshot.run));
-      if (issues.length) throw new Error(`Invalid milestone plan: ${issues.map(issue => issue.detail).join(' ')}`);
+      const issues = checkRunPlan(snapshot.run, plan, 'milestone', this.getAgents().filter(agent => !agent.isArchived));
+      if (issues.length) throw new DomainRefusal(`Invalid milestone plan: ${issues.map(issue => issue.detail).join(' ')}`, 'plan_check', [], issues);
       const version = snapshot.run.planVersion + 1;
       this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(workspaceId, input.runId, version, plan.schemaVersion, JSON.stringify(plan), 'milestone', now, now);
@@ -5460,7 +5458,7 @@ export class SQLiteService {
           updatedAt: _updatedAt, correctionOfTaskId: _correctionOfTaskId, correctionCycle: _correctionCycle, ...recordDefinition } = record;
         if (!same(recordDefinition, definition)) throw new Error(`Correction task ${definition.id} does not match its plan definition.`);
       }
-      const planIssues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived));
+      const planIssues = checkRunPlan(snapshot.run, plan, 'review_correction', this.getAgents().filter(agent => !agent.isArchived));
       if (planIssues.length) throw new Error(`The amended review plan is invalid: ${planIssues.map(issue => issue.detail).join(' ')}`);
 
       for (const finding of input.findings) {
@@ -5688,7 +5686,7 @@ export class SQLiteService {
           !input.addedTasks.filter(task => ['database', 'backend', 'frontend', 'mobile'].includes(task.kind)).every(task => task.correctionOfTaskId && task.scope.includePaths.length)) {
         throw new Error('A final-validation amendment must include scoped owner corrections followed by independent review and validation gates.');
       }
-      const issues = validateOrchestrationPlan(plan, this.getAgents().filter(agent => !agent.isArchived));
+      const issues = checkRunPlan(snapshot.run, plan, 'review_correction', this.getAgents().filter(agent => !agent.isArchived));
       if (issues.length) throw new Error(`The final-validation correction plan is invalid: ${issues.map(issue => issue.detail).join(' ')}`);
 
       const nextPlanVersion = snapshot.run.planVersion + 1;

@@ -5,50 +5,107 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { agentReadiness } from './agentReadiness.js';
 import { roleCanPlan } from './agentRoleContracts.js';
 import { resolveAgent } from './personaService.js';
-import { OrchestrationPlanner } from './orchestrationPlanner.js';
+import { OrchestrationPlanner, OrchestrationPlanningError, type OrchestrationPlanningInput } from './orchestrationPlanner.js';
 import { plannerModelName, repositoryPlanningContext } from './projectBuildOrchestrator.js';
 import { getCurrentBranch, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
+import type { OrchestrationPlan } from './orchestrationContract.js';
+import type { OrchestrationRepositoryWorkspace, OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { planRepositoryCoverage } from './orchestrationWorkspace.js';
+import { describePlanChanges } from './orchestrationPlanChanges.js';
 
-export async function reviseBoardPlan(context: WorkspaceContext, runId: string, revision: number, instruction: string) {
+/** A saved plan the Orchestrator may plan again: unstarted, unchanged since it was opened. */
+function unstartedSnapshot(runId: string, revision: number): OrchestrationSnapshot {
+  const snapshot = sqliteService.getOrchestrationSnapshot(runId);
+  if (!snapshot || snapshot.run.revision !== revision || snapshot.run.status !== 'awaiting_plan_approval' || snapshot.attempts.length) {
+    throw new Error('Only an unchanged, unstarted plan can be revised.');
+  }
+  return snapshot;
+}
+
+async function assertCheckpoints(roots: readonly OrchestrationRepositoryWorkspace[], during: boolean): Promise<void> {
+  for (const root of roots) {
+    const moved = (!during && await getCurrentBranch(root.worktreePath) !== root.branchName) ||
+      await getHeadCommit(root.worktreePath) !== root.baseCommit || !await isGitWorkingTreeClean(root.worktreePath);
+    if (moved) {
+      throw new Error(during ? 'The planning checkpoint changed during revision. The original plan is preserved.'
+        : 'The planning checkpoint changed. Review the saved workspace before revising.');
+    }
+  }
+}
+
+/**
+ * Everything the Orchestrator needs to plan again inside a saved, unstarted build, built one way
+ * from the run: its checkouts, memory, ready agents, and which codebases may stay without tasks.
+ * Revising a plan and correcting one at start both use it, so they plan under the same rules the
+ * plan was first made under.
+ */
+async function unstartedPlanningInput(context: WorkspaceContext, snapshot: OrchestrationSnapshot, goal: string): Promise<OrchestrationPlanningInput> {
+  const roots = snapshot.run.repositoryWorkspaces ?? [];
+  if (!roots.length) throw new Error('The saved planning workspaces are unavailable.');
+  await assertCheckpoints(roots, false);
+  const visible = [];
+  for (const agent of sqliteService.getAgents().filter(item => !item.isArchived)) {
+    if (agentReadiness(agent, sqliteService.getRuntimes()).status === 'ready' && await workspaceRegistry.canAccessProjectAgentRun(context, snapshot.run.projectId, agent.id)) visible.push(agent);
+  }
+  const agent = visible.find(item => item.role === 'Orchestrator Agent') ?? visible.find(item => roleCanPlan(item.role));
+  if (!agent) throw new Error('No authorized planning agent is ready.');
+  const persona = resolveAgent(agent, { includeMemory: false, includeToolPolicy: false });
+  const optional = new Set(planRepositoryCoverage(snapshot.run).optionalRepositories.map(item => item.toLowerCase()));
+  const contexts = roots.map(root => ({ ...root, context: repositoryPlanningContext(root.worktreePath) }));
+  return { runId: snapshot.run.id, cwd: roots[0].worktreePath, goal,
+    exclusions: snapshot.run.plan.exclusions, approvedRequirements: snapshot.run.plan.requirements,
+    // A revision keeps the saved project context (it used to be dropped) and reads the same memory.
+    projectContext: snapshot.run.plan.projectContext,
+    repositoryMemory: renderProjectMemory(await Promise.all(roots.map(root => readMemoryAtCommit(root.repository, root.worktreePath, root.baseCommit)))),
+    repositoryContext: contexts[0].context.context, availableScripts: contexts[0].context.scripts,
+    repositories: contexts.map(item => ({ repository: item.repository, repositoryContext: item.context.context, availableScripts: item.context.scripts,
+      ...(optional.has(item.repository.toLowerCase()) ? { optional: true } : {}) })),
+    repositoryRoots: roots.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })), branchContext: roots,
+    eligibleAgents: visible.map(item => ({ id: item.id, role: item.role, name: item.name, ready: true })),
+    planner: { id: agent.id, name: persona.name, role: persona.role, provider: persona.modelProvider,
+      modelName: plannerModelName(persona.modelProvider, persona.modelName, sqliteService.getRuntimes()), systemPrompt: persona.systemPrompt }
+  };
+}
+
+export async function reviseBoardPlan(context: WorkspaceContext, runId: string, revision: number, instruction: string, planner = new OrchestrationPlanner()) {
   return runWithWorkspace(context.workspaceId, async () => {
-    const snapshot = sqliteService.getOrchestrationSnapshot(runId);
-    if (!snapshot || snapshot.run.revision !== revision || snapshot.run.status !== 'awaiting_plan_approval' || snapshot.attempts.length) {
-      throw new Error('Only an unchanged, unstarted plan can be revised.');
-    }
-    const roots = snapshot.run.repositoryWorkspaces ?? [];
-    if (!roots.length) throw new Error('The saved planning workspaces are unavailable.');
-    for (const root of roots) {
-      if (await getCurrentBranch(root.worktreePath) !== root.branchName || await getHeadCommit(root.worktreePath) !== root.baseCommit || !await isGitWorkingTreeClean(root.worktreePath)) {
-        throw new Error('The planning checkpoint changed. Review the saved workspace before revising.');
-      }
-    }
-    const visible = [];
-    for (const agent of sqliteService.getAgents().filter(item => !item.isArchived)) {
-      if (agentReadiness(agent, sqliteService.getRuntimes()).status === 'ready' && await workspaceRegistry.canAccessProjectAgentRun(context, snapshot.run.projectId, agent.id)) visible.push(agent);
-    }
-    const agent = visible.find(item => item.role === 'Orchestrator Agent') ?? visible.find(item => roleCanPlan(item.role));
-    if (!agent) throw new Error('No authorized planning agent is ready.');
-    const persona = resolveAgent(agent, { includeMemory: false, includeToolPolicy: false });
-    const contexts = roots.map(root => ({ ...root, context: repositoryPlanningContext(root.worktreePath) }));
-    const planned = await new OrchestrationPlanner().createPlan({ runId, cwd: roots[0].worktreePath,
-      goal: snapshot.run.plan.goal + '\nPlan revision requested by the developer (within the same requirements):\n' + instruction,
-      exclusions: snapshot.run.plan.exclusions, approvedRequirements: snapshot.run.plan.requirements,
-      // A revision keeps the saved project context (it used to be dropped) and reads the same memory.
-      projectContext: snapshot.run.plan.projectContext,
-      repositoryMemory: renderProjectMemory(await Promise.all(roots.map(root => readMemoryAtCommit(root.repository, root.worktreePath, root.baseCommit)))),
-      repositoryContext: contexts[0].context.context, availableScripts: contexts[0].context.scripts,
-      repositories: contexts.map(item => ({ repository: item.repository, repositoryContext: item.context.context, availableScripts: item.context.scripts })),
-      repositoryRoots: roots.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })), branchContext: roots,
-      eligibleAgents: visible.map(item => ({ id: item.id, role: item.role, name: item.name, ready: true })),
-      planner: { id: agent.id, name: persona.name, role: persona.role, provider: persona.modelProvider,
-        modelName: plannerModelName(persona.modelProvider, persona.modelName, sqliteService.getRuntimes()), systemPrompt: persona.systemPrompt }
-    });
+    const snapshot = unstartedSnapshot(runId, revision);
+    const input = await unstartedPlanningInput(context, snapshot,
+      snapshot.run.plan.goal + '\nPlan revision requested by the developer (within the same requirements):\n' + instruction);
+    const planned = await planner.createPlan(input);
     // The requested planning instruction does not replace the approved product goal.
     planned.plan.goal = snapshot.run.plan.goal;
-    for (const root of roots) {
-      if (await getHeadCommit(root.worktreePath) !== root.baseCommit || !await isGitWorkingTreeClean(root.worktreePath)) throw new Error('The planning checkpoint changed during revision. The original plan is preserved.');
-    }
+    await assertCheckpoints(snapshot.run.repositoryWorkspaces ?? [], true);
     return sqliteService.replaceUnstartedPlan({ runId, expectedRevision: revision, plan: planned.plan, actorId: context.userId, reason: instruction });
+  });
+}
+
+export interface StartCorrection {
+  snapshot: OrchestrationSnapshot;
+  /** What the saved plan failed, in the check's words. */
+  reason: string;
+  /** What the correction changed, one short line each. */
+  changes: string[];
+}
+
+/**
+ * A saved plan that failed its start check goes back to the Orchestrator once. The corrected plan
+ * is saved as the next version and waits for the person to start it: their approval always covers
+ * the exact plan that runs. Throws the planner's error, with both plans, when the correction fails.
+ */
+export async function correctPlanBeforeStart(context: WorkspaceContext, runId: string, issues: readonly { detail: string }[],
+  planner = new OrchestrationPlanner()): Promise<StartCorrection> {
+  return runWithWorkspace(context.workspaceId, async () => {
+    const latest = sqliteService.getOrchestrationSnapshot(runId);
+    const snapshot = unstartedSnapshot(runId, latest?.run.revision ?? -1);
+    const reason = issues.map(issue => issue.detail).join(' ');
+    const input = await unstartedPlanningInput(context, snapshot, snapshot.run.plan.goal);
+    const corrected: OrchestrationPlan = await planner.correctPlan(input, snapshot.run.plan, new OrchestrationPlanningError(reason, 'invalid_plan'));
+    corrected.goal = snapshot.run.plan.goal;
+    await assertCheckpoints(snapshot.run.repositoryWorkspaces ?? [], true);
+    const saved = sqliteService.replaceUnstartedPlan({ runId, expectedRevision: snapshot.run.revision, plan: corrected, actorId: context.userId,
+      reason: `The Orchestrator corrected the plan before it could start: ${reason}` });
+    return { snapshot: saved, reason, changes: describePlanChanges(snapshot.run.plan, corrected) };
   });
 }
