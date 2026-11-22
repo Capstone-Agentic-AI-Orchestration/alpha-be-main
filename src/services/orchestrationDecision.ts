@@ -33,7 +33,12 @@ export async function executeOrchestrationDecision(input: {
     throw new Error('This build is not waiting for that publication decision.');
   }
   const { orchestrationService } = await import('./orchestrationRuntime.js');
-  return action === 'start'
-    ? orchestrationService.startPlannedWork({ workspaceId: context.workspaceId, runId, expectedRevision: expectedRevision!, actorId: context.userId })
-    : orchestrationService.approveAndPublish({ workspaceId: context.workspaceId, runId, expectedRevision, actorId: context.userId });
+  if (action !== 'start') return orchestrationService.approveAndPublish({ workspaceId: context.workspaceId, runId, expectedRevision, actorId: context.userId });
+  const started = await orchestrationService.startPlannedWork({ workspaceId: context.workspaceId, runId, expectedRevision: expectedRevision!, actorId: context.userId });
+  // Started from the card or from chat, the conversation says so and follows the agents from here.
+  if (started.run.status === 'executing') {
+    const { postStartedNotice } = await import('./orchestrationChatNotice.js');
+    await postStartedNotice(sqliteService, started);
+  }
+  return started;
 }

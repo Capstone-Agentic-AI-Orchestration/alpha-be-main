@@ -24,7 +24,7 @@ import { pathMatchesScope } from '../utils/pathScope.js';
 import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
-import { authorizedRepositoriesForRun, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
+import { authorizedRepositoriesForRun, planRepositoryCoverage, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { memorySources, readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 import { isBuildWorkspaceLost, latestCheckpointCommit } from './orchestrationCheckpoints.js';
@@ -562,7 +562,7 @@ export class OrchestrationService {
         const issues = validateOrchestrationPlan({ ...snapshot.run.plan, tasks: snapshot.run.plan.tasks.filter(task => executableIds.has(task.id)) }, eligibleAgents, {
           maxTaskCount: MAX_INITIAL_PLAN_TASKS,
           initialPlan: true,
-          repositories: snapshot.run.repositoryWorkspaces?.length ? snapshot.run.repositoryWorkspaces.map(item => item.repository) : [snapshot.run.repository]
+          ...planRepositoryCoverage(snapshot.run)
         });
         if (issues.length) throw new OrchestrationPlanError(issues);
       }

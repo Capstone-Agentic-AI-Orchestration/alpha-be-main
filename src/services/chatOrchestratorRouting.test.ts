@@ -622,7 +622,7 @@ describe('the Orchestrator decides about a build waiting in the chat', () => {
     cliReply = route({ route: 'start_plan', evidence: content });
     const result = await send(chatService, content, { projectId: 'project-1', buildDecision: decision });
     expect(startPlannedWork).toHaveBeenCalledTimes(1);
-    expect(result.agentMessage.content).toContain('Plan v2 started');
+    expect(result.agentMessage.content).toContain('Started plan v2');
     expect(approveAndPublish).not.toHaveBeenCalled();
   });
 

@@ -16,14 +16,15 @@ import { runWithWorkspace } from './workspaceContext.js';
 /** The one thing a notice reads: the build chat's messages, to post each notice once. */
 export interface NoticeStore { getChatMessages(threadId: string): ChatMessage[] }
 
-async function post(store: NoticeStore, snapshot: OrchestrationSnapshot, id: string, content: string): Promise<void> {
+async function post(store: NoticeStore, snapshot: OrchestrationSnapshot, id: string, content: string,
+  messageType: ChatMessage['messageType'] = 'build_milestone'): Promise<void> {
   const threadId = snapshot.run.originChatThreadId;
   if (!threadId) return;
   await runWithWorkspace(snapshot.run.workspaceId, async () => {
     if (store.getChatMessages(threadId).some(message => message.id === id)) return;
     const message: ChatMessage = {
       id, threadId, senderType: 'agent', senderName: 'Alpha Orchestrator', content,
-      messageType: 'build_milestone', orchestrationRunId: snapshot.run.id, timestamp: new Date().toISOString()
+      messageType, orchestrationRunId: snapshot.run.id, timestamp: new Date().toISOString()
     };
     const { saveChatMessageAndShare } = await import('./chatWriteThrough.js');
     saveChatMessageAndShare(message);
@@ -46,6 +47,17 @@ export function publishedNotice(publications: OrchestrationPublicationRecord[]):
   }
   if (opened.length) lines.push('Merge on GitHub when you are happy with it.');
   return lines.join('\n');
+}
+
+/**
+ * A started plan, at the bottom of its conversation. It is a build message, so the chat shows the
+ * agents' live progress under it, where the person is reading, instead of only in the pinned card.
+ */
+export async function postStartedNotice(store: NoticeStore, snapshot: OrchestrationSnapshot): Promise<void> {
+  const required = snapshot.tasks.filter(task => task.required).length || snapshot.tasks.length;
+  await post(store, snapshot, `${snapshot.run.id}-started-v${snapshot.run.planVersion}`,
+    `**Plan v${snapshot.run.planVersion} started.** The agents are working on ${required} ${required === 1 ? 'task' : 'tasks'}; their progress follows here. You can stop the build at any time; work already on the build branch stays available.`,
+    'build').catch(() => undefined);
 }
 
 export async function postPublishedNotice(store: NoticeStore, snapshot: OrchestrationSnapshot, publications: OrchestrationPublicationRecord[]): Promise<void> {

@@ -185,7 +185,7 @@ async function startPlan(input: ChatActionInput, deps: ChatActionDeps): Promise<
   const next = await deps.decide({ context: input.context, projectId: input.projectId, runId: snapshot.run.id, action: 'start',
     threadId: input.threadId, ...revisionFor(input, snapshot) });
   return reply(next.run.status === 'executing'
-    ? `Plan v${next.run.planVersion} started. Follow the agents and instructions in the right panel.`
+    ? `Started plan v${next.run.planVersion}, as you asked.`
     : `The start request returned build status: ${next.run.status}. Check the right panel for its current outcome.`);
 }
 
