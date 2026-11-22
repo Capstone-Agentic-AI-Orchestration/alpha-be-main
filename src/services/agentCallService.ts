@@ -787,7 +787,12 @@ export class AgentCallService extends EventEmitter {
   private extractPatch(content: string): string | undefined {
     const match = content.match(/```(?:diff|patch)\s*\n([\s\S]*?)```/i);
     if (!match?.[1]) return undefined;
-    const patch = match[1].trim();
+    // Only surrounding blank lines go: a last hunk can end on a blank context line (a single
+    // space), and trimming it away made git apply reject the patch as corrupt.
+    const lines = match[1].split('\n');
+    while (lines.length && !lines[0].trim()) lines.shift();
+    while (lines.length && !lines[lines.length - 1].replace(/\r$/, '')) lines.pop();
+    const patch = lines.join('\n');
     if (!patch || Buffer.byteLength(patch, 'utf8') > MAX_PATCH_BYTES) return undefined;
     if (!/(^|\n)(diff --git |--- a\/|\+\+\+ b\/)/.test(patch)) return undefined;
     return `${patch}\n`;

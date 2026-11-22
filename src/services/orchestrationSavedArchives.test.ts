@@ -44,3 +44,36 @@ describe('inspected same-task archive restoration', () => {
     expect(fs.existsSync(path.join(cwd, 'src', 'email.ts'))).toBe(false);
   });
 });
+
+describe('saved work with ordinary dot files and unusual names', () => {
+  it('reads every name in numstat -z output, including both names of a rename', async () => {
+    const { numstatPaths } = await import('./orchestrationSavedArchives.js');
+    expect(numstatPaths('1\t0\t.github/workflows/ci.yml\x002\t1\tsrc/café.ts\x000\t0\t\x00src/old name.ts\x00src/new name.ts\x00'))
+      .toEqual(['.github/workflows/ci.yml', 'src/café.ts', 'src/old name.ts', 'src/new name.ts']);
+  });
+
+  it('restores .github and .gitignore files a task may write, but never the .git folder', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-archive-dotfiles-'));
+    const previousHome = process.env.ALPHA_HOME;
+    try {
+      const cwd = path.join(root, 'worktree'); fs.mkdirSync(cwd);
+      process.env.ALPHA_HOME = path.join(root, 'profile');
+      const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+      git('init', '-b', 'main'); fs.writeFileSync(path.join(cwd, 'README.md'), 'base\n'); git('add', '.'); git('-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-m', 'base');
+      const baseCommit = git('rev-parse', 'HEAD');
+      fs.mkdirSync(path.join(cwd, '.github', 'workflows'), { recursive: true });
+      fs.writeFileSync(path.join(cwd, '.github', 'workflows', 'ci.yml'), 'on: push\n');
+      fs.writeFileSync(path.join(cwd, '.gitignore'), 'dist\n');
+      await preserveAndRestoreWorktree({ worktree: cwd, runId: 'run-dot', label: 'ci' });
+      const task = { id: 'ci', repository: 'acme/app', status: 'failed', scope: { includePaths: ['.github/**', '.gitignore'], excludePaths: [] } };
+      const snapshot = { run: { id: 'run-dot', repository: 'acme/app', plan: { tasks: [task] }, repositoryWorkspaces: [{ repository: 'acme/app', worktreePath: cwd, branchName: 'main', baseCommit }] }, tasks: [task], attempts: [] } as unknown as OrchestrationSnapshot;
+      const saved = listSavedArchives(snapshot, snapshot.tasks[0])[0];
+      expect(saved?.files).toEqual(expect.arrayContaining(['untracked/.github/workflows/ci.yml', 'untracked/.gitignore']));
+      await restoreSavedArchive(snapshot, snapshot.tasks[0], { archiveId: saved.id, archiveHash: saved.hash, candidateHash: await worktreeChangesHash(cwd) });
+      expect(fs.readFileSync(path.join(cwd, '.github', 'workflows', 'ci.yml'), 'utf8')).toBe('on: push\n');
+    } finally {
+      if (previousHome === undefined) delete process.env.ALPHA_HOME; else process.env.ALPHA_HOME = previousHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

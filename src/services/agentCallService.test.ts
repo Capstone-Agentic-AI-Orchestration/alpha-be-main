@@ -38,3 +38,11 @@ describe('independent agent call scope', () => {
     if (['revise', 'implement'].includes(operationMode)) expect(prompt).toContain('Do not apply it.');
   });
 });
+
+describe('the patch an agent call proposes', () => {
+  it('keeps a last hunk that ends on a blank context line, so git apply accepts it', () => {
+    const patch = ['diff --git a/src/a.ts b/src/a.ts', '--- a/src/a.ts', '+++ b/src/a.ts', '@@ -1,3 +1,3 @@', ' first', '-old', '+new', ' '].join('\n');
+    const extracted = (new AgentCallService() as unknown as { extractPatch(content: string): string | undefined }).extractPatch('Here it is:\n```diff\n\n' + patch + '\n\n```');
+    expect(extracted).toBe(patch + '\n');
+  });
+});

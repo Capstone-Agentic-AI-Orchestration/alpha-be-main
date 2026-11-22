@@ -155,6 +155,10 @@ export function resolveInProject(roots: ProjectRoot[], repository: string | unde
   return { root, abs: real, rel: path.relative(root.dir, real).split(path.sep).join('/') };
 }
 
+/** Diff exclusions matching isSecretFile, so project_git diff never shows what project_read_file hides. */
+const SECRET_DIFF_PATTERNS = ['**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/*.p12', '**/*.pfx',
+  '**/id_rsa', '**/id_ed25519', '**/id_ecdsa', '**/id_dsa'];
+
 /** Files whose contents are never shown: environment files (except examples) and private keys. */
 export function isSecretFile(name: string): boolean {
   // Windows drops trailing dots and spaces from file names: `.env.` and `.env ` are `.env`.
@@ -349,8 +353,9 @@ export function gitArgs(command: GitCommand, options: { ref?: string; rel?: stri
     case 'log':
       return [...base, 'log', '--oneline', '--decorate', '-n', String(options.maxCount ?? 20), ...(ref ? [ref] : []), ...pathspec];
     case 'diff':
+      // The same files project_read_file hides (isSecretFile), in any letter case.
       return [...base, 'diff', '--no-ext-diff', '--no-textconv', ...(ref ? [ref] : []), '--', options.rel || '.',
-        ':(exclude,glob)**/.env', ':(exclude,glob)**/.env.*'];
+        ...SECRET_DIFF_PATTERNS.map(pattern => `:(exclude,glob,icase)${pattern}`)];
     case 'branches':
       return [...base, 'branch', '--all', '--no-color'];
     default:

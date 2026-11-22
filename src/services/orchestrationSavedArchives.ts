@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { samePath } from '../utils/samePath.js';
 import { sameRepository } from '../utils/repositoryName.js';
 import path from 'node:path';
 import os from 'node:os';
@@ -25,7 +26,7 @@ function archive(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord,
   if (!workspace) throw new Error('The recorded workspace is unavailable.');
   if (fs.statSync(path.join(folder, 'README.json')).size > MAX_BYTES) throw new Error('Saved archive metadata exceeds the restore limit.');
   const metadata = JSON.parse(fs.readFileSync(path.join(folder, 'README.json'), 'utf8'));
-  if (metadata.runId !== snapshot.run.id || path.resolve(metadata.worktree) !== path.resolve(workspace.worktreePath) || !id.endsWith('-' + safeName(task.id))) throw new Error('The archive does not belong to this failed step and workspace.');
+  if (metadata.runId !== snapshot.run.id || !samePath(String(metadata.worktree), workspace.worktreePath) || !id.endsWith('-' + safeName(task.id))) throw new Error('The archive does not belong to this failed step and workspace.');
   const hash = createHash('sha256');
   let size = 0;
   const files: Array<{ relative: string; file: string }> = [];
@@ -46,10 +47,27 @@ function archive(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord,
   const patch = files.find(item => item.relative === 'tracked-changes.patch');
   if (patch && /^(?:new file mode|old mode|new mode) 120000$/m.test(fs.readFileSync(patch.file, 'utf8'))) throw new Error('A symbolic-link patch needs manual review.');
   const untracked = files.filter(item => item.relative.startsWith('untracked/'));
-  const allows = (relative: string) => relative && !path.isAbsolute(relative) && !relative.split(/[\\/]/).includes('..') && !relative.startsWith('.git') &&
+  const allows = (relative: string) => relative && !path.isAbsolute(relative) && !relative.split(/[\\/]/).includes('..') && !relative.split(/[\\/]/).some(part => part.toLowerCase() === '.git') &&
     scopeAllowsPath(task.scope, relative);
   if (untracked.some(item => !allows(item.relative.slice('untracked/'.length)))) throw new Error('The archive contains a file outside this step’s approved scope.');
   return { workspace, folder, hash: hash.digest('hex'), patch, untracked, allows, files: files.map(item => item.relative), savedAt: String(metadata.savedAt ?? '') };
+}
+
+/**
+ * The file names in `git apply --numstat -z` output: "added<TAB>deleted<TAB>path\0", or for a
+ * rename "added<TAB>deleted<TAB>\0old\0new\0". Both names of a rename are returned.
+ */
+export function numstatPaths(output: string): string[] {
+  const fields = output.split('\0');
+  const paths: string[] = [];
+  for (let index = 0; index < fields.length; index++) {
+    const parts = fields[index].split('\t');
+    if (parts.length < 3) continue;
+    const name = parts.slice(2).join('\t');
+    if (name) paths.push(name);
+    else { paths.push(fields[index + 1] ?? '', fields[index + 2] ?? ''); index += 2; }
+  }
+  return paths.filter(Boolean);
 }
 
 export function listSavedArchives(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord) {
@@ -79,8 +97,9 @@ export async function restoreSavedArchive(snapshot: OrchestrationSnapshot, task:
     sameRepository(snapshot.tasks.find(item => item.id === attempt.taskId)?.repository ?? snapshot.run.repository, entry.workspace.repository));
   if (await getCurrentBranch(cwd) !== entry.workspace.branchName || await getHeadCommit(cwd) !== (latest?.resultCommit ?? entry.workspace.baseCommit)) throw new Error('The accepted checkpoint changed. The archive was not restored.');
   if (entry.patch) {
-    const stat = await exec('git', ['apply', '--numstat', entry.patch.file], { cwd, windowsHide: true });
-    const paths = stat.stdout.trim().split('\n').filter(Boolean).map(line => line.split('\t').slice(2).join('\t').trim());
+    // -z keeps file names exactly as they are; without it git quotes unusual names and they fail the scope check.
+    const stat = await exec('git', ['apply', '--numstat', '-z', entry.patch.file], { cwd, windowsHide: true });
+    const paths = numstatPaths(stat.stdout);
     if (!paths.length || paths.some(file => !entry.allows(file))) throw new Error('The patch contains paths outside the approved scope.');
     await exec('git', ['apply', '--check', entry.patch.file], { cwd, windowsHide: true });
   }
