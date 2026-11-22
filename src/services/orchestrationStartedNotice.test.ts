@@ -3,11 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ChatMessage } from '../models/index.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 
-const saved: ChatMessage[] = [];
+const { saved } = vi.hoisted(() => ({ saved: [] as ChatMessage[] }));
 vi.mock('./chatWriteThrough.js', () => ({ saveChatMessageAndShare: (message: ChatMessage) => { saved.push(message); } }));
 vi.mock('./chatService.js', () => ({ chatService: { emit: vi.fn() } }));
 
-const { postStartedNotice } = await import('./orchestrationChatNotice.js');
+import { postStartedNotice } from './orchestrationChatNotice.js';
 
 /** Starting a plan, from the card or from chat, is said in its conversation, where its progress then shows. */
 describe('the started-plan notice in chat', () => {
