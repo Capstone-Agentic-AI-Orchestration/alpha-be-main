@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { assertSafeBranchName, isGitRepo } from '../utils/gitUtils.js';
+import { assertSafeBranchName, isGitRepo, keepRepositoryLineEndings, REPOSITORY_LINE_ENDINGS } from '../utils/gitUtils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -210,6 +210,7 @@ export async function ensureBuildWorktree(input: EnsureBuildWorktreeInput): Prom
   // Drop the dead registration for this path, then recreate the branch at the checkpoint.
   await git(checkoutDir, ['worktree', 'prune']);
   await fs.promises.mkdir(path.dirname(worktreePath), { recursive: true });
-  await git(checkoutDir, ['worktree', 'add', '-B', input.branchName, worktreePath, commit]);
+  await git(checkoutDir, [...REPOSITORY_LINE_ENDINGS, 'worktree', 'add', '-B', input.branchName, worktreePath, commit]);
+  await keepRepositoryLineEndings(checkoutDir, worktreePath);
   return { status: 'rebuilt', commit, ...(preservedFolder ? { preservedFolder } : {}) };
 }

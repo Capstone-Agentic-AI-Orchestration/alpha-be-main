@@ -165,7 +165,7 @@ export function appendOrchestrationTaskPolicy(
       ? `For every targeted finding ID below, include one findingCoverage entry with concrete evidence that it is fixed. A correction is not complete merely because its checks pass.\n${orchestration.taskPackage.findingIds.map(id => `- ${id}`).join('\n')}`
       : '',
     'For reportedChecks, use objects with script, result and evidence; result must be passed, failed, or not_run. Use not_run when a check did not execute, including when your sandbox blocked it, and explain why in evidence; a check that cannot run is not a task blocker, because Alpha runs the required checks itself. Put only problems that stop the task itself, such as a missing requirement or file, in blockers so Alpha can escalate them clearly.',
-    'Use alpha-task-files for all source reads and scoped edits: project_list_files, project_read_file, project_search, project_write_file, project_edit_file and project_delete_file. Native file tools and terminal commands are disabled. project_generate_lockfile performs the bounded npm lockfile operation when that path is approved. project_run_check runs only an assigned requiredChecks name in a disposable source copy. Alpha also runs required verification after the report. Analysis/review/delivery output belongs in report deliverables, never repository edits.',
+    'Use alpha-task-files for all source reads and scoped edits: project_list_files, project_read_file, project_search, project_write_file, project_edit_file and project_delete_file. Native file tools and terminal commands are disabled. A refused file tool call is not a blocker: re-read the file and retry with project_edit_file and a longer, unique old_text, or replace the file with its current content as expected_content (line endings do not matter). project_generate_lockfile performs the bounded npm lockfile operation when that path is approved. project_run_check runs only an assigned requiredChecks name in a disposable source copy. Alpha also runs required verification after the report. Analysis/review/delivery output belongs in report deliverables, never repository edits.',
     'Follow your persona and role boundaries. Do not implement another planned task, broaden the scope, or rework an accepted dependency. If the assigned work conflicts with your role or cannot be completed safely, explain the conflict and stop.',
     orchestration.taskPackage.reportCorrection || task.kind === 'review'
       ? ''
@@ -672,7 +672,8 @@ export class RunnerService extends EventEmitter {
     const access: McpAccess = ctx.orchestration ? 'read' : mcpAccessFor(persona.autonomyLevel, 'run');
     const task = ctx.orchestration?.taskPackage.task;
     const taskRepository = task?.repository ?? issue.githubRepo ?? 'task';
-    const taskRoots = task ? [{ name: path.basename(cwd), repo: taskRepository, dir: cwd }] : undefined;
+    // Named after the repository, not the hashed worktree folder, so paths the tools show read naturally.
+    const taskRoots = task ? [{ name: taskRepository.split('/').pop() || path.basename(cwd), repo: taskRepository, dir: cwd }] : undefined;
     const taskMcpServers = task ? ['alpha-task-files', ...(['audit', 'review', 'delivery'].includes(task.kind) ? ['alpha-github'] : [])] : persona.mcpServers;
     /*
      * A specialist in a build may read the board and comment on its own card,

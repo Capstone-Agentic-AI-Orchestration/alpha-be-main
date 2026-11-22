@@ -160,7 +160,7 @@ describe('RunnerService workspace ownership lifetime', () => {
     }
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
     expect(invocations[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', skills: [],
-      projectRoots: [{ name: path.basename(fixture.cwd), repo: 'test/repo', dir: fixture.cwd }] });
+      projectRoots: [{ name: 'repo', repo: 'test/repo', dir: fixture.cwd }] });
     expect(processes[0].options.cwd).not.toBe(fixture.cwd);
     expect(processes[0].options.idleTimeoutMs).toBe(300_000);
     expect(path.basename(processes[0].options.cwd)).toBe('context');

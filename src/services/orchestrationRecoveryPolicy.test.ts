@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { classifyRecoveryCategory, isContentFreeDirection, recoveryAvailableActions, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
+import { classifyRecoveryCategory, isContentFreeDirection, isSpecialistBlocker, isToolOrEnvironmentBlocker, recoveryAvailableActions, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
 
 function blockedReviewSnapshot(reportOnlyRetries: number): OrchestrationSnapshot {
   return {
@@ -129,6 +129,43 @@ describe('a specialist that reports a blocker', () => {
     expect(recovery.availableActions).toContain('provide_guidance');
     expect(recovery.availableActions).not.toContain('repair_and_continue');
     expect(recovery.actionReasons.repair_and_continue).toContain('no API client or documented endpoint contract');
+  });
+
+  it('offers a plain retry, not a demand for missing detail, when a tool refused the change', () => {
+    const tool = 'The specialist reported a blocker: The scoped project file tool rejected replacement of src/App.tsx because its exact-content guard did not match; the tracker UI could not be implemented.';
+    const refused = { ...snapshot, attempts: [{ ...snapshot.attempts[0], failureReason: tool }] } as unknown as OrchestrationSnapshot;
+    const recovery = recoveryAvailableActions({ snapshot: refused, category: 'project_code', taskId: 'frontend', canControl: true, episodeAgeMs: 0 });
+    expect(recovery.availableActions).toContain('repair_and_continue');
+    expect(isSpecialistBlocker(tool)).toBe(false);
+    expect(isSpecialistBlocker(blocker)).toBe(true);
+  });
+
+  it('tells tool and environment failures apart from missing information', () => {
+    for (const text of ['The scoped project file tool rejected replacement of src/App.tsx because its exact-content guard did not match',
+      'project_edit_file refused the edit: old_text must match exactly once', 'npm install was refused: EACCES permission denied', 'The check timed out after 600 s']) {
+      expect(isToolOrEnvironmentBlocker(text)).toBe(true);
+    }
+    for (const text of ['The frontend has no API client or documented endpoint contract.', 'Which currency should totals use?', 'docs/payments-api.md is missing.']) {
+      expect(isToolOrEnvironmentBlocker(text)).toBe(false);
+    }
+  });
+
+  it('continues a task that left uncheckpointed work instead of waiting for inspection', () => {
+    for (const reason of ['The repository changed after submission or has uncheckpointed edits. Reconcile it before acceptance.',
+      'The runner reported completion without a verifiable checkpoint commit. Preserve the worktree and reconcile it before retrying.']) {
+      const leftover = { ...snapshot, attempts: [{ ...snapshot.attempts[0], failureReason: reason }] } as unknown as OrchestrationSnapshot;
+      expect(recoveryAvailableActions({ snapshot: leftover, category: 'workspace', taskId: 'frontend', canControl: true, episodeAgeMs: 0 }).availableActions)
+        .toContain('repair_and_continue');
+    }
+  });
+
+  it('resumes a build stopped between tasks, which repeats the planning or saving step', () => {
+    for (const stoppedReason of ['Milestone planning stopped before dispatch: provider timed out', 'Plan document could not be saved before dispatch: disk busy']) {
+      const between = { run: { status: 'blocked', stoppedReason }, tasks: [{ id: 'frontend', status: 'accepted', required: true }], attempts: [], findings: [] } as unknown as OrchestrationSnapshot;
+      expect(recoveryAvailableActions({ snapshot: between, category: 'unknown', canControl: true, episodeAgeMs: 0 }).availableActions).toContain('resume_checkpoint');
+    }
+    const lost = { run: { status: 'blocked', stoppedReason: 'Build working copy lost: the folder was deleted.' }, tasks: [], attempts: [], findings: [] } as unknown as OrchestrationSnapshot;
+    expect(recoveryAvailableActions({ snapshot: lost, category: 'workspace', canControl: true, episodeAgeMs: 0 }).availableActions).not.toContain('resume_checkpoint');
   });
 
   it('still offers a plain repair for a failed check', () => {

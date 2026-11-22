@@ -157,7 +157,9 @@ export function resolveInProject(roots: ProjectRoot[], repository: string | unde
 
 /** Files whose contents are never shown: environment files (except examples) and private keys. */
 export function isSecretFile(name: string): boolean {
-  const base = path.basename(name);
+  // Windows drops trailing dots and spaces from file names: `.env.` and `.env ` are `.env`.
+  let base = path.basename(name);
+  while (base.endsWith('.') || base.endsWith(' ')) base = base.slice(0, -1);
   if (/^\.env(\..+)?$/i.test(base)) return !/\.(example|sample|template|dist)$/i.test(base);
   return /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa|dsa)$/i.test(base);
 }

@@ -1,6 +1,7 @@
 import type { DeliveryRecord } from './orchestrationDelivery.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
+import { reasonForPerson } from './domainRefusal.js';
 
 /**
  * "Merge it" in a project chat: the Orchestrator merges the build's reviewed pull
@@ -45,7 +46,9 @@ export async function mergeFromChat(input: { context: WorkspaceContext; projectI
     const names = merged.repositories.map(repo => `${repoName(repo.repository)} pull request #${repo.prNumber}`).join(', ');
     return `Merged ${names} into dev. CI runs on dev next; promotion to UAT is a separate step.`;
   } catch (error) {
-    return `I can't merge it: ${error instanceof Error ? error.message : String(error)}`;
+    const reason = reasonForPerson(error);
+    if (reason.unexpected) void import('../utils/logger.js').then(({ logError }) => logError('Merge from chat failed unexpectedly:', error instanceof Error ? error.stack ?? error.message : String(error))).catch(() => undefined);
+    return `I can't merge it: ${reason.text}`;
   }
 }
 

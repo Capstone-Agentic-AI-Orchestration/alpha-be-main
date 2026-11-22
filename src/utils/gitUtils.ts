@@ -27,16 +27,42 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
  * detached keeps the user's checkout and any uncommitted files untouched,
  * while still sharing the repository's object store and remote configuration.
  */
+/**
+ * Git arguments that check files out exactly as the repository stores them, the way GitHub
+ * and CI see them, whatever this machine's core.autocrlf says. Git for Windows turns autocrlf
+ * on by default, which gave build copies CRLF endings: checks that expect LF failed only
+ * here, and agents' edits never matched text they had read. .gitattributes still apply.
+ */
+export const REPOSITORY_LINE_ENDINGS = ['-c', 'core.autocrlf=false'] as const;
+
+/**
+ * Keep a build worktree's line endings as stored for every later git command in it (Alpha's
+ * resets and restores, checks), not only its first checkout. Uses Git's per-worktree config,
+ * so the person's own checkout keeps its settings. Best effort: an unusual repository
+ * (bare, or with core.worktree set) keeps only the first checkout's endings.
+ */
+export async function keepRepositoryLineEndings(repositoryDir: string, worktreeDir: string): Promise<void> {
+  const read = (key: string) => execFileAsync('git', ['config', '--get', key], { cwd: repositoryDir }).then(result => result.stdout.trim(), () => '');
+  if (await read('core.bare') === 'true' || await read('core.worktree')) return;
+  try {
+    if (await read('extensions.worktreeConfig') !== 'true') await execFileAsync('git', ['config', 'extensions.worktreeConfig', 'true'], { cwd: repositoryDir });
+    await execFileAsync('git', ['config', '--worktree', 'core.autocrlf', 'false'], { cwd: worktreeDir });
+  } catch {
+    // Older Git without per-worktree config: the first checkout already used the stored endings.
+  }
+}
+
 export async function addDetachedWorktree(repositoryDir: string, worktreeDir: string): Promise<void> {
   const destination = path.resolve(worktreeDir);
   if (fs.existsSync(destination)) {
     throw new Error(`The isolated build folder already exists: ${destination}`);
   }
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-  await execFileAsync('git', ['worktree', 'add', '--detach', destination, 'HEAD'], {
+  await execFileAsync('git', [...REPOSITORY_LINE_ENDINGS, 'worktree', 'add', '--detach', destination, 'HEAD'], {
     cwd: repositoryDir,
     timeout: 120_000
   });
+  await keepRepositoryLineEndings(repositoryDir, destination);
 }
 
 /** Create one shared orchestration branch in an isolated, run-scoped worktree. */
@@ -51,10 +77,11 @@ export async function addBranchWorktree(
   const destination = path.resolve(worktreeDir);
   if (fs.existsSync(destination)) throw new Error(`The isolated build folder already exists: ${destination}`);
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-  await execFileAsync('git', ['worktree', 'add', '-b', branchName, destination, baseRef], {
+  await execFileAsync('git', [...REPOSITORY_LINE_ENDINGS, 'worktree', 'add', '-b', branchName, destination, baseRef], {
     cwd: repositoryDir,
     timeout: 120_000
   });
+  await keepRepositoryLineEndings(repositoryDir, destination);
 }
 
 /** Resolve an immutable commit without switching the checkout's branch. */

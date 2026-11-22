@@ -119,6 +119,49 @@ describe('task acceptance and targeted correction', () => {
     directory = '';
   });
 
+  it('retries a task a file tool stopped, with how to get past it, instead of blocking the build', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-tool-blocker-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'App.tsx'), 'export const App = () => null;\n');
+    commit(repository, 'Initial fixture');
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'tool blocker fixture'));
+    const launches: OrchestrationLaunchRequest[] = [];
+    let branchName = '';
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({ schemaVersion: 1, goal: 'Build the tracker UI.', exclusions: [],
+      requirements: [{ id: 'REQ-UI', description: 'Show the tracker.' }],
+      tasks: [{ id: 'tracker-ui', title: 'Build the tracker UI', description: 'Replace the App component.', kind: 'frontend', ownerAgentId: 'frontend-agent',
+        dependsOn: [], requirementIds: ['REQ-UI'], acceptanceCriteria: ['The tracker renders.'], requiredChecks: ['test'], scope: { includePaths: ['src/**'], excludePaths: [] } }] });
+    let snapshot = await startAndApprove(orchestration, { workspaceId, projectId, issueId, repository: 'acme/tracker', requestKey: 'request-tool-blocker',
+      requestFingerprint: 'fingerprint-tool-blocker', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents: [{ id: 'frontend-agent', role: 'Frontend Agent' }] as const, plan });
+    const first = launches[0];
+    const blocker = 'The scoped project file tool rejected replacement of src/App.tsx because its exact-content guard did not match.';
+    snapshot = (await orchestration.handleRunnerCompleted(completedRun(first, await getHeadCommit(repository), [], { blockers: [blocker] })))!;
+    const acceptance = new TaskAcceptanceService(store, orchestration, { worktreePathFor: () => repository,
+      runVerification: async () => ({ status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }] }) });
+
+    const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId: snapshot.run.id, taskId: 'tracker-ui', attemptId: first.attemptId, acceptedBy: 'orchestrator' });
+
+    expect(outcome.decision).toBe('retrying');
+    expect(outcome.snapshot.run.status).toBe('executing');
+    expect(launches).toHaveLength(2);
+    expect(launches[1].taskPackage.corrections.join(' ')).toContain('This is not a product blocker. Re-read the file and retry');
+  });
+
   it('completes an accepted read-only report without a publication stage', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });
