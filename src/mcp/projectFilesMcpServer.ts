@@ -102,18 +102,18 @@ if (TASK) {
   };
   if (!TASK.reportOnly && ['database', 'backend', 'frontend', 'mobile'].includes(TASK.kind)) {
     TOOLS.project_write_file = {
-      description: 'Create a source file inside this task’s approved path scope. To replace an existing file, include exact expected_content; otherwise use project_edit_file.',
-      inputSchema: schema({ path: str('Repository-relative path.'), content: str('Full UTF-8 content.'), expected_content: str('Current exact content when replacing an existing file.') }, ['path', 'content']),
+      description: 'Create a source file inside this task’s approved path scope. To replace an existing file, include its current content as expected_content (as project_read_file shows it, without line numbers; line endings and a byte-order mark do not matter, and the file keeps its own). For small changes prefer project_edit_file.',
+      inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), content: str('Full UTF-8 content.'), expected_content: str('Current content when replacing an existing file; line endings do not matter.') }, ['path', 'content']),
       run: args => writeTaskFile(ROOTS, TASK, args as any)
     };
     TOOLS.project_edit_file = {
-      description: 'Replace exactly one occurrence of old_text in an approved file. Refuses ambiguous/stale text and out-of-scope paths.',
-      inputSchema: schema({ path: str('Repository-relative path.'), old_text: str('Exact nonempty text matching once.'), new_text: str('Replacement text.') }, ['path', 'old_text', 'new_text']),
+      description: 'Replace exactly one occurrence of old_text in an approved file. Copy old_text from project_read_file without the line numbers; line endings do not matter and the file keeps its own. Refuses text that matches zero or several times, and out-of-scope paths.',
+      inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), old_text: str('Nonempty text matching exactly once (line endings ignored).'), new_text: str('Replacement text.') }, ['path', 'old_text', 'new_text']),
       run: args => editTaskFile(ROOTS, TASK, args as any)
     };
     TOOLS.project_delete_file = {
-      description: 'Delete an approved source file only when its current content matches expected_content.',
-      inputSchema: schema({ path: str('Repository-relative path.'), expected_content: str('Exact current file content.') }, ['path', 'expected_content']),
+      description: 'Delete an approved source file only when its current content matches expected_content (line endings do not matter).',
+      inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), expected_content: str('Current file content; line endings do not matter.') }, ['path', 'expected_content']),
       run: args => deleteTaskFile(ROOTS, TASK, args as any)
     };
     TOOLS.project_generate_lockfile = {

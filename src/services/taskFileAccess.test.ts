@@ -43,17 +43,72 @@ describe('task authority before a file changes', () => {
   });
   it('supports bounded creation, exact edits and guarded deletion', () => {
     writeTaskFile(roots, scope, { path: 'src/nested/new.ts', content: 'first' });
-    expect(() => writeTaskFile(roots, scope, { path: 'src/api.ts', content: 'bad' })).toThrow('exact expected_content');
+    expect(() => writeTaskFile(roots, scope, { path: 'src/api.ts', content: 'bad' })).toThrow('expected_content');
     editTaskFile(roots, scope, { path: 'src/api.ts', old_text: 'before', new_text: '$& after' });
     expect(fs.readFileSync(path.join(dir, 'src/api.ts'), 'utf8')).toBe('$& after');
     expect(() => deleteTaskFile(roots, scope, { path: 'src/api.ts', expected_content: 'stale' })).toThrow();
     deleteTaskFile(roots, scope, { path: 'src/api.ts', expected_content: '$& after' });
     expect(fs.existsSync(path.join(dir, 'src/api.ts'))).toBe(false);
   });
+  it.each(['src/api.ts.', 'src/api.ts ', 'src/.env.', 'src/.env ', 'src/Node_Modules/x.js'])('refuses %s, which Windows would rename or which is internal', target => {
+    expect(() => writeTaskFile(roots, scope, { path: target, content: 'bad' })).toThrow();
+  });
+
   it('rejects malformed authority rather than falling back to broad grants', () => {
     expect(parseTaskFileScope(undefined)).toBeUndefined();
     expect(() => parseTaskFileScope(JSON.stringify({ ...scope, kind: 'admin' }))).toThrow();
     expect(() => parseTaskFileScope(JSON.stringify({ ...scope, requiredChecks: ['deploy'] }))).toThrow();
+  });
+});
+
+/**
+ * On Windows a checkout can hold CRLF endings (core.autocrlf) or a byte-order mark that
+ * project_read_file never shows. Guards compare what the agent was shown, and a written
+ * file keeps its own form: this is what blocked a real build (src/App.tsx).
+ */
+describe('files with Windows line endings or a byte-order mark', () => {
+  const app = () => path.join(dir, 'src', 'App.tsx');
+  const crlf = 'export function App() {\r\n  return <h1>Old</h1>;\r\n}\r\n';
+  const shown = 'export function App() {\n  return <h1>Old</h1>;\n}\n';
+
+  it('edits a multi-line block copied from what the agent read, keeping CRLF', () => {
+    fs.writeFileSync(app(), crlf);
+    editTaskFile(roots, scope, { path: 'src/App.tsx', old_text: '{\n  return <h1>Old</h1>;\n}', new_text: '{\n  return <main>\n    <h1>New</h1>\n  </main>;\n}' });
+    expect(fs.readFileSync(app(), 'utf8')).toBe('export function App() {\r\n  return <main>\r\n    <h1>New</h1>\r\n  </main>;\r\n}\r\n');
+  });
+
+  it('replaces and deletes a CRLF file given its content as the agent saw it', () => {
+    fs.writeFileSync(app(), crlf);
+    writeTaskFile(roots, scope, { path: 'src/App.tsx', content: 'export const App = () => null;\n', expected_content: shown });
+    expect(fs.readFileSync(app(), 'utf8')).toBe('export const App = () => null;\r\n');
+    deleteTaskFile(roots, scope, { path: 'src/App.tsx', expected_content: 'export const App = () => null;\n' });
+    expect(fs.existsSync(app())).toBe(false);
+  });
+
+  it('matches past a byte-order mark and keeps it', () => {
+    fs.writeFileSync(app(), '\uFEFF' + shown);
+    writeTaskFile(roots, scope, { path: 'src/App.tsx', content: 'next\n', expected_content: shown });
+    expect(fs.readFileSync(app(), 'utf8')).toBe('\uFEFFnext\n');
+  });
+
+  it('still refuses stale or ambiguous text', () => {
+    fs.writeFileSync(app(), crlf + crlf);
+    expect(() => editTaskFile(roots, scope, { path: 'src/App.tsx', old_text: 'return <h1>Old</h1>;', new_text: 'x' })).toThrow('exactly once');
+    expect(() => writeTaskFile(roots, scope, { path: 'src/App.tsx', content: 'x', expected_content: shown })).toThrow('expected_content');
+  });
+
+  it('writes a new file exactly as sent', () => {
+    writeTaskFile(roots, scope, { path: 'src/new.ts', content: 'a\r\nb\n' });
+    expect(fs.readFileSync(path.join(dir, 'src', 'new.ts'), 'utf8')).toBe('a\r\nb\n');
+  });
+});
+
+describe('path scope letter case', () => {
+  it('follows the platform: case-insensitive where file names are', async () => {
+    const { pathMatchesScope } = await import('../utils/pathScope.js');
+    expect(pathMatchesScope('src/Components/Button.tsx', 'src/components/**', true)).toBe(true);
+    expect(pathMatchesScope('src/Secrets/key.ts', 'src/secrets/**', true)).toBe(true);
+    expect(pathMatchesScope('src/Components/Button.tsx', 'src/components/**', false)).toBe(false);
   });
 });
 

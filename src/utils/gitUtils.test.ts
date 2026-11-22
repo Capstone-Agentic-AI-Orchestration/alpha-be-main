@@ -124,6 +124,29 @@ describe('the branch an agent starts from', () => {
     await removeDetachedWorktree(source, workingDir);
   });
 
+  it('checks a build copy out with the stored line endings, even where autocrlf is on, and leaves the source alone', async () => {
+    const source = path.join(root, 'crlf-source');
+    fs.mkdirSync(source, { recursive: true });
+    git(source, 'init', '--initial-branch', 'main');
+    git(source, 'config', 'core.autocrlf', 'true');
+    fs.writeFileSync(path.join(source, 'App.tsx'), 'one\ntwo\n');
+    git(source, 'add', '-A');
+    git(source, 'commit', '-m', 'baseline');
+    const workingDir = path.join(root, 'crlf-worktree');
+
+    await addBranchWorktree(source, workingDir, 'alpha/orchestration/eol-run');
+
+    expect(fs.readFileSync(path.join(workingDir, 'App.tsx'), 'utf8')).toBe('one\ntwo\n');
+    expect(git(workingDir, 'config', 'core.autocrlf')).toBe('false');
+    expect(git(source, 'config', 'core.autocrlf')).toBe('true');
+    expect(git(workingDir, 'status', '--porcelain')).toBe('');
+    // A later reset in the build copy keeps the stored endings too.
+    fs.writeFileSync(path.join(workingDir, 'App.tsx'), 'changed\n');
+    git(workingDir, 'checkout', '--', 'App.tsx');
+    expect(fs.readFileSync(path.join(workingDir, 'App.tsx'), 'utf8')).toBe('one\ntwo\n');
+    await removeDetachedWorktree(source, workingDir);
+  });
+
   it('reports committed added, changed, and deleted paths between checkpoint commits', async () => {
     const repo = path.join(root, 'changed-paths');
     fs.mkdirSync(repo, { recursive: true });

@@ -19,6 +19,8 @@ import {
   hasRepeatedRecoveryFailure,
   hasRepairableFinalValidationEvidence,
   isAlphaOwnedGitBlocker,
+  isToolOrEnvironmentBlocker,
+  TOOL_BLOCKER_PREFIX,
   reportFormatCorrectionCount,
   safeRecoverySummary,
   safeRecoveryGuidance,
@@ -50,9 +52,10 @@ const REPORT_ONLY_CORRECTION_CHECKS = new Set([
   'requirement_coverage', 'acceptance_criteria', 'deliverable_traceability'
 ]);
 const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
-  'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed'
+  'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed', 'tool_blocker'
 ]);
 
+/** Same case rule as the write tool (pathMatchesScope), so a file it allowed is never rejected here. */
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
   return CODE_TASK_KINDS.has(task.kind) &&
     task.scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
@@ -283,7 +286,9 @@ export class TaskAcceptanceService {
             }
           }
         }
-        const repairableCodeFailure = CODE_TASK_KINDS.has(task.kind) && rejection.findings.length > 0 &&
+        // A tool failure is retried for any task kind; code failures only for implementation tasks.
+        const onlyToolFailures = rejection.findings.length > 0 && rejection.findings.every(finding => finding.evidence.check === 'tool_blocker');
+        const repairableCodeFailure = (CODE_TASK_KINDS.has(task.kind) || onlyToolFailures) && rejection.findings.length > 0 &&
           rejection.findings.every(finding => typeof finding.evidence.check === 'string' &&
             AUTOMATIC_CODE_REPAIR_CHECKS.has(finding.evidence.check) &&
             (finding.evidence.check !== 'required_check' ||
@@ -563,10 +568,18 @@ export class TaskAcceptanceService {
     }
     // Alpha stages and commits the specialist's changes itself, so a sandbox refusing the
     // agent's own git add or commit is expected and says nothing about the task.
-    const unresolvedBlocker = report.blockers.find(blocker => !isAlphaOwnedGitBlocker(blocker));
-    if (unresolvedBlocker) {
-      return fail(`The specialist reported a blocker: ${unresolvedBlocker}`, {
+    const unresolvedBlockers = report.blockers.filter(blocker => !isAlphaOwnedGitBlocker(blocker));
+    // A refused tool call or an environment error is not missing information: the specialist
+    // gets one more try with the error and how to get past it, before anyone is asked.
+    const needsPerson = unresolvedBlockers.find(blocker => !isToolOrEnvironmentBlocker(blocker));
+    if (needsPerson) {
+      return fail(`The specialist reported a blocker: ${needsPerson}`, {
         check: 'agent_blocker', blockers: report.blockers
+      });
+    }
+    if (unresolvedBlockers.length) {
+      return fail(`${TOOL_BLOCKER_PREFIX} ${unresolvedBlockers.join(' ')} This is not a product blocker. Re-read the file and retry with project_edit_file and a longer, unique old_text, or replace the file with its current content as expected_content (line endings do not matter).`, {
+        check: 'tool_blocker', blockers: report.blockers
       });
     }
     const authorizedWorkspace = repositoryWorkspaceForTask(snapshot, task.id);

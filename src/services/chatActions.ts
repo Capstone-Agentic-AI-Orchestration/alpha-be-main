@@ -2,6 +2,7 @@ import type { OrchestrationPlan } from './orchestrationContract.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import type { ChatBuildDecision } from './chatBuildDecision.js';
+import { reasonForPerson } from './domainRefusal.js';
 
 /**
  * What the Orchestrator can do about a build from the project chat.
@@ -136,7 +137,7 @@ export async function runChatAction(input: ChatActionInput, deps: ChatActionDeps
       case 'merge_dev': return reply(await deps.merge({ context: input.context, projectId: input.projectId, threadId: input.threadId, messageId: input.messageId }));
     }
   } catch (error) {
-    return reply(`I couldn't do that: ${error instanceof Error ? error.message : String(error)}`);
+    return reply(`I couldn't do that: ${personReason(error)}`);
   }
 }
 
@@ -147,6 +148,13 @@ function onePending(input: ChatActionInput, deps: ChatActionDeps, statuses: read
   const snapshot = pending.find(item => statuses.includes(item.run.status));
   if (!snapshot) return reply(`There is no ${noun} waiting in this conversation right now.`);
   return snapshot;
+}
+
+/** The reason a person reads; an unexpected system error is logged instead of shown. */
+function personReason(error: unknown): string {
+  const reason = reasonForPerson(error);
+  if (reason.unexpected) void import('../utils/logger.js').then(({ logError }) => logError('Chat action failed unexpectedly:', error instanceof Error ? error.stack ?? error.message : String(error))).catch(() => undefined);
+  return reason.text;
 }
 
 function isOutcome(value: OrchestrationSnapshot | ChatActionOutcome): value is ChatActionOutcome {
@@ -231,7 +239,7 @@ async function revisePlan(input: ChatActionInput, deps: ChatActionDeps): Promise
     const next = await deps.revise(input.context, snapshot.run.id, snapshot.run.revision, instruction);
     return reply(`I revised the plan; it is now plan v${next.run.planVersion}. Review it on the right and tell me to start it when it looks right.`);
   } catch (error) {
-    return reply(`I couldn't revise the plan in place: ${error instanceof Error ? error.message : String(error)} If you want different or extra work, I can replace the plan with a new one; the current plan is kept and can be restored.`);
+    return reply(`I couldn't revise the plan in place: ${personReason(error)} If you want different or extra work, I can replace the plan with a new one; the current plan is kept and can be restored.`);
   }
 }
 

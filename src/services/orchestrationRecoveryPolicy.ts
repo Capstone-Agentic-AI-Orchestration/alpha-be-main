@@ -47,6 +47,8 @@ export function hasRepeatedRecoveryFailure(
 }
 
 const SPECIALIST_BLOCKER_PREFIX = 'The specialist reported a blocker:';
+/** How acceptance words a task a tool stopped (taskAcceptanceService); kept here so both agree. */
+export const TOOL_BLOCKER_PREFIX = 'A tool stopped the specialist:';
 
 /**
  * A blocker that only says the agent's own git staging or commit was refused. The build
@@ -63,9 +65,44 @@ export function isAlphaOwnedGitFailure(reason: string | undefined): boolean {
   return text.startsWith(SPECIALIST_BLOCKER_PREFIX) && isAlphaOwnedGitBlocker(text.slice(SPECIALIST_BLOCKER_PREFIX.length));
 }
 
-/** The specialist stopped because it lacks information, not because its code failed a check. */
+/**
+ * A blocker that is a tool or environment failure, not missing information: a file tool that
+ * refused a change, a guard that did not match, a permission error, a timeout. Another try,
+ * with the error, usually gets past it, so it is retried instead of waiting for the person.
+ */
+export function isToolOrEnvironmentBlocker(blocker: string): boolean {
+  return /\b(?:tool|guard)\b[\s\S]{0,120}\b(?:rejected|refused|denied|did not match|didn't match|failed|errored)\b/i.test(blocker) ||
+    /\b(?:rejected|refused)\b[\s\S]{0,60}\b(?:edit|write|replacement|replace|delete)\b/i.test(blocker) ||
+    /\bexact[- ]content\b|\bold_text\b|\bexpected_content\b/i.test(blocker) ||
+    /\b(?:EPERM|EACCES|ENOENT|EBUSY|ETIMEDOUT)\b|\btimed? ?out\b|\bsandbox\b|permission denied/i.test(blocker);
+}
+
+/**
+ * A task that stopped with work left in its build copy that no checkpoint recorded: edits made
+ * after the report, or a runner that finished without a checkpoint commit. Retrying the same
+ * task keeps that work (the runner adapter saves it aside and restores it), so it can continue.
+ */
+export function isLeftoverWorkFailure(reason: string | undefined): boolean {
+  return /uncheckpointed edits|without a verifiable checkpoint commit/i.test(reason ?? '');
+}
+
+/** A build stopped between tasks while planning or saving its next step; resuming repeats that step. */
+export function isBetweenTasksStop(stoppedReason: string | undefined): boolean {
+  return /^(?:Milestone planning stopped before dispatch|Plan document could not be saved before dispatch)/i.test(stoppedReason?.trim() ?? '');
+}
+
+/** A task stopped by a tool or environment failure, as reported by the specialist or classified by acceptance. */
+export function isToolFailure(reason: string | undefined): boolean {
+  const text = reason?.trim() ?? '';
+  return text.startsWith(TOOL_BLOCKER_PREFIX) ||
+    (text.startsWith(SPECIALIST_BLOCKER_PREFIX) && isToolOrEnvironmentBlocker(text.slice(SPECIALIST_BLOCKER_PREFIX.length)));
+}
+
+/** The specialist stopped because it lacks information, not because its code or a tool failed. */
 export function isSpecialistBlocker(reason: string | undefined): boolean {
-  return Boolean(reason?.trim().startsWith(SPECIALIST_BLOCKER_PREFIX)) && !isAlphaOwnedGitFailure(reason);
+  const text = reason?.trim() ?? '';
+  return text.startsWith(SPECIALIST_BLOCKER_PREFIX) && !isAlphaOwnedGitFailure(reason) &&
+    !isToolOrEnvironmentBlocker(text.slice(SPECIALIST_BLOCKER_PREFIX.length));
 }
 
 /** "continue", "go ahead", "fix it" and similar carry no new information for a blocked specialist. */
@@ -178,6 +215,16 @@ export function recoveryAvailableActions(input: {
       } else {
         actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
       }
+    } else if (isToolFailure(latestFailedAttempt?.failureReason) && !['budget', 'final_validation', 'report'].includes(category)) {
+      // A refused tool call or an environment error: another try usually gets past it, and the
+      // person may add direction. Whatever its wording classifies as, it never leaves no action.
+      if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
+      if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
+      else actionReasons.provide_guidance = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
+    } else if (isLeftoverWorkFailure(latestFailedAttempt?.failureReason) && ['workspace', 'project_code', 'unknown'].includes(category)) {
+      // Work the checkpoint did not record: the same specialist continues with it kept.
+      if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('repair_and_continue');
+      else actionReasons.repair_and_continue = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
     } else if (category === 'project_code') {
       if (repeatedFailure && attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('provide_guidance');
       else if (attempts < AUTO_REPAIR_ATTEMPT_LIMIT) availableActions.push('repair_and_continue');
@@ -228,6 +275,11 @@ export function recoveryAvailableActions(input: {
   }
   if (canAct && snapshot.run.status === 'blocked' && category === 'alpha' && !snapshot.run.currentTaskId &&
       /orchestrator is (?:disabled|unavailable)/i.test(snapshot.run.stoppedReason ?? '')) {
+    availableActions.push('resume_checkpoint');
+  }
+  // Stopped between tasks (planning the next milestone, saving its plan): continuing repeats that step.
+  if (canAct && snapshot.run.status === 'blocked' && !snapshot.run.currentTaskId && isBetweenTasksStop(snapshot.run.stoppedReason) &&
+      !availableActions.includes('resume_checkpoint')) {
     availableActions.push('resume_checkpoint');
   }
   if (canAct && ['blocked', 'paused'].includes(snapshot.run.status)) availableActions.push('keep_paused');

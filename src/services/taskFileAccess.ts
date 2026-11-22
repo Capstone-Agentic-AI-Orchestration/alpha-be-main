@@ -62,11 +62,32 @@ export async function auditTaskDependencies(roots: ProjectRoot[], scope: TaskFil
   return runDependencyAudit({ directory: root.dir, repository: scope.repository, taskId: scope.taskId,
     evidenceDirectory: scope.auditDirectory!, spec: scope.dependencyAudit! });
 }
+/**
+ * The form an agent sees a file in (project_read_file shows lines without \r and drops a
+ * leading byte-order mark), and so the form every guard compares in. On Windows a checkout
+ * may hold CRLF endings the agent never sees; comparing raw bytes refused every edit.
+ */
+export function textForMatch(raw: string): string {
+  return raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+}
+
+/** Text written back in a file's own form: its byte-order mark and its line endings. */
+function inFileForm(text: string, original: string): string {
+  const body = textForMatch(text);
+  const crlf = (original.match(/\r\n/g)?.length ?? 0) > (original.match(/(?<!\r)\n/g)?.length ?? 0);
+  return (original.startsWith('\uFEFF') ? '\uFEFF' : '') + (crlf ? body.replace(/\n/g, '\r\n') : body);
+}
+
+/** A path part Windows would silently rename: `config.ts.` and `config.ts ` are `config.ts`. */
+function renamedByWindows(part: string): boolean {
+  return /[. ]$/.test(part) && part !== '.' && part !== '..';
+}
+
 function writablePath(roots: ProjectRoot[], scope: TaskFileScope, given: string): string {
   if (scope.reportOnly || !isImplementationTask(scope.kind)) throw new Error('This task is read-only.');
   if (!given || given.includes('\\') || given.includes(':') || given.startsWith('/') ||
-      given.split('/').some(part => !part || part === '.' || part === '..' || SKIPPED_DIRS.has(part) || isSecretFile(part))) {
-    throw new Error('Use a repository-relative source path; secrets, dependencies and internal folders are forbidden.');
+      given.split('/').some(part => !part || part === '.' || part === '..' || renamedByWindows(part) || SKIPPED_DIRS.has(part.toLowerCase()) || isSecretFile(part))) {
+    throw new Error('Use a repository-relative source path with forward slashes, no trailing dots or spaces; secrets, dependencies and internal folders are forbidden.');
   }
   if (!scope.includePaths.some(pattern => pathMatchesScope(given, pattern)) ||
       scope.excludePaths.some(pattern => pathMatchesScope(given, pattern))) throw new Error(`${given} is outside this task’s approved path scope.`);
@@ -87,11 +108,13 @@ function writablePath(roots: ProjectRoot[], scope: TaskFileScope, given: string)
 export function writeTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: { path: string; content: string; expected_content?: string }): string {
   const target = writablePath(roots, scope, args.path);
   if (typeof args.content !== 'string' || Buffer.byteLength(args.content) > MAX_FILE) throw new Error('Text content must be at most 2 MiB.');
-  if (fs.existsSync(target) && (args.expected_content === undefined || fs.readFileSync(target, 'utf8') !== args.expected_content)) {
-    throw new Error('File already exists or changed. Use project_edit_file, or supply its exact expected_content.');
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : undefined;
+  if (existing !== undefined && (args.expected_content === undefined || textForMatch(existing) !== textForMatch(args.expected_content))) {
+    throw new Error('File already exists or changed. Use project_edit_file, or supply its current content as expected_content (line endings do not matter). Re-read the file and retry.');
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, args.content, 'utf8');
+  // A replaced file keeps its own line endings and byte-order mark; a new file is written as sent.
+  fs.writeFileSync(target, existing === undefined ? args.content : inFileForm(args.content, existing), 'utf8');
   return `Updated ${args.path} within task ${scope.taskId}.`;
 }
 
@@ -99,13 +122,18 @@ export function editTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: {
   const target = writablePath(roots, scope, args.path);
   if (!args.old_text || typeof args.new_text !== 'string' || fs.statSync(target).size > MAX_FILE) throw new Error('Provide a nonempty exact old_text and bounded new_text.');
   const current = fs.readFileSync(target, 'utf8');
-  if (current.split(args.old_text).length !== 2) throw new Error('old_text must match exactly once. Read the current file and retry.');
-  return writeTaskFile(roots, scope, { path: args.path, content: current.replace(args.old_text, () => args.new_text), expected_content: current });
+  const view = textForMatch(current);
+  const oldText = textForMatch(args.old_text);
+  if (view.split(oldText).length !== 2) throw new Error('old_text must match exactly once (line endings do not matter). Read the current file and retry with a longer, unique old_text.');
+  fs.writeFileSync(target, inFileForm(view.replace(oldText, () => textForMatch(args.new_text)), current), 'utf8');
+  return `Updated ${args.path} within task ${scope.taskId}.`;
 }
 
 export function deleteTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: { path: string; expected_content: string }): string {
   const target = writablePath(roots, scope, args.path);
-  if (fs.statSync(target).size > MAX_FILE || typeof args.expected_content !== 'string' || fs.readFileSync(target, 'utf8') !== args.expected_content) throw new Error('Deletion requires the current exact expected_content.');
+  if (fs.statSync(target).size > MAX_FILE || typeof args.expected_content !== 'string' || textForMatch(fs.readFileSync(target, 'utf8')) !== textForMatch(args.expected_content)) {
+    throw new Error('Deletion requires the current content as expected_content (line endings do not matter). Re-read the file and retry.');
+  }
   fs.unlinkSync(target);
   return `Deleted ${args.path} within task ${scope.taskId}.`;
 }

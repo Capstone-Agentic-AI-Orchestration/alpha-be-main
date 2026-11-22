@@ -27,3 +27,18 @@ export class PlanNeedsYouError extends DomainRefusal {
     this.name = 'PlanNeedsYouError';
   }
 }
+
+/**
+ * What to tell a person about a failed action. A refusal, or an error written as a sentence for
+ * people, is shown as it is. A programming or system error (a TypeError, a SQLite or Node error
+ * code, an "undefined") is not: the person gets a plain sentence and the detail is logged, since
+ * they cannot act on it and it reads as a dead end.
+ */
+export function reasonForPerson(error: unknown, fallback = 'Something went wrong on Alpha\'s side. It was logged; try again, or tell the Orchestrator what to do.'): { text: string; unexpected: boolean } {
+  if (error instanceof DomainRefusal) return { text: error.message, unexpected: false };
+  const message = error instanceof Error ? error.message.trim() : '';
+  const technical = !message || (error instanceof Error && ['TypeError', 'ReferenceError', 'SyntaxError', 'RangeError'].includes(error.name)) ||
+    /\bundefined\b|is not a function|cannot read propert/i.test(message) || message.includes('\n    at ') ||
+    /\bSQLITE_[A-Z]+\b|\bE(?:NOENT|ACCES|PERM|BUSY|EXIST|NOTDIR|ISDIR|CONNREFUSED|CONNRESET|TIMEDOUT|PIPE|NOSPC)\b/.test(message);
+  return technical ? { text: fallback, unexpected: true } : { text: message, unexpected: false };
+}
