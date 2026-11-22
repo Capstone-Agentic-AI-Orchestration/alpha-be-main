@@ -1,4 +1,5 @@
 import type { Issue, IssueSubtask } from '../models/index.js';
+import { isImplementationTask } from './agentRoleContracts.js';
 import type { IssueStore } from '../store/issueStore.js';
 import { issueStore } from '../store/stores.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
@@ -98,7 +99,7 @@ export async function synchronizePublishedOrchestrationIssue(
 ): Promise<void> {
   const publication = snapshot.run.publication;
   const reportOnly = snapshot.run.status === 'completed' && !publication && snapshot.tasks?.length > 0 &&
-    snapshot.tasks.every(task => !['database', 'backend', 'frontend', 'mobile'].includes(task.kind)) &&
+    snapshot.tasks.every(task => !isImplementationTask(task.kind)) &&
     snapshot.tasks.filter(task => task.required).every(task => task.status === 'accepted');
   if (reportOnly) {
     const issue = await store.get(snapshot.run.workspaceId, snapshot.run.issueId);

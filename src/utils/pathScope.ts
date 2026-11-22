@@ -30,3 +30,12 @@ export function pathMatchesScope(filePath: string, pattern: string, ignoreCase =
   expression += '$';
   return new RegExp(expression, ignoreCase ? 'i' : '').test(normalizedPath);
 }
+
+/**
+ * Whether a task's scope allows a path: matched by an include pattern and by no exclude pattern.
+ * The write tool, acceptance, planning and saved-work restore all use this one rule.
+ */
+export function scopeAllowsPath(scope: { includePaths: readonly string[]; excludePaths: readonly string[] }, filePath: string): boolean {
+  return scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
+    !scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
+}

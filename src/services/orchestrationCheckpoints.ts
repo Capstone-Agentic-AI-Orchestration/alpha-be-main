@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { sameRepository } from '../utils/repositoryName.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,11 +46,7 @@ export function checkpointRef(branchName: string): string {
   return `refs/alpha-checkpoints/${branchName}`;
 }
 
-export function sameRepository(left: string | undefined, right: string | undefined): boolean {
-  const normalize = (value: string | undefined) =>
-    (value ?? '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').toLowerCase();
-  return normalize(left) === normalize(right);
-}
+export { sameRepository };
 
 /** The commit a repository's working copy must be at: its latest accepted task, or the build's base. */
 export function latestCheckpointCommit(snapshot: OrchestrationSnapshot, repository: string, baseCommit?: string): string | undefined {

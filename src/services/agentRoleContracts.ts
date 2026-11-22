@@ -110,6 +110,9 @@ export function roleCanOwnTask(kind: OrchestrationTaskKind, role: string): boole
   return (agentRoleContract(role)?.tasks as readonly string[] | undefined)?.includes(kind) ?? false;
 }
 
-export function isImplementationTask(kind: OrchestrationTaskKind): boolean {
-  return ['database', 'backend', 'frontend', 'mobile'].includes(kind);
+/** The task kinds that change code. Use isImplementationTask, never a local copy of this list. */
+const IMPLEMENTATION_TASK_KINDS: ReadonlySet<string> = new Set(['database', 'backend', 'frontend', 'mobile']);
+
+export function isImplementationTask(kind: string): boolean {
+  return IMPLEMENTATION_TASK_KINDS.has(kind);
 }

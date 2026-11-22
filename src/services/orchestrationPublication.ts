@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { sameRepository } from '../utils/repositoryName.js';
 import type { IssueStore } from '../store/issueStore.js';
 import { issueStore } from '../store/stores.js';
 import { githubService, type IGitHubService } from './githubService.js';
@@ -134,7 +135,7 @@ async function assertPublishedWorkspace(
 
 function pullRequestBody(snapshot: OrchestrationSnapshot, repository: string, resultCommit: string, checkCommands: string[]): string {
   const requiredTasks = snapshot.tasks.filter(task => task.required &&
-    (task.repository ?? snapshot.run.repository).toLowerCase() === repository.toLowerCase());
+    sameRepository((task.repository ?? snapshot.run.repository), repository));
   const requirements = snapshot.run.plan.requirements.slice(0, 20)
     .map(requirement => `- **${requirement.id}:** ${requirement.description}`);
   const checks = checkCommands.length ? checkCommands.map(command => `- \`${command}\` — passed`) : ['- Final validation passed in Alpha.'];
@@ -199,7 +200,7 @@ export class OrchestrationPublicationService {
       }
       return { repository: repo, branchName: workspace.branchName, resultCommit: validated.resultCommit, publicationBaseBranch: baseBranch };
     }));
-    const primary = publicationTargets.find(target => target.repository.toLowerCase() === canonicalRepo(snapshot.run.repository).toLowerCase()) ?? publicationTargets[0];
+    const primary = publicationTargets.find(target => sameRepository(target.repository, snapshot.run.repository)) ?? publicationTargets[0];
     return { publicationBaseBranch: primary.publicationBaseBranch, resultCommit: primary.resultCommit, publicationTargets };
   }
 
@@ -216,7 +217,7 @@ export class OrchestrationPublicationService {
     }];
     if (savedTargets.length !== workspaces.length) throw new Error('The saved approval does not cover every selected codebase. Reopen final review before retrying publication.');
     const targets = savedTargets.map(target => {
-      const workspace = workspaces.find(item => canonicalRepo(item.repository).toLowerCase() === canonicalRepo(target.repository).toLowerCase());
+      const workspace = workspaces.find(item => sameRepository(item.repository, target.repository));
       if (!workspace || workspace.branchName !== target.branchName || !isSafeBranchName(target.publicationBaseBranch) ||
           target.publicationBaseBranch === target.branchName) {
         throw new Error(`The saved publication target for ${target.repository} is invalid. Reopen final review and resolve the repository setup.`);
@@ -278,7 +279,7 @@ export class OrchestrationPublicationService {
   /** Backward-compatible primary pull request for older callers. */
   async publish(snapshot: OrchestrationSnapshot): Promise<OrchestrationPublicationRecord> {
     const publications = await this.publishAll(snapshot);
-    const primary = publications.find(item => item.repository?.toLowerCase() === canonicalRepo(snapshot.run.repository).toLowerCase()) ?? publications[0];
+    const primary = publications.find(item => sameRepository(item.repository, snapshot.run.repository)) ?? publications[0];
     if (!primary) throw new Error('No codebase pull request was published.');
     return primary;
   }

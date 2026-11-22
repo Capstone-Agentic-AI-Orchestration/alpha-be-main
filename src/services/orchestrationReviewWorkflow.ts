@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { isImplementationTask } from './agentRoleContracts.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import path from 'node:path';
 import type { Agent } from '../models/index.js';
 import {
@@ -37,7 +39,6 @@ export class OrchestrationReviewPlanError extends Error {
   }
 }
 
-const CODE_TASK_KINDS = new Set(['database', 'backend', 'frontend', 'mobile']);
 export const MAX_REVIEW_CORRECTION_CYCLES = 2;
 
 function correctionTaskId(rootTaskId: string, cycle: number): string {
@@ -62,7 +63,7 @@ function ancestorsFor(tasks: readonly OrchestrationTaskDefinition[], taskId: str
 function rootTaskFor(task: OrchestrationTaskRecord, snapshot: OrchestrationSnapshot): OrchestrationTaskRecord {
   const rootId = task.correctionOfTaskId ?? task.id;
   const root = snapshot.tasks.find(candidate => candidate.id === rootId);
-  if (!root || !CODE_TASK_KINDS.has(root.kind)) {
+  if (!root || !isImplementationTask(root.kind)) {
     throw new OrchestrationReviewPlanError('The finding does not map to a persisted implementation task. Keep the build blocked for human review.');
   }
   return root;
@@ -99,7 +100,7 @@ export function buildOrchestrationReviewAmendment(
 
   const sourceByFinding = reviewFindings.map(finding => {
     const target = snapshot.tasks.find(task => task.id === finding.targetTaskId);
-    if (!target || target.status !== 'accepted' || !CODE_TASK_KINDS.has(target.kind) || target.ownerAgentId === reviewTask.ownerAgentId) {
+    if (!target || target.status !== 'accepted' || !isImplementationTask(target.kind) || target.ownerAgentId === reviewTask.ownerAgentId) {
       throw new OrchestrationReviewPlanError(`Finding “${finding.title}” does not identify accepted code owned by a different specialist. Keep the build blocked for human review.`);
     }
     const root = rootTaskFor(target, snapshot);
@@ -189,7 +190,7 @@ export function buildOrchestrationReviewAmendment(
 
   const existingTasks = snapshot.run.plan.tasks.map(task => ({ ...task }));
   const validationTemplates = existingTasks.filter(task => task.kind === 'validation' &&
-    (task.repository ?? snapshot.run.repository).toLowerCase() === (reviewTask.repository ?? snapshot.run.repository).toLowerCase() &&
+    sameRepository((task.repository ?? snapshot.run.repository), (reviewTask.repository ?? snapshot.run.repository)) &&
     (!reviewTask.milestoneId || task.milestoneId === reviewTask.milestoneId));
   const requiredValidators = validationTemplates.filter(task => task.required);
   if (requiredValidators.length > 1) {
@@ -300,7 +301,7 @@ export function buildFinalValidationAmendment(
       : failedChecks;
     const repoFailed = commands.filter(check => check.exitCode !== 0 || check.signal != null);
     if (!repoFailed.length) continue;
-    const repoTasks = snapshot.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
+    const repoTasks = snapshot.tasks.filter(task => task.status === 'accepted' && isImplementationTask(task.kind) &&
       (task.repository ?? snapshot.run.repository).toLowerCase() === repositoryKey && (taskChanges.get(task.id)?.length ?? 0) > 0);
     if (!repoTasks.length) {
       throw new OrchestrationReviewPlanError(`Final checks failed in ${repository}, but no accepted implementation task can be tied to changed files there. Keep the build blocked for human review.`);
@@ -342,7 +343,7 @@ const OWNER_CORRECTION_COPY: Record<OwnerCorrectionOrigin, { label: string; keep
 /** Files each accepted implementation task changed, from its accepted attempt evidence. */
 function acceptedCodeChanges(snapshot: OrchestrationSnapshot): Map<string, string[]> {
   const taskChanges = new Map<string, string[]>();
-  for (const task of snapshot.tasks.filter(candidate => candidate.status === 'accepted' && CODE_TASK_KINDS.has(candidate.kind))) {
+  for (const task of snapshot.tasks.filter(candidate => candidate.status === 'accepted' && isImplementationTask(candidate.kind))) {
     const attempt = [...snapshot.attempts].reverse().find(candidate => candidate.taskId === task.id && candidate.status === 'accepted');
     const acceptance = attempt?.result?.acceptanceEvidence;
     const changedPaths = acceptance && typeof acceptance === 'object'
@@ -407,7 +408,7 @@ function routeOwnerFindings(
       requirementIds: [followupReview.requirementIds[0]],
       acceptanceCriteria: ['Record what the configured checks confirm after the independent review.'],
       requiredChecks: [...new Set(snapshot.run.plan.tasks
-        .filter(task => task.required && (task.repository ?? snapshot.run.repository).toLowerCase() === snapshot.run.repository.toLowerCase())
+        .filter(task => task.required && sameRepository((task.repository ?? snapshot.run.repository), snapshot.run.repository))
         .flatMap(task => task.requiredChecks))].slice(0, 7),
       scope: { includePaths: [], excludePaths: [] },
       required: true
@@ -469,7 +470,7 @@ export function buildHumanReviewAmendment(
     throw new OrchestrationReviewPlanError('Every required task must be accepted before the work can be sent back.');
   }
   const taskChanges = acceptedCodeChanges(snapshot);
-  const owners = snapshot.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
+  const owners = snapshot.tasks.filter(task => task.status === 'accepted' && isImplementationTask(task.kind) &&
     (taskChanges.get(task.id)?.length ?? 0) > 0);
   if (!owners.length) {
     throw new OrchestrationReviewPlanError('No accepted implementation task changed files in this build, so there is no owner to correct. Describe the change as a new build instead.');

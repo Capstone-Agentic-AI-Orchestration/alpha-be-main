@@ -30,7 +30,8 @@ import {
   safeRecoveryGuidance,
   safeRecoverySummary,
   specialistBlockerDirectionMessage,
-  workAttemptCount
+  workAttemptCount,
+  REPORT_FORMAT_CHECKS
 } from './orchestrationRecoveryPolicy.js';
 
 export interface OrchestrationRecoveryState {
@@ -250,7 +251,9 @@ export class OrchestrationRecoveryService {
     const validationEvidence = latestBlockedEvent?.payload.evidence && typeof latestBlockedEvent.payload.evidence === 'object'
       ? latestBlockedEvent.payload.evidence as Record<string, unknown>
       : undefined;
-    const workspaceValidation = ['workspace_checkpoint', 'final_scope', 'workspace_missing'].includes(String(validationEvidence?.check ?? ''));
+    // A missing or changed working copy at final checks is repaired by checking again (rebuild,
+    // or set the changes aside); only a changed file no task owns needs the person.
+    const workspaceValidation = String(validationEvidence?.check ?? '') === 'final_scope';
     const finalValidationCorrectionRunning = snapshot.run.status === 'executing' && Boolean(snapshot.run.currentTaskId) &&
       snapshot.findings.some(finding => finding.status === 'open' && finding.evidence.origin === 'final_validation');
     const finalValidation = (snapshot.run.status === 'blocked' || finalValidationCorrectionRunning) &&
@@ -357,9 +360,7 @@ export class OrchestrationRecoveryService {
     const result = evidenceAttempt?.result ?? {};
     const rejectionReason = typeof result.rejectionReason === 'string' ? result.rejectionReason : undefined;
     const reportError = typeof result.agentReportError === 'string' ? result.agentReportError : undefined;
-    const reportFindingChecks = new Set([
-      'agent_report', 'report_identity', 'review_findings_missing', 'requirement_coverage', 'acceptance_criteria'
-    ]);
+    const reportFindingChecks = REPORT_FORMAT_CHECKS;
     const hasReportFinding = Boolean(episodeTask && snapshot.findings.some(finding =>
       finding.taskId === episodeTask.id && finding.status === 'open' &&
       (!evidenceAttempt || finding.createdAt >= evidenceAttempt.createdAt) &&

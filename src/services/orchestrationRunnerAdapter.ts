@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { canonicalRepository } from '../utils/repositoryName.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Agent, PrototypeRun, Project } from '../models/index.js';
@@ -44,9 +45,7 @@ interface AdapterDependencies {
   checkpointRemote?: CheckpointRemote;
 }
 
-function normalizeRepository(value: string | undefined): string {
-  return (value ?? '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').toLowerCase();
-}
+const normalizeRepository = canonicalRepository;
 
 export function orchestrationBranchName(runId: string): string {
   const suffix = runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase();

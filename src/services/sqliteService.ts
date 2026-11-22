@@ -1,4 +1,6 @@
 import type { FeatureSpec, FeatureSpecRecord } from './featureSpecContract.js';
+import { isImplementationTask } from './agentRoleContracts.js';
+import { canonicalRepository, sameRepository } from '../utils/repositoryName.js';
 import Database from 'better-sqlite3';
 import type { DeliveryRecord } from './orchestrationDelivery.js';
 import type { UsageEntry } from './chatUsage.js';
@@ -239,13 +241,7 @@ function orchestrationRecoveryMilestoneFromRow(row: any): OrchestrationRecoveryM
   };
 }
 
-function canonicalOrchestrationRepository(value: string): string {
-  return value.trim()
-    .replace(/^https?:\/\/github\.com\//i, '')
-    .replace(/\.git$/i, '')
-    .replace(/\/$/, '')
-    .toLowerCase();
-}
+const canonicalOrchestrationRepository = canonicalRepository;
 
 function isSafeOrchestrationBranchName(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._/-]{1,200}$/.test(value) &&
@@ -3777,7 +3773,7 @@ export class SQLiteService {
       });
       // Only real pull requests are listed; a repository the build left unchanged has none.
       run.publications = validPublications.filter(item => item.unchanged !== true).map(toRecord);
-      run.publication = run.publications.find(item => item.repository?.toLowerCase() === run.repository.toLowerCase()) ?? run.publications[0];
+      run.publication = run.publications.find(item => sameRepository(item.repository, run.repository)) ?? run.publications[0];
     }
     return {
       run,
@@ -4704,7 +4700,7 @@ export class SQLiteService {
         }];
         const repositories = Array.isArray(evidence?.repositories) ? evidence.repositories as Array<Record<string, unknown>> : [];
         if (evidence?.completionType !== 'report_only' || evidence.noOpenBlockingFindings !== true ||
-            snapshot.tasks.some(task => ['database', 'backend', 'frontend', 'mobile'].includes(task.kind)) ||
+            snapshot.tasks.some(task => isImplementationTask(task.kind)) ||
             snapshot.findings.some(finding => finding.status === 'open' && ['blocking', 'critical'].includes(finding.severity)) ||
             snapshot.run.plan.milestones?.some(milestone => !snapshot.run.plan.tasks.some(task => task.milestoneId === milestone.id)) ||
             repositories.length !== workspaces.length || !workspaces.every(workspace => {
@@ -4770,14 +4766,14 @@ export class SQLiteService {
         const seenPublicationRepositories = new Set<string>();
         for (const workspace of expectedWorkspaces) {
           const record = publicationRecords.find(item => typeof item.repository === 'string' &&
-            canonicalOrchestrationRepository(item.repository).toLowerCase() === canonicalOrchestrationRepository(workspace.repository).toLowerCase()) ??
+            sameRepository(item.repository, workspace.repository)) ??
             (workspace.repository === snapshot.run.repository ? publication : undefined);
           const publicationRepository = record && typeof record.repository === 'string'
             ? canonicalOrchestrationRepository(record.repository) : canonicalOrchestrationRepository(workspace.repository);
           if (seenPublicationRepositories.has(publicationRepository)) mismatchReasons.push('duplicate repository');
           seenPublicationRepositories.add(publicationRepository);
           const repoValidation = validatedRepositories.find(item => typeof item.repository === 'string' &&
-            canonicalOrchestrationRepository(item.repository).toLowerCase() === canonicalOrchestrationRepository(workspace.repository).toLowerCase());
+            sameRepository(item.repository, workspace.repository));
           const resultCommit = typeof repoValidation?.resultCommit === 'string' ? repoValidation.resultCommit
             : workspace.repository === snapshot.run.repository ? validated.resultCommit : undefined;
           const branchName = typeof repoValidation?.branchName === 'string' ? repoValidation.branchName
@@ -5463,7 +5459,7 @@ export class SQLiteService {
 
       for (const finding of input.findings) {
         const target = snapshot.tasks.find(task => task.id === finding.taskId);
-        if (!target || target.status !== 'accepted' || !['database', 'backend', 'frontend', 'mobile'].includes(target.kind) ||
+        if (!target || target.status !== 'accepted' || !isImplementationTask(target.kind) ||
             finding.sourceTaskId !== input.taskId ||
             (finding.correctionTaskId && !newTaskRecords.has(finding.correctionTaskId)) ||
             (['blocking', 'critical'].includes(finding.severity) && !finding.correctionTaskId)) {
@@ -5683,7 +5679,7 @@ export class SQLiteService {
       }
       if (!addedPlanTasks.some(task => task.kind === 'review' && task.required) ||
           !addedPlanTasks.some(task => task.kind === 'validation' && task.required) ||
-          !input.addedTasks.filter(task => ['database', 'backend', 'frontend', 'mobile'].includes(task.kind)).every(task => task.correctionOfTaskId && task.scope.includePaths.length)) {
+          !input.addedTasks.filter(task => isImplementationTask(task.kind)).every(task => task.correctionOfTaskId && task.scope.includePaths.length)) {
         throw new Error('A final-validation amendment must include scoped owner corrections followed by independent review and validation gates.');
       }
       const issues = checkRunPlan(snapshot.run, plan, 'review_correction', this.getAgents().filter(agent => !agent.isArchived));
@@ -5716,7 +5712,7 @@ export class SQLiteService {
         const target = snapshot.tasks.find(task => task.id === finding.taskId);
         const source = snapshot.tasks.find(task => task.id === finding.sourceTaskId);
         const finalValidationOrigin = finding.evidence?.origin === amendmentSource;
-        if (!target || target.status !== 'accepted' || !['database', 'backend', 'frontend', 'mobile'].includes(target.kind) ||
+        if (!target || target.status !== 'accepted' || !isImplementationTask(target.kind) ||
             !source || source.status !== 'accepted' || (!finalValidationOrigin && source.kind !== 'review') ||
             (finalValidationOrigin && source.id !== target.id) ||
             !finding.correctionTaskId || !newTaskRecords.has(finding.correctionTaskId)) {

@@ -1,4 +1,5 @@
 import type { SQLiteService } from './sqliteService.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import type { WorkspaceContext } from './workspaceRegistry.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -69,7 +70,7 @@ export class OrchestrationDeliveryService {
       throw new DeliveryError('Resolve the blocking security findings before delivery.');
     }
     for (const repo of record.repositories) {
-      const tasks = snapshot.tasks.filter(task => (task.repository ?? snapshot.run.repository).toLowerCase() === repo.repository.toLowerCase());
+      const tasks = snapshot.tasks.filter(task => sameRepository((task.repository ?? snapshot.run.repository), repo.repository));
       const owners = new Set(tasks.filter(task => ['backend', 'frontend', 'database', 'mobile'].includes(task.kind)).map(task => task.ownerAgentId));
       const reviews = tasks.filter(task => task.kind === 'review' && task.status === 'accepted' && !owners.has(task.ownerAgentId));
       const validation = tasks.filter(task => task.kind === 'validation' && task.status === 'accepted' && !owners.has(task.ownerAgentId));

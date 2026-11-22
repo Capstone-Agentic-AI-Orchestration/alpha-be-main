@@ -1,4 +1,5 @@
 import { renderClient, vercelClient } from './hosting/hostingService.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import type { DeliveryRepository } from './orchestrationDelivery.js';
 import { DeliveryError } from './orchestrationDelivery.js';
 
@@ -21,8 +22,7 @@ export async function verifyDeliveryDeployment(target: DeliveryRepository,
   const service = await render?.findServiceByName(`${name}-uat`);
   let sha = ''; let status = 'pending'; let rawUrl = ''; let backend = false;
   if (service) {
-    const repo = service.repo?.replace(/^https?:\/\/github.com\//i, '').replace(/\.git$/, '').replace(/\/$/, '');
-    if (repo?.toLowerCase() !== target.repository.toLowerCase() || service.branch !== 'uat') {
+    if (!service.repo || !sameRepository(service.repo, target.repository) || service.branch !== 'uat') {
       throw new DeliveryError('The Render service does not match this repository and UAT branch.');
     }
     const latest = (await render!.listDeploys(service.id, 1))[0];

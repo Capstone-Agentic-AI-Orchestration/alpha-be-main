@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { isImplementationTask } from './agentRoleContracts.js';
 import { startUsage } from './chatUsage.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -172,7 +173,7 @@ export function appendOrchestrationTaskPolicy(
       : 'Workspace and access: Alpha owns the private build worktree and local checkpoints. Never stage, commit or push yourself. Read and edit through alpha-task-files only. For npm lockfiles use project_generate_lockfile, which disables lifecycle scripts and writes only an approved lockfile. Use project_run_check only for an assigned check; it runs in a disposable copy. Alpha prepares dependencies and verifies the actual worktree after your report. If access is refused, report the missing operation rather than trying a shell, custom cache or another directory.',
     orchestration.taskPackage.reportCorrection
       ? 'Do not inspect or change repository files, run checks, publish, or change ticket status. Correct only the report from supplied evidence.'
-      : !['database', 'backend', 'frontend', 'mobile'].includes(task.kind)
+      : !isImplementationTask(task.kind)
         ? 'Do not edit repository files, publish, change ticket status, or run terminal commands. Validation may request project_run_check only for its assigned checks.'
         : 'Make changes only for this assignment. Do not push, open a pull request, merge, deploy, or change ticket status; Alpha owns acceptance and publication.'
   ].filter(Boolean).join('\n');

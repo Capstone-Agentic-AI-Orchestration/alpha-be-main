@@ -2,11 +2,9 @@ import type { WorkspaceContext } from './workspaceRegistry.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { sqliteService } from './sqliteService.js';
 import { runWithWorkspace } from './workspaceContext.js';
-import { agentReadiness } from './agentReadiness.js';
-import { roleCanPlan } from './agentRoleContracts.js';
-import { resolveAgent } from './personaService.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type OrchestrationPlanningInput } from './orchestrationPlanner.js';
-import { plannerModelName, repositoryPlanningContext } from './projectBuildOrchestrator.js';
+import { repositoryPlanningContext } from './projectBuildOrchestrator.js';
+import { plannableAgents, plannerIdentity, readyProjectAgents, selectPlanner } from './planningAgents.js';
 import { getCurrentBranch, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import type { OrchestrationPlan } from './orchestrationContract.js';
@@ -44,13 +42,10 @@ async function unstartedPlanningInput(context: WorkspaceContext, snapshot: Orche
   const roots = snapshot.run.repositoryWorkspaces ?? [];
   if (!roots.length) throw new Error('The saved planning workspaces are unavailable.');
   await assertCheckpoints(roots, false);
-  const visible = [];
-  for (const agent of sqliteService.getAgents().filter(item => !item.isArchived)) {
-    if (agentReadiness(agent, sqliteService.getRuntimes()).status === 'ready' && await workspaceRegistry.canAccessProjectAgentRun(context, snapshot.run.projectId, agent.id)) visible.push(agent);
-  }
-  const agent = visible.find(item => item.role === 'Orchestrator Agent') ?? visible.find(item => roleCanPlan(item.role));
-  if (!agent) throw new Error('No authorized planning agent is ready.');
-  const persona = resolveAgent(agent, { includeMemory: false, includeToolPolicy: false });
+  const runtimes = sqliteService.getRuntimes();
+  const eligible = await readyProjectAgents({ agents: sqliteService.getAgents(), runtimes, context, projectId: snapshot.run.projectId });
+  const planner = selectPlanner(eligible, runtimes);
+  if (!planner) throw new Error('No authorized planning agent with an available model is ready.');
   const optional = new Set(planRepositoryCoverage(snapshot.run).optionalRepositories.map(item => item.toLowerCase()));
   const contexts = roots.map(root => ({ ...root, context: repositoryPlanningContext(root.worktreePath) }));
   return { runId: snapshot.run.id, cwd: roots[0].worktreePath, goal,
@@ -62,9 +57,8 @@ async function unstartedPlanningInput(context: WorkspaceContext, snapshot: Orche
     repositories: contexts.map(item => ({ repository: item.repository, repositoryContext: item.context.context, availableScripts: item.context.scripts,
       ...(optional.has(item.repository.toLowerCase()) ? { optional: true } : {}) })),
     repositoryRoots: roots.map(item => ({ name: item.repository, repo: item.repository, dir: item.worktreePath })), branchContext: roots,
-    eligibleAgents: visible.map(item => ({ id: item.id, role: item.role, name: item.name, ready: true })),
-    planner: { id: agent.id, name: persona.name, role: persona.role, provider: persona.modelProvider,
-      modelName: plannerModelName(persona.modelProvider, persona.modelName, sqliteService.getRuntimes()), systemPrompt: persona.systemPrompt }
+    eligibleAgents: plannableAgents(eligible),
+    planner: plannerIdentity(planner, runtimes)
   };
 }
 
