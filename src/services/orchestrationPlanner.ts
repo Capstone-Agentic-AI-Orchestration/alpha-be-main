@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathMatchesScope } from '../utils/pathScope.js';
-import { agentRoleContract, roleCanOwnTask, roleCanPlan } from './agentRoleContracts.js';
+import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
+import { agentRoleContract, roleCanOwnTask, roleCanPlan, isImplementationTask } from './agentRoleContracts.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { runCliTurn } from './cliRunner.js';
 import { correctPlanSafely } from './orchestrationPlanCorrections.js';
@@ -22,7 +22,6 @@ import {
   type OrchestrationTaskKind
 } from './orchestrationContract.js';
 
-const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', 'frontend', 'mobile']);
 const UNIVERSAL_SCOPE_PATTERNS = new Set(['*', '**', '**/*', '*.*']);
 
 /** Work that stores who a user is and how they sign in. */
@@ -526,7 +525,7 @@ function validatePlan(
   }
   const selectedRepositories = input.repositories?.map(repository => repository.repository);
   if (!input.milestoneContext && plan.schemaVersion === 1 && /dependenc[\s\S]{0,100}vulnerab|vulnerab[\s\S]{0,100}dependenc|dependency audit|npm audit/i.test(input.goal) &&
-      plan.tasks.some(task => CODE_TASK_KINDS.has(task.kind) && !plan.tasks.some(audit => audit.required && audit.dependencyAudit?.purpose === 'baseline' && audit.repository === task.repository))) {
+      plan.tasks.some(task => isImplementationTask(task.kind) && !plan.tasks.some(audit => audit.required && audit.dependencyAudit?.purpose === 'baseline' && audit.repository === task.repository))) {
     throw new OrchestrationPlanningError('Dependency remediation requires baseline Security audit evidence for every implementation repository.', 'invalid_plan');
   }
   const issues = validateOrchestrationPlan(plan, eligible, { maxTaskCount: MAX_INITIAL_PLAN_TASKS, initialPlan: true, repositories: selectedRepositories, auditMilestone: Boolean(input.milestoneContext),
@@ -540,9 +539,9 @@ function validatePlan(
     const repository = (audit.repository ?? roots[0]?.repo ?? '').toLowerCase();
     const root = roots.find(item => item.repo.toLowerCase() === repository);
     if (!root || lockfiles.some(file => fs.existsSync(path.join(root.dir, file)))) continue;
-    const owner = plan.tasks.some(task => task.required && CODE_TASK_KINDS.has(task.kind) &&
+    const owner = plan.tasks.some(task => task.required && isImplementationTask(task.kind) &&
       (task.repository ?? roots[0]?.repo ?? '').toLowerCase() === repository && lockfiles.some(file =>
-        task.scope.includePaths.some(pattern => pathMatchesScope(file, pattern)) && !task.scope.excludePaths.some(pattern => pathMatchesScope(file, pattern))));
+        scopeAllowsPath(task.scope, file)));
     if (!owner) throw new OrchestrationPlanningError(`Final Security verification for ${repository} requires a committed npm lockfile. Assign its implementation specialist a required scoped lockfile task before verification, including when its baseline is clean.`, 'invalid_plan');
   }
   const storageIssue = accountStorageIssue(plan, input, roots);
@@ -550,7 +549,7 @@ function validatePlan(
   const repositoryScripts = new Map((input.repositories ?? []).map(repository => [repository.repository.toLowerCase(), new Set(repository.availableScripts)]));
   const knownScripts = new Set(input.availableScripts);
   for (const task of plan.tasks) {
-    if (CODE_TASK_KINDS.has(task.kind)) {
+    if (isImplementationTask(task.kind)) {
       if (!task.scope.includePaths.length || task.scope.includePaths.some(scope => UNIVERSAL_SCOPE_PATTERNS.has(scope))) {
         throw new OrchestrationPlanningError(`Code task ${task.id} needs a narrow explicit path scope.`, 'invalid_scope');
       }

@@ -1,4 +1,5 @@
 import { sqliteService } from './sqliteService.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import { OrchestrationDeliveryService } from './orchestrationDeliveryService.js';
 import { DeliveryError } from './orchestrationDelivery.js';
 import { currentIdentity } from './identityService.js';
@@ -13,7 +14,7 @@ export function createDeliveryService(api?: GitHubApi) { return new Orchestratio
     const { startProjectBuild } = await import('./projectBuildOrchestrator.js');
     if (!snapshot.run.originChatThreadId) throw new DeliveryError('Open this project in chat before preparing a CI repair.');
     const scopes = record.repositories.map(target => {
-      const tasks = snapshot.tasks.filter(task => (task.repository ?? snapshot.run.repository).toLowerCase() === target.repository.toLowerCase() &&
+      const tasks = snapshot.tasks.filter(task => sameRepository((task.repository ?? snapshot.run.repository), target.repository) &&
         ['backend', 'frontend', 'database', 'mobile'].includes(task.kind));
       const includePaths = [...new Set(tasks.flatMap(task => task.scope.includePaths))];
       if (!includePaths.length) throw new DeliveryError('The original build has no authorized implementation scope for a repair.');

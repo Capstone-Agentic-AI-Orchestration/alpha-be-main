@@ -1,8 +1,6 @@
 import type { OrchestrationRunRecord, OrchestrationSnapshot, OrchestrationRepositoryWorkspace } from './orchestrationStateMachine.js';
 
-function canonicalRepository(value: string): string {
-  return value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase();
-}
+import { canonicalRepository } from '../utils/repositoryName.js';
 
 /** Resolve the authorized private branch for one repository in a product build. */
 export function repositoryWorkspaceForRun(

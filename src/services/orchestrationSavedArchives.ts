@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { sameRepository } from '../utils/repositoryName.js';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
@@ -7,7 +8,7 @@ import { promisify } from 'node:util';
 import type { OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { getCurrentBranch, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
-import { pathMatchesScope } from '../utils/pathScope.js';
+import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 
 const exec = promisify(execFile);
@@ -46,7 +47,7 @@ function archive(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord,
   if (patch && /^(?:new file mode|old mode|new mode) 120000$/m.test(fs.readFileSync(patch.file, 'utf8'))) throw new Error('A symbolic-link patch needs manual review.');
   const untracked = files.filter(item => item.relative.startsWith('untracked/'));
   const allows = (relative: string) => relative && !path.isAbsolute(relative) && !relative.split(/[\\/]/).includes('..') && !relative.startsWith('.git') &&
-    task.scope.includePaths.some(pattern => pathMatchesScope(relative, pattern)) && !task.scope.excludePaths.some(pattern => pathMatchesScope(relative, pattern));
+    scopeAllowsPath(task.scope, relative);
   if (untracked.some(item => !allows(item.relative.slice('untracked/'.length)))) throw new Error('The archive contains a file outside this step’s approved scope.');
   return { workspace, folder, hash: hash.digest('hex'), patch, untracked, allows, files: files.map(item => item.relative), savedAt: String(metadata.savedAt ?? '') };
 }
@@ -75,7 +76,7 @@ export async function restoreSavedArchive(snapshot: OrchestrationSnapshot, task:
   const cwd = entry.workspace.worktreePath;
   if (entry.hash !== input.archiveHash || await worktreeChangesHash(cwd) !== input.candidateHash || !await isGitWorkingTreeClean(cwd)) throw new Error('The archive or candidate changed, or the candidate has edits. Review it before restoring.');
   const latest = [...snapshot.attempts].reverse().find(attempt => attempt.status === 'accepted' && attempt.resultCommit &&
-    (snapshot.tasks.find(item => item.id === attempt.taskId)?.repository ?? snapshot.run.repository).toLowerCase() === entry.workspace.repository.toLowerCase());
+    sameRepository(snapshot.tasks.find(item => item.id === attempt.taskId)?.repository ?? snapshot.run.repository, entry.workspace.repository));
   if (await getCurrentBranch(cwd) !== entry.workspace.branchName || await getHeadCommit(cwd) !== (latest?.resultCommit ?? entry.workspace.baseCommit)) throw new Error('The accepted checkpoint changed. The archive was not restored.');
   if (entry.patch) {
     const stat = await exec('git', ['apply', '--numstat', entry.patch.file], { cwd, windowsHide: true });

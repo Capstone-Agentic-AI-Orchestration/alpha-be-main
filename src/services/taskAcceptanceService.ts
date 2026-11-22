@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { isImplementationTask } from './agentRoleContracts.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import path from 'node:path';
 import { taskAuditEvidence, finalDependencyAuditProblem } from './orchestrationAuditEvidence.js';
 import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
@@ -12,7 +14,7 @@ import { OrchestrationService } from './orchestrationService.js';
 import { buildFinalValidationAmendment, buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
-import { pathMatchesScope } from '../utils/pathScope.js';
+import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
   MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
@@ -20,6 +22,7 @@ import {
   hasRepairableFinalValidationEvidence,
   isAlphaOwnedGitBlocker,
   isToolOrEnvironmentBlocker,
+  REPORT_FORMAT_CHECKS,
   TOOL_BLOCKER_PREFIX,
   reportFormatCorrectionCount,
   safeRecoverySummary,
@@ -45,21 +48,15 @@ interface AcceptanceDependencies {
   runVerification: typeof runVerification;
 }
 
-const CODE_TASK_KINDS = new Set(['database', 'backend', 'frontend', 'mobile']);
-const REPORT_ONLY_CORRECTION_CHECKS = new Set([
-  'agent_report', 'report_identity', 'review_findings_missing', 'duplicate_review_finding',
-  'review_target', 'review_requirement', 'review_path_scope', 'review_finding_coverage',
-  'requirement_coverage', 'acceptance_criteria', 'deliverable_traceability'
-]);
+const REPORT_ONLY_CORRECTION_CHECKS = REPORT_FORMAT_CHECKS;
 const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
   'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed', 'tool_blocker'
 ]);
 
 /** Same case rule as the write tool (pathMatchesScope), so a file it allowed is never rejected here. */
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
-  return CODE_TASK_KINDS.has(task.kind) &&
-    task.scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
-    !task.scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
+  return isImplementationTask(task.kind) &&
+    scopeAllowsPath(task.scope, filePath);
 }
 
 /** Title of a finding, as the reviewer or Alpha's acceptance gate wrote it. */
@@ -288,7 +285,7 @@ export class TaskAcceptanceService {
         }
         // A tool failure is retried for any task kind; code failures only for implementation tasks.
         const onlyToolFailures = rejection.findings.length > 0 && rejection.findings.every(finding => finding.evidence.check === 'tool_blocker');
-        const repairableCodeFailure = (CODE_TASK_KINDS.has(task.kind) || onlyToolFailures) && rejection.findings.length > 0 &&
+        const repairableCodeFailure = (isImplementationTask(task.kind) || onlyToolFailures) && rejection.findings.length > 0 &&
           rejection.findings.every(finding => typeof finding.evidence.check === 'string' &&
             AUTOMATIC_CODE_REPAIR_CHECKS.has(finding.evidence.check) &&
             (finding.evidence.check !== 'required_check' ||
@@ -518,7 +515,7 @@ export class TaskAcceptanceService {
         seenFindings.add(key);
         const target = snapshot.tasks.find(candidate => candidate.id === finding.targetTaskId);
         const root = target && reviewRootTask(target, snapshot.tasks);
-        if (!target || target.status !== 'accepted' || !CODE_TASK_KINDS.has(target.kind) || !root ||
+        if (!target || target.status !== 'accepted' || !isImplementationTask(target.kind) || !root ||
             target.ownerAgentId === task.ownerAgentId || !dependsTransitivelyOn(task, target.id, snapshot.tasks)) {
           return fail(`Review finding “${finding.title}” does not refer to accepted code owned by a different specialist and included in this review's dependencies.`, {
             check: 'review_target', targetTaskId: finding.targetTaskId
@@ -649,7 +646,7 @@ export class TaskAcceptanceService {
       return fail('The orchestration has no recorded base commit, so cumulative change scope cannot be verified.', { check: 'base_commit' });
     }
     const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktreePath, authorizedWorkspace.baseCommit, attempt.resultCommit);
-    const readOnlyTask = !CODE_TASK_KINDS.has(task.kind);
+    const readOnlyTask = !isImplementationTask(task.kind);
     if (readOnlyTask && changedPaths.length) {
       return fail('This planning, review, validation, or delivery task changed repository files.', {
         check: 'read_only_scope', changedPaths
@@ -668,7 +665,7 @@ export class TaskAcceptanceService {
       : [task.id]);
     const acceptedPathOwners = new Map<string, { taskId: string; commit: string }>();
     for (const acceptedTask of snapshot.tasks.filter(candidate => candidate.status === 'accepted' &&
-      (candidate.repository ?? snapshot.run.repository).toLowerCase() === (task.repository ?? snapshot.run.repository).toLowerCase())) {
+      sameRepository((candidate.repository ?? snapshot.run.repository), (task.repository ?? snapshot.run.repository)))) {
       const acceptedAttempt = [...snapshot.attempts].reverse().find(candidate =>
         candidate.taskId === acceptedTask.id && candidate.status === 'accepted' && candidate.resultCommit);
       const acceptedEvidence = acceptedAttempt?.result?.acceptanceEvidence;
@@ -723,7 +720,7 @@ export class TaskAcceptanceService {
     }
     const scopeOwners = snapshot.tasks.filter(candidate =>
       (candidate.status === 'accepted' || candidate.id === task.id) &&
-      (candidate.repository ?? snapshot.run.repository).toLowerCase() === (task.repository ?? snapshot.run.repository).toLowerCase());
+      sameRepository((candidate.repository ?? snapshot.run.repository), (task.repository ?? snapshot.run.repository)));
     const outsideBuildScope = cumulativeChangedPaths.find(filePath =>
       !scopeOwners.some(candidate => taskAllowsPath(candidate, filePath)));
     if (outsideBuildScope) {
@@ -746,7 +743,7 @@ export class TaskAcceptanceService {
         check: 'required_check', requiredScript: failedCheck, missingScripts, observedCommands
       });
     }
-    if (CODE_TASK_KINDS.has(task.kind) && (!verification || verification.status !== 'passed' || !observedCommands.length || missingScripts.length)) {
+    if (isImplementationTask(task.kind) && (!verification || verification.status !== 'passed' || !observedCommands.length || missingScripts.length)) {
       return fail('No complete, passing repository check evidence is available for this code task.', {
         check: 'verification_evidence', verification: verification ?? null
       });
@@ -787,7 +784,7 @@ export class TaskAcceptanceService {
       scope: { includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths, passed: true },
       requiredChecks: task.requiredChecks,
       verification: attempt.result?.verification,
-      semanticReviewRequired: CODE_TASK_KINDS.has(task.kind),
+      semanticReviewRequired: isImplementationTask(task.kind),
       ...(task.dependencyAudit ? { dependencyAudits: taskAuditEvidence(snapshot, task, attempt, worktree,
         validateAttemptReport(attempt).success ? (attempt.result?.agentReport as { auditEvidenceIds?: string[] }).auditEvidenceIds : undefined) } : {})
     };
@@ -803,7 +800,7 @@ export class TaskAcceptanceService {
     if (current.run.plan.milestones?.some(milestone => !current.run.plan.tasks.some(task => task.milestoneId === milestone.id))) {
       throw new Error('The approved milestone roadmap is incomplete; plan and accept its remaining work before final validation.');
     }
-    const reportOnly = !current.tasks.some(task => CODE_TASK_KINDS.has(task.kind));
+    const reportOnly = !current.tasks.some(task => isImplementationTask(task.kind));
     const repositoryResults: Array<Record<string, unknown> & { repository: string; worktree: string; branchName: string; resultCommit: string; baseCommit: string; cumulativeChangedPaths: string[]; verification: VerificationResult }> = [];
     for (const workspace of current.run.repositoryWorkspaces?.length
       ? current.run.repositoryWorkspaces
@@ -819,7 +816,7 @@ export class TaskAcceptanceService {
         this.dependencies.getCurrentBranch(worktree), this.dependencies.getHeadCommit(worktree), this.dependencies.isGitWorkingTreeClean(worktree)
       ]);
       const taskCommits = current.attempts.filter(attempt => attempt.status === 'accepted' &&
-        (current.tasks.find(task => task.id === attempt.taskId)?.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase())
+        sameRepository(current.tasks.find(task => task.id === attempt.taskId)?.repository ?? current.run.repository, workspace.repository))
         .map(attempt => attempt.resultCommit).filter((value): value is string => Boolean(value));
       const latestTaskCommit = taskCommits[taskCommits.length - 1];
       if (branchName !== workspace.branchName || !clean || (latestTaskCommit && currentCommit !== latestTaskCommit)) {
@@ -833,8 +830,8 @@ export class TaskAcceptanceService {
         return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
       const cumulativeChangedPaths = await this.dependencies.getGitChangedPaths(worktree, workspace.baseCommit, currentCommit);
-      const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && CODE_TASK_KINDS.has(task.kind) &&
-        (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase());
+      const acceptedCodeTasks = current.tasks.filter(task => task.status === 'accepted' && isImplementationTask(task.kind) &&
+        sameRepository((task.repository ?? current.run.repository), workspace.repository));
       const unownedPath = cumulativeChangedPaths.find(filePath => !acceptedCodeTasks.some(task => taskAllowsPath(task, filePath)));
       if (unownedPath) {
         const reason = `Final checks found ${unownedPath} in ${workspace.repository}, outside the accepted task assignments.`;
@@ -843,7 +840,7 @@ export class TaskAcceptanceService {
         return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
       const requiredScripts = [...new Set(current.tasks.filter(task => task.required &&
-        (task.repository ?? current.run.repository).toLowerCase() === workspace.repository.toLowerCase()).flatMap(task => task.requiredChecks))];
+        sameRepository((task.repository ?? current.run.repository), workspace.repository)).flatMap(task => task.requiredChecks))];
       let verification: VerificationResult;
       try {
         verification = reportOnly && !requiredScripts.length ? {

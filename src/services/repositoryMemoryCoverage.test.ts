@@ -22,8 +22,7 @@ const SITES: Record<string, { calls: number; memory: boolean; why: string }> = {
   'services/runnerService.ts': { calls: 2, memory: true, why: 'Build tasks (from the task package) and every other run on a project.' },
   'services/orchestrationPlanner.ts': { calls: 2, memory: true, why: 'Defines and uses plannerSystemPrompt, which opens with memory.' },
   'services/projectBuildOrchestrator.ts': { calls: 1, memory: true, why: 'Initial planning, memory read at the planning checkpoints.' },
-  'services/orchestrationMilestonePlanner.ts': { calls: 1, memory: true, why: 'Milestone planning, memory read at the accepted checkpoints.' },
-  'services/boardPlanRevision.ts': { calls: 1, memory: true, why: 'Plan revision, memory read at the planning checkpoints.' },
+  'services/planningAgents.ts': { calls: 1, memory: false, why: 'Resolves personas to choose the planner and the agents it may assign; each planning path passes memory itself (see PLANNERS).' },
   'services/personaService.ts': { calls: 3, memory: true, why: 'Defines resolveAgent, which places repositoryMemory first.' },
   'services/cliRunner.ts': { calls: 1, memory: false, why: 'Defines runCliTurn; callers supply the prompt.' },
   'services/chatConsentCheck.ts': { calls: 2, memory: false, why: 'Isolated consent check before code or GitHub actions: deliberately sees only the message, the action and the build state, never repository memory.' },
@@ -43,6 +42,12 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+/**
+ * Planning paths whose personas are resolved in planningAgents.ts. They still build the planner's
+ * input themselves, so each must pass repository memory read at its own checkpoints.
+ */
+const PLANNERS = ['services/orchestrationMilestonePlanner.ts', 'services/boardPlanRevision.ts'];
+
 describe('repository memory coverage', () => {
   const root = path.resolve(__dirname, '..');
   const found = new Map<string, { calls: number; text: string }>();
@@ -57,6 +62,11 @@ describe('repository memory coverage', () => {
       .map(([file, site]) => `${file}: ${site.calls} call(s), listed ${SITES[file]?.calls ?? 'nowhere'}. Decide whether it passes repository memory, then record it in SITES.`);
     expect(unknown).toEqual([]);
     expect(Object.keys(SITES).filter(file => !found.has(file))).toEqual([]);
+  });
+
+  it('passes repository memory on every planning path that uses the shared planner choice', () => {
+    const root = path.resolve(__dirname, '..');
+    expect(PLANNERS.filter(file => !PASSES_MEMORY.test(fs.readFileSync(path.join(root, file), 'utf8')))).toEqual([]);
   });
 
   it('passes repository memory wherever SITES says it does', () => {

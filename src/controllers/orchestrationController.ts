@@ -1,5 +1,6 @@
 import { executeOrchestrationDecision } from '../services/orchestrationDecision.js';
 import { errorResponse } from './workflowErrorResponse.js';
+import { DomainRefusal } from '../services/domainRefusal.js';
 import { localPreviewService } from '../services/localPreviewService.js';
 import { Request, Response, Router } from 'express';
 import { ALPHA_ORCHESTRATION_ENABLED } from '../config/env.js';
@@ -31,14 +32,14 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery-can
   if (!task) return res.status(409).json({ error: 'There is no failed step to restart.' });
   const { repositoryWorkspaceForTask } = await import('../services/orchestrationWorkspace.js');
   const { worktreeChangesHash } = await import('../services/orchestrationWorktreeRecovery.js');
-  const { workAttemptCount, reportFormatCorrectionCount, MAX_REPORT_FORMAT_CORRECTIONS } = await import('../services/orchestrationRecoveryPolicy.js');
+  const { workAttemptCount, reportFormatCorrectionCount, MAX_REPORT_FORMAT_CORRECTIONS, MAX_REPAIR_ATTEMPTS_PER_EPISODE } = await import('../services/orchestrationRecoveryPolicy.js');
   const workspace = repositoryWorkspaceForTask(snapshot, task.id);
   if (!workspace) return res.status(409).json({ error: 'The saved workspace is unavailable.' });
   const changes = await getOrchestrationLiveChanges(snapshot);
   const { listSavedArchives } = await import('../services/orchestrationSavedArchives.js');
   res.json({ runRevision: snapshot.run.revision, taskId: task.id, taskRevision: task.revision,
     candidateHash: await worktreeChangesHash(workspace.worktreePath), changes, archives: listSavedArchives(snapshot, task),
-    restartAvailable: req.workspace!.role === 'dev' && snapshot.run.status === 'blocked' && (workAttemptCount(snapshot, task.id) >= 4 || reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) &&
+    restartAvailable: req.workspace!.role === 'dev' && snapshot.run.status === 'blocked' && (workAttemptCount(snapshot, task.id) >= MAX_REPAIR_ATTEMPTS_PER_EPISODE || reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) &&
       (snapshot.recoveryAuthorizations ?? []).filter(item => item.taskId === task.id).length < 2 });
 }));
 
@@ -512,6 +513,13 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/tasks/:task
   if (!Number.isSafeInteger(expectedTaskRevision) || expectedTaskRevision < 0) {
     return res.status(400).json({ error: 'expectedTaskRevision must be a non-negative integer.' });
   }
+  // The same rule as the recovery panel: a specialist that lacks information meets the same
+  // blocker again on a plain retry, so it needs direction, from the panel or the chat.
+  const { isSpecialistBlocker, specialistBlockerDirectionMessage } = await import('../services/orchestrationRecoveryPolicy.js');
+  const latestFailure = [...snapshot.attempts].reverse().find(attempt => attempt.taskId === task.id && attempt.failureReason)?.failureReason;
+  if (isSpecialistBlocker(latestFailure)) {
+    return errorResponse(res, new DomainRefusal(specialistBlockerDirectionMessage(latestFailure!), 'needs_direction', ['ask_orchestrator']));
+  }
   try {
     const { orchestrationService } = await import('../services/orchestrationRuntime.js');
     const next = await orchestrationService.retryTask({
@@ -539,7 +547,8 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/resume', de
   const pausedByKillSwitch = snapshot.run.status === 'blocked' &&
     /orchestrator is (?:disabled|unavailable)/i.test(snapshot.run.stoppedReason || '');
   const needsRecovery = snapshot.run.status === 'recovery_required';
-  const milestonePlanningStopped = snapshot.run.status === 'blocked' && /^(Milestone planning stopped|Plan document could not be saved) before dispatch:/.test(snapshot.run.stoppedReason ?? '');
+  const { isBetweenTasksStop } = await import('../services/orchestrationRecoveryPolicy.js');
+  const milestonePlanningStopped = snapshot.run.status === 'blocked' && isBetweenTasksStop(snapshot.run.stoppedReason);
   if (snapshot.run.currentTaskId || (!userPaused && !pausedByKillSwitch && !needsRecovery && !milestonePlanningStopped)) {
     return res.status(409).json({ error: 'This build is not paused at a resumable checkpoint.' });
   }

@@ -6,7 +6,7 @@ import spawn from 'cross-spawn';
 import treeKill from 'tree-kill';
 import type { ChildProcess } from 'node:child_process';
 import { isSecretFile, pickRoot, resolveInProject, SKIPPED_DIRS, type ProjectRoot } from './projectFiles.js';
-import { pathMatchesScope } from '../utils/pathScope.js';
+import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { orchestrationTaskKindSchema, orchestrationRequiredCheckSchema } from './orchestrationContract.js';
 import { isImplementationTask } from './agentRoleContracts.js';
 import type { runVerification } from './verificationService.js';
@@ -93,8 +93,7 @@ function writablePath(roots: ProjectRoot[], scope: TaskFileScope, given: string)
       given.split('/').some(part => !part || part === '.' || part === '..' || renamedByWindows(part) || SKIPPED_DIRS.has(part.toLowerCase()) || isSecretFile(part))) {
     throw new Error('Use a repository-relative source path with forward slashes, no trailing dots or spaces; secrets, dependencies and internal folders are forbidden.');
   }
-  if (!scope.includePaths.some(pattern => pathMatchesScope(given, pattern)) ||
-      scope.excludePaths.some(pattern => pathMatchesScope(given, pattern))) throw new Error(`${given} is outside this task’s approved path scope.`);
+  if (!scopeAllowsPath(scope, given)) throw new Error(`${given} is outside this task’s approved path scope.`);
   const root = pickRoot(roots, scope.repository);
   let current = root.dir;
   for (const part of given.split('/')) {

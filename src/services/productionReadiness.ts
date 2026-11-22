@@ -1,4 +1,5 @@
 import { ALPHA_CLOUD_API, IS_CLOUD } from '../config/env.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import { database, type Sql } from '../store/database.js';
 import { cloudRequest } from './cloudWorkspaces.js';
 import { githubApi, type GitHubApi } from './githubApi.js';
@@ -42,7 +43,7 @@ const SHA = /^[a-f0-9]{40,64}$/i;
 export function builtFrom(build: SubmittedRound['build'], repository: string, sha: string): boolean {
   const parts = [build?.frontend, ...(build?.backends ?? [])];
   return parts.some(part =>
-    part?.repository?.toLowerCase() === repository.toLowerCase() && part.commitSha?.toLowerCase() === sha.toLowerCase());
+    Boolean(part) && sameRepository(part?.repository, repository) && part?.commitSha?.toLowerCase() === sha.toLowerCase());
 }
 
 export function decideReadiness(input: {

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { sameRepository } from '../utils/repositoryName.js';
 import fs from 'node:fs';
 import { RUNS_DIR } from '../config/env.js';
 import { dependencyInputs, readDependencyAuditEvidence } from './dependencyAuditService.js';
@@ -36,7 +37,7 @@ export function taskAuditEvidence(snapshot: OrchestrationSnapshot, task: Orchest
 /** Self-checks are useful evidence, but only an accepted independent Security task closes this gate. */
 export function finalDependencyAuditProblem(snapshot: OrchestrationSnapshot, repository: string, worktree: string,
   roles: readonly { id: string; role: string }[]): string | undefined {
-  const related = snapshot.tasks.filter(task => task.dependencyAudit && (task.repository ?? snapshot.run.repository).toLowerCase() === repository.toLowerCase());
+  const related = snapshot.tasks.filter(task => task.dependencyAudit && sameRepository((task.repository ?? snapshot.run.repository), repository));
   if (!related.some(task => task.required && task.dependencyAudit?.purpose !== 'self-check')) return;
   const current = dependencyInputs(worktree);
   for (const task of related.filter(task => task.required && task.status === 'accepted' && task.dependencyAudit?.purpose === 'verification')) {
@@ -47,7 +48,7 @@ export function finalDependencyAuditProblem(snapshot: OrchestrationSnapshot, rep
     if (!Array.isArray(records)) continue;
     const valid = records.some(record => {
       const parsed = dependencyAuditEvidenceSchema.safeParse(record);
-      return parsed.success && parsed.data.taskId === task.id && parsed.data.repository.toLowerCase() === repository.toLowerCase() &&
+      return parsed.success && parsed.data.taskId === task.id && sameRepository(parsed.data.repository, repository) &&
         parsed.data.purpose === 'verification' && parsed.data.status !== 'error' && parsed.data.passesPolicy &&
         !parsed.data.resolvedFromManifest && parsed.data.inputHash === current.inputHash && parsed.data.level === task.dependencyAudit!.level;
     });

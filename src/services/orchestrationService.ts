@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isImplementationTask } from './agentRoleContracts.js';
+import { canonicalRepository, sameRepository } from '../utils/repositoryName.js';
 import type { DependencyAuditSpec, DependencyAuditEvidence } from './dependencyAuditContract.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,7 +21,7 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { buildHumanReviewAmendment, type OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
 import type { Milestone, MilestoneExpansion, PlanNextMilestone } from './orchestrationMilestonePlanner.js';
 import { getCurrentBranch, getGitChangedPaths, getGitDiffNumstat, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
-import { pathMatchesScope } from '../utils/pathScope.js';
+import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
@@ -86,7 +88,6 @@ const MAX_REVIEW_SOURCE_FILES = 12;
 const MAX_REVIEW_SOURCE_FILE_BYTES = 16 * 1024;
 const REVIEW_SOURCE_EXTENSIONS = /\.(?:[cm]?[jt]sx?|vue|svelte|html?|css|scss|less|json|md|ya?ml)$/i;
 const SENSITIVE_REVIEW_PATH = /(?:^|\/)(?:\.env(?:\.|$)|secrets?(?:\/|\.|$)|credentials?(?:\/|\.|$)|private[-_]?key|id_rsa|id_ed25519)/i;
-const CODE_TASK_KINDS = new Set<OrchestrationTaskKind>(['database', 'backend', 'frontend', 'mobile']);
 const NON_REPAIRABLE_AGENT_FAILURE = /\b(?:provider|429|rate.?limit|quota|network|connection|timed? ?out|credential|authentication|permission|access denied|eacces|eperm|enoent|eio|worktree|working tree|branch|checkpoint|workspace|runtime|not ready|executable|spawn|disk full|enospc|read.only file system|no such file or directory)\b/i;
 
 /**
@@ -409,7 +410,7 @@ export class OrchestrationService {
       }
       // The primary record is the run's repository when it has a pull request, else any that does.
       const opened = publications.filter(item => !item.unchanged);
-      const publication = opened.find(item => item.repository?.toLowerCase() === snapshot.run.repository.toLowerCase())
+      const publication = opened.find(item => sameRepository(item.repository, snapshot.run.repository))
         ?? opened[0] ?? publications[0];
       if (!publication) throw new Error('No codebase pull request was published.');
       const completed = this.store.transitionOrchestrationRun({
@@ -864,7 +865,7 @@ export class OrchestrationService {
       const latestAccepted = [...snapshot.attempts].reverse().find(attempt => {
         const task = snapshot.tasks.find(item => item.id === attempt.taskId);
         return attempt.status === 'accepted' && attempt.resultCommit && task &&
-          (task.repository ?? snapshot.run.repository).toLowerCase() === workspace.repository.toLowerCase();
+          sameRepository((task.repository ?? snapshot.run.repository), workspace.repository);
       });
       const expectedCommit = latestAccepted?.resultCommit ?? workspace.baseCommit;
       if (!expectedCommit || head !== expectedCommit) {
@@ -993,8 +994,19 @@ export class OrchestrationService {
           (event.payload.evidence as Record<string, unknown>).validationVersion === 1);
       if (!validationEvent) throw new Error('Alpha could not confirm that this blocker came from final validation. Review the saved changes before continuing.');
       const savedEvidence = validationEvent.payload.evidence as Record<string, unknown>;
-      if (['workspace_checkpoint', 'final_scope', 'workspace_missing'].includes(String(savedEvidence.check ?? ''))) {
-        throw new Error('This blocker needs workspace or scope reconciliation before final checks can be repeated. Review the saved branch and changed files first.');
+      const check = String(savedEvidence.check ?? '');
+      if (check === 'final_scope') {
+        throw new Error('A changed file belongs to no accepted task, so the final checks would stop again. Tell the Orchestrator which task should own it, or review the saved changes.');
+      }
+      // A missing working copy is rebuilt from its checkpoints; a copy with changes no accepted
+      // task made is set aside (kept on disk) and restored to the accepted checkpoint.
+      if (check === 'workspace_missing') await this.executor.ensureWorkspaces?.(snapshot);
+      if (check === 'workspace_checkpoint') {
+        const copies = (snapshot.run.repositoryWorkspaces ?? []).map(workspace => workspace.worktreePath);
+        if (!copies.length && snapshot.run.worktreePath) copies.push(snapshot.run.worktreePath);
+        for (const worktree of copies) {
+          if (fs.existsSync(worktree)) await preserveAndRestoreWorktree({ worktree, runId: snapshot.run.id, label: 'final-checks', keepChanges: false });
+        }
       }
       this.store.resolveAnsweredReportFindings(input.runId, input.now);
       return this.store.transitionOrchestrationRun({
@@ -1164,14 +1176,14 @@ export class OrchestrationService {
       const failedStage = run.stages.find(stage => stage.status === 'failed');
       const isVerificationFailure = failedStage?.id === 'tests'
         && (run.verificationEvidence?.status === 'failed' || /verification failed|could not prepare .*dependencies/i.test(run.testSummary ?? ''));
-      const isRepairableImplementationFailure = failedStage?.id === 'implementation' && CODE_TASK_KINDS.has(task.kind) &&
+      const isRepairableImplementationFailure = failedStage?.id === 'implementation' && isImplementationTask(task.kind) &&
         !NON_REPAIRABLE_AGENT_FAILURE.test(failedStage.logs.slice(-30).join('\n'));
       const verificationOutput = failedStage?.logs.slice(-30).join('\n').slice(-4_000);
       const reason = isVerificationFailure
         ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
         : describeRunnerFailure(run, failedStage?.logs ?? []);
       return this.failActiveAttempt(snapshot, task.id, attempt.id, reason,
-        (isVerificationFailure || isRepairableImplementationFailure || /Process timed out/i.test(run.testSummary ?? '')) && CODE_TASK_KINDS.has(task.kind));
+        (isVerificationFailure || isRepairableImplementationFailure || /Process timed out/i.test(run.testSummary ?? '')) && isImplementationTask(task.kind));
     }));
   }
 
@@ -1836,7 +1848,7 @@ export class OrchestrationService {
     const codeTasks = new Map<string, OrchestrationSnapshot['tasks'][number]>();
     for (const ancestorId of ancestors) {
       const candidate = taskById.get(ancestorId);
-      if (!candidate || candidate.status !== 'accepted' || !['database', 'backend', 'frontend', 'mobile'].includes(candidate.kind)) continue;
+      if (!candidate || candidate.status !== 'accepted' || !isImplementationTask(candidate.kind)) continue;
       codeTasks.set(candidate.id, candidate);
       if (candidate.correctionOfTaskId) {
         const root = taskById.get(candidate.correctionOfTaskId);
@@ -1933,8 +1945,7 @@ export class OrchestrationService {
     const report = acceptedAttempt.result?.agentReport as { deliverables?: Array<{ paths?: string[] }> } | undefined;
     const reportedPaths = (report?.deliverables ?? []).flatMap(deliverable => deliverable.paths ?? []);
     const tracked = await getGitTrackedPathsAtCommit(worktree, acceptedAttempt.resultCommit!);
-    const included = (filePath: string) => task.scope.includePaths.some(pattern => pathMatchesScope(filePath, pattern)) &&
-      !task.scope.excludePaths.some(pattern => pathMatchesScope(filePath, pattern));
+    const included = (filePath: string) => scopeAllowsPath(task.scope, filePath);
     const candidates = tracked.filter(filePath =>
       included(filePath) && REVIEW_SOURCE_EXTENSIONS.test(filePath) && !SENSITIVE_REVIEW_PATH.test(filePath)
     );
@@ -2001,7 +2012,7 @@ function legacySingleRepositoryWorkspace(
   run: OrchestrationSnapshot['run'],
   repository: string
 ): { repository: string; branchName: string; baseRef: string; baseCommit: string; worktreePath: string } | undefined {
-  const canonical = (value: string) => value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase();
+  const canonical = canonicalRepository;
   if (run.repositoryWorkspaces?.length || canonical(repository) !== canonical(run.repository)) return undefined;
   const suffix = run.id.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase();
   if (!suffix) return undefined;
@@ -2024,9 +2035,7 @@ export function orchestrationRequestFingerprint(input: {
   createdBy: string;
   originalRequest: string;
 }): string {
-  const repositories = [...new Set((input.repositories ?? [input.repository]).map(value =>
-    value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase()
-  ))].sort();
+  const repositories = [...new Set((input.repositories ?? [input.repository]).map(value => canonicalRepository(value)))].sort();
   return createHash('sha256').update(JSON.stringify({ ...input, repositories })).digest('hex');
 }
 

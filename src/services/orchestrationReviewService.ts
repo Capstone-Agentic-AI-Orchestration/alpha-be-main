@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { sameRepository } from '../utils/repositoryName.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -196,7 +197,7 @@ export async function getOrchestrationDiffPreview(
     const latestCheckpoint = savedCheckpoint ? [...snapshot.attempts].reverse().find(attempt => {
       const task = snapshot.tasks.find(candidate => candidate.id === attempt.taskId);
       return Boolean(attempt.resultCommit && /^[a-f0-9]{40,64}$/i.test(attempt.resultCommit) && task &&
-        (task.repository ?? snapshot.run.repository).toLowerCase() === workspace.repository.toLowerCase());
+        sameRepository((task.repository ?? snapshot.run.repository), workspace.repository));
     }) : undefined;
     const baseCommit = validated
       ? typeof repoEvidence?.baseCommit === 'string' ? repoEvidence.baseCommit : workspace.baseCommit

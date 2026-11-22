@@ -1,4 +1,5 @@
 import { featureSpecSourceHash, plannerRequirementsFromSpec, specPlanningBrief } from './featureSpecContract.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import { manualChecklistRequirements } from './issueChecklist.js';
 import { boardCardSpec, selectBoardCards, type BoardCardSelection } from './boardCardBuild.js';
 import { isBoardThreadId } from './boardThreads.js';
@@ -196,7 +197,7 @@ async function reconcilePlanningReservation(input: {
 }
 
 function planningRequestKey(requestKey: string, repository: string, primaryRepository: string): string {
-  if (repository.toLowerCase() === primaryRepository.toLowerCase()) return requestKey;
+  if (sameRepository(repository, primaryRepository)) return requestKey;
   const suffix = crypto.createHash('sha256').update(repository.toLowerCase()).digest('hex').slice(0, 12);
   return `${requestKey}-repo-${suffix}`;
 }
@@ -217,7 +218,7 @@ async function reconcilePlanningReservations(input: {
 }
 
 function namedRepository(repositories: readonly SelectedProjectRepository[], repository: string): boolean {
-  return repositories.some(item => item.named && item.repository.toLowerCase() === repository.toLowerCase());
+  return repositories.some(item => item.named && sameRepository(item.repository, repository));
 }
 
 /** Whether the request names a codebase, by its full name or its short name (project-a-fe). */
@@ -467,8 +468,7 @@ async function startOrchestratedProjectBuild(input: {
   const activeLegacyRun = sqliteService.getSquadRuns().find(run => {
     if (run.projectId !== project.id || run.status !== 'running') return false;
     const activeIssue = sqliteService.getIssues().find(candidate => candidate.id === run.issueId);
-    const normalize = (value: string) => value.toLowerCase().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
-    return !activeIssue?.githubRepo || normalize(activeIssue.githubRepo) === normalize(repository);
+    return !activeIssue?.githubRepo || sameRepository(activeIssue.githubRepo, repository);
   });
   if (activeLegacyRun) return blocked('A legacy build is already using this project repository. Wait for it to finish before starting a task-based build.', project, repository);
 
@@ -536,7 +536,7 @@ async function startOrchestratedProjectBuild(input: {
   const branchName = orchestrationBranchName(proposedRunId);
   try {
     for (const [index, target] of repositories.entries()) {
-      const repair = input.deliveryRepair?.repositories.find(item => item.repository.toLowerCase() === target.repository.toLowerCase());
+      const repair = input.deliveryRepair?.repositories.find(item => sameRepository(item.repository, target.repository));
       if (input.deliveryRepair && !repair) throw new Error('Repair repository is outside the original delivery.');
       const requestedBase = repair?.base ?? requestedBuildBase(cleanGoal);
       const base = requestedBase ?? (await remoteHasDevBranch(target.checkoutDir) ? 'dev' : undefined);
@@ -639,7 +639,7 @@ async function startOrchestratedProjectBuild(input: {
       // The model may choose owners and dependencies, but cannot expand the
       // previously authorized write scope or alter the workflow gates.
       for (const task of planned.plan.tasks) {
-        const repair = input.deliveryRepair.repositories.find(item => item.repository.toLowerCase() === (task.repository ?? repository).toLowerCase());
+        const repair = input.deliveryRepair.repositories.find(item => sameRepository(item.repository, (task.repository ?? repository)));
         if (!repair) throw new Error('Repair plan selected an unauthorized repository.');
         task.scope = {
           includePaths: [...repair.includePaths],
@@ -823,8 +823,8 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
     const repos = repositoryOptions(project);
     const requestedRepos = input.requestedRepositories?.map(repo => repo.trim()).filter(Boolean)
       ?? (input.requestedRepository ? [input.requestedRepository.trim()] : []);
-    if (requestedRepos.some(requested => !repos.some(repo => repo.toLowerCase() === requested.toLowerCase()))) {
-      const invalid = requestedRepos.find(requested => !repos.some(repo => repo.toLowerCase() === requested.toLowerCase()))!;
+    if (requestedRepos.some(requested => !repos.some(repo => sameRepository(repo, requested)))) {
+      const invalid = requestedRepos.find(requested => !repos.some(repo => sameRepository(repo, requested)))!;
       return blocked(`“${invalid}” is not attached to ${project.name}. Choose codebases listed in this project.`, project);
     }
     const selectedRepositories = requestedRepos.length ? [...new Set(requestedRepos)] : [...repos];

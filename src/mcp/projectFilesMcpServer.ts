@@ -10,6 +10,7 @@
  * Entry point only -- nothing imports this.
  */
 import { createInterface } from 'node:readline';
+import { isImplementationTask } from '../services/agentRoleContracts.js';
 import { auditTaskDependencies, taskCanAudit, deleteTaskFile, editTaskFile, generateTaskLockfile, parseTaskFileScope, runTaskCheck, stopTaskOperations, writeTaskFile } from '../services/taskFileAccess.js';
 
 import {
@@ -100,7 +101,7 @@ if (TASK) {
     description: 'Run the assigned npm vulnerability audit read-only in a disposable metadata copy. Returns immutable audit evidence, findings, policy result or scanner error. Never updates product files. Include the returned evidence id in auditEvidenceIds in your report.',
     inputSchema: schema({}), run: () => auditTaskDependencies(ROOTS, TASK)
   };
-  if (!TASK.reportOnly && ['database', 'backend', 'frontend', 'mobile'].includes(TASK.kind)) {
+  if (!TASK.reportOnly && isImplementationTask(TASK.kind)) {
     TOOLS.project_write_file = {
       description: 'Create a source file inside this task’s approved path scope. To replace an existing file, include its current content as expected_content (as project_read_file shows it, without line numbers; line endings and a byte-order mark do not matter, and the file keeps its own). For small changes prefer project_edit_file.',
       inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), content: str('Full UTF-8 content.'), expected_content: str('Current content when replacing an existing file; line endings do not matter.') }, ['path', 'content']),
@@ -121,7 +122,7 @@ if (TASK) {
       inputSchema: schema({}), run: () => generateTaskLockfile(ROOTS, TASK)
     };
   }
-  if (!TASK.reportOnly && (TASK.kind === 'validation' || ['database', 'backend', 'frontend', 'mobile'].includes(TASK.kind))) {
+  if (!TASK.reportOnly && (TASK.kind === 'validation' || isImplementationTask(TASK.kind))) {
     TOOLS.project_run_check = {
       description: 'Run one task-authorized repository check in a disposable source copy; return exact results without changing project files.',
       inputSchema: schema({ script: str('One requiredChecks name from this task.') }, ['script']),

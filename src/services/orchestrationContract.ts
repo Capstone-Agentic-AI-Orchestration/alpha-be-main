@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Agent } from '../models/index.js';
-import { roleCanOwnTask } from './agentRoleContracts.js';
+import { roleCanOwnTask, isImplementationTask } from './agentRoleContracts.js';
 import { dependencyAuditSpecSchema } from './dependencyAuditContract.js';
 
 /**
@@ -326,7 +326,7 @@ export function validateOrchestrationPlan(
     issues.push({ code: 'dependency_cycle', taskId, detail: `Task "${taskId}" participates in a dependency cycle.` });
   }
 
-  const codeTasks = plan.tasks.filter(task => task.required && ['database', 'backend', 'frontend', 'mobile'].includes(task.kind));
+  const codeTasks = plan.tasks.filter(task => task.required && isImplementationTask(task.kind));
   const codeOwnerIds = new Set(codeTasks.map(task => task.ownerAgentId));
   const availableIndependentReviewers = eligibleAgents.filter(agent =>
     roleCanOwnOrchestrationTask('review', agent.role) && !codeOwnerIds.has(agent.id)
@@ -356,7 +356,7 @@ export function validateOrchestrationPlan(
     const role = agents.get(task.ownerAgentId)?.role ?? '';
     if ((task.kind === 'audit' && (!spec || spec.purpose === 'self-check')) ||
         (spec && (spec.purpose === 'self-check'
-          ? !['database', 'backend', 'frontend', 'mobile', 'validation'].includes(task.kind)
+          ? !(isImplementationTask(task.kind) || task.kind === 'validation')
           : !['audit', 'review'].includes(task.kind) || !roleCanOwnTask('audit', role)))) {
       issues.push({ code: 'audit_authority', taskId: task.id, detail: 'Independent audits require a Security audit/review owner; specialists may self-check only their assigned implementation/validation work.' });
     }

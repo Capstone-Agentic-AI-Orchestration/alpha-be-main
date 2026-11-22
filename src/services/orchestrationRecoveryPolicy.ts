@@ -1,10 +1,22 @@
 import { createHash } from 'node:crypto';
+import { isImplementationTask } from './agentRoleContracts.js';
 import type { OrchestrationRecoveryActionName, OrchestrationRecoveryCategory } from '../models/index.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 
 /** Total execution attempts including the first specialist run; this permits two automatic repairs. */
 export const AUTO_REPAIR_ATTEMPT_LIMIT = 3;
 export const MAX_REPAIR_ATTEMPTS_PER_EPISODE = 4;
+
+/**
+ * Acceptance checks a report-only correction can fix (no code changes). Acceptance corrects
+ * these automatically and recovery classifies them as report problems; one list, so a check
+ * corrected automatically is never later treated as a code failure.
+ */
+export const REPORT_FORMAT_CHECKS: ReadonlySet<string> = new Set([
+  'agent_report', 'report_identity', 'review_findings_missing', 'duplicate_review_finding',
+  'review_target', 'review_requirement', 'review_path_scope', 'review_finding_coverage',
+  'requirement_coverage', 'acceptance_criteria', 'deliverable_traceability'
+]);
 /** Alpha may ask the same specialist twice to correct a report without touching code. */
 export const MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS = 2;
 /** Keep one additional correction available only after the developer reviews the escalation. */
@@ -160,7 +172,7 @@ export function classifyRecoveryCategory(input: {
   if (/setting|configuration|missing required|not configured|reconnect|install .*runtime/i.test(text)) return 'configuration';
   if (/orchestrator.*(?:disabled|unavailable)|alpha daemon|update the (?:desktop )?app/i.test(text)) return 'alpha';
   if (/alpha could not (?:complete|finish|safely verify).*acceptance checks|acceptance system failure/i.test(text)) return 'alpha';
-  if (input.hasTask && ['database', 'backend', 'frontend', 'mobile', 'implement'].includes(input.taskKind ?? '')) return 'project_code';
+  if (input.hasTask && isImplementationTask(input.taskKind ?? '')) return 'project_code';
   return 'unknown';
 }
 

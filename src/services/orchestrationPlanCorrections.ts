@@ -1,8 +1,8 @@
 import { MAX_TASK_DEPENDENCIES, type OrchestrationPlan } from './orchestrationContract.js';
+import { isImplementationTask } from './agentRoleContracts.js';
 
 /** Tasks that only write a report: changing their bounds never widens what code can change. */
 const ANALYSIS_KINDS = new Set(['requirements', 'architecture']);
-const CODE_KINDS = new Set(['database', 'backend', 'frontend', 'mobile']);
 
 type PlanTask = OrchestrationPlan['tasks'][number];
 type Milestone = NonNullable<OrchestrationPlan['milestones']>[number];
@@ -87,7 +87,7 @@ function waitForManagerBriefs(tasks: PlanTask[], agents: readonly { id: string; 
   for (const brief of briefs) {
     // Two briefs in one milestone is the planner's call to resolve, not ours.
     if (briefs.some(other => other !== brief && other.milestoneId === brief.milestoneId)) continue;
-    const waiting = tasks.filter(task => CODE_KINDS.has(task.kind) && task.milestoneId === brief.milestoneId && canWaitFor(task, brief, byId));
+    const waiting = tasks.filter(task => isImplementationTask(task.kind) && task.milestoneId === brief.milestoneId && canWaitFor(task, brief, byId));
     for (const task of waiting) {
       task.dependsOn.push(brief.id);
       corrections.push(`Made ${task.id} wait for the Manager brief ${brief.id}.`);
