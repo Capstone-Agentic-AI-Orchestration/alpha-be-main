@@ -50,7 +50,7 @@ describe('task authority before a file changes', () => {
     deleteTaskFile(roots, scope, { path: 'src/api.ts', expected_content: '$& after' });
     expect(fs.existsSync(path.join(dir, 'src/api.ts'))).toBe(false);
   });
-  it.each(['src/api.ts.', 'src/api.ts ', 'src/.env.', 'src/.env ', 'src/Node_Modules/x.js'])('refuses %s, which Windows would rename or which is internal', target => {
+  it.each(['src/api.ts.', 'src/api.ts ', 'src/.env.', 'src/.env ', 'src/Node_Modules/x.js', 'NODE_M~1/x.js', 'src/SECRET~1.TXT', 'src/ENV~1'])('refuses %s, which Windows would rename or which is internal', target => {
     expect(() => writeTaskFile(roots, scope, { path: target, content: 'bad' })).toThrow();
   });
 

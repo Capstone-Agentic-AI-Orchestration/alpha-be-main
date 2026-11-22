@@ -78,9 +78,13 @@ function inFileForm(text: string, original: string): string {
   return (original.startsWith('\uFEFF') ? '\uFEFF' : '') + (crlf ? body.replace(/\n/g, '\r\n') : body);
 }
 
-/** A path part Windows would silently rename: `config.ts.` and `config.ts ` are `config.ts`. */
+/**
+ * A path part Windows would resolve to another name: `config.ts.` and `config.ts ` are
+ * `config.ts`, and an 8.3 short alias such as `NODE_M~1` or `SECRET~1.TXT` names a longer
+ * file. Checks on the given name would not see the real one, so such names are refused.
+ */
 function renamedByWindows(part: string): boolean {
-  return /[. ]$/.test(part) && part !== '.' && part !== '..';
+  return (/[. ]$/.test(part) && part !== '.' && part !== '..') || /~\d/.test(part);
 }
 
 function writablePath(roots: ProjectRoot[], scope: TaskFileScope, given: string): string {
@@ -101,6 +105,10 @@ function writablePath(roots: ProjectRoot[], scope: TaskFileScope, given: string)
     const real = fs.realpathSync.native(current);
     const rel = path.relative(root.dir, real);
     if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) throw new Error('Path escapes the assigned repository.');
+    // The same name checks on the real name, which can differ from the given one on Windows.
+    if (rel.split(path.sep).some(name => SKIPPED_DIRS.has(name.toLowerCase()) || isSecretFile(name))) {
+      throw new Error('Use a repository-relative source path; secrets, dependencies and internal folders are forbidden.');
+    }
   }
   return current;
 }
