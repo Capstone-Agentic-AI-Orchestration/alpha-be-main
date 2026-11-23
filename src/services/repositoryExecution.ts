@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { CI_CHECKS, orchestrationRequiredCheckSchema, type OrchestrationRequiredCheck } from './orchestrationContract.js';
 
 export interface PackageManifest {
   packageManager?: unknown;
@@ -35,6 +36,11 @@ export function packageManagerBinary(manager: string): string {
 export function hasScript(scripts: Record<string, unknown>, name: string): boolean {
   return Object.hasOwn(scripts, name) && typeof scripts[name] === 'string' && (scripts[name] as string).trim().length > 0;
 }
+/** The checkable scripts a repository defines (orchestrationRequiredCheckSchema names with a command). */
+export function definedCheckScripts(cwd: string): OrchestrationRequiredCheck[] {
+  const scripts = readManifest(cwd)?.scripts ?? {};
+  return orchestrationRequiredCheckSchema.options.filter(name => hasScript(scripts, name));
+}
 export function discoverVerificationCommands(cwd: string, requestedScripts?: readonly string[]): VerificationCommand[] {
   const manifest = readManifest(cwd);
   if (!manifest?.scripts) return [];
@@ -42,8 +48,8 @@ export function discoverVerificationCommands(cwd: string, requestedScripts?: rea
   const manager = packageManagerFor(cwd, manifest);
   const requested = [...new Set(requestedScripts ?? [])];
   const combined = requested.length ? undefined : ['verify', 'check', 'validate', 'ci'].find(name => hasScript(scripts, name));
-  const selected = requested.length ? requested.filter(name => hasScript(scripts, name))
-    : combined ? [combined] : ['test', 'typecheck', 'lint'].filter(name => hasScript(scripts, name));
+  const defaults = combined ? [combined] : CI_CHECKS.filter(name => hasScript(scripts, name));
+  const selected = requested.length ? requested.filter(name => hasScript(scripts, name)) : defaults;
   return selected.map(script => ({
     script, bin: packageManagerBinary(manager), args: ['run', script], display: manager + ' run ' + script
   }));

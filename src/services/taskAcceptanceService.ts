@@ -5,7 +5,7 @@ import path from 'node:path';
 import { taskAuditEvidence, finalDependencyAuditProblem } from './orchestrationAuditEvidence.js';
 import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
 import { normalizeAndValidateAgentReport } from './orchestrationAgentReport.js';
-import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { getCurrentBranch, getGitChangedPaths, getGitFileAtCommit, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { runVerification, type VerificationResult } from './verificationService.js';
 import { projectRunWorkspacePath } from './workspaceService.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -15,6 +15,9 @@ import { buildFinalValidationAmendment, buildOrchestrationReviewAmendment, Orche
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
+import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
+import { TEST_FILE, testWeakening } from './testWeakening.js';
+import { taskChangeBaseline } from './orchestrationCheckpoints.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
   MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS,
@@ -44,14 +47,17 @@ interface AcceptanceDependencies {
   getHeadCommit: typeof getHeadCommit;
   isGitWorkingTreeClean: typeof isGitWorkingTreeClean;
   getGitChangedPaths: typeof getGitChangedPaths;
+  getGitFileAtCommit: typeof getGitFileAtCommit;
   worktreePathFor: typeof projectRunWorkspacePath;
   runVerification: typeof runVerification;
 }
 
 const REPORT_ONLY_CORRECTION_CHECKS = REPORT_FORMAT_CHECKS;
 const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
-  'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed', 'tool_blocker'
+  'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'required_check', 'verification_failed', 'tool_blocker'
 ]);
+
+const MAX_WEAKENING_CHECK_BYTES = 1024 * 1024;
 
 /** Same case rule as the write tool (pathMatchesScope), so a file it allowed is never rejected here. */
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
@@ -90,6 +96,30 @@ export function finalValidationBlockReason(
   return parts.join(' ') || 'Final validation failed.';
 }
 
+/**
+ * Whether a task may change a file an accepted task delivered. Both cases need the file in the
+ * task's own approved scope, so the plan the person approved names it:
+ * - the task builds on the owner (depends on it, directly or through other tasks). Repository
+ *   checks and shared code reach across files, so later work must be able to update earlier
+ *   files, tests included; the change is recorded as evolvedAcceptedPaths for the review.
+ * - the owner sits in an earlier milestone (a persisted later milestone is a scoped amendment).
+ * Tasks the plan runs side by side stay strict: neither may rewrite the other's accepted work.
+ */
+function mayEvolveAcceptedPath(
+  snapshot: OrchestrationSnapshot,
+  task: OrchestrationTaskRecord,
+  filePath: string,
+  ownerTaskId: string
+): boolean {
+  if (!taskAllowsPath(task, filePath)) return false;
+  if (dependsTransitivelyOn(task, ownerTaskId, snapshot.tasks)) return true;
+  const owner = snapshot.tasks.find(candidate => candidate.id === ownerTaskId);
+  const milestones = snapshot.run.plan.milestones ?? [];
+  const prior = milestones.findIndex(item => item.id === owner?.milestoneId);
+  const current = milestones.findIndex(item => item.id === task.milestoneId);
+  return prior >= 0 && current > prior;
+}
+
 function dependsTransitivelyOn(
   task: OrchestrationTaskRecord,
   dependencyId: string,
@@ -109,23 +139,12 @@ function dependsTransitivelyOn(
   return visit(task.id);
 }
 
-function reportChangeBaseline(
-  snapshot: OrchestrationSnapshot,
-  taskId: string,
-  attempt: OrchestrationAttemptRecord
-): string | undefined {
-  if (attempt.contextManifest.reportOnlyReportRetry !== true) return attempt.startingCommit;
-  const storedBaseline = attempt.contextManifest.reportOnlyBaselineCommit;
-  if (typeof storedBaseline === 'string' && /^[a-f0-9]{40,64}$/i.test(storedBaseline)) return storedBaseline;
-  const attemptIndex = snapshot.attempts.findIndex(item => item.id === attempt.id);
-  for (let index = attemptIndex - 1; index >= 0; index -= 1) {
-    const previous = snapshot.attempts[index];
-    if (previous.taskId === taskId && previous.contextManifest.reportOnlyReportRetry !== true &&
-        ['failed', 'rejected', 'recovery_required'].includes(previous.status) && previous.startingCommit) {
-      return previous.startingCommit;
-    }
-  }
-  return attempt.startingCommit;
+/**
+ * Where this task's changes are measured from, across all its attempts (taskChangeBaseline).
+ * Report-only and code retries alike: both continue the earlier attempt's saved work.
+ */
+function taskBaseline(snapshot: OrchestrationSnapshot, taskId: string, attempt: OrchestrationAttemptRecord): string | undefined {
+  return taskChangeBaseline(snapshot, taskId, repositoryWorkspaceForTask(snapshot, taskId)?.baseCommit) ?? attempt.startingCommit;
 }
 
 function reviewRootTask(task: OrchestrationTaskRecord, tasks: readonly OrchestrationTaskRecord[]): OrchestrationTaskRecord | undefined {
@@ -167,6 +186,7 @@ export class TaskAcceptanceService {
       getHeadCommit,
       isGitWorkingTreeClean,
       getGitChangedPaths,
+      getGitFileAtCommit,
       worktreePathFor: projectRunWorkspacePath,
       runVerification,
       ...dependencies
@@ -259,7 +279,7 @@ export class TaskAcceptanceService {
                     return typeof detail === 'string' ? detail : rejection.reason;
                   }),
                   previousResponse: previousAgentReportResponse(attempt.result),
-                  startingCommit: reportChangeBaseline(rejected, task.id, attempt)
+                  startingCommit: taskBaseline(rejected, task.id, attempt)
                 }
               });
               if (correction.run.status === 'executing' && correction.run.currentTaskId === task.id) {
@@ -630,7 +650,7 @@ export class TaskAcceptanceService {
         submittedCommit: attempt.resultCommit, currentCommit, workingTreeClean: isClean
       });
     }
-    const diffStartingCommit = reportChangeBaseline(snapshot, task.id, attempt);
+    const diffStartingCommit = taskBaseline(snapshot, task.id, attempt);
     if (!diffStartingCommit) {
       return fail('The attempt has no recorded starting commit, so its changed-file scope cannot be verified.', { check: 'starting_commit' });
     }
@@ -663,31 +683,8 @@ export class TaskAcceptanceService {
     const correctionLineageTaskIds = new Set(task.correctionOfTaskId
       ? [task.correctionOfTaskId, ...snapshot.tasks.filter(candidate => candidate.correctionOfTaskId === task.correctionOfTaskId).map(candidate => candidate.id)]
       : [task.id]);
-    const acceptedPathOwners = new Map<string, { taskId: string; commit: string }>();
-    for (const acceptedTask of snapshot.tasks.filter(candidate => candidate.status === 'accepted' &&
-      sameRepository((candidate.repository ?? snapshot.run.repository), (task.repository ?? snapshot.run.repository)))) {
-      const acceptedAttempt = [...snapshot.attempts].reverse().find(candidate =>
-        candidate.taskId === acceptedTask.id && candidate.status === 'accepted' && candidate.resultCommit);
-      const acceptedEvidence = acceptedAttempt?.result?.acceptanceEvidence;
-      const acceptedChangedPaths = acceptedEvidence && typeof acceptedEvidence === 'object'
-        ? (acceptedEvidence as Record<string, unknown>).changedPaths
-        : undefined;
-      if (!acceptedAttempt?.resultCommit || !Array.isArray(acceptedChangedPaths)) continue;
-      for (const acceptedPath of acceptedChangedPaths) {
-        if (typeof acceptedPath === 'string') acceptedPathOwners.set(acceptedPath, {
-          taskId: acceptedTask.id, commit: acceptedAttempt.resultCommit
-        });
-      }
-    }
-    const acceptedCommits = new Set([...acceptedPathOwners.values()].map(owner => owner.commit));
-    const pathsChangedSinceAccepted = new Map<string, Set<string>>();
-    for (const acceptedCommit of acceptedCommits) {
-      const changedSinceAccepted = await this.dependencies.getGitChangedPaths(worktreePath, acceptedCommit, attempt.resultCommit);
-      pathsChangedSinceAccepted.set(acceptedCommit, new Set(changedSinceAccepted));
-    }
-    const restoredAcceptedPaths = new Set([...acceptedPathOwners]
-      .filter(([filePath, owner]) => !pathsChangedSinceAccepted.get(owner.commit)?.has(filePath))
-      .map(([filePath]) => filePath));
+    const { owners: acceptedPathOwners, restored: restoredAcceptedPaths } =
+      await this.acceptedPathOwnership(snapshot, task, worktreePath, attempt.resultCommit);
     const outsideScope = changedPaths.find(filePath => !taskAllowsPath(task, filePath) &&
       !(correctionPaths.has(filePath) &&
         (!cumulativeChangedPaths.includes(filePath) ||
@@ -700,23 +697,31 @@ export class TaskAcceptanceService {
     }
     const modifiedAcceptedPath = changedPaths.find(filePath =>
       acceptedPathOwners.has(filePath) && !restoredAcceptedPaths.has(filePath) &&
-      // A persisted later milestone is an explicit scoped plan amendment. It may
-      // evolve earlier accepted files, while same-milestone ownership stays strict.
-      !(() => {
-        const owner = snapshot.tasks.find(candidate => candidate.id === acceptedPathOwners.get(filePath)!.taskId);
-        const milestones = snapshot.run.plan.milestones ?? [];
-        const prior = milestones.findIndex(item => item.id === owner?.milestoneId);
-        const current = milestones.findIndex(item => item.id === task.milestoneId);
-        return prior >= 0 && current > prior && taskAllowsPath(task, filePath);
-      })() &&
+      !mayEvolveAcceptedPath(snapshot, task, filePath, acceptedPathOwners.get(filePath)!.taskId) &&
       !(task.correctionOfTaskId && correctionPaths.has(filePath) &&
         correctionLineageTaskIds.has(acceptedPathOwners.get(filePath)!.taskId) && taskAllowsPath(task, filePath)));
     if (modifiedAcceptedPath) {
       const owner = acceptedPathOwners.get(modifiedAcceptedPath)!;
-      return fail(`This task changed ${modifiedAcceptedPath}, which belongs to already accepted task ${owner.taskId}. Restore the accepted artifact or request a plan amendment.`, {
+      // Only reached when this task does not build on the owner: the plan runs them as separate
+      // work, so this is a real conflict. Name only ways out that exist for a started build.
+      return fail(`This task changed ${modifiedAcceptedPath}, which accepted task ${owner.taskId} delivered, and this task does not build on ${owner.taskId}. Restore that file to its accepted version, or cancel this build and plan the change with ${owner.taskId}'s work.`, {
         check: 'accepted_artifact_mutation', changedPath: modifiedAcceptedPath,
         acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
       }, modifiedAcceptedPath);
+    }
+    // Every route that may change another task's accepted file (building on it, a later milestone, a
+    // review correction) may update it, never delete it or weaken its tests: fail closed here rather
+    // than trusting the reviewer to notice. A change here already passed the ownership guard above.
+    for (const filePath of changedPaths) {
+      const owner = acceptedPathOwners.get(filePath);
+      if (!owner || owner.taskId === task.id || restoredAcceptedPaths.has(filePath)) continue;
+      const weakened = await this.acceptedFileWeakening(worktreePath, filePath, owner.commit, attempt.resultCommit);
+      if (weakened) {
+        return fail(`This task ${weakened} in ${filePath}, which accepted task ${owner.taskId} delivered. Work that builds on ${owner.taskId} may update its files but not delete them or remove their tests or assertions. Restore what was removed and keep the update.`, {
+          check: 'accepted_artifact_weakened', changedPath: filePath,
+          acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
+        }, filePath);
+      }
     }
     const scopeOwners = snapshot.tasks.filter(candidate =>
       (candidate.status === 'accepted' || candidate.id === task.id) &&
@@ -735,7 +740,7 @@ export class TaskAcceptanceService {
       : null;
     const observedCommands = verification?.commands ?? [];
     const missingScripts = verification?.missingScripts ?? [];
-    const requiredChecks = task.requiredChecks;
+    const requiredChecks = buildTaskRequiredChecks(snapshot, task);
     const failedCheck = requiredChecks.find(script => missingScripts.includes(script) ||
       !observedCommands.some(command => command.script === script && command.exitCode === 0 && command.signal === null));
     if (failedCheck) {
@@ -764,14 +769,25 @@ export class TaskAcceptanceService {
     const authorizedWorkspace = repositoryWorkspaceForTask(snapshot, task.id);
     if (!authorizedWorkspace) throw new Error(`Task ${task.id} has no authorized repository workspace.`);
     const worktree = authorizedWorkspace.worktreePath;
-    const changedPaths = attempt.startingCommit && attempt.resultCommit
-      ? await this.dependencies.getGitChangedPaths(worktree,
-        reportChangeBaseline(snapshot, task.id, attempt) ?? attempt.startingCommit, attempt.resultCommit)
+    const diffStartingCommit = taskBaseline(snapshot, task.id, attempt);
+    const changedPaths = diffStartingCommit && attempt.resultCommit
+      ? await this.dependencies.getGitChangedPaths(worktree, diffStartingCommit, attempt.resultCommit)
+      : [];
+    // Files this task changed that an earlier accepted task delivered (allowed by mayEvolveAcceptedPath).
+    // Recorded so the reviewers that depend on this task look at what changed in accepted work.
+    const ownership = attempt.resultCommit
+      ? await this.acceptedPathOwnership(snapshot, task, worktree, attempt.resultCommit)
+      : undefined;
+    const evolvedAcceptedPaths = ownership
+      ? changedPaths.flatMap(filePath => {
+        const owner = ownership.owners.get(filePath);
+        return owner && owner.taskId !== task.id && !ownership.restored.has(filePath) ? [{ path: filePath, ownerTaskId: owner.taskId }] : [];
+      })
       : [];
     return {
       acceptanceVersion: 1,
       attemptId: attempt.id,
-      diffStartingCommit: reportChangeBaseline(snapshot, task.id, attempt) ?? attempt.startingCommit,
+      diffStartingCommit,
       artifactId: snapshot.artifacts.find(item => item.attemptId === attempt.id && item.type === 'task_result')?.id,
       resultCommit: attempt.resultCommit,
       currentHead: attempt.resultCommit,
@@ -781,13 +797,68 @@ export class TaskAcceptanceService {
       cumulativeChangedPaths: authorizedWorkspace.baseCommit && attempt.resultCommit
         ? await this.dependencies.getGitChangedPaths(worktree, authorizedWorkspace.baseCommit, attempt.resultCommit)
         : [],
+      ...(evolvedAcceptedPaths.length ? { evolvedAcceptedPaths } : {}),
       scope: { includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths, passed: true },
-      requiredChecks: task.requiredChecks,
+      requiredChecks: buildTaskRequiredChecks(snapshot, task),
       verification: attempt.result?.verification,
       semanticReviewRequired: isImplementationTask(task.kind),
       ...(task.dependencyAudit ? { dependencyAudits: taskAuditEvidence(snapshot, task, attempt, worktree,
         validateAttemptReport(attempt).success ? (attempt.result?.agentReport as { auditEvidenceIds?: string[] }).auditEvidenceIds : undefined) } : {})
     };
+  }
+
+  /**
+   * How a change weakened an accepted file, or undefined when it did not: deleted it, or (for a test
+   * file) removed or skipped tests or removed assertions (testWeakening, a JavaScript/TypeScript
+   * heuristic). A file too large to read is treated as weakened (fail closed).
+   */
+  private async acceptedFileWeakening(worktreePath: string, filePath: string, acceptedCommit: string, resultCommit: string): Promise<string | undefined> {
+    const read = (commit: string) => this.dependencies.getGitFileAtCommit(worktreePath, commit, filePath, MAX_WEAKENING_CHECK_BYTES)
+      .then(content => content ?? null, () => undefined);
+    const after = await read(resultCommit);
+    if (after === undefined) return 'deleted a file';
+    if (!TEST_FILE.test(filePath)) return undefined;
+    const before = await read(acceptedCommit);
+    if (before === null || after === null) return 'changed a test file too large to compare';
+    if (before === undefined) return undefined;
+    return testWeakening(before, after);
+  }
+
+  /**
+   * Which accepted task delivered each file in this task's repository (the later task when two did),
+   * and which of those files are back at their accepted version at `resultCommit`.
+   */
+  private async acceptedPathOwnership(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    worktreePath: string,
+    resultCommit: string
+  ): Promise<{ owners: Map<string, { taskId: string; commit: string }>; restored: Set<string> }> {
+    const owners = new Map<string, { taskId: string; commit: string }>();
+    for (const acceptedTask of snapshot.tasks.filter(candidate => candidate.status === 'accepted' &&
+      sameRepository((candidate.repository ?? snapshot.run.repository), (task.repository ?? snapshot.run.repository)))) {
+      const acceptedAttempt = [...snapshot.attempts].reverse().find(candidate =>
+        candidate.taskId === acceptedTask.id && candidate.status === 'accepted' && candidate.resultCommit);
+      const acceptedEvidence = acceptedAttempt?.result?.acceptanceEvidence;
+      const acceptedChangedPaths = acceptedEvidence && typeof acceptedEvidence === 'object'
+        ? (acceptedEvidence as Record<string, unknown>).changedPaths
+        : undefined;
+      if (!acceptedAttempt?.resultCommit || !Array.isArray(acceptedChangedPaths)) continue;
+      for (const acceptedPath of acceptedChangedPaths) {
+        if (typeof acceptedPath === 'string') owners.set(acceptedPath, {
+          taskId: acceptedTask.id, commit: acceptedAttempt.resultCommit
+        });
+      }
+    }
+    const pathsChangedSinceAccepted = new Map<string, Set<string>>();
+    for (const acceptedCommit of new Set([...owners.values()].map(owner => owner.commit))) {
+      pathsChangedSinceAccepted.set(acceptedCommit,
+        new Set(await this.dependencies.getGitChangedPaths(worktreePath, acceptedCommit, resultCommit)));
+    }
+    const restored = new Set([...owners]
+      .filter(([filePath, owner]) => !pathsChangedSinceAccepted.get(owner.commit)?.has(filePath))
+      .map(([filePath]) => filePath));
+    return { owners, restored };
   }
 
   private async finalValidation(
@@ -839,8 +910,7 @@ export class TaskAcceptanceService {
         const blocked = this.store.transitionOrchestrationRun({ runId: current.run.id, expectedRevision: current.run.revision, nextStatus: 'blocked', actorId, reason, evidence, now });
         return { decision: 'blocked', snapshot: blocked, reason, evidence };
       }
-      const requiredScripts = [...new Set(current.tasks.filter(task => task.required &&
-        sameRepository((task.repository ?? current.run.repository), workspace.repository)).flatMap(task => task.requiredChecks))];
+      const requiredScripts = repositoryChecks(current.tasks.filter(task => task.required), workspace.repository, current.run.repository);
       let verification: VerificationResult;
       try {
         verification = reportOnly && !requiredScripts.length ? {

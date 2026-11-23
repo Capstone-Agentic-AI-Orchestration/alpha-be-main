@@ -33,11 +33,19 @@ export const orchestrationTaskKindSchema = z.enum([
 
 export type OrchestrationTaskKind = z.infer<typeof orchestrationTaskKindSchema>;
 
+/** The package scripts a task may be held to. The planner, verification and the agent's check tool read this list. */
 export const orchestrationRequiredCheckSchema = z.enum([
-  'verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint'
+  'verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint', 'build'
 ]);
 
 export type OrchestrationRequiredCheck = z.infer<typeof orchestrationRequiredCheckSchema>;
+
+/**
+ * The scripts a repository's CI runs on every pull request (tests, types, lint, and the build the
+ * frontend CI requires). Code that passes Alpha's checks must not then fail CI after delivery, so a
+ * code task runs each of these its repository defines, whatever the plan named (taskRequiredChecks).
+ */
+export const CI_CHECKS: readonly OrchestrationRequiredCheck[] = ['test', 'typecheck', 'lint', 'build'];
 
 const shortText = z.string().trim().min(1).max(240);
 const detailText = z.string().trim().min(1).max(4_000);

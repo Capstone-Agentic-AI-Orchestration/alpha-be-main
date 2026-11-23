@@ -150,6 +150,7 @@ export function appendOrchestrationTaskPolicy(
     orchestration.taskPackage.corrections.length
       ? `Targeted corrections from acceptance:\n${orchestration.taskPackage.corrections.map(item => `- ${item}`).join('\n')}`
       : '',
+    formatEarlierAttemptFiles(orchestration.taskPackage),
     orchestration.taskPackage.exclusions.length
       ? `Build exclusions:\n${orchestration.taskPackage.exclusions.map(item => `- ${item}`).join('\n')}`
       : '',
@@ -208,6 +209,7 @@ export function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPac
     `Authorized path patterns: ${taskPackage.task.scope.includePaths.length ? taskPackage.task.scope.includePaths.join(', ') : 'none configured'}`,
     taskPackage.task.scope.excludePaths.length ? `Forbidden path patterns:\n${taskPackage.task.scope.excludePaths.map(item => `- ${item}`).join('\n')}` : '',
     taskPackage.corrections.length ? `Targeted corrections:\n${taskPackage.corrections.map(item => `- ${item}`).join('\n')}` : '',
+    formatEarlierAttemptFiles(taskPackage),
     taskPackage.reviewInputs.length ? [
       'Immutable accepted code changes for this review (diff hashes bind these exact patches):',
       ...taskPackage.reviewInputs.map(input => [
@@ -286,6 +288,21 @@ export function formatOrchestrationReportContract(taskPackage: OrchestrationTask
   ].join('\n\n');
 }
 
+/** The files a retry inherits from this task's earlier attempts, which its report must list. Empty on a first attempt. */
+function formatEarlierAttemptFiles(taskPackage: OrchestrationTaskPackage): string {
+  const files = taskPackage.earlierAttemptChangedPaths ?? [];
+  return files.length
+    ? `Files this task's earlier attempts already changed (saved in your working copy and part of this task's work; list each under deliverables in your report): ${files.join(', ')}`
+    : '';
+}
+
+/** A dependency's changes to earlier accepted tasks' files, for the reviewer to check nothing was weakened. */
+function formatEvolvedAcceptedPaths(paths: OrchestrationTaskPackage['acceptedDependencies'][number]['evolvedAcceptedPaths']): string {
+  if (!paths?.length) return '';
+  const files = paths.map(item => item.path + ' (from ' + item.ownerTaskId + ')').join(', ');
+  return `  Files it changed that earlier accepted tasks delivered (check tests and behaviour were not weakened): ${files}`;
+}
+
 function formatAcceptedDependencies(dependencies: OrchestrationTaskPackage['acceptedDependencies']): string {
   if (!dependencies.length) return '- None.';
   return dependencies.map(dependency => [
@@ -303,7 +320,8 @@ function formatAcceptedDependencies(dependencies: OrchestrationTaskPackage['acce
     dependency.observedChecks.length
       ? `  Individual checks:\n${dependency.observedChecks.map(item => `    - ${item.script}: ${item.result}`).join('\n')}`
       : '  Individual checks: none recorded.',
-    dependency.changedPaths.length ? `  Changed files: ${dependency.changedPaths.join(', ')}` : ''
+    dependency.changedPaths.length ? `  Changed files: ${dependency.changedPaths.join(', ')}` : '',
+    formatEvolvedAcceptedPaths(dependency.evolvedAcceptedPaths)
   ].filter(Boolean).join('\n')).join('\n');
 }
 
@@ -979,6 +997,7 @@ Task package version ${orchestration.taskPackage.packageVersion}; report schema 
 Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'none configured'}
 Forbidden path patterns: ${orchestration.taskPackage.task.scope.excludePaths.length ? orchestration.taskPackage.task.scope.excludePaths.join(', ') : 'none'}
 Targeted corrections: ${orchestration.taskPackage.corrections.length ? orchestration.taskPackage.corrections.join(' ') : 'none'}
+${formatEarlierAttemptFiles(orchestration.taskPackage) || 'Files from earlier attempts of this task: none'}
 Accepted prerequisite handoffs:
 ${formatAcceptedDependencies(orchestration.taskPackage.acceptedDependencies)}
 

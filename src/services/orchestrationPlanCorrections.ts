@@ -1,5 +1,6 @@
 import { MAX_TASK_DEPENDENCIES, type OrchestrationPlan } from './orchestrationContract.js';
 import { isImplementationTask } from './agentRoleContracts.js';
+import { taskRequiredChecks } from './repositoryChecks.js';
 
 /** Tasks that only write a report: changing their bounds never widens what code can change. */
 const ANALYSIS_KINDS = new Set(['requirements', 'architecture']);
@@ -32,18 +33,25 @@ export interface PlanCorrections<P> {
  *   milestone's tasks. The roadmap stays; later milestones are planned from the work
  *   the first one delivers, so this only narrows what runs now.
  *
+ * - Every code task gets all the checks its repository runs, and the CI checks its repository
+ *   defines (taskRequiredChecks), so the saved plan shows what acceptance enforces. This adds
+ *   checks, never paths.
+ *
  * Anything that would mean inventing work (a missing review, a missing task in a
  * named repository) is left for the planner and the check.
  */
 export function correctPlanSafely<P extends OrchestrationPlan>(
   plan: P,
-  agents: readonly { id: string; role: string }[]
+  agents: readonly { id: string; role: string }[],
+  /** The check scripts a task's repository defines (undefined repository: the run's). */
+  scriptsFor: (repository: string | undefined) => readonly string[] = () => []
 ): PlanCorrections<P> {
   const corrections: string[] = [];
   let tasks = plan.tasks.map(task => ({ ...task, dependsOn: [...task.dependsOn], requirementIds: [...task.requirementIds] }));
   tasks = firstMilestoneTasksOnly(tasks, plan.milestones ?? [], corrections);
   narrowAnalysisTasks(tasks, plan.milestones ?? [], corrections);
   waitForManagerBriefs(tasks, agents, corrections);
+  sameChecksPerRepository(tasks, scriptsFor, corrections);
   return corrections.length ? { plan: { ...plan, tasks }, corrections } : { plan, corrections };
 }
 
@@ -92,6 +100,20 @@ function waitForManagerBriefs(tasks: PlanTask[], agents: readonly { id: string; 
       task.dependsOn.push(brief.id);
       corrections.push(`Made ${task.id} wait for the Manager brief ${brief.id}.`);
     }
+  }
+}
+
+/**
+ * Give each code task every check its repository runs, and each CI check its repository defines.
+ * Tasks with no repository share the run's.
+ */
+function sameChecksPerRepository(tasks: PlanTask[], scriptsFor: (repository: string | undefined) => readonly string[], corrections: string[]): void {
+  const checked = tasks.map(task => ({ ...task, requiredChecks: [...task.requiredChecks] }));
+  for (const [index, task] of tasks.entries()) {
+    const required = taskRequiredChecks(checked[index], checked, '', scriptsFor(task.repository));
+    if (required.length === task.requiredChecks.length) continue;
+    task.requiredChecks = required;
+    corrections.push(`Gave ${task.id} every check its repository runs: ${required.join(', ')}.`);
   }
 }
 

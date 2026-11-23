@@ -59,6 +59,22 @@ export function latestCheckpointCommit(snapshot: OrchestrationSnapshot, reposito
 }
 
 /**
+ * Where a task's changes start: the checkpoint its first attempt had to start from (the latest
+ * accepted task in its repository, or the build's base). Every attempt of the task, and so its
+ * changed files, ownership and review diff, is measured from here.
+ *
+ * Not the attempt's own starting commit: a retry starts on the task's latest saved checkpoint,
+ * rejected ones included, so measuring from there dropped the earlier attempt's work. A retry that
+ * changed nothing was accepted with no files: no owner and an empty diff for the review.
+ */
+export function taskChangeBaseline(snapshot: OrchestrationSnapshot, taskId: string, baseCommit?: string): string | undefined {
+  const task = snapshot.tasks.find(item => item.id === taskId);
+  if (!task) return undefined;
+  const earlierWork = { ...snapshot, attempts: snapshot.attempts.filter(attempt => attempt.taskId !== taskId) };
+  return latestCheckpointCommit(earlierWork, task.repository ?? snapshot.run.repository, baseCommit);
+}
+
+/**
  * Why a checkpoint must not be backed up, or null when it may be.
  *
  * Accepted work is unreviewed until the build is published, and a hidden ref is still

@@ -35,6 +35,8 @@ export const MAX_BUILD_LESSONS = 20;
 const LESSONS_HEADING = '## Lessons from builds';
 
 const REPORT_INVALID = /^The specialist report (?:is invalid|does not match version \d+): ?(.*)$/s;
+/** Scope refusals, in the current wording and the older "belongs to already accepted task" kept in saved history. */
+const SCOPE_REJECTION = /which is outside its approved path scope|belongs to already accepted task|which accepted task \S+ delivered/;
 const CHAR_LIMIT = /(\w+)(?:\.\d+)? String must contain at most (\d+) character/;
 
 /** A failure reason Alpha recorded, as an instruction the agent can follow next time. */
@@ -49,8 +51,8 @@ function lessonFor(reason: string): { kind: AgentLesson['kind']; text: string } 
   if (/does not identify changed file .+ as a deliverable/.test(reason)) {
     return { kind: 'deliverables', text: 'List every file you change under deliverables in the task report.' };
   }
-  if (/which is outside its approved path scope|belongs to already accepted task/.test(reason)) {
-    return { kind: 'scope', text: 'Change only files inside the task\'s allowed paths, and leave files owned by earlier accepted tasks alone.' };
+  if (SCOPE_REJECTION.test(reason)) {
+    return { kind: 'scope', text: 'Change only files inside the task\'s allowed paths, and leave files from earlier accepted tasks alone unless your task builds on them.' };
   }
   const check = reason.match(/Required check “(.+?)” was not observed passing/);
   if (check) return { kind: 'checks', text: 'Make the required check ' + check[1] + ' pass before you report the task done.' };
@@ -90,7 +92,7 @@ export function buildScorecard(history: History): AgentScorecard {
     attempts: work.length,
     reportFormatRejections: reasons.filter(reason => REPORT_INVALID.test(reason)).length,
     blockersReported: reasons.filter(reason => reason.startsWith('The specialist reported a blocker')).length,
-    scopeRejections: reasons.filter(reason => /outside its approved path scope|belongs to already accepted task/.test(reason)).length,
+    scopeRejections: reasons.filter(reason => SCOPE_REJECTION.test(reason)).length,
     checkFailures: reasons.filter(reason => /Required check “|observed verification commands failed/.test(reason)).length,
     reviewFindings: history.reviewFindings.filter(finding => ['blocking', 'critical'].includes(finding.severity)).length,
     lastWorkedAt: history.attempts.at(-1)?.createdAt
