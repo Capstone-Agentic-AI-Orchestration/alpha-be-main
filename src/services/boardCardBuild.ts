@@ -27,7 +27,8 @@ const CARD_NOUN_SOON = /^(?:\s+[\w-]+){0,5}?\s+(?:tasks?|cards?|tickets?)\b/i;
 const OPEN_STATUSES = new Set<Issue['status']>(['backlog', 'todo', 'in_progress']);
 const MAX_CARD_TEXT = 600;
 
-const isBuildRecord = (issue: Issue) => issue.labels.includes('alpha:chat-build');
+/** Alpha's own "Build: …" cards: records of a chat request, not tasks. One rule for the board and the product picture. */
+export const isBuildRecord = (issue: Issue) => issue.labels.includes('alpha:chat-build');
 const cardNumber = (issue: Issue) => Number(issue.identifier.split('-').pop()) || 0;
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 const asksForAllCards = (request: string) => [...request.matchAll(ALL_CARDS_START)]

@@ -58,7 +58,7 @@ export function hasRepeatedRecoveryFailure(
   ).length >= 2;
 }
 
-const SPECIALIST_BLOCKER_PREFIX = 'The specialist reported a blocker:';
+export const SPECIALIST_BLOCKER_PREFIX = 'The specialist reported a blocker:';
 /** How acceptance words a task a tool stopped (taskAcceptanceService); kept here so both agree. */
 export const TOOL_BLOCKER_PREFIX = 'A tool stopped the specialist:';
 

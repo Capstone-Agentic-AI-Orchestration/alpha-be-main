@@ -4178,6 +4178,13 @@ export class SQLiteService {
     return rows.flatMap(row => { const snapshot = this.getOrchestrationSnapshot(row.id); return snapshot ? [snapshot] : []; });
   }
 
+  /** A project's builds, newest first, at most `limit`. */
+  listProjectOrchestrationSnapshots(projectId: string, limit: number): OrchestrationSnapshot[] {
+    const rows = this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ?')
+      .all(this.workspaceId(), projectId, Math.max(0, Math.floor(limit))) as Array<{ id: string }>;
+    return rows.map(row => this.getOrchestrationSnapshot(row.id)).filter((snapshot): snapshot is OrchestrationSnapshot => Boolean(snapshot));
+  }
+
   getLatestOrchestrationSnapshot(projectId: string, originChatThreadId?: string): OrchestrationSnapshot | undefined {
     const row = originChatThreadId
       ? this.db.prepare('SELECT id FROM orchestration_runs WHERE workspace_id = ? AND project_id = ? AND origin_chat_thread_id = ? ORDER BY created_at DESC LIMIT 1')
