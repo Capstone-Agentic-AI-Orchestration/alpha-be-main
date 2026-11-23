@@ -17,8 +17,16 @@ import type { VerifiedCitation } from './resolutionEvidence.js';
 export type ResolutionOutcome =
   | 'resolving' | 'retrying' | 'retry_accepted' | 'retry_failed' | 'escalated' | 'interrupted' | 'superseded';
 
+/**
+ * `out_of_bounds`: the Orchestrator's retry changed files it was not cleared for (a sensitive area,
+ * or beyond its expected files), so acceptance held the work for the person.
+ */
 export type ResolutionEscalation =
-  | 'product' | 'sensitive' | 'strict' | 'unverified' | 'outside_scope' | 'repeat' | 'budget' | 'unavailable' | 'retry_refused';
+  | 'product' | 'sensitive' | 'strict' | 'unverified' | 'outside_scope' | 'repeat' | 'budget' | 'unavailable' | 'retry_refused'
+  | 'out_of_bounds';
+
+/** The acceptance check that holds an Orchestrator retry which went beyond what it was cleared to change. */
+export const ORCHESTRATOR_FIX_REVIEW_CHECK = 'orchestrator_fix_review';
 
 export interface ResolutionQuestion {
   text: string;
@@ -45,6 +53,11 @@ export interface ResolutionRecord {
   citations?: VerifiedCitation[];
   refusedCitations?: Array<{ quote: string; reason: string }>;
   classifiedPaths?: Array<{ repository: string; path: string; tier: RiskTier; categories: string[] }>;
+  /**
+   * Files the task had already changed when the fix was cleared. With the fix's expected files, the
+   * only files its retry may change before acceptance holds the work for the person.
+   */
+  priorChangedPaths?: string[];
   reasons?: string[];
   plannerAgentId?: string;
   appliedBy?: string;
@@ -65,6 +78,15 @@ export function resolutionOf(episode: Pick<OrchestrationRecoveryEpisode, 'eviden
 
 export function withResolution(episode: OrchestrationRecoveryEpisode, resolution: ResolutionRecord): OrchestrationRecoveryEpisode {
   return { ...episode, evidence: { ...episode.evidence, resolution } };
+}
+
+/**
+ * Whether the open recovery is an Orchestrator fix that has not been through a person: its retries
+ * are held to what the fix was cleared to change. A fix the person applied is theirs.
+ */
+export function unapprovedOrchestratorFix(episode: OrchestrationRecoveryEpisode | undefined, taskId: string): ResolutionRecord | undefined {
+  const resolution = resolutionOf(episode);
+  return episode?.taskId === taskId && resolution?.outcome === 'retrying' && !resolution.appliedBy ? resolution : undefined;
 }
 
 /** The guidance a specialist receives for an Orchestrator fix, within the guidance limit. */

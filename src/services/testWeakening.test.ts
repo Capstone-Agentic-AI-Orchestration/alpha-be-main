@@ -17,7 +17,8 @@ describe('test weakening', () => {
   });
 
   it('counts active tests, titles and assertions from the syntax tree, not comments or strings', () => {
-    expect(testStrength(accepted)).toEqual({ active: 2, inactive: 0, assertions: 2, titles: ['stores accounts', 'finds %s'] });
+    expect(testStrength(accepted)).toEqual({ active: 2, inactive: 0, assertions: 2, titles: ['stores accounts', 'finds %s'],
+      tests: [{ title: 'stores accounts', state: 'active' }, { title: 'finds %s', state: 'active' }] });
     const padded = `${accepted}\n// it("ghost", () => { expect(1).toBe(1); });\nconst note = "test(expect(";\n/* test(() => expect(1)) */`;
     expect(testStrength(padded)).toEqual(testStrength(accepted));
   });
@@ -26,7 +27,7 @@ describe('test weakening', () => {
     // The old scanner read the quote in the regex as opening a string, emptied the code after it, and lost the test.
     const withRegex = `${accepted}\nconst quote = /"/;\nit("keeps quotes", () => { expect(quote.test('"')).toBe(true); });`;
     expect(testStrength(withRegex)).toMatchObject({ active: 3, assertions: 3 });
-    expect(testWeakening(withRegex, withRegex.replace('it("keeps quotes"', 'it.skip("keeps quotes"'))).toBe('removed test cases (“keeps quotes”)');
+    expect(testWeakening(withRegex, withRegex.replace('it("keeps quotes"', 'it.skip("keeps quotes"'))).toBe('skipped or disabled tests (“keeps quotes”)');
   });
 
   it('does not count code inside a template ${...} as a test, or miss a real one after it', () => {
@@ -42,12 +43,42 @@ describe('test weakening', () => {
   it('flags removing, skipping, replacing or emptying tests, and allows adding to them', () => {
     expect(testWeakening(accepted, accepted.replace('  it("stores accounts", () => { expect(accounts.size).toBe(0); });\n', ''))).toBe('removed test cases (“stores accounts”)');
     expect(testWeakening(accepted, accepted.replace('  it("stores', '  // it("stores'))).toBe('removed test cases (“stores accounts”)');
-    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.skip("stores'))).toBe('removed test cases (“stores accounts”)');
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.skip("stores'))).toBe('skipped or disabled tests (“stores accounts”)');
     expect(testWeakening(accepted, `${accepted}\ndescribe.skip("later", () => {});`)).toBe('skipped or disabled tests');
     expect(testWeakening(accepted, `${accepted}\nxit("later", () => {});`)).toBe('skipped or disabled tests');
     expect(testWeakening(accepted, accepted.replace('expect(accounts.size).toBe(0);', ''))).toBe('removed assertions');
     expect(testWeakening(accepted, accepted.replace('"stores accounts"', '"something easier"'))).toBe('replaced test cases (“stores accounts”)');
     expect(testWeakening(accepted, `${accepted}\nimport { signIn } from "../src/auth";\nit("signs in", () => { expect(signIn).toBeDefined(); });`)).toBeUndefined();
+  });
+
+  it('treats a test that passes only when the code is broken as weakened', () => {
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'test.fails("stores')))
+      .toBe('turned tests into expected failures, which pass when the code is broken (“stores accounts”)');
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.failing("stores')))
+      .toBe('turned tests into expected failures, which pass when the code is broken (“stores accounts”)');
+    expect(testStrength('test.fails("x", () => {});')).toMatchObject({ active: 0, inactive: 1, tests: [{ title: 'x', state: 'inverted' }] });
+  });
+
+  it('treats runIf and skipIf as conditional unless the literal always runs the test', () => {
+    const conditional = 'made tests run only on a condition (“stores accounts”)';
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.runIf(process.env.CI)("stores'))).toBe(conditional);
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'test.skipIf(isWindows)("stores'))).toBe(conditional);
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.runIf(false)("stores'))).toBe('skipped or disabled tests (“stores accounts”)');
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'test.skipIf(true)("stores'))).toBe('skipped or disabled tests (“stores accounts”)');
+    // A literal that always runs it is still an active test.
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.runIf(true)("stores'))).toBeUndefined();
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'test.skipIf(false)("stores'))).toBeUndefined();
+    expect(testWeakening(accepted, accepted.replace('test.each([1, 2])', 'test.skipIf(slow).each([1, 2])'))).toBe('made tests run only on a condition (“finds %s”)');
+  });
+
+  it('compares each title, so keeping the count while weakening one test is still caught', () => {
+    // One test is inverted and a new one is added: the active count stays at two.
+    const swapped = `${accepted.replace('it("stores', 'it.failing("stores')}\nit("a new easy test", () => { expect(1).toBe(1); });`;
+    expect(testStrength(swapped).active).toBe(2);
+    expect(testWeakening(accepted, swapped)).toBe('turned tests into expected failures, which pass when the code is broken (“stores accounts”)');
+    // Turning an expected failure back into a normal test strengthens it.
+    const inverted = accepted.replace('it("stores', 'test.fails("stores');
+    expect(testWeakening(inverted, accepted)).toBeUndefined();
   });
 
   it('reads TypeScript and JSX, and counts a table test once', () => {

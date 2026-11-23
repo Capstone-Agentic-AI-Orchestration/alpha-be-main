@@ -17,6 +17,8 @@ import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchest
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
 import { isTestFile, testFileWeakening } from './testWeakening.js';
+import { classifyRisk } from './riskTier.js';
+import { ORCHESTRATOR_FIX_REVIEW_CHECK, unapprovedOrchestratorFix } from './blockerResolutionRecord.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
@@ -770,7 +772,49 @@ export class TaskAcceptanceService {
         check: 'verification_failed', verification
       });
     }
+    // Last, so ordinary failures still get their automatic repair first: only work that would
+    // otherwise be accepted is held here, and its check is not an automatic one.
+    const overreach = this.orchestratorFixOverreach(snapshot, task, changedPaths,
+      [...acceptedPathOwners].filter(([, owner]) => owner.taskId !== task.id).map(([filePath]) => filePath));
+    if (overreach) return fail(overreach.reason, overreach.evidence, overreach.evidence.sensitivePaths[0] ?? overreach.evidence.outsidePaths[0]);
     return null;
+  }
+
+  /**
+   * The risk gate on what an Orchestrator fix actually did, not only on what it said it would change:
+   * a retry that changed a sensitive area (or, in `strict`, earlier accepted work), or files beyond the
+   * fix's expected files and what the task already had, is held for the person. A fix the person
+   * applied is theirs and is not held.
+   */
+  private orchestratorFixOverreach(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    changedPaths: readonly string[],
+    otherTasksAcceptedPaths: readonly string[]
+  ): { reason: string; evidence: { check: string; sensitivePaths: string[]; outsidePaths: string[] } } | undefined {
+    const resolution = unapprovedOrchestratorFix(this.store.getOpenOrchestrationRecoveryEpisode(snapshot.run.id), task.id);
+    if (!resolution) return undefined;
+    const repository = task.repository ?? snapshot.run.repository;
+    const setting = this.store.getProjectOrchestrationSetting(snapshot.run.projectId);
+    const risk = classifyRisk({
+      paths: changedPaths.map(filePath => ({ repository, path: filePath })),
+      acceptedPaths: otherTasksAcceptedPaths.map(filePath => ({ repository, path: filePath })),
+      projectPatterns: setting.sensitivePaths
+    });
+    const sensitivePaths = risk.classifiedPaths
+      .filter(item => item.tier >= 2 || (item.tier === 1 && setting.autonomy === 'strict'))
+      .map(item => item.path);
+    const cleared = new Set([
+      ...(resolution.priorChangedPaths ?? []),
+      ...(resolution.proposedFix?.expectedFiles ?? []).filter(file => sameRepository(file.repository, repository)).map(file => file.path)
+    ]);
+    const outsidePaths = changedPaths.filter(filePath => !cleared.has(filePath));
+    if (!sensitivePaths.length && !outsidePaths.length) return undefined;
+    const named = [...sensitivePaths, ...outsidePaths.filter(filePath => !sensitivePaths.includes(filePath))].slice(0, 5).join(', ');
+    return {
+      reason: `The Orchestrator's fix for this task changed ${named}, beyond what Alpha may change on its own. The work is kept and waits for the person to approve the fix.`,
+      evidence: { check: ORCHESTRATOR_FIX_REVIEW_CHECK, sensitivePaths, outsidePaths }
+    };
   }
 
   private async acceptanceEvidence(

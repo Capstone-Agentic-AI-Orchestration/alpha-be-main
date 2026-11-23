@@ -22,6 +22,7 @@ import { classifyRisk, type RepositoryPath, type RiskClassification } from './ri
 import { isSafeRelativePath, verifyCitations, type CheckpointReader } from './resolutionEvidence.js';
 import { isTestFile, testFileWeakening } from './testWeakening.js';
 import {
+  ORCHESTRATOR_FIX_REVIEW_CHECK,
   fixGuidance,
   resolutionOf,
   withResolution,
@@ -156,6 +157,17 @@ function escalation(base: ResolutionRecord, reason: ResolutionEscalation, extra:
   return { act: false, resolution: { ...base, ...extra, outcome: 'escalated', escalation: reason } };
 }
 
+/** Why acceptance held this task's latest result for the person, when an Orchestrator fix went out of bounds. */
+function heldForReview(snapshot: OrchestrationSnapshot, taskId: string | undefined): string[] | undefined {
+  const finding = [...snapshot.findings].reverse().find(item => item.taskId === taskId && item.status === 'open' &&
+    item.evidence.check === ORCHESTRATOR_FIX_REVIEW_CHECK);
+  if (!finding) return undefined;
+  const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  const sensitive = list(finding.evidence.sensitivePaths).map(filePath => `${filePath} is a sensitive area`);
+  const outside = list(finding.evidence.outsidePaths).map(filePath => `${filePath} was not part of the fix`);
+  return [...sensitive, ...outside].slice(0, 20);
+}
+
 /** Milestone text for each way a resolution ends, posted to the build's chat (team only). */
 function milestoneText(taskTitle: string, record: ResolutionRecord): { key: string; content: string } | undefined {
   const subject = `“${taskTitle}”`;
@@ -182,7 +194,8 @@ function milestoneText(taskTitle: string, record: ResolutionRecord): { key: stri
     repeat: `${subject} stopped on the same problem Alpha already handled in this build, so it is yours now.${openQuestion}`,
     budget: `Alpha has resolved ${MAX_RESOLUTIONS_PER_BUILD} problems in this build already, so ${subject} waits for you.`,
     unavailable: `Alpha could not look into why ${subject} stopped, so it waits for you.${diagnosis}`,
-    retry_refused: `Alpha could not start the fix for ${subject}, so it waits for you.${diagnosis}`
+    retry_refused: `Alpha could not start the fix for ${subject}, so it waits for you.${diagnosis}`,
+    out_of_bounds: `Alpha's fix for ${subject} changed files it was not cleared to change on its own (${(record.reasons ?? []).join('; ')}). The work is kept and waits for you: apply the proposed fix as yours, or give other direction.`
   };
   return { key: `orchestrator_escalation_${record.escalation ?? 'other'}`, content: reasons[record.escalation ?? 'unavailable'] };
 }
@@ -391,7 +404,7 @@ export class BlockerResolutionService {
     if (risk.tier === 1 && setting.autonomy === 'strict') return escalation(base, 'strict', { ...classified, proposedFix });
     return {
       act: true,
-      resolution: { ...base, ...classified, proposedFix, outcome: 'retrying' },
+      resolution: { ...base, ...classified, proposedFix, priorChangedPaths: gathered.changedPaths.slice(0, 200), outcome: 'retrying' },
       guidance: safeRecoveryGuidance(fixGuidance(diagnosis, proposedFix, check.verified))
     };
   }
@@ -445,6 +458,13 @@ export class BlockerResolutionService {
     }
     if (record.outcome !== 'retrying' || snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId) return undefined;
     if (!['waiting_for_user', 'ready_to_continue'].includes(episode.phase)) return undefined;
+    const held = heldForReview(snapshot, episode.taskId);
+    if (held) {
+      // Acceptance held the retry's work: it changed files the fix was not cleared for. The person
+      // sees why, and the proposed fix stays ready to apply as theirs.
+      return this.finish(episode, { ...record, outcome: 'escalated', escalation: 'out_of_bounds', reasons: held, finishedAt: this.now() },
+        task?.title ?? 'this task', { phase: 'waiting_for_user' });
+    }
     return this.finish(episode, { ...record, outcome: 'retry_failed', finishedAt: this.now() }, task?.title ?? 'this task', { phase: 'waiting_for_user' });
   }
 

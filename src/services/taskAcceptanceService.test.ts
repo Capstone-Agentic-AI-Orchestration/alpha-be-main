@@ -211,6 +211,88 @@ describe('task acceptance and targeted correction', () => {
     expect(launches[1].taskPackage.corrections.join(' ')).toContain('replaced test cases (“handles an empty cart”)');
   });
 
+  describe('an Orchestrator fix is held to what it was cleared to change', () => {
+    /** A build whose only task is being retried under an Orchestrator resolution; the retry changes `files`. */
+    async function retryUnderResolution(files: Record<string, string>, resolution: Record<string, unknown> = {}) {
+      const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+      fs.mkdirSync(tempRoot, { recursive: true });
+      directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-fix-bounds-'));
+      const repository = path.join(directory, 'repository');
+      fs.mkdirSync(path.join(repository, 'src', 'auth'), { recursive: true });
+      git(directory, ['init', '-b', 'main', repository]);
+      fs.writeFileSync(path.join(repository, 'src', 'cart.ts'), 'export const total = (items: number[]) => items.reduce((a, b) => a + b, 0);\n');
+      fs.writeFileSync(path.join(repository, 'src', 'auth', 'session.ts'), 'export const SESSION_COOKIE = "sid";\n');
+      commit(repository, 'Initial fixture');
+      store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+      runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'fix bounds fixture'));
+      const launches: OrchestrationLaunchRequest[] = [];
+      let branchName = '';
+      const orchestration = new OrchestrationService(store, {
+        async prepare(request) {
+          branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+          if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+          return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+        },
+        async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+      });
+      const plan = parseOrchestrationPlan({ schemaVersion: 1, goal: 'Add discounts to the cart.', exclusions: [],
+        requirements: [{ id: 'REQ-DISCOUNT', description: 'Apply discounts.' }],
+        tasks: [{ id: 'cart-discounts', title: 'Add cart discounts', description: 'Apply discounts in the cart total.', kind: 'backend', ownerAgentId: 'backend-agent',
+          dependsOn: [], requirementIds: ['REQ-DISCOUNT'], acceptanceCriteria: ['Discounts apply.'], requiredChecks: ['test'], scope: { includePaths: ['src/**'], excludePaths: [] } }] });
+      let snapshot = await startAndApprove(orchestration, { workspaceId, projectId, issueId, repository: 'acme/cart', requestKey: 'request-fix-bounds',
+        requestFingerprint: 'fingerprint-fix-bounds', createdBy: 'user-test', executorId: 'desktop-test',
+        eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan });
+      runWithWorkspace(workspaceId, () => store!.saveOrchestrationRecoveryEpisode({ episode: {
+        id: 'recovery-fix-bounds', workspaceId, projectId: snapshot.run.projectId, runId: snapshot.run.id, issueId: snapshot.run.issueId,
+        taskId: 'cart-discounts', source: 'acceptance', category: 'project_code', code: 'acceptance_project_code', summary: 'Lint failed.',
+        fingerprint: 'f', phase: 'repairing', episodeNumber: 1, repairBudget: 4, attemptsUsed: 3, initiatedBy: 'orchestrator', revision: 0,
+        createdAt: '2026-11-24T10:00:00.000Z', updatedAt: '2026-11-24T10:00:00.000Z',
+        evidence: { resolution: { outcome: 'retrying', fingerprint: 'f', turn: true, startedAt: '', tier: 0, priorChangedPaths: [],
+          proposedFix: { instructions: 'Apply the discount in src/cart.ts.', expectedFiles: [{ repository: 'acme/cart', path: 'src/cart.ts' }] }, ...resolution } }
+      } }));
+      const first = launches[0];
+      for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(repository, file), content);
+      const resultCommit = commit(repository, 'Orchestrator fix retry');
+      snapshot = (await orchestration.handleRunnerCompleted(completedRun(first, resultCommit, Object.keys(files))))!;
+      const acceptance = new TaskAcceptanceService(store, orchestration, { worktreePathFor: () => repository,
+        runVerification: async () => ({ status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+          commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }] }) });
+      const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId: snapshot.run.id, taskId: 'cart-discounts', attemptId: first.attemptId, acceptedBy: 'orchestrator' });
+      return { outcome, launches, attempt: outcome.snapshot.attempts.find(item => item.id === first.attemptId)! };
+    }
+
+    const discounted = 'export const total = (items: number[], discount = 0) => items.reduce((a, b) => a + b, 0) * (1 - discount);\n';
+
+    it('holds a retry that touched a sensitive path for the person, without an automatic repair', async () => {
+      const { outcome, launches, attempt } = await retryUnderResolution({
+        'src/cart.ts': discounted,
+        'src/auth/session.ts': 'export const SESSION_COOKIE = "session";\n'
+      });
+      expect(outcome.decision).toBe('rejected');
+      expect(outcome.snapshot.run.status).toBe('blocked');
+      expect(attempt.status).toBe('rejected');
+      expect(outcome.snapshot.findings).toContainEqual(expect.objectContaining({ evidence: expect.objectContaining({
+        check: 'orchestrator_fix_review', sensitivePaths: ['src/auth/session.ts'], outsidePaths: ['src/auth/session.ts']
+      }) }));
+      expect(launches).toHaveLength(1);
+    });
+
+    it('accepts a retry that stayed within its expected files', async () => {
+      const { outcome, attempt } = await retryUnderResolution({ 'src/cart.ts': discounted });
+      expect(outcome.decision).not.toBe('blocked');
+      expect(attempt.status).toBe('accepted');
+    });
+
+    it('accepts a fix the person applied, even in a sensitive area', async () => {
+      const { outcome, attempt } = await retryUnderResolution({
+        'src/cart.ts': discounted,
+        'src/auth/session.ts': 'export const SESSION_COOKIE = "session";\n'
+      }, { appliedBy: 'pm-1', tier: 2 });
+      expect(outcome.decision).not.toBe('blocked');
+      expect(attempt.status).toBe('accepted');
+    });
+  });
+
   it('completes an accepted read-only report without a publication stage', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });

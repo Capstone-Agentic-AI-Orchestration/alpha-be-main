@@ -43,20 +43,32 @@ const DISABLED_TEST_FUNCTIONS = new Set(['xit', 'xtest']);
 const SUITE_FUNCTIONS = new Set(['describe', 'suite']);
 const DISABLED_SUITE_FUNCTIONS = new Set(['xdescribe']);
 const ASSERTION_FUNCTIONS = new Set(['expect', 'assert']);
-/** `it.only(...)`, `test.concurrent(...)`: still one active test. */
-const MODIFIERS = new Set(['only', 'concurrent', 'sequential', 'fails', 'failing']);
+/** `it.only(...)`, `test.concurrent(...)`: still one test that runs normally. */
+const MODIFIERS = new Set(['only', 'concurrent', 'sequential']);
+/** `test.fails(...)`, `it.failing(...)`: the test passes only while the code is broken. */
+const INVERTING = new Set(['fails', 'failing']);
 /** `it.each(table)(...)`, `test.runIf(cond)(...)`: the outer call is the test, the inner call builds it. */
 const BUILDERS = new Set(['each', 'for', 'runIf', 'skipIf']);
-const DISABLING = new Set(['skip', 'todo', 'fixme', 'skipIf']);
+const DISABLING = new Set(['skip', 'todo', 'fixme']);
 /** Position data and comments: never part of what the code does. */
 const IGNORED_KEYS = new Set(['loc', 'start', 'end', 'range', 'extra', 'leadingComments', 'trailingComments', 'innerComments', 'comments', 'tokens']);
 
+/**
+ * How a test runs. `inverted`: it passes only when the code is broken (`fails`, `failing`).
+ * `conditional`: `runIf`/`skipIf` with anything but a literal that always runs it. `disabled`:
+ * skipped, todo, `x`-prefixed, or a condition that never runs it. Only `active` counts as kept.
+ */
+export type TestState = 'active' | 'inverted' | 'conditional' | 'disabled';
+
 export interface TestStrength {
   active: number;
+  /** Tests and suites that do not run normally (inverted, conditional or disabled). */
   inactive: number;
   assertions: number;
   /** Titles of active tests (their own title, not the suite's), `<dynamic>` when computed. */
   titles: string[];
+  /** Every test with its state, so a title that stops running normally is visible. */
+  tests: Array<{ title: string; state: TestState }>;
 }
 
 type AstNode = { type: string } & Record<string, unknown>;
@@ -75,18 +87,41 @@ function childNodes(node: AstNode): AstNode[] {
   return children;
 }
 
+/** `true` or `false` when the argument is that literal, otherwise undefined (decided at run time). */
+function literalBoolean(argument: unknown): boolean | undefined {
+  return isNode(argument) && argument.type === 'BooleanLiteral' ? Boolean(argument.value) : undefined;
+}
+
+/** The member name a call's callee ends with: `test.runIf(cond)` gives `runIf`. */
+function calledMember(call: AstNode): string | undefined {
+  const callee = call.callee;
+  if (!isNode(callee) || (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression')) return undefined;
+  return isNode(callee.property) && callee.property.type === 'Identifier' ? String(callee.property.name) : undefined;
+}
+
+interface CalleeChain {
+  root: string;
+  props: string[];
+  throughCall: boolean;
+  /** The literal argument of a `runIf(...)` / `skipIf(...)` builder call, when it is one. */
+  conditions: { runIf?: boolean; skipIf?: boolean };
+}
+
 /** A callee as a name and member chain: `it.skip.each(t)` is `it` + [skip, each], reached through a call. */
-function calleeChain(callee: unknown): { root: string; props: string[]; throughCall: boolean } | undefined {
+function calleeChain(callee: unknown): CalleeChain | undefined {
   const props: string[] = [];
+  const conditions: CalleeChain['conditions'] = {};
   let throughCall = false;
   let node = callee;
   while (isNode(node)) {
-    if (node.type === 'Identifier') return { root: String(node.name), props, throughCall };
+    if (node.type === 'Identifier') return { root: String(node.name), props, throughCall, conditions };
     if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') && !node.computed && isNode(node.property) && node.property.type === 'Identifier') {
       props.unshift(String(node.property.name));
       node = node.object;
     } else if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
       throughCall = true;
+      const member = calledMember(node);
+      if (member === 'runIf' || member === 'skipIf') conditions[member] = literalBoolean((node.arguments as unknown[])[0]);
       node = node.callee;
     } else if (node.type === 'TaggedTemplateExpression') {
       throughCall = true;
@@ -107,28 +142,60 @@ function title(argument: unknown): string {
   return '<dynamic>';
 }
 
-type CallKind = 'active' | 'inactive' | 'assertion' | undefined;
+function isKnownProp(prop: string): boolean {
+  return MODIFIERS.has(prop) || INVERTING.has(prop) || BUILDERS.has(prop) || DISABLING.has(prop);
+}
 
-/** What one call is: an active or disabled test or suite, an assertion, or none of these. */
+/** How a test or suite runs, from how it is called. */
+function testState(chain: CalleeChain, disabledRoot: boolean): TestState {
+  const { props, conditions } = chain;
+  if (disabledRoot || props.some(prop => DISABLING.has(prop))) return 'disabled';
+  // skipIf(false) and runIf(true) always run the test; any other condition may not.
+  if (props.includes('skipIf') && conditions.skipIf !== false) return conditions.skipIf === true ? 'disabled' : 'conditional';
+  if (props.includes('runIf') && conditions.runIf !== true) return conditions.runIf === false ? 'disabled' : 'conditional';
+  if (props.some(prop => INVERTING.has(prop))) return 'inverted';
+  return 'active';
+}
+
+type CallKind = { kind: 'assertion' } | { kind: 'test'; state: TestState } | { kind: 'suite'; state: TestState } | undefined;
+
+/** What one call is: a test or suite and how it runs, an assertion, or none of these. */
 function callKind(node: AstNode): CallKind {
   const chain = calleeChain(node.callee);
   if (!chain) return undefined;
   const { root, props, throughCall } = chain;
-  if (ASSERTION_FUNCTIONS.has(root)) return throughCall ? undefined : 'assertion';
+  if (ASSERTION_FUNCTIONS.has(root)) return throughCall ? undefined : { kind: 'assertion' };
   const disabledRoot = DISABLED_TEST_FUNCTIONS.has(root) || DISABLED_SUITE_FUNCTIONS.has(root);
-  const testRoot = TEST_FUNCTIONS.has(root);
-  if (!disabledRoot && !testRoot && !SUITE_FUNCTIONS.has(root)) return undefined;
-  if (props.some(prop => !MODIFIERS.has(prop) && !BUILDERS.has(prop) && !DISABLING.has(prop))) return undefined;
+  const isTest = TEST_FUNCTIONS.has(root) || DISABLED_TEST_FUNCTIONS.has(root);
+  if (!isTest && !SUITE_FUNCTIONS.has(root) && !DISABLED_SUITE_FUNCTIONS.has(root)) return undefined;
+  if (!props.every(isKnownProp)) return undefined;
   // The builder call itself (`it.each(table)`) is not a test; the call it returns is.
   if (props.some(prop => BUILDERS.has(prop)) !== throughCall) return undefined;
-  if (disabledRoot || props.some(prop => DISABLING.has(prop))) return 'inactive';
-  return testRoot ? 'active' : undefined;
+  return { kind: isTest ? 'test' : 'suite', state: testState(chain, disabledRoot) };
 }
 
 function parserPlugins(filePath: string): ParserPlugin[] {
   if (/\.[cm]?tsx$/i.test(filePath)) return ['typescript', 'jsx', 'decorators-legacy'];
   if (/\.[cm]?ts$/i.test(filePath)) return ['typescript', 'decorators-legacy'];
   return ['jsx', 'decorators-legacy'];
+}
+
+/** Adds one call to the counts: an assertion, a test with its state, or a suite that does not run normally. */
+function countCall(strength: TestStrength, node: AstNode): void {
+  const call = callKind(node);
+  if (!call) return;
+  if (call.kind === 'assertion') {
+    strength.assertions += 1;
+    return;
+  }
+  if (call.state !== 'active') strength.inactive += 1;
+  if (call.kind === 'suite') return;
+  const testTitle = title((node.arguments as unknown[])[0]);
+  strength.tests.push({ title: testTitle, state: call.state });
+  if (call.state === 'active') {
+    strength.active += 1;
+    strength.titles.push(testTitle);
+  }
 }
 
 /** Counts from the syntax tree. Throws when the source does not parse. */
@@ -142,19 +209,11 @@ export function testStrength(source: string, filePath = 'test.ts'): TestStrength
     errorRecovery: false,
     plugins: parserPlugins(filePath)
   }) as unknown as AstNode;
-  const strength: TestStrength = { active: 0, inactive: 0, assertions: 0, titles: [] };
+  const strength: TestStrength = { active: 0, inactive: 0, assertions: 0, titles: [], tests: [] };
   const stack: AstNode[] = [ast];
   while (stack.length) {
     const node = stack.pop()!;
-    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
-      const kind = callKind(node);
-      if (kind === 'assertion') strength.assertions += 1;
-      else if (kind === 'inactive') strength.inactive += 1;
-      else if (kind === 'active') {
-        strength.active += 1;
-        strength.titles.push(title((node.arguments as unknown[])[0]));
-      }
-    }
+    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') countCall(strength, node);
     // Reversed, so nodes come off the stack in source order and titles read top to bottom.
     stack.push(...childNodes(node).reverse());
   }
@@ -187,10 +246,21 @@ function named(reason: string, titles: readonly string[]): string {
  * How `after` weakened `before`, or undefined when it kept every active test, its title, and every
  * assertion. Throws when either version does not parse; testFileWeakening turns that into weakening.
  */
+const STATE_WEAKENING: Record<Exclude<TestState, 'active'>, string> = {
+  inverted: 'turned tests into expected failures, which pass when the code is broken',
+  conditional: 'made tests run only on a condition',
+  disabled: 'skipped or disabled tests'
+};
+
 export function testWeakening(before: string, after: string, filePath = 'test.ts'): string | undefined {
   const was = testStrength(before, filePath);
   const now = testStrength(after, filePath);
   const missing = missingTitles(was.titles, now.titles);
+  // Per title first: a test that is still there but no longer runs normally.
+  for (const state of ['inverted', 'conditional', 'disabled'] as const) {
+    const changed = missing.filter(item => now.tests.some(test => test.title === item && test.state === state));
+    if (changed.length) return named(STATE_WEAKENING[state], changed);
+  }
   if (now.active < was.active) return named('removed test cases', missing);
   if (now.inactive > was.inactive) return 'skipped or disabled tests';
   if (missing.length) return named('replaced test cases', missing);

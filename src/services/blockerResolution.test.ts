@@ -376,6 +376,24 @@ describe('blocker resolution', () => {
     expect(h.turn).toHaveBeenCalledTimes(1);
   });
 
+  it('escalates with the fix ready to apply when acceptance holds a retry that went out of bounds', async () => {
+    const h = harness(snapshot({ reason: LINT_FAILURE, attempts: 3 }), [fix()]);
+    expect(await stuck(h)).toMatchObject({ outcome: 'retrying', priorChangedPaths: ['src/BookingList.tsx'] });
+    const held = 'The Orchestrator\'s fix for this task changed src/auth/session.ts, beyond what Alpha may change on its own.';
+    failRetry(h, held);
+    h.state.snapshot = { ...h.state.snapshot, findings: [{ id: 'finding-held', runId: 'run-1', taskId: 'booking-ui', sourceTaskId: 'booking-ui',
+      severity: 'blocking', status: 'open', createdAt: '2026-11-24T11:30:00.000Z', path: 'src/auth/session.ts',
+      evidence: { check: 'orchestrator_fix_review', sensitivePaths: ['src/auth/session.ts'], outsidePaths: ['src/auth/session.ts'] } }] } as unknown as OrchestrationSnapshot;
+    h.recovery.reconcileSnapshot(h.state.snapshot);
+
+    const escalated = await h.resolver.resolveIfStuck(h.state.snapshot);
+    expect(escalated).toMatchObject({ outcome: 'escalated', escalation: 'out_of_bounds', proposedFix: expect.any(Object),
+      reasons: ['src/auth/session.ts is a sensitive area', 'src/auth/session.ts was not part of the fix'] });
+    expect(h.milestones.find(item => item.key === 'orchestrator_escalation_out_of_bounds')?.content).toContain('src/auth/session.ts is a sensitive area');
+    expect(h.recovery.explain(openEpisode(h))).toContain('Alpha has a verified fix ready for you to apply.');
+    expect(h.turn).toHaveBeenCalledTimes(1);
+  });
+
   it('stops at the cap of resolutions per build', async () => {
     const h = harness(snapshot({ reason: API_BLOCKER, attempts: 1 }), []);
     h.recovery.reconcileSnapshot(h.state.snapshot);
