@@ -296,6 +296,13 @@ function formatEarlierAttemptFiles(taskPackage: OrchestrationTaskPackage): strin
     : '';
 }
 
+/** A dependency's changes to earlier accepted tasks' files, for the reviewer to check nothing was weakened. */
+function formatEvolvedAcceptedPaths(paths: OrchestrationTaskPackage['acceptedDependencies'][number]['evolvedAcceptedPaths']): string {
+  if (!paths?.length) return '';
+  const files = paths.map(item => item.path + ' (from ' + item.ownerTaskId + ')').join(', ');
+  return `  Files it changed that earlier accepted tasks delivered (check tests and behaviour were not weakened): ${files}`;
+}
+
 function formatAcceptedDependencies(dependencies: OrchestrationTaskPackage['acceptedDependencies']): string {
   if (!dependencies.length) return '- None.';
   return dependencies.map(dependency => [
@@ -314,9 +321,7 @@ function formatAcceptedDependencies(dependencies: OrchestrationTaskPackage['acce
       ? `  Individual checks:\n${dependency.observedChecks.map(item => `    - ${item.script}: ${item.result}`).join('\n')}`
       : '  Individual checks: none recorded.',
     dependency.changedPaths.length ? `  Changed files: ${dependency.changedPaths.join(', ')}` : '',
-    dependency.evolvedAcceptedPaths?.length
-      ? `  Files it changed that earlier accepted tasks delivered (check tests and behaviour were not weakened): ${dependency.evolvedAcceptedPaths.map(item => `${item.path} (from ${item.ownerTaskId})`).join(', ')}`
-      : ''
+    formatEvolvedAcceptedPaths(dependency.evolvedAcceptedPaths)
   ].filter(Boolean).join('\n')).join('\n');
 }
 

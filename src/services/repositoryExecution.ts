@@ -48,8 +48,8 @@ export function discoverVerificationCommands(cwd: string, requestedScripts?: rea
   const manager = packageManagerFor(cwd, manifest);
   const requested = [...new Set(requestedScripts ?? [])];
   const combined = requested.length ? undefined : ['verify', 'check', 'validate', 'ci'].find(name => hasScript(scripts, name));
-  const selected = requested.length ? requested.filter(name => hasScript(scripts, name))
-    : combined ? [combined] : CI_CHECKS.filter(name => hasScript(scripts, name));
+  const defaults = combined ? [combined] : CI_CHECKS.filter(name => hasScript(scripts, name));
+  const selected = requested.length ? requested.filter(name => hasScript(scripts, name)) : defaults;
   return selected.map(script => ({
     script, bin: packageManagerBinary(manager), args: ['run', script], display: manager + ' run ' + script
   }));
