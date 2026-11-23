@@ -103,7 +103,6 @@ export async function sendBuilderMessage(params: {
     cwd: path.resolve('..'),
     provider: runtime.provider,
     modelName,
-    codexBaseUrl: runtime.endpoint,
     systemPrompt: BUILDER_SYSTEM_PROMPT,
     personaName: 'the Alpha Agent Builder',
     prompt: message,

@@ -502,7 +502,6 @@ export class ChatService extends EventEmitter {
       cwd: process.cwd(),
       provider: runtime.provider,
       modelName: runtime.modelName,
-      codexBaseUrl: runtime.endpoint,
       reasoningEffort: runtime.reasoningEffort ?? undefined,
       mode: 'chat',
       approvalMode: 'ask',
@@ -1765,7 +1764,6 @@ export class ChatService extends EventEmitter {
         approvalMode: 'ask',
         responseSchema: routingPrompt?.includes('## Structured chat response') ? alphaChatResponseSchema : undefined,
         modelName: runtime.modelName,
-        codexBaseUrl: runtime.endpoint,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         // The tool policy still applies: a chat inspects, it does not mutate.
         systemPrompt: [repositoryMemory, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel(runtime), routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
@@ -2003,9 +2001,6 @@ export class ChatService extends EventEmitter {
       provider: persona.modelProvider,
       approvalMode: 'ask',
       modelName: persona.modelName,
-      codexBaseUrl: runtimes.find(runtime =>
-        runtime.provider === persona.modelProvider && runtime.models.includes(persona.modelName)
-      )?.endpoint,
       reasoningEffort: persona.reasoningEffort,
       systemPrompt: board?.access === 'write'
         ? `${persona.systemPrompt}\n\n${describeRuntimeModel({ provider: persona.modelProvider, modelName: persona.modelName, reasoningEffort: persona.reasoningEffort })}\n\n${MANAGER_BOARD_INSTRUCTIONS}${boardRefusal ? `\n\nYou cannot change the board in this conversation: ${boardRefusal} Answer from the attached records only, and say so if asked to change cards.` : ''}`

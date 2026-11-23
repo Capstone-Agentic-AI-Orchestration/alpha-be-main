@@ -614,24 +614,15 @@ describe('Codex isolation from the operator config', () => {
     expect(valueOf(args, '--sandbox')).toBe('read-only');
   });
 
-  it('applies only the explicit local model catalog overrides before the model flag', () => {
-    const { args } = buildTurnInvocation(options({
-      provider: 'OpenAI',
-      modelName: 'gpt-6-astra',
-      codexConfigArgs: [
-        '--config', 'openai_base_url="http://127.0.0.1:10100/v1"',
-        '--config', 'model_catalog_json="C:\\\\Users\\\\Lloyd\\\\.codex\\\\opencodex-catalog.json"'
-      ]
-    }), noMcp);
-    const ignoredConfig = args.indexOf('--ignore-user-config');
-    const baseUrl = args.indexOf('openai_base_url="http://127.0.0.1:10100/v1"');
-    const modelCatalog = args.indexOf('model_catalog_json="C:\\\\Users\\\\Lloyd\\\\.codex\\\\opencodex-catalog.json"');
-    const model = args.indexOf('--model');
-
-    expect(ignoredConfig).toBeGreaterThanOrEqual(0);
-    expect(baseUrl).toBeGreaterThan(ignoredConfig);
-    expect(modelCatalog).toBeGreaterThan(baseUrl);
-    expect(model).toBeGreaterThan(modelCatalog);
+  it.each(['chat', 'run', 'review'] as const)('never points a %s turn at a local gateway', mode => {
+    // OpenCodex writes openai_base_url and model_catalog_json into the
+    // operator's config. Re-applying them made every chat wait on that gateway;
+    // with it stopped, a "hello" retried "connection refused" for minutes.
+    const { args } = buildTurnInvocation(options({ provider: 'OpenAI', modelName: 'gpt-6-luna', mode }), noMcp);
+    const gatewayOverrides = args.filter(arg =>
+      /^(openai_base_url|model_catalog_json|experimental_realtime_ws_base_url|model_provider)\s*=/.test(arg)
+    );
+    expect(gatewayOverrides).toEqual([]);
   });
 
   it('cannot be undone through customCliArgs', () => {
