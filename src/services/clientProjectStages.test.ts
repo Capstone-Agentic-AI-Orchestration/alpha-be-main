@@ -162,3 +162,63 @@ describe('project stages: POC', () => {
     expect(items[0]?.stage).toMatchObject({ stage: 'poc', label: 'Proof of concept', waitingOn: 'pm' });
   });
 });
+
+/** A thread whose POC v1 is approved: the contract stage. */
+export async function toContractStage() {
+  const saved = await stages.savePocDraft(target, pm, draft, 'client-a');
+  await stages.publishPoc(target, pm, saved.pocDraft!.id, cmd(), 'client-a');
+  const poc = (await stages.summary(target, client)).poc!;
+  await stages.approvePoc(target, client, poc.id, cmd({ contentHash: poc.contentHash, fullName: 'Juan Dela Cruz', consent: true }));
+}
+
+describe('project stages: contract', () => {
+  it('drafts the contract from the approved POC and keeps the draft with the PM', async () => {
+    await toContractStage();
+    const summary = await stages.saveContractDraft(target, pm, {}, 'client-a');
+    expect(summary.contract).toMatchObject({ status: 'draft', terms: { projectName: 'Project A', clientName: 'Client client-a',
+      revisionLimit: 3, deliverables: ['Online booking', 'Email confirmation'], scope: { pocNumber: 1, title: 'Booking site' } } });
+    expect(summary.contract?.terms.clauses).toHaveLength(5);
+    expect((await stages.summary(target, client)).contract).toBeNull();
+    const edited = await stages.saveContractDraft(target, pm, { notes: 'Launch before March.', deliverables: ['Booking site'] }, 'client-a');
+    expect(edited.contract?.terms).toMatchObject({ notes: 'Launch before March.', deliverables: ['Booking site'], revisionLimit: 3 });
+    await expect(stages.saveContractDraft(target, pm, { revisionLimit: 9 }, 'client-a')).rejects.toMatchObject({ code: 'invalid_stage_input' });
+  });
+
+  it('has the client sign exactly what was issued, then the PM countersigns and development starts', async () => {
+    await toContractStage();
+    const draftContract = (await stages.saveContractDraft(target, pm, {}, 'client-a')).contract!;
+    await stages.issueContract(target, pm, draftContract.id, cmd(), 'client-a');
+    const issued = (await stages.summary(target, client)).contract!;
+    expect(issued).toMatchObject({ status: 'issued' });
+    expect(issued.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect((await stages.summary(target, client)).nextAction).toMatchObject({ who: 'client', kind: 'sign_contract' });
+    await expect(stages.saveContractDraft(target, pm, { notes: 'x' }, 'client-a')).rejects.toMatchObject({ code: 'stage_mismatch' });
+    await expect(stages.countersignContract(target, pm, issued.id, cmd({ fullName: 'Pat PM' }), 'client-a')).rejects.toMatchObject({ code: 'stage_mismatch' });
+    await expect(stages.signContract(target, client, issued.id, cmd({ contentHash: 'b'.repeat(64), fullName: 'Juan Dela Cruz', consent: true })))
+      .rejects.toMatchObject({ code: 'contract_changed' });
+
+    const signed = await stages.signContract(target, client, issued.id, cmd({ contentHash: issued.contentHash, fullName: 'Juan Dela Cruz', consent: true }));
+    expect(signed.stage.contract).toMatchObject({ status: 'client_signed', clientSignedName: 'Juan Dela Cruz' });
+    expect(signed.stage.nextAction).toMatchObject({ who: 'pm', kind: 'countersign_contract' });
+    await expect(stages.voidContract(target, pm, issued.id, cmd(), 'client-a')).rejects.toMatchObject({ code: 'stage_mismatch' });
+
+    const countersigned = await stages.countersignContract(target, pm, issued.id, cmd({ fullName: 'Pat PM' }), 'client-a');
+    expect(countersigned.stage).toMatchObject({ stage: 'development', revisionsUsed: 0, contract: { status: 'countersigned', pmSignedName: 'Pat PM' },
+      nextAction: { who: 'pm', kind: 'share_build' } });
+    const actions = (await conversation.timeline(target, client)).items.filter(item => item.kind === 'stage_event').map(item => item.stage?.action);
+    expect(actions).toEqual(['poc_published', 'poc_approved', 'contract_issued', 'contract_signed', 'contract_countersigned']);
+  });
+
+  it('lets the PM withdraw an unsigned contract and issue a corrected one', async () => {
+    await toContractStage();
+    const first = (await stages.saveContractDraft(target, pm, {}, 'client-a')).contract!;
+    await stages.issueContract(target, pm, first.id, cmd(), 'client-a');
+    const voided = await stages.voidContract(target, pm, first.id, cmd(), 'client-a');
+    expect(voided.stage.contract).toBeNull();
+    expect(voided.stage.nextAction).toMatchObject({ who: 'pm', kind: 'issue_contract' });
+    const second = (await stages.saveContractDraft(target, pm, { notes: 'Corrected' }, 'client-a')).contract!;
+    expect(second.id).not.toBe(first.id);
+    await stages.issueContract(target, pm, second.id, cmd(), 'client-a');
+    expect((await stages.summary(target, client)).contract).toMatchObject({ id: second.id, status: 'issued', terms: { notes: 'Corrected' } });
+  });
+});
