@@ -13,6 +13,7 @@ import type { TicketSharedPreview } from '../store/ticketProjectManagementStore.
 import { clientProjectPreviewSql } from '../store/clientProjectPreviewSql.js';
 import type { ProjectUatBuilds } from './projectUatBuilds.js';
 import { CLIENT_TICKET_ACCESS_JOINS_SQL, CLIENT_VISIBLE_PROJECT_SQL } from '../store/ticketClientSql.js';
+import { loadStageBadge, type StageBadge } from '../store/clientProjectStageStore.js';
 
 const id = z.string().min(1).max(200).refine(v => v.trim() === v);
 const pageSchema = z.object({
@@ -43,7 +44,7 @@ interface RequestRow {
   pending_project_requested: boolean; cursor_found: boolean;
 }
 export interface ClientProject { workspaceId: string; projectId: string; intakeOptionId: string; name: string;
-  updatedAt: string; preview: Pick<TicketSharedPreview,'branch'|'url'> | null }
+  updatedAt: string; preview: Pick<TicketSharedPreview,'branch'|'url'> | null; stage: StageBadge }
 export interface ClientProjectRequest extends ClientTicketQueueItem {
   workspaceId: string; projectId: string | null; projectName: string | null;
   requestedProjectName: string | null; projectLinkStatus: 'linked' | 'pending_review' | null;
@@ -172,7 +173,8 @@ export class PostgresClientProjectPortal {
         if (!validTicketProjectPreview(preview)) throw new TicketReadInvariantError();
         items.push({ workspaceId: row.workspace_id, projectId: row.project_id,
           intakeOptionId: ticketClientProjectOptionId(row.workspace_id, client.userId, row.project_id),
-          name: row.name, updatedAt: ticketSqlIso(row.updated_at), preview:preview?{branch:preview.branch,url:preview.url}:null });
+          name: row.name, updatedAt: ticketSqlIso(row.updated_at), preview:preview?{branch:preview.branch,url:preview.url}:null,
+          stage: await loadStageBadge(sql, { workspaceId: row.workspace_id, projectId: row.project_id, clientId: client.userId }) });
       }
       return { items };
     });

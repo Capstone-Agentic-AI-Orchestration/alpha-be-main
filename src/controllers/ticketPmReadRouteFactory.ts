@@ -3,6 +3,8 @@ import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js'
 import { createPmClientProjectRouter } from './clientProjectPortalController.js';
 import { createPmClientConversationRouter } from './clientProjectConversationController.js';
 import { ClientProjectConversation } from '../services/clientProjectConversation.js';
+import { createPmProjectStageRouter } from './clientProjectStageController.js';
+import { ClientProjectStages } from '../services/clientProjectStages.js';
 import { createPmProjectUatRouter } from './projectUatController.js';
 import { ProjectUat } from '../services/projectUat.js';
 import { createProjectUatBuilds } from '../services/projectUatBuilds.js';
@@ -148,6 +150,7 @@ export function createTicketPmReadRouteBoundary(
   // Sharing a preview with clients is checked against the project's verified UAT build.
   if (triageEnabled) router.use(createPmClientProjectRouter(new PostgresClientProjectPortal(db, createProjectUatBuilds(db)), relayRequest));
   if (triageEnabled) router.use(createPmClientConversationRouter(new ClientProjectConversation(db, new PostgresClientProjectPortal(db)), relayRequest));
+  if (triageEnabled) router.use(createPmProjectStageRouter(new ClientProjectStages(db, new PostgresClientProjectPortal(db)), relayRequest));
   if (triageEnabled) router.use(createPmProjectUatRouter(new ProjectUat(db,new PostgresClientProjectPortal(db),createProjectUatBuilds(db),projectUatStorage()),relayRequest));
   router.use(createTicketQueueRouter(queue, relayRequest));
   router.use(createTicketReadRouter({ ...reads,

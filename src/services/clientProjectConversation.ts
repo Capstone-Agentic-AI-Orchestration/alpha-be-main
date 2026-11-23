@@ -27,7 +27,11 @@ const checkSchema = z.object({ done: z.boolean() }).strict();
 const linkSchema = z.object({ issueId: id, source: z.enum(['conversation', 'task_dialog']).default('conversation') }).strict();
 
 export type RequestChecklistStatus = 'open' | 'in_progress' | 'ready_to_check' | 'done' | 'declined' | 'cancelled';
-export type ConversationItemKind = 'message' | 'note' | 'request' | 'clarification' | 'task_linked' | 'request_done' | 'request_reopened';
+export type ConversationItemKind = 'message' | 'note' | 'request' | 'clarification' | 'task_linked' | 'request_done' | 'request_reopened'
+  | 'stage_event';
+
+/** A stage event in the timeline: what happened, to which POC/contract/round/quote, with its version number or signer's name. */
+export interface ConversationStageEvent { action: string; refId: string | null; number: number | null; name: string | null; stage: string | null }
 
 export interface ConversationItem {
   id: string;
@@ -37,6 +41,8 @@ export interface ConversationItem {
   createdAt: string;
   request: { ticketId: string; reference: string; title: string } | null;
   task: { issueId: string; identifier: string; title: string } | null;
+  /** Only on stage events. */
+  stage?: ConversationStageEvent;
 }
 
 export interface LinkedTask { issueId: string; identifier: string; title: string; status: string }
@@ -94,12 +100,22 @@ interface TimelineRow {
   id: string; kind: ConversationItemKind; author: 'client' | 'pm'; body: string | null; created_at: string | Date;
   ticket_id: string | null; reference: string | null; title: string | null;
   issue_id: string | null; identifier: string | null; issue_title: string | null;
+  stage: { action: string; refId: string | null; number: unknown; name: unknown; stage: unknown } | null;
 }
 interface RequestRow {
   workspace_id: string; id: string; reference: string; title: string; description: string | null; status: string;
   created_at: string | Date; done: boolean | null; changed_by_kind: 'client' | 'pm' | null; changed_at: string | Date | null;
 }
 interface TaskRow { ticket_id: string; id: string; identifier: string; title: string; status: string }
+
+function stageEvent(raw: NonNullable<TimelineRow['stage']>): ConversationStageEvent {
+  return {
+    action: raw.action, refId: raw.refId ?? null,
+    number: typeof raw.number === 'number' ? raw.number : null,
+    name: typeof raw.name === 'string' ? raw.name : null,
+    stage: typeof raw.stage === 'string' ? raw.stage : null,
+  };
+}
 
 export class ClientProjectConversation {
   constructor(private readonly db: TransactionalSql, private readonly portal: PostgresClientProjectPortal) {}
@@ -112,34 +128,40 @@ export class ClientProjectConversation {
       const { rows } = await sql.query<TimelineRow>(`with visible as (${VISIBLE_REQUESTS_SQL}),
         entries as (
           select 'pm:'||m.id as id,'message' as kind,m.author_kind as author,m.body,m.created_at,
-            null::text as ticket_id,null::text as issue_id
+            null::text as ticket_id,null::text as issue_id,null::jsonb as stage
           from alpha_private.client_project_messages m
           where m.workspace_id=$1 and m.project_id=$2 and m.client_user_id=$3
           union all
-          select 'request:'||v.id,'request','client',v.description,v.created_at,v.id,null from visible v
+          select 'request:'||v.id,'request','client',v.description,v.created_at,v.id,null,null from visible v
           union all
-          select 'tm:'||m.id,case when m.audience='internal' then 'note' else 'message' end,m.author_kind,m.body,m.created_at,m.ticket_id,null
+          select 'tm:'||m.id,case when m.audience='internal' then 'note' else 'message' end,m.author_kind,m.body,m.created_at,m.ticket_id,null,null
           from alpha_private.ticket_messages m join visible v on v.workspace_id=m.workspace_id and v.id=m.ticket_id
           where m.audience='client' or $4::boolean
           union all
           select 'ce:'||e.id,'clarification',
             case when e.event_type='proposal_clarification_requested' then 'pm' else 'client' end,
-            e.metadata->>'body',e.occurred_at,v.id,null
+            e.metadata->>'body',e.occurred_at,v.id,null,null
           from alpha_private.ticket_central_intakes i
           join visible v on v.workspace_id=i.accepted_workspace_id and v.id=i.accepted_ticket_id
           join alpha_private.ticket_central_intake_events e on e.organization_key=i.organization_key and e.intake_id=i.id
           where e.event_type in ('proposal_clarification_requested','proposal_clarification_replied')
             and coalesce(btrim(e.metadata->>'body'),'')<>''
           union all
-          select 'tl:'||l.issue_id,'task_linked','pm',null,l.linked_at,l.ticket_id,l.issue_id
+          select 'tl:'||l.issue_id,'task_linked','pm',null,l.linked_at,l.ticket_id,l.issue_id,null
           from alpha_private.request_task_links l join visible v on v.workspace_id=l.workspace_id and v.id=l.ticket_id
           union all
-          select 'ck:'||c.ticket_id,case when c.done then 'request_done' else 'request_reopened' end,c.changed_by_kind,null,c.changed_at,c.ticket_id,null
+          select 'ck:'||c.ticket_id,case when c.done then 'request_done' else 'request_reopened' end,c.changed_by_kind,null,c.changed_at,c.ticket_id,null,null
           from alpha_private.client_request_checks c join visible v on v.workspace_id=c.workspace_id and v.id=c.ticket_id
+          union all
+          select 'se:'||e.id,'stage_event',e.actor_kind,e.body,e.created_at,null,null,
+            jsonb_build_object('action',e.action,'refId',e.ref_id,'number',e.metadata->'number','name',e.metadata->'name',
+              'stage',e.metadata->'stage')
+          from alpha_private.client_project_stage_events e
+          where e.workspace_id=$1 and e.project_id=$2 and e.client_user_id=$3
         ),
         latest as (select * from entries order by created_at desc,id collate "C" desc limit 400)
         select l.id,l.kind,l.author,l.body,l.created_at,l.ticket_id,v.reference,v.title,
-          i.id as issue_id,i.identifier,i.title as issue_title
+          i.id as issue_id,i.identifier,i.title as issue_title,l.stage
         from latest l
         left join visible v on v.id=l.ticket_id
         left join public.issues i on i.id=l.issue_id and i.workspace_id=$1
@@ -148,6 +170,7 @@ export class ClientProjectConversation {
         id: row.id, kind: row.kind, author: row.author, body: row.body ?? '', createdAt: ticketSqlIso(row.created_at),
         request: row.ticket_id && row.reference && row.title !== null ? { ticketId: row.ticket_id, reference: row.reference, title: row.title } : null,
         task: row.issue_id && row.identifier ? { issueId: row.issue_id, identifier: row.identifier, title: row.issue_title ?? '' } : null,
+        ...(row.kind === 'stage_event' && row.stage ? { stage: stageEvent(row.stage) } : {}),
       })).filter(item => item.kind !== 'task_linked' || item.task !== null);
       return pm ? { items, clientId: client } : { items };
     });
