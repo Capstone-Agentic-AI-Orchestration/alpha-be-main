@@ -16,6 +16,7 @@ import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTa
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
+import { TEST_FILE, testWeakening } from './testWeakening.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
@@ -56,10 +57,6 @@ const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
   'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'required_check', 'verification_failed', 'tool_blocker'
 ]);
 
-/** Test files whose cases and assertions an update to accepted work must keep. */
-const TEST_FILE = /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
-const TEST_CASE = /\b(?:it|test)(?:\.(?:each|only|skip)\s*\([^)]*\))?\s*\(/g;
-const ASSERTION = /\bexpect\s*\(|\bassert(?:\.\w+)?\s*\(/g;
 const MAX_WEAKENING_CHECK_BYTES = 1024 * 1024;
 
 /** Same case rule as the write tool (pathMatchesScope), so a file it allowed is never rejected here. */
@@ -712,12 +709,12 @@ export class TaskAcceptanceService {
         acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
       }, modifiedAcceptedPath);
     }
-    // Building on a task allows updating its files, never removing them or weakening its tests:
-    // fail closed here rather than trusting the reviewer to notice.
+    // Every route that may change another task's accepted file (building on it, a later milestone, a
+    // review correction) may update it, never delete it or weaken its tests: fail closed here rather
+    // than trusting the reviewer to notice. A change here already passed the ownership guard above.
     for (const filePath of changedPaths) {
       const owner = acceptedPathOwners.get(filePath);
-      if (!owner || owner.taskId === task.id || restoredAcceptedPaths.has(filePath) ||
-          !taskAllowsPath(task, filePath) || !dependsTransitivelyOn(task, owner.taskId, snapshot.tasks)) continue;
+      if (!owner || owner.taskId === task.id || restoredAcceptedPaths.has(filePath)) continue;
       const weakened = await this.acceptedFileWeakening(worktreePath, filePath, owner.commit, attempt.resultCommit);
       if (weakened) {
         return fail(`This task ${weakened} in ${filePath}, which accepted task ${owner.taskId} delivered. Work that builds on ${owner.taskId} may update its files but not delete them or remove their tests or assertions. Restore what was removed and keep the update.`, {
@@ -812,8 +809,8 @@ export class TaskAcceptanceService {
 
   /**
    * How a change weakened an accepted file, or undefined when it did not: deleted it, or (for a test
-   * file) left fewer test cases or assertions than the accepted version. The counts are a heuristic for
-   * JavaScript and TypeScript tests; a file too large to read is treated as weakened (fail closed).
+   * file) removed or skipped tests or removed assertions (testWeakening, a JavaScript/TypeScript
+   * heuristic). A file too large to read is treated as weakened (fail closed).
    */
   private async acceptedFileWeakening(worktreePath: string, filePath: string, acceptedCommit: string, resultCommit: string): Promise<string | undefined> {
     const read = (commit: string) => this.dependencies.getGitFileAtCommit(worktreePath, commit, filePath, MAX_WEAKENING_CHECK_BYTES)
@@ -824,10 +821,7 @@ export class TaskAcceptanceService {
     const before = await read(acceptedCommit);
     if (before === null || after === null) return 'changed a test file too large to compare';
     if (before === undefined) return undefined;
-    const count = (source: string, pattern: RegExp) => source.match(pattern)?.length ?? 0;
-    if (count(after, TEST_CASE) < count(before, TEST_CASE)) return 'removed test cases';
-    if (count(after, ASSERTION) < count(before, ASSERTION)) return 'removed assertions';
-    return undefined;
+    return testWeakening(before, after);
   }
 
   /**
