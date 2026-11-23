@@ -37,5 +37,9 @@ export function createPmProjectStageRouter(app: ClientProjectStages, relay = rel
     app.voidContract(target, subject, req.params.contractId, req.body, clientId)));
   router.post(base + '/contract/:contractId/countersign', handle((req, subject, target, clientId) =>
     app.countersignContract(target, subject, req.params.contractId, req.body, clientId)));
+  router.post(base + '/rounds', handle((req, subject, target, clientId) => app.shareBuild(target, subject, req.body, clientId)));
+  router.post(base + '/rounds/:roundId/classify', handle((req, subject, target, clientId) =>
+    app.classifyRound(target, subject, req.params.roundId, req.body, clientId)));
+  router.post(base + '/final', handle((req, subject, target, clientId) => app.markFinalDelivery(target, subject, req.body, clientId)));
   return router;
 }

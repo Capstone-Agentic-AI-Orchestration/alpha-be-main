@@ -7,7 +7,7 @@ import {
   loadStageSummary, lockStageRow, type ContractTerms, type PocFeature, type StageSummary, type StageThread,
 } from '../store/clientProjectStageStore.js';
 import { defaultContractTerms, type ContractSource } from './projectContractTerms.js';
-import { canTransition, contentHash, type ProjectStage } from './projectStageRules.js';
+import { canTransition, contentHash, revisionsUsed, roundCounts, submitRequiresQuote, type ProjectStage } from './projectStageRules.js';
 import type { PostgresClientProjectPortal, ProjectTarget } from './clientProjectPortal.js';
 
 /**
@@ -45,6 +45,14 @@ const plainCommand = command.strict();
 const changesSchema = command.extend({ body: z.string().trim().min(1).max(4000) }).strict();
 const signOffSchema = command.extend({ contentHash: z.string().regex(/^[a-f0-9]{64}$/), fullName, consent: z.literal(true) }).strict();
 const countersignSchema = command.extend({ fullName }).strict();
+const shareBuildSchema = command.extend({ note: text(4000).default('') }).strict();
+const roundItemsSchema = z.object({ items: z.array(z.string().trim().min(1).max(4000)).max(50) }).strict();
+const submitRoundSchema = command.extend({ acceptPaid: z.boolean().default(false) }).strict();
+const classifySchema = command.extend({
+  items: z.array(z.object({ id, classification: z.enum(['revision', 'fix', 'out_of_scope']), pmNote: text(2000).default('') }).strict()).min(1).max(50),
+}).strict();
+const acceptFinalSchema = command.extend({ fullName, consent: z.literal(true) }).strict();
+const shortTitle = (body: string) => { const line = body.split(/\s+/).join(' '); return line.length > 120 ? line.slice(0, 119) + '…' : line; };
 const clause = z.object({ title: z.string().trim().min(1).max(300), body: z.string().trim().min(1).max(8000) }).strict();
 const contractDraftSchema = z.object({
   deliverables: z.array(z.string().trim().min(1).max(500)).max(50).optional(),
@@ -286,6 +294,168 @@ export class ClientProjectStages {
           where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), contract, pm.userId, value.fullName]);
         return { refId: contract, metadata: { name: value.fullName }, moveTo: 'development' };
       });
+  }
+
+  /**
+   * PM: share a build for feedback. Opens the next feedback round, with the
+   * client-visible preview link of the moment. Sharing a build while a final
+   * delivery waits for acceptance takes that delivery back.
+   */
+  async shareBuild(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown) {
+    const value = parseStageInput(shareBuildSchema, input);
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'build_shared', { note: value.note }, async ({ sql, thread, stage, subject: pm }) => {
+      if (stage !== 'development') stageMismatch('Builds are shared during development.');
+      if (await this.activeRound(sql, thread)) stageMismatch('The client is still working on the last feedback round.');
+      const { rows: preview } = await sql.query<{ url: string | null }>(`select url from alpha_private.client_project_previews
+        where workspace_id=$1 and project_id=$2`, [thread.workspaceId, thread.projectId]);
+      const roundId = randomUUID();
+      const { rows } = await sql.query<{ number: number }>(`insert into alpha_private.client_project_revision_rounds
+          (workspace_id,project_id,client_user_id,id,number,status,build_note,preview_url,opened_by)
+        select $1,$2,$3,$4,coalesce(max(number),0)+1,'open',$5,$6,$7 from alpha_private.client_project_revision_rounds
+        where workspace_id=$1 and project_id=$2 and client_user_id=$3 returning number`,
+      [...threadParams(thread), roundId, value.note, preview[0]?.url ?? null, pm.userId]);
+      await sql.query(`update alpha_private.client_project_stages set final_delivered_at=null,final_delivered_note=null
+        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and final_accepted_at is null`, threadParams(thread));
+      return { refId: roundId, metadata: { number: rows[0]!.number } };
+    });
+  }
+
+  /** Client: replace the open round's notes (a draft; nothing is sent until the round is submitted). */
+  async saveRoundItems(target: ProjectTarget, subject: TicketSubject, roundId: unknown, input: unknown): Promise<StageSummary> {
+    requireActor(subject, 'client');
+    const round = parseStageInput(id, roundId);
+    const value = parseStageInput(roundItemsSchema, input);
+    return this.db.transaction(async sql => {
+      const client = await this.portal.authorizeThread(sql, target, subject, undefined, true);
+      const thread = { ...target, clientId: client };
+      const row = await lockStageRow(sql, thread, true);
+      if (row.stage !== 'development') stageMismatch('Feedback rounds are part of development.');
+      await this.roundIn(sql, thread, round, ['open'], 'This round was already sent. Refresh to see it.');
+      await sql.query(`delete from alpha_private.client_project_revision_items
+        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and round_id=$4`, [...threadParams(thread), round]);
+      for (const [position, body] of value.items.entries()) {
+        await sql.query(`insert into alpha_private.client_project_revision_items(workspace_id,project_id,client_user_id,round_id,id,position,body)
+          values ($1,$2,$3,$4,$5,$6,$7)`, [...threadParams(thread), round, randomUUID(), position, body]);
+      }
+      await bumpVersion(sql, thread);
+      return loadStageSummary(sql, thread, 'client');
+    });
+  }
+
+  /**
+   * Client: send the round. While included rounds remain it goes straight to
+   * the PM. Once they are used, it needs `acceptPaid`: the round waits for a
+   * quote, and only an accepted quote sends it on.
+   */
+  async submitRound(target: ProjectTarget, subject: TicketSubject, roundId: unknown, input: unknown) {
+    const round = parseStageInput(id, roundId);
+    const value = parseStageInput(submitRoundSchema, input);
+    return this.mutate(target, subject, undefined, 'client', value.operationId, 'round_submitted', { round, acceptPaid: value.acceptPaid },
+      async ({ sql, thread, stage }) => {
+        if (stage !== 'development') stageMismatch('Feedback rounds are part of development.');
+        const current = await this.roundIn(sql, thread, round, ['open'], 'This round was already sent. Refresh to see it.');
+        const { rows: items } = await sql.query<{ body: string }>(`select body from alpha_private.client_project_revision_items
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and round_id=$4 order by position`, [...threadParams(thread), round]);
+        if (!items.length) throw new TicketWorkflowError(400, 'round_empty', 'Add at least one change before sending the round.');
+        const row = await lockStageRow(sql, thread, true);
+        const { rows: rounds } = await sql.query<{ counts: boolean | null; paid: boolean }>(`select counts,paid from alpha_private.client_project_revision_rounds
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3`, threadParams(thread));
+        if (!submitRequiresQuote(revisionsUsed(rounds, row.revisions_offset), row.revision_limit)) {
+          await sql.query(`update alpha_private.client_project_revision_rounds set status='submitted',submitted_at=now()
+            where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), round]);
+          return { refId: round, metadata: { number: current.number } };
+        }
+        if (!value.acceptPaid) {
+          throw new TicketWorkflowError(409, 'revision_limit_reached',
+            `Your ${row.revision_limit} included revision rounds are used. This round needs a quote first.`);
+        }
+        const quote = randomUUID();
+        await sql.query(`insert into alpha_private.client_project_quotes(workspace_id,project_id,client_user_id,id,kind,round_id,title,description,
+            status,requested_by_kind) values ($1,$2,$3,$4,'paid_revision',$5,$6,$7,'requested','client')`,
+        [...threadParams(thread), quote, round, `Revision round ${current.number}`, items.map(item => '• ' + item.body).join('\n').slice(0, 8000)]);
+        await sql.query(`update alpha_private.client_project_revision_rounds set status='awaiting_quote',submitted_at=now(),paid=true,quote_id=$5
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), round, quote]);
+        return { refId: round, metadata: { number: current.number, paid: true } };
+      });
+  }
+
+  /**
+   * PM: label each note of a submitted round. The round counts against the
+   * included rounds only if a note is a revision; each out-of-scope note
+   * becomes a change request waiting for a quote.
+   */
+  async classifyRound(target: ProjectTarget, subject: TicketSubject, roundId: unknown, input: unknown, clientId?: unknown) {
+    const round = parseStageInput(id, roundId);
+    const value = parseStageInput(classifySchema, input);
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'round_classified', { round, items: value.items },
+      async ({ sql, thread, stage }) => {
+        if (stage !== 'development') stageMismatch('Feedback rounds are part of development.');
+        const current = await this.roundIn(sql, thread, round, ['submitted'], 'This round is not waiting for review.');
+        const { rows: items } = await sql.query<{ id: string; body: string }>(`select id,body from alpha_private.client_project_revision_items
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and round_id=$4 order by position for update`, [...threadParams(thread), round]);
+        const labels = new Map(value.items.map(item => [item.id, item]));
+        if (labels.size !== value.items.length || items.length !== labels.size || items.some(item => !labels.has(item.id))) {
+          throw new TicketWorkflowError(400, 'round_classification_incomplete', 'Label every change in the round.');
+        }
+        for (const item of items) {
+          const label = labels.get(item.id)!;
+          await sql.query(`update alpha_private.client_project_revision_items set classification=$6,pm_note=$7
+            where workspace_id=$1 and project_id=$2 and client_user_id=$3 and round_id=$4 and id=$5`,
+          [...threadParams(thread), round, item.id, label.classification, label.pmNote]);
+          if (label.classification === 'out_of_scope') {
+            await sql.query(`insert into alpha_private.client_project_quotes(workspace_id,project_id,client_user_id,id,kind,round_id,title,description,
+                status,requested_by_kind) values ($1,$2,$3,$4,'change_request',$5,$6,$7,'requested','pm')`,
+            [...threadParams(thread), randomUUID(), round, shortTitle(item.body), item.body]);
+          }
+        }
+        const counts = roundCounts(value.items.map(item => item.classification));
+        await sql.query(`update alpha_private.client_project_revision_rounds set status='classified',classified_at=now(),counts=$5
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), round, counts]);
+        return { refId: round, metadata: { number: current.number, counts } };
+      });
+  }
+
+  /** PM: the agreed deliverables are done; the client is asked to accept them. */
+  async markFinalDelivery(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown) {
+    const value = parseStageInput(shareBuildSchema, input);
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'final_delivered', { note: value.note }, async ({ sql, thread, stage }) => {
+      if (stage !== 'development') stageMismatch('The final delivery is part of development.');
+      if (await this.activeRound(sql, thread)) stageMismatch('Finish the open feedback round first.');
+      const row = await lockStageRow(sql, thread, true);
+      if (row.final_delivered_at) stageMismatch('The final delivery is already waiting for the client.');
+      await sql.query(`update alpha_private.client_project_stages set final_delivered_at=now(),final_delivered_note=$4
+        where workspace_id=$1 and project_id=$2 and client_user_id=$3`, [...threadParams(thread), value.note]);
+      return { refId: null };
+    });
+  }
+
+  /** Client: accept the final delivery. The contract closes. */
+  async acceptFinal(target: ProjectTarget, subject: TicketSubject, input: unknown) {
+    const value = parseStageInput(acceptFinalSchema, input);
+    return this.mutate(target, subject, undefined, 'client', value.operationId, 'final_accepted', { fullName: value.fullName },
+      async ({ sql, thread, stage }) => {
+        if (stage !== 'development') stageMismatch('There is no final delivery waiting for you.');
+        const row = await lockStageRow(sql, thread, true);
+        if (!row.final_delivered_at || row.final_accepted_at) stageMismatch('There is no final delivery waiting for you.');
+        await sql.query(`update alpha_private.client_project_stages set final_accepted_at=now(),final_accepted_name=$4
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3`, [...threadParams(thread), value.fullName]);
+        return { refId: null, metadata: { name: value.fullName }, moveTo: 'completed' };
+      });
+  }
+
+  /** The thread's round that is not yet classified, if any. */
+  protected async activeRound(sql: Sql, thread: StageThread): Promise<boolean> {
+    const { rows } = await sql.query(`select id from alpha_private.client_project_revision_rounds
+      where workspace_id=$1 and project_id=$2 and client_user_id=$3 and status<>'classified' for update`, threadParams(thread));
+    return rows.length > 0;
+  }
+
+  /** Round `round`, locked, when its status is one of `statuses`; otherwise a stage mismatch. */
+  protected async roundIn(sql: Sql, thread: StageThread, round: string, statuses: string[], message: string) {
+    const { rows } = await sql.query<{ number: number; status: string }>(`select number,status from alpha_private.client_project_revision_rounds
+      where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 for update`, [...threadParams(thread), round]);
+    if (!rows[0] || !statuses.includes(rows[0].status)) stageMismatch(message);
+    return rows[0];
   }
 
   /** A contract's terms, locked, when it is in `status`; otherwise a stage mismatch with `message`. */

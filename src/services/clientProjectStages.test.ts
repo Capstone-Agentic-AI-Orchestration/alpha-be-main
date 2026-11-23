@@ -222,3 +222,82 @@ describe('project stages: contract', () => {
     expect((await stages.summary(target, client)).contract).toMatchObject({ id: second.id, status: 'issued', terms: { notes: 'Corrected' } });
   });
 });
+
+/** A thread whose contract is countersigned: the development stage. */
+async function toDevelopmentStage() {
+  await toContractStage();
+  const drafted = (await stages.saveContractDraft(target, pm, {}, 'client-a')).contract!;
+  await stages.issueContract(target, pm, drafted.id, cmd(), 'client-a');
+  const issued = (await stages.summary(target, client)).contract!;
+  await stages.signContract(target, client, issued.id, cmd({ contentHash: issued.contentHash, fullName: 'Juan Dela Cruz', consent: true }));
+  await stages.countersignContract(target, pm, issued.id, cmd({ fullName: 'Pat PM' }), 'client-a');
+}
+
+/** Share a build, send one round of notes, and label them; returns the round's summary entry. */
+async function feedbackRound(notes: string[], labels: Array<'revision' | 'fix' | 'out_of_scope'>) {
+  const shared = await stages.shareBuild(target, pm, cmd({ note: 'New build' }), 'client-a');
+  const roundId = shared.receipt.refId!;
+  const saved = await stages.saveRoundItems(target, client, roundId, { items: notes });
+  const items = saved.rounds.find(round => round.id === roundId)!.items;
+  await stages.submitRound(target, client, roundId, cmd());
+  const classified = await stages.classifyRound(target, pm, roundId, cmd({ items: items.map((item, index) => ({ id: item.id, classification: labels[index] })) }), 'client-a');
+  return classified.stage;
+}
+
+describe('project stages: development', () => {
+  it('counts a round only when it holds a revision, and turns out-of-scope notes into change requests', async () => {
+    await toDevelopmentStage();
+    let summary = await feedbackRound(['The login button is broken'], ['fix']);
+    expect(summary.revisionsUsed).toBe(0);
+    summary = await feedbackRound(['Make the header blue', 'Add a loyalty program'], ['revision', 'out_of_scope']);
+    expect(summary.revisionsUsed).toBe(1);
+    expect(summary.rounds[0]).toMatchObject({ number: 2, status: 'classified', counts: true });
+    expect(summary.quotes).toEqual([expect.objectContaining({ kind: 'change_request', status: 'requested', title: 'Add a loyalty program', requestedBy: 'pm' })]);
+    expect(summary.nextAction).toMatchObject({ who: 'pm', kind: 'send_quote' });
+  });
+
+  it('asks for a quote once the included rounds are used', async () => {
+    await toDevelopmentStage();
+    for (let round = 0; round < 3; round += 1) await feedbackRound([`Change ${round}`], ['revision']);
+    expect((await stages.summary(target, client)).revisionsUsed).toBe(3);
+
+    const shared = await stages.shareBuild(target, pm, cmd({ note: 'Build 4' }), 'client-a');
+    const roundId = shared.receipt.refId!;
+    await stages.saveRoundItems(target, client, roundId, { items: ['One more change'] });
+    await expect(stages.submitRound(target, client, roundId, cmd())).rejects.toMatchObject({ code: 'revision_limit_reached' });
+    const paid = await stages.submitRound(target, client, roundId, cmd({ acceptPaid: true }));
+    expect(paid.stage.rounds[0]).toMatchObject({ number: 4, status: 'awaiting_quote', paid: true });
+    expect(paid.stage.quotes[0]).toMatchObject({ kind: 'paid_revision', status: 'requested', title: 'Revision round 4', amount: null });
+    expect(paid.stage.revisionsUsed).toBe(3);
+    expect(paid.stage.nextAction).toMatchObject({ who: 'pm', kind: 'send_quote' });
+  });
+
+  it('keeps one round open at a time and refuses empty or repeated sends', async () => {
+    await toDevelopmentStage();
+    const shared = await stages.shareBuild(target, pm, cmd({ note: '' }), 'client-a');
+    expect(shared.stage.nextAction).toMatchObject({ who: 'client', kind: 'submit_round' });
+    await expect(stages.shareBuild(target, pm, cmd({ note: '' }), 'client-a')).rejects.toMatchObject({ code: 'stage_mismatch' });
+    await expect(stages.submitRound(target, client, shared.receipt.refId, cmd())).rejects.toMatchObject({ code: 'round_empty' });
+    await stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['A'] });
+    await stages.submitRound(target, client, shared.receipt.refId, cmd());
+    await expect(stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['B'] })).rejects.toMatchObject({ code: 'stage_mismatch' });
+    await expect(stages.classifyRound(target, pm, shared.receipt.refId, cmd({ items: [] }), 'client-a')).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('closes the contract when the client accepts the final delivery', async () => {
+    await toDevelopmentStage();
+    await expect(stages.acceptFinal(target, client, cmd({ fullName: 'Juan Dela Cruz', consent: true }))).rejects.toMatchObject({ code: 'stage_mismatch' });
+    const delivered = await stages.markFinalDelivery(target, pm, cmd({ note: 'All deliverables are live.' }), 'client-a');
+    expect(delivered.stage).toMatchObject({ final: { note: 'All deliverables are live.', acceptedAt: null }, nextAction: { who: 'client', kind: 'accept_final' } });
+    const accepted = await stages.acceptFinal(target, client, cmd({ fullName: 'Juan Dela Cruz', consent: true }));
+    expect(accepted.stage).toMatchObject({ stage: 'completed', final: { acceptedName: 'Juan Dela Cruz' }, nextAction: null });
+    await expect(stages.shareBuild(target, pm, cmd({ note: '' }), 'client-a')).rejects.toMatchObject({ code: 'stage_mismatch' });
+  });
+
+  it('takes back an unaccepted final delivery when the PM shares another build', async () => {
+    await toDevelopmentStage();
+    await stages.markFinalDelivery(target, pm, cmd({ note: 'Done?' }), 'client-a');
+    const shared = await stages.shareBuild(target, pm, cmd({ note: 'One more fix' }), 'client-a');
+    expect(shared.stage.final).toBeNull();
+  });
+});

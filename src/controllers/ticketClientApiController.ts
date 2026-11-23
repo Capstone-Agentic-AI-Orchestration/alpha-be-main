@@ -376,6 +376,11 @@ export function createTicketClientApiRouter(
       router.post(stagePath + '/poc/:pocId/approve', write((req, subject) => stages.approvePoc(target(req), subject, req.params.pocId, req.body)));
       router.post(stagePath + '/contract/:contractId/sign', write((req, subject) =>
         stages.signContract(target(req), subject, req.params.contractId, req.body)));
+      router.put(stagePath + '/rounds/:roundId/items', write((req, subject) =>
+        stages.saveRoundItems(target(req), subject, req.params.roundId, req.body)));
+      router.post(stagePath + '/rounds/:roundId/submit', write((req, subject) =>
+        stages.submitRound(target(req), subject, req.params.roundId, req.body)));
+      router.post(stagePath + '/final/accept', write((req, subject) => stages.acceptFinal(target(req), subject, req.body)));
     }
   }
 
