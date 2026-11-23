@@ -11,11 +11,27 @@ import { orchestrationRecoveryService } from './orchestrationRecoveryService.js'
 import { milestonePlanner } from './orchestrationMilestonePlanner.js';
 import { prepareAcceptedWebsitePreview } from './acceptedWebsitePreview.js';
 import { localPreviewService } from './localPreviewService.js';
+import { desktopBlockerResolution } from './blockerResolutionRuntime.js';
+import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 
 /** One local orchestrator/runner pair for the desktop's authoritative executor. */
 export const orchestrationRunnerAdapter = new OrchestrationRunnerAdapter({ store: sqliteService });
 export const orchestrationService = new OrchestrationService(sqliteService, orchestrationRunnerAdapter, undefined, milestonePlanner(sqliteService));
 export const taskAcceptanceService = new TaskAcceptanceService(sqliteService, orchestrationService);
+export const blockerResolutionService = desktopBlockerResolution({
+  store: sqliteService, orchestration: orchestrationService, recovery: orchestrationRecoveryService
+});
+
+/**
+ * After recovery records why a task stopped, the Orchestrator may resolve it on its own. It runs in
+ * the background (a planner turn takes a while) and holds the run while it does, so a second event
+ * for the same build never starts a second turn.
+ */
+function resolveIfStuck(snapshot: OrchestrationSnapshot): void {
+  if (!ALPHA_ORCHESTRATION_ENABLED) return;
+  void blockerResolutionService.resolveIfStuck(snapshot)
+    .catch(error => logError(`Could not resolve the stuck task in build ${snapshot.run.id}:`, error instanceof Error ? error.message : String(error)));
+}
 
 export function startOrchestrationEventDelivery(
   publish: (event: OrchestrationEventNotification) => void | Promise<void>,
@@ -54,6 +70,7 @@ orchestrationRunnerAdapter.attachResultHandlers({
       }
       orchestrationRecoveryService.reconcileSnapshot(latest);
       await orchestrationRecoveryService.flushPendingMilestones();
+      resolveIfStuck(latest);
     }
     return latest;
   },
@@ -62,6 +79,7 @@ orchestrationRunnerAdapter.attachResultHandlers({
     if (snapshot) {
       orchestrationRecoveryService.reconcileSnapshot(snapshot);
       await orchestrationRecoveryService.flushPendingMilestones();
+      resolveIfStuck(snapshot);
     }
     return snapshot;
   },
@@ -209,6 +227,8 @@ export async function reconcileInterruptedOrchestrations(): Promise<void> {
   for (const snapshot of sqliteService.listAllActiveOrchestrationSnapshots()) {
     try {
       orchestrationRecoveryService.reconcileSnapshot(snapshot);
+      // A resolution that was running when Alpha stopped is closed, never retried: a crash cannot loop.
+      blockerResolutionService.markInterrupted(snapshot);
     } catch (error) {
       logError(`Could not restore recovery details for task build ${snapshot.run.id}:`, error instanceof Error ? error.message : String(error));
     }

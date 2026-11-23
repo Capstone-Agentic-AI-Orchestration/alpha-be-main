@@ -795,11 +795,31 @@ export type OrchestrationRecoveryPhase =
   | 'resolved'
   | 'cancelled';
 
+/**
+ * How far Alpha may resolve a stuck task on its own (BLOCKER_RESOLUTION_PLAN): `off` is the old
+ * behaviour, `standard` fixes mechanical and structural problems (risk tiers 0 and 1), `strict`
+ * mechanical ones only. Internal: never shown to clients.
+ */
+export type OrchestrationAutonomy = 'off' | 'standard' | 'strict';
+export const ORCHESTRATION_AUTONOMY_LEVELS: readonly OrchestrationAutonomy[] = ['off', 'standard', 'strict'];
+export const DEFAULT_ORCHESTRATION_AUTONOMY: OrchestrationAutonomy = 'standard';
+
+export interface ProjectOrchestrationSetting {
+  enabled: boolean;
+  autonomy: OrchestrationAutonomy;
+  /** Path globs this project adds to the default sensitive areas (riskTier). */
+  sensitivePaths: string[];
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
 export type OrchestrationRecoveryActionName =
   | 'explain_failure'
   | 'retry_report_format'
   | 'repair_and_continue'
   | 'provide_guidance'
+  /** Apply the Orchestrator's verified fix that a sensitive area held back for the person. */
+  | 'apply_proposed_fix'
   | 'recheck_prerequisite'
   | 'plan_final_validation_corrections'
   | 'resume_checkpoint'
@@ -855,6 +875,21 @@ export interface OrchestrationRecoveryProjection {
   updatedAt: string;
   availableActions: OrchestrationRecoveryActionName[];
   actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>>;
+  /** True while the Orchestrator is resolving this on its own ("Alpha is resolving this"). */
+  resolving?: boolean;
+  /** What the Orchestrator found, when it looked into this recovery. Team only, like the whole projection. */
+  orchestratorResolution?: OrchestrationResolutionProjection;
+}
+
+export interface OrchestrationResolutionProjection {
+  outcome: string;
+  tier?: number;
+  escalation?: string;
+  diagnosis?: string;
+  question?: { text: string; options: Array<{ label: string; description?: string }>; why: string };
+  /** The verified fix the person can apply in one step (apply_proposed_fix). */
+  proposedFix?: string;
+  evidence?: string[];
 }
 
 export interface OrchestrationRecoveryActionRecord {

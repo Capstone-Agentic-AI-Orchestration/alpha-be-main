@@ -162,6 +162,55 @@ describe('task acceptance and targeted correction', () => {
     expect(launches[1].taskPackage.corrections.join(' ')).toContain('This is not a product blocker. Re-read the file and retry');
   });
 
+  it('sends back a task whose own diff removes a test that was there before it started', async () => {
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-own-test-weakening-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'tests'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    const existingTests = 'import { total } from "../src/cart";\nit("adds items", () => { expect(total([1, 2])).toBe(3); });\nit("handles an empty cart", () => { expect(total([])).toBe(0); });\n';
+    fs.writeFileSync(path.join(repository, 'tests', 'cart.test.ts'), existingTests);
+    commit(repository, 'Initial fixture');
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'own test weakening fixture'));
+    const launches: OrchestrationLaunchRequest[] = [];
+    let branchName = '';
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({ schemaVersion: 1, goal: 'Add discounts to the cart.', exclusions: [],
+      requirements: [{ id: 'REQ-DISCOUNT', description: 'Apply discounts.' }],
+      tasks: [{ id: 'cart-discounts', title: 'Add cart discounts', description: 'Apply discounts in the cart total.', kind: 'backend', ownerAgentId: 'backend-agent',
+        dependsOn: [], requirementIds: ['REQ-DISCOUNT'], acceptanceCriteria: ['Discounts apply.'], requiredChecks: ['test'], scope: { includePaths: ['src/**', 'tests/**'], excludePaths: [] } }] });
+    let snapshot = await startAndApprove(orchestration, { workspaceId, projectId, issueId, repository: 'acme/cart', requestKey: 'request-own-weakening',
+      requestFingerprint: 'fingerprint-own-weakening', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan });
+    const first = launches[0];
+    // The specialist "fixed" a failing case by deleting it and added a test of its own.
+    fs.writeFileSync(path.join(repository, 'tests', 'cart.test.ts'),
+      'import { total } from "../src/cart";\nit("adds items", () => { expect(total([1, 2])).toBe(3); });\nit("applies a discount", () => { expect(total([10], 0.5)).toBe(5); });\n');
+    const resultCommit = commit(repository, 'Discounts');
+    snapshot = (await orchestration.handleRunnerCompleted(completedRun(first, resultCommit, ['tests/cart.test.ts'])))!;
+    const acceptance = new TaskAcceptanceService(store, orchestration, { worktreePathFor: () => repository,
+      runVerification: async () => ({ status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }] }) });
+
+    const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId: snapshot.run.id, taskId: 'cart-discounts', attemptId: first.attemptId, acceptedBy: 'orchestrator' });
+
+    expect(outcome.decision).toBe('retrying');
+    expect(outcome.snapshot.findings).toContainEqual(expect.objectContaining({
+      evidence: expect.objectContaining({ check: 'test_weakened', changedPath: 'tests/cart.test.ts' })
+    }));
+    expect(launches).toHaveLength(2);
+    expect(launches[1].taskPackage.corrections.join(' ')).toContain('replaced test cases (“handles an empty cart”)');
+  });
+
   it('completes an accepted read-only report without a publication stage', async () => {
     const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
     fs.mkdirSync(tempRoot, { recursive: true });
