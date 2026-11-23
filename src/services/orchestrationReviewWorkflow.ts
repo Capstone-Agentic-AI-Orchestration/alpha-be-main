@@ -13,6 +13,7 @@ import {
 } from './orchestrationContract.js';
 import type { OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { checkRunPlan } from './orchestrationRunChecks.js';
+import { repositoryChecks } from './repositoryChecks.js';
 
 export type OrchestrationReviewFinding = NonNullable<OrchestrationAgentReport['reviewFindings']>[number];
 
@@ -407,9 +408,7 @@ function routeOwnerFindings(
       dependsOn: [followupReview.id],
       requirementIds: [followupReview.requirementIds[0]],
       acceptanceCriteria: ['Record what the configured checks confirm after the independent review.'],
-      requiredChecks: [...new Set(snapshot.run.plan.tasks
-        .filter(task => task.required && sameRepository((task.repository ?? snapshot.run.repository), snapshot.run.repository))
-        .flatMap(task => task.requiredChecks))].slice(0, 7),
+      requiredChecks: repositoryChecks(snapshot.run.plan.tasks.filter(task => task.required), snapshot.run.repository, snapshot.run.repository),
       scope: { includePaths: [], excludePaths: [] },
       required: true
     };

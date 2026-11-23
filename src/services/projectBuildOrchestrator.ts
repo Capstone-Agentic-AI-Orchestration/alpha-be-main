@@ -28,7 +28,7 @@ import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity, type PlanningDecision } from './orchestrationPlanner.js';
 import { composeProjectContext } from './projectPlaybook.js';
-import { MAX_PROJECT_CONTEXT_CHARS, type OrchestrationPlan } from './orchestrationContract.js';
+import { MAX_PROJECT_CONTEXT_CHARS, orchestrationRequiredCheckSchema, type OrchestrationPlan } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
@@ -293,7 +293,7 @@ export function repositoryPlanningContext(repositoryDir: string): { context: str
     if (parsed && typeof parsed === 'object') manifest = parsed;
   } catch { /* Repositories without package.json use their visible tree and README. */ }
   const scripts = manifest?.scripts ?? {};
-  const supportedChecks = new Set(['verify', 'check', 'validate', 'ci', 'test', 'typecheck', 'lint']);
+  const supportedChecks = new Set<string>(orchestrationRequiredCheckSchema.options);
   const availableScripts = Object.keys(scripts).filter(script => supportedChecks.has(script) && typeof scripts[script] === 'string' && scripts[script]!.trim());
   const context = [
     `Repository root entries (names only):\n${visibleEntries.join('\n')}`,

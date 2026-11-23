@@ -420,8 +420,9 @@ describe('task acceptance and targeted correction', () => {
           scope: { includePaths: ['src/**'], excludePaths: [] }
         },
         {
+          // Does not build on create-api: the plan runs them as separate work, so its accepted files stay protected.
           id: 'preserve-api', title: 'Preserve task API behavior', description: 'Make a compatible improvement to the API implementation.',
-          kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: ['create-api'], requirementIds: ['REQ-COMPAT'],
+          kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-COMPAT'],
           acceptanceCriteria: ['The accepted create API behavior remains intact.'], requiredChecks: ['test'],
           scope: { includePaths: ['src/**'], excludePaths: [] }
         }
@@ -495,7 +496,7 @@ describe('task acceptance and targeted correction', () => {
 
     snapshot = invalidated.snapshot;
     const restoreRequest = launches[3];
-    expect(restoreRequest.taskPackage.corrections.join('\n')).toContain('already accepted task create-api');
+    expect(restoreRequest.taskPackage.corrections.join('\n')).toContain('which accepted task create-api delivered, and this task does not build on create-api');
     const acceptedApi = git(repository, ['show', `${acceptedApiCommit}:src/api.ts`]);
     fs.writeFileSync(path.join(repository, 'src', 'api.ts'), `${acceptedApi}\n`);
     resultCommit = commit(repository, 'Restore accepted API behavior');
@@ -509,6 +510,210 @@ describe('task acceptance and targeted correction', () => {
     expect(finalAcceptance.snapshot.findings.every(finding => finding.status === 'resolved')).toBe(true);
     expect(finalAcceptance.evidence).toMatchObject({ cumulativeChangedPaths: ['src/api.ts'] });
     expect(finalAcceptance.evidence).toHaveProperty('checks.status', 'passed');
+  });
+
+  it('measures a retried task from where the task started, so its owner and review see the rejected attempt\'s work', async () => {
+    // A retry continues the rejected attempt's checkpoint. Measured from the retry's own start, a retry
+    // that changed nothing was accepted with no files: nobody owned the code and the review diff was empty.
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-task-baseline-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'index.ts'), 'export const ready = true;\n');
+    const baseCommit = commit(repository, 'Initial fixture');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    store.addAllowedPath(directory, 'task baseline fixture');
+    const eligibleAgents = [
+      { id: 'frontend-agent', role: 'Frontend Agent' },
+      { id: 'reviewer-agent', role: 'Security / Code Quality Agent' }
+    ] as const;
+    vi.spyOn(store, 'getAgents').mockReturnValue(eligibleAgents.map(agent => ({ ...agent })) as any);
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'main', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1,
+      goal: 'Build the landing page.',
+      exclusions: [],
+      requirements: [{ id: 'REQ-PAGE', description: 'Show the landing page.' }],
+      tasks: [
+        {
+          id: 'landing-page', title: 'Landing page', description: 'Build the landing page.',
+          kind: 'frontend', ownerAgentId: 'frontend-agent', dependsOn: [], requirementIds: ['REQ-PAGE'],
+          acceptanceCriteria: ['The page renders.'], requiredChecks: ['test'],
+          scope: { includePaths: ['src/**'], excludePaths: [] }
+        },
+        {
+          id: 'review-page', title: 'Review the landing page', description: 'Inspect the accepted page.',
+          kind: 'review', ownerAgentId: 'reviewer-agent', dependsOn: ['landing-page'], requirementIds: ['REQ-PAGE'],
+          acceptanceCriteria: ['Review the page and give evidence.']
+        }
+      ]
+    });
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+        commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }]
+      })
+    });
+    let snapshot = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/site', requestKey: 'request-task-baseline',
+      requestFingerprint: 'fingerprint-task-baseline', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents, plan, baseRef: 'main', baseCommit
+    });
+    expect(launches[0].taskPackage.earlierAttemptChangedPaths).toBeUndefined();
+
+    // Attempt 1 writes the page, but its check fails: rejected, and its checkpoint stays for the retry.
+    fs.writeFileSync(path.join(repository, 'src', 'landing.ts'), 'export const landing = () => "<h1>Resort</h1>";\n');
+    const pageCommit = commit(repository, 'Build the landing page');
+    snapshot = (await orchestration.handleRunnerCompleted({
+      ...completedRun(launches[0], pageCommit, ['src/landing.ts']),
+      verificationEvidence: { status: 'failed', missingScripts: [], commands: [{ script: 'test', display: 'npm test', exitCode: 1, signal: null }] }
+    }))!;
+    const rejected = await acceptance.evaluateAndAccept({
+      workspaceId, runId: snapshot.run.id, taskId: 'landing-page', attemptId: launches[0].attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(rejected.decision).toBe('retrying');
+
+    // The retry is told which files are already its work, changes nothing, and its checks pass.
+    expect(launches[1].taskPackage.earlierAttemptChangedPaths).toEqual(['src/landing.ts']);
+    snapshot = (await orchestration.handleRunnerCompleted(completedRun(launches[1], pageCommit, ['src/landing.ts'])))!;
+    const accepted = await acceptance.evaluateAndAccept({
+      workspaceId, runId: snapshot.run.id, taskId: 'landing-page', attemptId: launches[1].attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(accepted.decision).toBe('accepted');
+    expect(accepted.snapshot.attempts.find(attempt => attempt.id === launches[1].attemptId)?.result).toMatchObject({
+      acceptanceEvidence: { diffStartingCommit: baseCommit, changedPaths: ['src/landing.ts'] }
+    });
+
+    // The independent review gets the page as a diff, not an empty patch.
+    expect(launches[2].taskPackage.reviewInputs).toEqual([expect.objectContaining({
+      taskId: 'landing-page', startingCommit: baseCommit, changedPaths: ['src/landing.ts'],
+      diff: expect.stringContaining('+export const landing')
+    })]);
+  });
+
+  it('holds every code task to its repository checks and lets work that builds on a task update its files', async () => {
+    // The shape of a real stuck build: the first task was planned without lint, the next one with it.
+    // Lint covers the whole repository, so the later task met lint errors in the first task's test file
+    // and could neither fix them (that file was accepted work) nor leave them (lint failed).
+    const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-repository-checks-'));
+    const repository = path.join(directory, 'repository');
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(repository, 'tests'), { recursive: true });
+    git(directory, ['init', '-b', 'main', repository]);
+    fs.writeFileSync(path.join(repository, 'src', 'index.ts'), 'export const ready = true;\n');
+    commit(repository, 'Initial fixture');
+
+    store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+    runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'repository checks fixture'));
+    let branchName = '';
+    const launches: OrchestrationLaunchRequest[] = [];
+    const orchestration = new OrchestrationService(store, {
+      async prepare(request) {
+        branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+        if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+        return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+      },
+      async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+    });
+    const plan = parseOrchestrationPlan({
+      schemaVersion: 1,
+      goal: 'Store accounts and add sign-in.',
+      exclusions: [],
+      requirements: [
+        { id: 'REQ-STORE', description: 'Store accounts.' },
+        { id: 'REQ-AUTH', description: 'Sign customers in.' }
+      ],
+      tasks: [
+        {
+          id: 'accounts-data', title: 'Account storage', description: 'Store accounts.',
+          kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-STORE'],
+          acceptanceCriteria: ['Accounts are stored.'], requiredChecks: ['test'],
+          scope: { includePaths: ['src/**', 'tests/**'], excludePaths: [] }
+        },
+        {
+          id: 'auth-api', title: 'Sign-in API', description: 'Sign customers in with stored accounts.',
+          kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: ['accounts-data'], requirementIds: ['REQ-AUTH'],
+          acceptanceCriteria: ['Customers can sign in.'], requiredChecks: ['test', 'lint'],
+          scope: { includePaths: ['src/**', 'tests/**'], excludePaths: [] }
+        }
+      ]
+    });
+    const observed = (scripts: string[]) => ({
+      status: 'passed', missingScripts: [], commands: scripts.map(script => ({ script, display: `npm run ${script}`, exitCode: 0, signal: null }))
+    });
+    const acceptance = new TaskAcceptanceService(store, orchestration, {
+      worktreePathFor: () => repository,
+      runVerification: async () => ({
+        status: 'passed', missingScripts: [], summary: 'Verification passed.',
+        commands: ['test', 'lint'].map(script => ({ command: { script, bin: 'npm', args: ['run', script], display: `npm run ${script}` }, exitCode: 0, signal: null, output: '' }))
+      })
+    });
+
+    let snapshot = await startAndApprove(orchestration, {
+      workspaceId, projectId, issueId, repository: 'acme/accounts', requestKey: 'request-repository-checks',
+      requestFingerprint: 'fingerprint-repository-checks', createdBy: 'user-test', executorId: 'desktop-test',
+      eligibleAgents: [{ id: 'backend-agent', role: 'Backend Agent' }] as const, plan
+    });
+    // The runner is told to run, and acceptance requires, every check the repository runs.
+    expect(launches[0].taskPackage.task.requiredChecks).toEqual(['test', 'lint']);
+
+    fs.writeFileSync(path.join(repository, 'src', 'accounts.ts'), 'export const accounts = new Map<string, string>();\n');
+    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), 'const accounts = require("../src/accounts");\n');
+    let resultCommit = commit(repository, 'Store accounts');
+    snapshot = (await orchestration.handleRunnerCompleted({
+      ...completedRun(launches[0], resultCommit, ['src/accounts.ts', 'tests/accounts.spec.ts']), verificationEvidence: observed(['test'])
+    }))!;
+    const withoutLint = await acceptance.evaluateAndAccept({
+      workspaceId, runId: snapshot.run.id, taskId: 'accounts-data', attemptId: launches[0].attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(withoutLint.decision).toBe('retrying');
+    expect(withoutLint.snapshot.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'open', evidence: expect.objectContaining({ check: 'required_check', requiredScript: 'lint' }) })
+    ]));
+
+    // The owner fixes the lint error in its own file, so it is never left for later work. The retry
+    // continues attempt 1's checkpoint, and reports that attempt's files as its work too.
+    expect(launches[1].taskPackage.earlierAttemptChangedPaths).toEqual(['src/accounts.ts', 'tests/accounts.spec.ts']);
+    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), 'import { accounts } from "../src/accounts";\n');
+    resultCommit = commit(repository, 'Fix the account test lint error');
+    snapshot = (await orchestration.handleRunnerCompleted({
+      ...completedRun(launches[1], resultCommit, launches[1].taskPackage.earlierAttemptChangedPaths!), verificationEvidence: observed(['test', 'lint'])
+    }))!;
+    const accepted = await acceptance.evaluateAndAccept({
+      workspaceId, runId: snapshot.run.id, taskId: 'accounts-data', attemptId: launches[1].attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(accepted.decision).toBe('accepted');
+
+    // auth-api builds on accounts-data and its scope names tests/**, so it may update that task's test file.
+    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), 'import { accounts } from "../src/accounts";\nimport { signIn } from "../src/auth";\n');
+    fs.writeFileSync(path.join(repository, 'src', 'auth.ts'), 'export const signIn = (email: string) => email;\n');
+    resultCommit = commit(repository, 'Add sign-in and update the account test');
+    snapshot = (await orchestration.handleRunnerCompleted({
+      ...completedRun(launches[2], resultCommit, ['src/auth.ts', 'tests/accounts.spec.ts']), verificationEvidence: observed(['test', 'lint'])
+    }))!;
+    const evolved = await acceptance.evaluateAndAccept({
+      workspaceId, runId: snapshot.run.id, taskId: 'auth-api', attemptId: launches[2].attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(evolved.decision).toBe('awaiting_approval');
+    expect(evolved.snapshot.findings.filter(finding => finding.status === 'open')).toEqual([]);
+    // The change to accepted work is recorded for the reviewers that build on auth-api.
+    expect(evolved.snapshot.attempts.find(attempt => attempt.id === launches[2].attemptId)?.result)
+      .toHaveProperty('acceptanceEvidence.evolvedAcceptedPaths', [{ path: 'tests/accounts.spec.ts', ownerTaskId: 'accounts-data' }]);
   });
 
   it('blocks with an Alpha finding when repository acceptance checks throw', async () => {

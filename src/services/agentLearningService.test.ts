@@ -58,7 +58,7 @@ describe('agent scorecard and lessons', () => {
     const { draftLessons } = await import('./agentLearningService.js');
     const lessons = draftLessons(history as any);
     expect(lessons.map(lesson => lesson.text)).toEqual([
-      'Change only files inside the task\'s allowed paths, and leave files owned by earlier accepted tasks alone.',
+      'Change only files inside the task\'s allowed paths, and leave files from earlier accepted tasks alone unless your task builds on them.',
       'A reviewer found: Amounts render without the currency symbol (src/App.tsx). Use formatCurrency for every amount.',
       'Make the required check test pass before you report the task done.',
       'Keep each blockers entry in the task report within 240 characters.'

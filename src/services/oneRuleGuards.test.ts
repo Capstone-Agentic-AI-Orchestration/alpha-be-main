@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { canonicalRepository, sameRepository } from '../utils/repositoryName.js';
 import { scopeAllowsPath } from '../utils/pathScope.js';
 import { isImplementationTask } from './agentRoleContracts.js';
+import { repositoryChecks, taskRequiredChecks } from './repositoryChecks.js';
 
 /**
  * A rule written twice drifts: a codebase allowed at planning was refused at start, a task
@@ -44,6 +45,22 @@ describe('one rule each', () => {
     // A new build also honours a configured planning step, so it keeps its own wording around the same choice;
     // chat only keeps the Orchestrator out of specialist replies, which is not choosing a planner.
     expect(offenders(/=== 'orchestrator agent'|=== 'Orchestrator Agent'/, ['services/planningAgents.ts', 'services/projectBuildOrchestrator.ts', 'services/chatService.ts'])).toEqual([]);
+  });
+
+  it('collects the checks a repository runs only with repositoryChecks / taskRequiredChecks', () => {
+    const tasks = [
+      { kind: 'database', repository: 'acme/api', requiredChecks: ['test'] as const },
+      { kind: 'backend', repository: 'https://github.com/acme/api', requiredChecks: ['test', 'lint'] as const },
+      { kind: 'validation', requiredChecks: ['typecheck'] as const },
+      { kind: 'review', repository: 'acme/web', requiredChecks: ['lint'] as const }
+    ];
+    expect(repositoryChecks(tasks, 'acme/api', 'acme/api')).toEqual(['test', 'lint', 'typecheck']);
+    expect(taskRequiredChecks(tasks[0], tasks, 'acme/api')).toEqual(['test', 'lint', 'typecheck']);
+    expect(taskRequiredChecks(tasks[3], tasks, 'acme/api')).toEqual(['lint']);
+    // A local union drifted from the rule: a task accepted without lint left errors later tasks could not fix.
+    expect(offenders(/flatMap\(\(?\w+\)? => \w+\.requiredChecks\)/, ['services/repositoryChecks.ts'])).toEqual([]);
+    // The planner kept its own list of checkable scripts and could never offer one the contract added.
+    expect(offenders(/'verify', 'check', 'validate', 'ci', 'test'/, ['services/orchestrationContract.ts'])).toEqual([]);
   });
 
   it('decides whether a task may change a path only with scopeAllowsPath', () => {

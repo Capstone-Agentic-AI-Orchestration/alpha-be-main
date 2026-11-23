@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { addBranchWorktree } from '../utils/gitUtils.js';
 import { classifyRecoveryCategory } from './orchestrationRecoveryPolicy.js';
 import {
-  BUILD_WORKSPACE_LOST_PREFIX, checkpointBackupRefusal, checkpointRef, ensureBuildWorktree, isBuildWorkspaceLost, lostReviewedWorkingCopy, type CheckpointRemote
+  BUILD_WORKSPACE_LOST_PREFIX, checkpointBackupRefusal, checkpointRef, ensureBuildWorktree, isBuildWorkspaceLost, lostReviewedWorkingCopy, taskChangeBaseline, type CheckpointRemote
 } from './orchestrationCheckpoints.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', [
@@ -171,5 +171,29 @@ describe('build working copy checkpoints', () => {
   it('only accepts hidden checkpoint refs under refs/alpha-checkpoints', () => {
     expect(checkpointRef(branchName)).toBe('refs/alpha-checkpoints/alpha/orchestration/checkpointtest');
     expect(() => checkpointRef('../escape')).toThrow();
+  });
+});
+
+describe('task change baseline', () => {
+  it('starts a task at the latest accepted checkpoint in its repository, whatever its own attempts did', () => {
+    const commit = (n: number) => String(n).repeat(40);
+    const snapshot = {
+      run: { repository: 'acme/api' },
+      tasks: [
+        { id: 'data', repository: 'acme/api' }, { id: 'pages', repository: 'acme/web' },
+        { id: 'auth', repository: 'https://github.com/Acme/API.git' }, { id: 'first', repository: 'acme/web' }
+      ],
+      attempts: [
+        { taskId: 'data', status: 'accepted', resultCommit: commit(1) },
+        { taskId: 'pages', status: 'accepted', resultCommit: commit(2) },
+        // The task's own rejected checkpoint, which its retry continues: never its baseline.
+        { taskId: 'auth', status: 'rejected', resultCommit: commit(3) },
+        { taskId: 'auth', status: 'submitted', resultCommit: commit(3) }
+      ]
+    } as never;
+    expect(taskChangeBaseline(snapshot, 'auth', commit(9))).toBe(commit(1));
+    expect(taskChangeBaseline(snapshot, 'first', commit(9))).toBe(commit(2));
+    expect(taskChangeBaseline(snapshot, 'data', commit(9))).toBe(commit(9));
+    expect(taskChangeBaseline(snapshot, 'missing', commit(9))).toBeUndefined();
   });
 });

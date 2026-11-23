@@ -130,6 +130,15 @@ const SCAFFOLD_DEV_DEPENDENCIES: Record<string, string> = {
 const COVERAGE_SCRIPT = 'jest --coverage --coverageReporters=json-summary --coverageReporters=text';
 
 /**
+ * What the generated CI runs for lint, so `npm run lint` (which Alpha runs) and CI agree.
+ *
+ * `lint-check.yml` in alphaorch-workflow runs `npx eslint . --max-warnings=0`: the whole
+ * repository, and a warning fails the job. `eslint src tests` skipped config files and let
+ * warnings through, so work that passed Alpha's lint could still fail CI after delivery.
+ */
+const LINT_SCRIPT = 'eslint . --max-warnings=0';
+
+/**
  * Versions forced beneath a framework that pins a vulnerable release.
  *
  * The newest NestJS 11 `@nestjs/platform-express` (11.2.8) pins multer 2.4.0,
@@ -166,7 +175,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       test: 'jest',
       'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
-      lint: 'eslint src tests'
+      lint: LINT_SCRIPT
     };
   } else if (stack === 'react') {
     /**
@@ -184,7 +193,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       test: 'jest',
       'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
-      lint: 'eslint src tests'
+      lint: LINT_SCRIPT
     };
   } else if (stack === 'nestjs') {
     scripts = {
@@ -198,7 +207,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       test: 'jest',
       'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
-      lint: 'eslint src tests'
+      lint: LINT_SCRIPT
     };
   } else {
     scripts = {
@@ -208,7 +217,7 @@ function buildPackageJson(packageName: string, stack: CanonicalStack): string {
       test: 'jest',
       'test:cov': COVERAGE_SCRIPT,
       typecheck: 'tsc --noEmit',
-      lint: 'eslint src tests'
+      lint: LINT_SCRIPT
     };
   }
 

@@ -6,6 +6,7 @@ import { agentRoleContract, roleCanOwnTask, roleCanPlan, isImplementationTask } 
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { runCliTurn } from './cliRunner.js';
 import { correctPlanSafely } from './orchestrationPlanCorrections.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import { splitOversizedTasks } from './orchestrationPlanSize.js';
 import { logInfo } from '../utils/logger.js';
 import type { ProjectRoot } from './projectFiles.js';
@@ -228,9 +229,16 @@ function withRunFields(plan: OrchestrationPlan, input: OrchestrationPlanningInpu
   };
 }
 
+/** The check scripts a planned task's repository defines; a task with no repository uses the default one. */
+function planningScripts(input: OrchestrationPlanningInput): (repository: string | undefined) => readonly string[] {
+  return repository => (repository
+    ? input.repositories?.find(item => sameRepository(item.repository, repository))?.availableScripts
+    : undefined) ?? input.availableScripts;
+}
+
 /** Apply the corrections that have one safe answer (see orchestrationPlanCorrections), and say what changed. */
 function correctedPlan<P extends Parameters<typeof correctPlanSafely>[0]>(plan: P, input: OrchestrationPlanningInput): P {
-  const { plan: corrected, corrections } = correctPlanSafely(plan, input.eligibleAgents);
+  const { plan: corrected, corrections } = correctPlanSafely(plan, input.eligibleAgents, planningScripts(input));
   if (corrections.length) logInfo(`Plan corrected before its checks: ${corrections.join(' ')}`);
   return noteUntouchedRepositories(corrected, input);
 }
@@ -546,14 +554,13 @@ function validatePlan(
   }
   const storageIssue = accountStorageIssue(plan, input, roots);
   if (storageIssue) throw new OrchestrationPlanningError(storageIssue, 'invalid_plan');
-  const repositoryScripts = new Map((input.repositories ?? []).map(repository => [repository.repository.toLowerCase(), new Set(repository.availableScripts)]));
-  const knownScripts = new Set(input.availableScripts);
+  const scriptsOf = planningScripts(input);
   for (const task of plan.tasks) {
     if (isImplementationTask(task.kind)) {
       if (!task.scope.includePaths.length || task.scope.includePaths.some(scope => UNIVERSAL_SCOPE_PATTERNS.has(scope))) {
         throw new OrchestrationPlanningError(`Code task ${task.id} needs a narrow explicit path scope.`, 'invalid_scope');
       }
-      const taskScripts = task.repository ? repositoryScripts.get(task.repository.toLowerCase()) ?? knownScripts : knownScripts;
+      const taskScripts = new Set(scriptsOf(task.repository));
       if (!task.requiredChecks.length || task.requiredChecks.some(script => !taskScripts.has(script))) {
         throw new OrchestrationPlanningError(`Code task ${task.id} needs available repository checks; declared checks: ${task.requiredChecks.join(', ') || 'none'}.`, 'invalid_checks');
       }

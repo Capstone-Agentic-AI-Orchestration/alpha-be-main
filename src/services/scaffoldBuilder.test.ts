@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { CI_CHECKS } from './orchestrationContract.js';
 import {
   buildProjectScaffold,
   normalizeProjectStack,
@@ -115,6 +116,15 @@ describe('buildProjectScaffold', () => {
     // Pinned, not floating — a '*' range makes the scaffold unreproducible.
     for (const range of Object.values(pkg.devDependencies) as string[]) {
       expect(range).not.toBe('*');
+    }
+  });
+
+  it('lints the way the generated CI does, and gives every stack the scripts Alpha runs as CI checks', () => {
+    // CI's lint job runs `npx eslint . --max-warnings=0`; a laxer `npm run lint` let work pass Alpha and fail CI.
+    for (const stack of ['nodejs', 'nestjs', 'react', 'nextjs'] as const) {
+      const pkg = JSON.parse(read(buildProjectScaffold({ serviceName: 'Resort', stack }), 'package.json'));
+      expect(pkg.scripts.lint).toBe('eslint . --max-warnings=0');
+      expect(CI_CHECKS.filter(script => !pkg.scripts[script])).toEqual([]);
     }
   });
 

@@ -23,6 +23,7 @@ import type { Milestone, MilestoneExpansion, PlanNextMilestone } from './orchest
 import { getCurrentBranch, getGitChangedPaths, getGitDiffNumstat, getGitDiffPatch, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, isGitRepo, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { rankRelatedFiles, type RankingAnchor } from './reviewSourceRanking.js';
+import { buildTaskRequiredChecks } from './repositoryChecks.js';
 import { assertOrchestrationApprovalCheckpointCurrent, getOrchestrationFinalValidationEvidence } from './orchestrationReviewService.js';
 import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { authorizedRepositoriesForRun, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
@@ -30,7 +31,7 @@ import { checkNewRunPlan, checkRunPlan } from './orchestrationRunChecks.js';
 import { DomainRefusal } from './domainRefusal.js';
 import { memorySources, readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
-import { isBuildWorkspaceLost, latestCheckpointCommit } from './orchestrationCheckpoints.js';
+import { isBuildWorkspaceLost, latestCheckpointCommit, taskChangeBaseline } from './orchestrationCheckpoints.js';
 import { logError } from '../utils/logger.js';
 import {
   ALPHA_ORCHESTRATION_MAX_BUILD_AGE_MS,
@@ -208,6 +209,8 @@ export interface OrchestrationTaskPackage {
     missingScripts: string[];
     observedChecks: Array<{ script: string; result: 'passed' | 'failed' | 'not_run' }>;
     changedPaths: string[];
+    /** Files this dependency changed that an earlier accepted task delivered; reviewers check they were not weakened. */
+    evolvedAcceptedPaths?: Array<{ path: string; ownerTaskId: string }>;
     dependencyAudits?: DependencyAuditEvidence[];
   }>;
   reviewInputs: Array<{
@@ -234,6 +237,11 @@ export interface OrchestrationTaskPackage {
   }>;
   corrections: string[];
   findingIds: string[];
+  /**
+   * Files this task's earlier attempts already changed, saved in the working copy the retry
+   * continues. They are this task's work too: the report must list them as deliverables.
+   */
+  earlierAttemptChangedPaths?: string[];
   /** Explicit project-owner clarification for one bounded recovery retry. */
   developerGuidance?: string;
   /** Bounded, read-only retries used only to repair an invalid task report. */
@@ -1757,7 +1765,17 @@ export class OrchestrationService {
           }),
           changedPaths: Array.isArray(acceptanceEvidence.changedPaths)
             ? acceptanceEvidence.changedPaths.filter((filePath): filePath is string => typeof filePath === 'string').slice(0, 60)
-            : []
+            : [],
+          ...(() => {
+            const evolved = Array.isArray(acceptanceEvidence.evolvedAcceptedPaths)
+              ? acceptanceEvidence.evolvedAcceptedPaths.flatMap((item: unknown) => {
+                const entry = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+                return typeof entry.path === 'string' && typeof entry.ownerTaskId === 'string'
+                  ? [{ path: entry.path, ownerTaskId: entry.ownerTaskId }] : [];
+              }).slice(0, 60)
+              : [];
+            return evolved.length ? { evolvedAcceptedPaths: evolved } : {};
+          })()
         };
       });
     const reviewInputs = task.kind === 'review' && !reportCorrection
@@ -1781,7 +1799,7 @@ export class OrchestrationService {
         repository: task.repository ?? snapshot.run.repository,
         description: task.description,
         acceptanceCriteria: task.acceptanceCriteria,
-        requiredChecks: task.requiredChecks,
+        requiredChecks: buildTaskRequiredChecks(snapshot, task),
         scope: task.scope
       },
       requirements: snapshot.run.plan.requirements.filter(requirement => requirementIds.has(requirement.id)),
@@ -1807,6 +1825,8 @@ export class OrchestrationService {
         .filter(finding => finding.correctionTaskId === taskId && finding.status === 'open')
         .map(finding => finding.id)
     };
+    const earlierAttemptChangedPaths = await this.earlierAttemptChangedPaths(snapshot, taskId);
+    if (earlierAttemptChangedPaths.length) taskPackage.earlierAttemptChangedPaths = earlierAttemptChangedPaths;
     if (!reportCorrection && developerGuidance?.trim()) {
       taskPackage.developerGuidance = developerGuidance.trim().slice(0, MAX_RECOVERY_GUIDANCE_CHARS);
     }
@@ -1927,6 +1947,25 @@ export class OrchestrationService {
       }
     }
     return results;
+  }
+
+  /**
+   * Files this task's earlier attempts left in the checkpoint a retry continues from (the same
+   * checkpoint the executor requires a retry to start at). Empty for a first attempt.
+   */
+  private async earlierAttemptChangedPaths(snapshot: OrchestrationSnapshot, taskId: string): Promise<string[]> {
+    const workspace = repositoryWorkspaceForTask(snapshot, taskId);
+    const checkpoint = [...snapshot.attempts].reverse().find(attempt => attempt.taskId === taskId && attempt.resultCommit &&
+      ['failed', 'rejected', 'recovery_required'].includes(attempt.status))?.resultCommit;
+    const baseline = workspace && taskChangeBaseline(snapshot, taskId, workspace.baseCommit);
+    if (!workspace || !checkpoint || !baseline || checkpoint === baseline) return [];
+    try {
+      return (await getGitChangedPaths(workspace.worktreePath, baseline, checkpoint)).slice(0, 200);
+    } catch (error) {
+      // Acceptance still measures the whole task, and names any file the report leaves out.
+      logError(`${snapshot.run.id}: could not list ${taskId}'s earlier attempt files: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
   }
 
   private async readReviewSourceContext(
