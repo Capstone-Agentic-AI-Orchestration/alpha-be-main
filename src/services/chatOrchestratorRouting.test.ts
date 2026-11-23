@@ -203,21 +203,22 @@ describe('specialist analysis handoffs', () => {
   it('selects specialists, records their replies, and strips all write grants despite Full access', async () => {
     const { chatService, sqlite } = await specialistFixture();
     cliReply = { content: route([assignment, { ...assignment, agentId: 'frontend-specialist', kind: 'frontend', instruction: 'Inspect UI error states.', reason: 'UI expertise.' }]) };
-    cliReplies = [cliReply.content, 'API finding: missing error mapping.', 'UI finding: missing retry state.'];
+    cliReplies = [cliReply.content, 'API finding: missing error mapping.', 'UI finding: missing retry state.', 'Both reviews found missing error handling.'];
     const result = await send(chatService, 'Use my agents to review the project', { projectId: 'project-1', approvalMode: 'full', clientMessageId: 'handoff-message' });
     expect(startProjectBuildBatch).not.toHaveBeenCalled();
-    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist', 'frontend-specialist']);
+    // Alpha's combined answer is the last word.
+    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist', 'frontend-specialist', 'Alpha']);
     expect(result.agentMessages[0].content).toContain('Server-side expertise.');
-    expect(turnInputs).toHaveLength(3);
+    expect(turnInputs).toHaveLength(4);
     expect(turnInputs[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', personaChanged: true });
-    for (const input of turnInputs.slice(1)) {
+    for (const input of turnInputs.slice(1, 3)) {
       expect(input).toMatchObject({ mode: 'chat', approvalMode: 'ask', priorSession: null, skills: [], autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github'] });
       expect(input.systemPrompt).toContain('No edits, shell commands');
     }
     expect(turnInputs[0].systemPrompt).toContain('Expert in Backend Agent');
     expect(sqlite.getChatMessages('thread-1').filter((message: any) => message.agentId === 'backend-specialist')).toHaveLength(1);
     await send(chatService, 'Use my agents to review the project', { projectId: 'project-1', clientMessageId: 'handoff-message' });
-    expect(turnInputs).toHaveLength(3);
+    expect(turnInputs).toHaveLength(4);
   });
 
   it('hands off with every project codebase, whatever codebases the model named', async () => {
@@ -227,7 +228,7 @@ describe('specialist analysis handoffs', () => {
     cliReplies = [cliReply.content, 'API finding: missing error mapping.'];
     const result = await send(chatService, 'Use my agents to review the API', { projectId: 'project-1' });
     expect(result.agentMessages[0].content).toContain('Handing off read-only analysis');
-    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist']);
+    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist', 'Alpha']);
   });
 
   it.each(['unknown', 'role-mismatch', 'inaccessible', 'offline', 'stale-model'])('refuses a %s assignment without starting any specialist', async problem => {
@@ -250,8 +251,8 @@ describe('specialist analysis handoffs', () => {
     cliReply = { content: route() };
     cliReplies = [cliReply.content, 'API findings.'];
     const result = await send(chatService, 'Check the API', { projectId: 'project-1', targetAgentId: coordinator.id });
-    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist']);
-    expect(turnInputs).toHaveLength(2);
+    expect(result.agentMessages.map((message: any) => message.senderName)).toEqual(['Alpha', 'backend-specialist', 'Alpha']);
+    expect(turnInputs).toHaveLength(3);
   });
 
   it('rechecks access before dispatching the next specialist', async () => {
@@ -262,8 +263,10 @@ describe('specialist analysis handoffs', () => {
       if (message.agentId === 'backend-specialist') access.mockResolvedValue(false);
     });
     const result = await send(chatService, 'Review the project', { projectId: 'project-1' });
-    expect(turnInputs).toHaveLength(2);
-    expect(result.agentMessages.at(-1).content).toContain('changed after the handoff');
+    // Alpha, the backend specialist and Alpha's combined answer; the frontend specialist never starts.
+    expect(turnInputs).toHaveLength(3);
+    expect(result.agentMessages.at(-2).content).toContain('changed after the handoff');
+    expect(result.agentMessages.at(-1).content).toContain('**frontend-specialist** did not start');
   });
 
   it('does not launch remaining specialists after the user stops the turn', async () => {
@@ -286,9 +289,9 @@ describe('specialist analysis handoffs', () => {
     cliReply = { content: route() };
     cliReplies = [cliReply.content, 'Read-only findings.'];
     await send(chatService, 'Review the API', { projectId: 'project-1', routing: { context, canBuild: false } });
-    expect(turnInputs).toHaveLength(2);
-    await send(chatService, '/ask explain the result', { routing: { context, canBuild: true, answerOnly: true } });
     expect(turnInputs).toHaveLength(3);
+    await send(chatService, '/ask explain the result', { routing: { context, canBuild: true, answerOnly: true } });
+    expect(turnInputs).toHaveLength(4);
     expect(startProjectBuildBatch).not.toHaveBeenCalled();
   });
 });

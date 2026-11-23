@@ -658,6 +658,7 @@ chatRouter.post('/chat/messages', desktopOnly, async (req: Request, res: Respons
       skillIds: skillIds === undefined ? undefined : [...new Set((skillIds as string[]).map(id => id.trim()))],
       workspaceId: req.workspace!.workspaceId,
       userId: req.workspace!.userId,
+      workspaceRole: req.workspace!.role,
       buildRequest,
       routing
     });

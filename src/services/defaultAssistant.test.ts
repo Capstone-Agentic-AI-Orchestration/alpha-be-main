@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { pickDefaultRuntime, DEFAULT_ASSISTANT, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel } from './defaultAssistant.js';
+import { pickDefaultRuntime, DEFAULT_ASSISTANT, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel, assistantPromptFor, CLIENT_ASSISTANT_PROMPT, HOW_TO_EXPLAIN } from './defaultAssistant.js';
+import { chatAudience } from './chatProductContext.js';
 import { RuntimeEngine, ModelProvider } from '../models/index.js';
 
 const rt = (
@@ -78,6 +79,31 @@ describe('the default assistant identity', () => {
   it('tells it to point at @mentions rather than impersonate an agent', () => {
     expect(DEFAULT_ASSISTANT_PROMPT).toMatch(/@mention/i);
     expect(DEFAULT_ASSISTANT_PROMPT).toMatch(/rather than answering on that agent/i);
+  });
+});
+
+describe('how Alpha explains the product', () => {
+  it('leads with purpose, keeps code names out unless asked, and never guesses', () => {
+    expect(DEFAULT_ASSISTANT_PROMPT).toContain(HOW_TO_EXPLAIN);
+    expect(HOW_TO_EXPLAIN).toContain('Lead with what the product is for');
+    expect(HOW_TO_EXPLAIN).toContain('No file paths, frameworks, libraries or configuration names unless the person asks');
+    expect(HOW_TO_EXPLAIN).toContain('Never guess. When something is not in these records, say it is not recorded');
+    expect(HOW_TO_EXPLAIN).toContain('Name old or conflicting records as such');
+  });
+
+  it('speaks to each team role in its own terms', () => {
+    expect(assistantPromptFor('pm')).toContain('project manager: use product terms');
+    expect(assistantPromptFor('dev')).toContain('developer: product terms first, then technical detail');
+    for (const role of ['pm', 'dev', 'admin']) expect(assistantPromptFor(role)).toContain('suggest adding it to the brief or the board');
+  });
+
+  it('gives a client, or a role it does not know, the client prompt with nothing about how the work is done', () => {
+    for (const role of ['client', undefined, 'auditor']) expect(assistantPromptFor(role)).toBe(CLIENT_ASSISTANT_PROMPT);
+    expect(CLIENT_ASSISTANT_PROMPT).toContain('Never guess.');
+    expect(CLIENT_ASSISTANT_PROMPT).not.toMatch(/\b(?:builds?|agents?|plans?|tasks?|blockers?|specialists?|orchestrat\w*|decisions?|board|cards?)\b/i);
+    expect(chatAudience('client')).toBe('client');
+    expect(chatAudience(undefined)).toBe('client');
+    expect(chatAudience('dev')).toBe('team');
   });
 });
 

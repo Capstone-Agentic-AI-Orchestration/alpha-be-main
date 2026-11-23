@@ -192,5 +192,18 @@ describe('orchestratorRoutingPrompt', () => {
   it('forbids the decision line for an answer-only message', () => {
     expect(orchestratorRoutingPrompt({ repositories: [], canBuild: true, answerOnly: true })).toMatch(/answer only/);
   });
+
+  it('answers product questions itself and keeps specialists for technical detail or a review', () => {
+    const prompt = orchestratorRoutingPrompt({ projectName: 'Project A', repositories: ['org/site'], canBuild: true });
+    const rule = prompt.split('\n').find(line => line.startsWith('1. '))!;
+    expect(rule).toContain('A question about the product itself');
+    expect(rule).toContain('answer it yourself from the product picture');
+    expect(rule).toContain('only when the person asks for technical detail, a code walkthrough or a review');
+    expect(rule).toContain('"Explain this project in simple terms" is this kind of question');
+    // Route 5 is still there for technical analysis, and the handoff asks only for what the answer needs.
+    expect(prompt).toContain('hand it to the relevant specialists using route 5');
+    expect(prompt).toContain('you write the person one combined answer to their question');
+    expect(prompt).toContain('the question it helps answer, and the evidence expected');
+  });
 });
 
