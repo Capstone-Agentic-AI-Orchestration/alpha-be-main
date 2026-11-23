@@ -93,7 +93,7 @@ async function runManagerTurn(input: {
     usageContext: { threadId: input.threadId },
     runId: `feature-spec-${randomUUID()}`,
     cwd: specScratchFolder(input.threadId),
-    provider: runtime.provider, modelName: runtime.modelName, codexBaseUrl: runtime.endpoint,
+    provider: runtime.provider, modelName: runtime.modelName,
     mode: 'chat', approvalMode: 'ask', skills: [], mcpServers: [], projectRoots: [],
     autonomyLevel: 'Supervised', priorSession: null, timeoutMs: 180_000,
     responseSchema: input.responseSchema, toolFree: true,

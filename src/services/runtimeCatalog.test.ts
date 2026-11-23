@@ -12,10 +12,11 @@ let parseOpenCodeModelIds: (output: string) => string[];
 let parseAntigravityModelIds: (output: string) => string[];
 let parseLMStudioModelIds: (payload: unknown) => string[];
 let codexCacheModelIds: (payload: unknown) => string[];
+let codexFetchedModelCache: (payload: unknown) => boolean;
 let claudeCatalogForAuth: (catalog: { models: string[]; source: RuntimeCatalogSource; error?: string }, authMethod: unknown) => { models: string[]; source: RuntimeCatalogSource; error?: string };
 
 beforeAll(async () => {
-  ({ parseOpenCodeModelIds, parseAntigravityModelIds, parseLMStudioModelIds, codexCacheModelIds, claudeCatalogForAuth } = await import('./runtimeService.js'));
+  ({ parseOpenCodeModelIds, parseAntigravityModelIds, parseLMStudioModelIds, codexCacheModelIds, codexFetchedModelCache, claudeCatalogForAuth } = await import('./runtimeService.js'));
 });
 
 describe('runtime model catalog parsers', () => {
@@ -71,5 +72,36 @@ describe('runtime model catalog parsers', () => {
       { type: 'embeddings', id: 'legacy-embedding' }
     ] })).toEqual(['google/gemma-4-26b-a4b']);
     expect(parseLMStudioModelIds({ data: [{ id: 'legacy-model' }] })).toEqual(['legacy-model']);
+  });
+});
+
+describe('Codex model cache provenance', () => {
+  // Headers captured from one machine: Codex's own fetch, then the same file
+  // after OpenCodex overwrote it with its gateway catalog.
+  const codexFetched = {
+    fetched_at: '2026-11-23T06:46:17.409537200Z',
+    etag: 'W/"dd9556756534500859f736d0a884684f"',
+    client_version: '0.166.0',
+    models: [{ slug: 'gpt-6-luna', visibility: 'list' }]
+  };
+  const gatewayWritten = {
+    fetched_at: '2000-01-01T00:00:00Z',
+    client_version: '0.0.0',
+    models: [
+      { slug: 'gpt-6.2-sol', visibility: 'list' },
+      { slug: 'anthropic/claude-opus-5-5', visibility: 'list' }
+    ]
+  };
+
+  it('trusts the catalog Codex fetched for its own sign-in', () => {
+    expect(codexFetchedModelCache(codexFetched)).toBe(true);
+  });
+
+  it('never trusts a catalog a gateway wrote into the Codex cache', () => {
+    // Its models only exist while that gateway runs; listing them is how a
+    // chat came to depend on OpenCodex being started.
+    expect(codexFetchedModelCache(gatewayWritten)).toBe(false);
+    expect(codexFetchedModelCache({ ...gatewayWritten, etag: '  ' })).toBe(false);
+    expect(codexFetchedModelCache(null)).toBe(false);
   });
 });

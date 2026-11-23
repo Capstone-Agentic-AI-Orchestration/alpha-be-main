@@ -592,7 +592,6 @@ async function generateWithAlphaRuntime(
         mode: 'review',
         provider: runtime.provider,
         modelName: runtime.modelName,
-        codexBaseUrl: runtime.endpoint,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         systemPrompt: SYSTEM_PROMPT,
         prompt,

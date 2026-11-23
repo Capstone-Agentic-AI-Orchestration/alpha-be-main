@@ -58,7 +58,7 @@ export async function confirmConsentInIsolation(input: {
   if (!runtime) return false;
   const result = await runCliTurn({
     usageContext: { threadId: input.threadId }, runId: input.runId, cwd: input.cwd,
-    provider: runtime.provider, modelName: runtime.modelName, codexBaseUrl: runtime.endpoint,
+    provider: runtime.provider, modelName: runtime.modelName,
     mode: 'chat', approvalMode: 'ask', skills: [], mcpServers: [], projectRoots: [],
     autonomyLevel: 'Supervised', priorSession: null, timeoutMs: 60_000,
     responseSchema: consentJsonSchema, toolFree: true, systemPrompt: CONSENT_CHECK_PROMPT,

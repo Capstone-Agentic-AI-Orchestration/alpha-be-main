@@ -10,8 +10,6 @@ import { agentCredentialEnv } from './gitCredentialIsolation.js';
 import { RuntimeService } from './runtimeService.js';
 import type { ProjectRoot } from './projectFiles.js';
 import type { TaskFileScope } from './taskFileAccess.js';
-import { codexModelConfigArgs } from './codexModelConfig.js';
-import { sqliteService } from './sqliteService.js';
 import { cleanupRunMcpConfig, codexMcpOverrides, mcpToolPatterns, openCodeMcpConfig, writeRunMcpConfig, type BoardRunScope } from './mcpConfigService.js';
 import { mcpAccessFor } from './autonomyPolicy.js';
 import { AutonomyLevel, ReasoningEffort } from '../models/index.js';
@@ -99,10 +97,6 @@ export interface CliTurnOptions {
   /** Agent `modelProvider` value — selects the CLI family. */
   provider: string;
   modelName?: string;
-  /** Verified local endpoint from the selected runtime catalog, when available. */
-  codexBaseUrl?: string;
-  /** Runtime-owned Codex gateway/catalog overrides; never read user MCP config. */
-  codexConfigArgs?: string[];
   /** The installed Codex accepts `--approve-for-me`; see RuntimeService.codexSupportsApproveForMe. */
   codexApproveForMe?: boolean;
   /**
@@ -571,11 +565,15 @@ export function buildTurnInvocation(
          * Credentials are unaffected: they live in ~/.codex/auth.json, not in
          * config.toml, and codex still reads and attempts to refresh the token
          * with this flag set.
+         *
+         * Nothing from that file is re-applied — in particular not
+         * `openai_base_url` or `model_catalog_json`. A local gateway such as
+         * OpenCodex writes both there; copying them back made every Codex turn
+         * depend on that gateway running, and when it was not, a chat sat on
+         * "connection refused" retries for minutes and never answered. Codex
+         * talks to OpenAI with its own sign-in. See codexIndependence.test.ts.
          */
         '--ignore-user-config',
-        // Re-apply only Alpha's local gateway and its model metadata catalog.
-        // The rest of the operator's Codex config (especially MCPs) remains isolated.
-        ...(options.codexConfigArgs ?? []),
         // Orchestration reviews are non-interactive. Keep Codex in its
         // read-only sandbox, but make it execute safe in-sandbox inspection
         // commands without waiting for an approval UI that Alpha cannot show.
@@ -910,28 +908,6 @@ export function buildTurnInvocation(
 }
 
 /**
- * The local gateway the runtime scan found for Codex, if any.
- *
- * Chat passes it explicitly. The Orchestrator planner and other callers did
- * not, so their `codex exec` ran with `--ignore-user-config` and no gateway:
- * a model only the local gateway serves (`gpt-6-luna`) went to the default
- * endpoint, Codex exited 1, and planning reported "not a single valid JSON
- * object" before any specialist started.
- */
-function scannedCodexEndpoint(): string | undefined {
-  try {
-    return sqliteService.getRuntimes().find(runtime => runtime.provider === 'OpenAI' && runtime.endpoint)?.endpoint;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Gateway and model-catalog flags for a Codex turn; empty for other providers. */
-export function codexGatewayArgs(provider: string, modelName: string | undefined, baseUrl?: string): string[] {
-  return provider === 'OpenAI' ? codexModelConfigArgs(modelName, baseUrl ?? scannedCodexEndpoint()) : [];
-}
-
-/**
  * agy's headless refusal of a terminal command. It does not refuse the one
  * call and carry on, as Claude Code and Codex do: the whole turn ends with no
  * output, so a planner or chat turn without shell access dies the moment the
@@ -1036,13 +1012,11 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
       responseSchemaPath = path.join(RUNS_DIR, `response-schema-${randomUUID()}.json`);
       fs.writeFileSync(responseSchemaPath, JSON.stringify(options.responseSchema));
     }
-    const codexArgs = codexGatewayArgs(provider, modelName, options.codexBaseUrl);
     const usesCodex = ['OpenAI', 'Ollama', 'LM Studio'].includes(provider);
     const invocation = buildTurnInvocation(
       {
         ...options,
         responseSchemaPath,
-        codexConfigArgs: codexArgs,
         ...(usesCodex ? {
           codexHome: codexAlphaSignedIn() ? codexAlphaHome() : undefined,
           codexIsolationArgs: await RuntimeService.codexIsolationArgs()

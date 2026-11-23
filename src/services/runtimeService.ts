@@ -94,7 +94,6 @@ type CatalogDiscovery = {
   fetchedAt?: string;
   stale?: boolean;
   error?: string;
-  endpoint?: string;
 };
 
 const CODEX_CATALOG_STALE_AFTER_MS = 30 * 60 * 1000;
@@ -127,86 +126,26 @@ function uniqueModelIds(values: unknown[]): string[] {
 }
 
 /**
- * Codex's local cache and an optional local OpenAI-compatible gateway are the
- * only sources of model IDs. Alpha must not invent model IDs when neither
- * source is available.
+ * The Codex home agents actually run with: Alpha's own once someone signed in
+ * there for Alpha, the operator's otherwise. See cliHome.
  */
-const DEFAULT_OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
-
-function codexHome(): string {
+function codexRunHome(): string {
+  if (codexAlphaSignedIn()) return codexAlphaHome();
   return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
 }
 
-function localBaseUrl(value: string | undefined): string | undefined {
-  if (!value?.trim()) return undefined;
-  try {
-    const parsed = new URL(value.trim());
-    const host = parsed.hostname.toLowerCase();
-    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
-    if (!['127.0.0.1', 'localhost', '::1'].includes(host)) return undefined;
-    return value.trim().replace(/\/+$/, '');
-  } catch {
-    return undefined;
-  }
-}
-
 /**
- * Codex itself does not expose a stable `models` subcommand. When it has been
- * wired through OpenCodex (or another local OpenAI-compatible gateway), the
- * gateway's `/v1/models` endpoint is the authoritative catalog instead.
+ * Whether Codex itself wrote this models_cache.json.
  *
- * Read the same user-level config that Codex uses, but only ever probe a
- * loopback URL. This prevents a runtime scan from unexpectedly calling a
- * remote endpoint or leaking credentials while still discovering the local
- * OpenCodex catalog automatically.
+ * Codex records the provider's `etag` with every catalog it fetches for the
+ * signed-in account. A local gateway such as OpenCodex overwrites the same
+ * file with its own catalog — gateway-only models like `anthropic/claude-*`
+ * and OpenAI models this account cannot use — and that file carries no etag
+ * (OpenCodex stamps it `fetched_at: 2000-01-01`, `client_version: 0.0.0`).
  */
-function codexCatalogBases(): string[] {
-  const configured: string[] = [
-    process.env.OPENAI_BASE_URL,
-    process.env.OPENAI_API_BASE,
-    process.env.CODEX_OPENAI_BASE_URL
-  ].filter((value): value is string => Boolean(value?.trim()));
-
-  const configPath = path.join(codexHome(), 'config.toml');
-  try {
-    const config = fs.readFileSync(configPath, 'utf8');
-    const match = config.match(/^\s*openai_base_url\s*=\s*["']([^"']+)["']/im);
-    if (match?.[1]) configured.push(match[1]);
-  } catch {
-    // A missing or protected Codex config is normal on a fresh machine.
-  }
-
-  configured.push(DEFAULT_OPENCODEX_BASE_URL);
-
-  return Array.from(
-    new Set(
-      configured
-        .map(localBaseUrl)
-        .filter((value): value is string => Boolean(value))
-    )
-  );
-}
-
-function catalogModelIds(payload: unknown): string[] {
-  const data = (payload as { data?: unknown })?.data;
-  const models = (payload as { models?: unknown })?.models;
-  const rows = Array.isArray(data) ? data : Array.isArray(models) ? models : Array.isArray(payload) ? payload : [];
-
-  return Array.from(
-    new Set(
-      rows
-        .map(item => {
-          if (typeof item === 'string') return item;
-          if (item && typeof item === 'object' && 'id' in item) {
-            const id = (item as { id?: unknown }).id;
-            return typeof id === 'string' ? id : '';
-          }
-          return '';
-        })
-        .map(id => id.trim())
-        .filter(Boolean)
-    )
-  );
+export function codexFetchedModelCache(payload: unknown): boolean {
+  const etag = (payload as { etag?: unknown } | null)?.etag;
+  return typeof etag === 'string' && etag.trim().length > 0;
 }
 
 /**
@@ -243,41 +182,66 @@ export function codexCacheModelIds(payload: unknown): string[] {
     .filter((id, index, all) => all.indexOf(id) === index);
 }
 
-function readCodexModelCache(): { models: string[]; fetchedAt?: string; found: boolean } {
+function readCodexModelCache(home: string): { models: string[]; fetchedAt?: string; found: boolean; fetchedByCodex: boolean } {
   try {
-    const cachePath = path.join(codexHome(), 'models_cache.json');
+    const cachePath = path.join(home, 'models_cache.json');
     const payload = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as { fetched_at?: unknown };
     const fetchedAt = typeof payload.fetched_at === 'string' && !Number.isNaN(Date.parse(payload.fetched_at))
       ? new Date(payload.fetched_at).toISOString()
       : undefined;
-    return { models: codexCacheModelIds(payload), fetchedAt, found: true };
+    return { models: codexCacheModelIds(payload), fetchedAt, found: true, fetchedByCodex: codexFetchedModelCache(payload) };
   } catch {
     // Codex has not fetched a catalogue yet, or the cache is unavailable.
-    return { models: [], found: false };
+    return { models: [], found: false, fetchedByCodex: false };
   }
 }
 
-async function discoverCodexCatalog(): Promise<CatalogDiscovery> {
-  for (const base of codexCatalogBases()) {
-    try {
-      const response = await fetch(`${base}/models`, { signal: AbortSignal.timeout(1500) });
-      if (!response.ok) continue;
-      const models = catalogModelIds(await response.json());
-      if (models.length) return { models, source: 'local_api', fetchedAt: new Date().toISOString(), endpoint: base };
-    } catch {
-      // The gateway is optional; continue with Codex's local cache.
-    }
+/**
+ * Codex's own model list — never a gateway's.
+ *
+ * Alpha runs Codex against OpenAI with Codex's own sign-in (cliRunner passes
+ * `--ignore-user-config` and re-applies no gateway), so only models Codex
+ * itself offers belong in the picker:
+ *
+ * 1. The catalog Codex fetched for this account, when Codex wrote the cache.
+ * 2. Otherwise the catalog bundled in the Codex binary (`codex debug models
+ *    --bundled`): no network, no gateway. A model there that this account
+ *    cannot use fails its turn at once with Codex's own "not supported"
+ *    message, and Alpha's first Codex turn refreshes the cache, so the next
+ *    scan lists exactly the account's models.
+ *
+ * A gateway-written cache is never listed: its models only exist while that
+ * gateway runs, which is the dependency Alpha must not have.
+ */
+async function discoverCodexCatalog(bin: string, env?: NodeJS.ProcessEnv): Promise<CatalogDiscovery> {
+  const cached = readCodexModelCache(codexRunHome());
+  if (cached.found && cached.fetchedByCodex) {
+    return {
+      models: cached.models,
+      source: 'cache',
+      fetchedAt: cached.fetchedAt,
+      stale: catalogTimestampIsStale(cached.fetchedAt),
+      error: cached.fetchedAt ? undefined : 'Codex cache has no fetch timestamp'
+    };
   }
 
-  const cachedModels = readCodexModelCache();
-  if (cachedModels.found) {
-    return {
-      models: cachedModels.models,
-      source: 'cache',
-      fetchedAt: cachedModels.fetchedAt,
-      stale: catalogTimestampIsStale(cachedModels.fetchedAt),
-      error: cachedModels.fetchedAt ? undefined : 'Codex cache has no fetch timestamp'
-    };
+  const bundled = await runClosedStdin(bin, ['debug', 'models', '--bundled'], 15_000, env ? { env } : {});
+  if (bundled.ok) {
+    try {
+      const models = codexCacheModelIds(JSON.parse(bundled.stdout));
+      if (models.length) {
+        return {
+          models,
+          source: 'cli',
+          stale: true,
+          error: cached.found
+            ? 'Codex\'s model list was written by another tool, so Alpha shows the models built into Codex until Codex refreshes it on its next turn'
+            : 'Codex has not fetched its model list yet, so Alpha shows the models built into Codex until its first turn'
+        };
+      }
+    } catch {
+      // Not JSON: an older Codex without `debug models`.
+    }
   }
 
   return { models: [], source: 'none', error: 'No Codex model catalog is available' };
@@ -706,7 +670,10 @@ export class RuntimeService {
   private async detectCodex(): Promise<DetectedEngine> {
     const now = new Date().toISOString();
     const bin = RuntimeService.codexPath();
-    const catalog = await discoverCodexCatalog();
+    // Agents use Alpha's own Codex home once someone signed in there, so that
+    // sign-in is the one that decides whether Codex agents can run.
+    const alphaHomeEnv = codexAlphaSignedIn() ? { env: { CODEX_HOME: codexAlphaHome() } } : {};
+    const catalog = await discoverCodexCatalog(bin, alphaHomeEnv.env);
     const models = catalog.models;
     const versionProbe = await runClosedStdin(bin, ['--version'], 15_000);
     if (!versionProbe.ok) {
@@ -716,15 +683,11 @@ export class RuntimeService {
         provider: 'OpenAI',
         status: 'offline',
         models,
-        endpoint: catalog.endpoint,
         detectedAt: now
       };
     }
 
     const version = versionProbe.stdout.trim();
-    // Agents use Alpha's own Codex home once someone signed in there, so that
-    // sign-in is the one that decides whether Codex agents can run.
-    const alphaHomeEnv = codexAlphaSignedIn() ? { env: { CODEX_HOME: codexAlphaHome() } } : {};
     const authProbe = await runClosedStdin(bin, ['login', 'status'], 15_000, alphaHomeEnv);
     const authOutput = `${authProbe.stdout}\n${authProbe.stderr}`.trim();
     const authText = authOutput.toLowerCase();
@@ -751,7 +714,6 @@ export class RuntimeService {
       status: isAccountLogin || isApiKeyLogin ? 'online' : 'degraded',
       version,
       models,
-      endpoint: catalog.endpoint,
       account: isAccountLogin
         ? {
             authMethod: 'ChatGPT account',

@@ -99,7 +99,7 @@ beforeEach(async () => {
     resolveAgent: (input: any) => ({ systemPrompt: input.systemPrompt || '' }),
     resolveAgentLogged: (input: any) => ({ name: input.name, role: input.role, personaHash: 'fixture-hash', autonomyLevel: 'supervised',
     modelProvider: 'Anthropic', modelName: 'fixture-model', systemPrompt: input.systemPrompt, mcpServers: [] }) }));
-  vi.doMock('./cliRunner.js', () => ({ writeTurnPersona: () => undefined, codexGatewayArgs: () => [], buildTurnInvocation: (options: any) => {
+  vi.doMock('./cliRunner.js', () => ({ writeTurnPersona: () => undefined, buildTurnInvocation: (options: any) => {
     invocations.push(options);
     return { bin: 'test-only-not-spawned', args: [], family: 'claude', env: {} };
   } }));
