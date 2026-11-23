@@ -4,7 +4,7 @@ const subject = { kind: 'client' as const, userId: 'client-a', sessionId: 'sessi
 const cookie = '__Secure-alpha_client_session=session-secret; alpha_client_csrf=csrf-secret';
 const timestamp = '2026-10-08T03:00:00.000Z';
 
-async function setup(withProposals = false) {
+async function setup(withProposals = false, extra: Record<string, unknown> = {}) {
   vi.resetModules();
   vi.doMock('../config/env.js', () => ({ IS_CLOUD: true }));
   vi.doMock('./ticketRequestAuth.js', () => ({
@@ -42,7 +42,7 @@ async function setup(withProposals = false) {
     reply: vi.fn(async (_subject: unknown, id: string, input: {operationId: string}) => ({id,operationId:input.operationId,status:'pending' as const})),
   };
   const emailFor = vi.fn(async () => 'verified@example.test');
-  const router = createTicketClientApiRouter({...app, ...(withProposals ? {projectProposals:proposals,emailFor} : {})} as any, {
+  const router = createTicketClientApiRouter({...app, ...(withProposals ? {projectProposals:proposals,emailFor} : {}), ...extra} as any, {
     secure: true, allowedOrigins: ['https://alpha.example'],
   });
 
@@ -202,4 +202,38 @@ describe('project proposal client API',()=>{
   expect(f.proposals.list).not.toHaveBeenCalled();
   expect(f.proposals.reply).not.toHaveBeenCalled();
  });
+});
+
+describe('client project stage routes', () => {
+  async function stageSetup() {
+    const stages = {
+      summary: vi.fn(async () => ({ stage: 'poc' })),
+      operation: vi.fn(async () => ({ receipt: { operationId: 'op' } })),
+      requestPocChanges: vi.fn(async () => ({ receipt: { action: 'poc_changes_requested' } })),
+      approvePoc: vi.fn(async () => ({ receipt: { action: 'poc_approved' } })),
+    };
+    const projectPortal = { projects: vi.fn(), requests: vi.fn(), messages: vi.fn(), reply: vi.fn(), operation: vi.fn() };
+    return { ...(await setup(false, { projectPortal, projectStages: stages })), stages };
+  }
+  const params = { workspaceId: 'workspace-a', projectId: 'project-a' };
+
+  it('reads the stage for the signed-in client only, with the project from the path', async () => {
+    const f = await stageSetup();
+    const response = await f.invoke('GET', '/projects/:workspaceId/:projectId/stage', { params });
+    expect(response.body).toEqual({ stage: 'poc' });
+    expect(f.stages.summary).toHaveBeenCalledWith({ workspaceId: 'workspace-a', projectId: 'project-a' }, subject);
+  });
+
+  it('approves a POC only with the CSRF check passed', async () => {
+    const f = await stageSetup();
+    const body = { schemaVersion: 1, operationId: 'op', contentHash: 'a'.repeat(64), fullName: 'Juan', consent: true };
+    const refused = await f.invoke('POST', '/projects/:workspaceId/:projectId/stage/poc/:pocId/approve',
+      { params: { ...params, pocId: 'poc-1' }, body, headers: { 'x-csrf-token': 'wrong' } });
+    expect(refused.status).toBeGreaterThanOrEqual(400);
+    expect(f.stages.approvePoc).not.toHaveBeenCalled();
+    const accepted = await f.invoke('POST', '/projects/:workspaceId/:projectId/stage/poc/:pocId/approve',
+      { params: { ...params, pocId: 'poc-1' }, body });
+    expect(accepted.body).toEqual({ receipt: { action: 'poc_approved' } });
+    expect(f.stages.approvePoc).toHaveBeenCalledWith({ workspaceId: 'workspace-a', projectId: 'project-a' }, subject, 'poc-1', body);
+  });
 });

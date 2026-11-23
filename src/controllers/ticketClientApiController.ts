@@ -18,6 +18,7 @@ import { parseTicketDocumentMetadata, safeTicketDocuments, secureTicketDocumentR
 import { route } from './asyncRoute.js';
 import type { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 import type { ClientProjectConversation } from '../services/clientProjectConversation.js';
+import type { ClientProjectStages } from '../services/clientProjectStages.js';
 import type { ProjectUat } from '../services/projectUat.js';
 import { sendUatEvidence } from './projectUatController.js';
 import {
@@ -39,6 +40,7 @@ export interface TicketClientApiApplication {
   emailFor?(subject: Extract<TicketSubject,{kind:'client'}>): Promise<string|null>;
   projectPortal?: PostgresClientProjectPortal;
   projectConversation?: ClientProjectConversation;
+  projectStages?: ClientProjectStages;
   projectUat?: ProjectUat;
   workflowCapabilities(): { phaseWorkflowEnabled: boolean };
   authenticate(sessionCookie: unknown, csrfCookie?: unknown, csrfHeader?: unknown, requireCsrf?: boolean): Promise<TicketClientSessionCheck>;
@@ -352,6 +354,26 @@ export function createTicketClientApiRouter(
         if (subject) return res.json(await conversation.setDone(
           { workspaceId: req.params.workspaceId, projectId: req.params.projectId }, req.params.ticketId, subject, req.body));
       }));
+    }
+    if (application.projectStages) {
+      // The project's stages (POC → Contract → Development → Completed), shown in its conversation.
+      const stages = application.projectStages;
+      const stagePath = projectPath + '/stage';
+      const target = (req: Request) => ({ workspaceId: req.params.workspaceId, projectId: req.params.projectId });
+      const read = (work: (req: Request, subject: TicketSubject) => Promise<unknown>) => route(async (req, res) => {
+        if (!available(res)) return;
+        const subject = await authenticate(req, res, false);
+        if (subject) return res.json(await work(req, subject));
+      });
+      const write = (work: (req: Request, subject: TicketSubject) => Promise<unknown>) => route(async (req, res) => {
+        if (!available(res) || !allowedWriteOrigin(req, res)) return;
+        const subject = await authenticate(req, res, true);
+        if (subject) return res.json(await work(req, subject));
+      });
+      router.get(stagePath, read((req, subject) => stages.summary(target(req), subject)));
+      router.get(stagePath + '/operations/:operationId', read((req, subject) => stages.operation(target(req), subject, req.params.operationId)));
+      router.post(stagePath + '/poc/:pocId/changes', write((req, subject) => stages.requestPocChanges(target(req), subject, req.params.pocId, req.body)));
+      router.post(stagePath + '/poc/:pocId/approve', write((req, subject) => stages.approvePoc(target(req), subject, req.params.pocId, req.body)));
     }
   }
 
