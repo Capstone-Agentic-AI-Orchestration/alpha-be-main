@@ -97,6 +97,15 @@ describe('files with Windows line endings or a byte-order mark', () => {
     expect(() => writeTaskFile(roots, scope, { path: 'src/App.tsx', content: 'x', expected_content: shown })).toThrow('expected_content');
   });
 
+  it('leaves a file that is not UTF-8 untouched instead of corrupting it', () => {
+    const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]); // "café\n" in Latin-1
+    fs.writeFileSync(app(), latin1);
+    expect(() => editTaskFile(roots, scope, { path: 'src/App.tsx', old_text: 'caf', new_text: 'bar' })).toThrow('not UTF-8');
+    expect(() => writeTaskFile(roots, scope, { path: 'src/App.tsx', content: 'x', expected_content: 'café\n' })).toThrow('not UTF-8');
+    expect(() => deleteTaskFile(roots, scope, { path: 'src/App.tsx', expected_content: 'café\n' })).toThrow('not UTF-8');
+    expect(fs.readFileSync(app()).equals(latin1)).toBe(true);
+  });
+
   it('writes a new file exactly as sent', () => {
     writeTaskFile(roots, scope, { path: 'src/new.ts', content: 'a\r\nb\n' });
     expect(fs.readFileSync(path.join(dir, 'src', 'new.ts'), 'utf8')).toBe('a\r\nb\n');

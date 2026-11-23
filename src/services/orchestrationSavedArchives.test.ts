@@ -44,3 +44,50 @@ describe('inspected same-task archive restoration', () => {
     expect(fs.existsSync(path.join(cwd, 'src', 'email.ts'))).toBe(false);
   });
 });
+
+describe('saved work with ordinary dot files and unusual names', () => {
+  it('reads every name in numstat -z output, including both names of a rename', async () => {
+    const { numstatPaths } = await import('./orchestrationSavedArchives.js');
+    expect(numstatPaths('1\t0\t.github/workflows/ci.yml\x002\t1\tsrc/café.ts\x000\t0\t\x00src/old name.ts\x00src/new name.ts\x00'))
+      .toEqual(['.github/workflows/ci.yml', 'src/café.ts', 'src/old name.ts', 'src/new name.ts']);
+  });
+
+  it('restores .github and .gitignore files a task may write, but never the .git folder', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-archive-dotfiles-'));
+    const previousHome = process.env.ALPHA_HOME;
+    try {
+      const cwd = path.join(root, 'worktree'); fs.mkdirSync(cwd);
+      process.env.ALPHA_HOME = path.join(root, 'profile');
+      const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+      git('init', '-b', 'main'); fs.writeFileSync(path.join(cwd, 'README.md'), 'base\n'); git('add', '.'); git('-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-m', 'base');
+      const baseCommit = git('rev-parse', 'HEAD');
+      fs.mkdirSync(path.join(cwd, '.github', 'workflows'), { recursive: true });
+      fs.writeFileSync(path.join(cwd, '.github', 'workflows', 'ci.yml'), 'on: push\n');
+      fs.writeFileSync(path.join(cwd, '.gitignore'), 'dist\n');
+      await preserveAndRestoreWorktree({ worktree: cwd, runId: 'run-dot', label: 'ci' });
+      const task = { id: 'ci', repository: 'acme/app', status: 'failed', scope: { includePaths: ['.github/**', '.gitignore'], excludePaths: [] } };
+      const snapshot = { run: { id: 'run-dot', repository: 'acme/app', plan: { tasks: [task] }, repositoryWorkspaces: [{ repository: 'acme/app', worktreePath: cwd, branchName: 'main', baseCommit }] }, tasks: [task], attempts: [] } as unknown as OrchestrationSnapshot;
+      const saved = listSavedArchives(snapshot, snapshot.tasks[0])[0];
+      expect(saved?.files).toEqual(expect.arrayContaining(['untracked/.github/workflows/ci.yml', 'untracked/.gitignore']));
+      await restoreSavedArchive(snapshot, snapshot.tasks[0], { archiveId: saved.id, archiveHash: saved.hash, candidateHash: await worktreeChangesHash(cwd) });
+      expect(fs.readFileSync(path.join(cwd, '.github', 'workflows', 'ci.yml'), 'utf8')).toBe('on: push\n');
+    } finally {
+      if (previousHome === undefined) delete process.env.ALPHA_HOME; else process.env.ALPHA_HOME = previousHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the file names a saved patch touches', () => {
+  it('reads both sides of every file, renames and copies included, quoted names decoded', async () => {
+    const { patchHeaderPaths } = await import('./orchestrationSavedArchives.js');
+    const patch = [
+      'diff --git a/src/app.ts b/src/app.ts', '--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1 +1 @@', '-a', '+b',
+      'diff --git a/src/old.ts b/secrets/moved.ts', 'similarity index 100%', 'rename from src/old.ts', 'rename to secrets/moved.ts',
+      'diff --git a/src/base.ts b/infra/copy.ts', 'copy from src/base.ts', 'copy to infra/copy.ts',
+      String.raw`diff --git "a/src/caf\303\251.ts" "b/src/caf\303\251.ts"`, String.raw`--- "a/src/caf\303\251.ts"`, String.raw`+++ "b/src/caf\303\251.ts"`,
+      'diff --git a/src/new.ts b/src/new.ts', 'new file mode 100644', '--- /dev/null', '+++ b/src/new.ts'
+    ].join('\n');
+    expect(patchHeaderPaths(patch)).toEqual(['src/app.ts', 'src/old.ts', 'secrets/moved.ts', 'src/base.ts', 'infra/copy.ts', 'src/café.ts', 'src/new.ts']);
+  });
+});

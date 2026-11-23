@@ -71,6 +71,19 @@ export function textForMatch(raw: string): string {
   return raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
 }
 
+/**
+ * A file's text for an edit, refusing anything that is not valid UTF-8. Decoding Latin-1 or
+ * Windows-1252 bytes as UTF-8 turns each one into U+FFFD, and writing that back corrupts every
+ * such byte in the file, so these files are left as they are.
+ */
+function readEditableText(target: string, given: string): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(target));
+  } catch {
+    throw new Error(`${given} is not UTF-8 text, so editing it here would corrupt it. Leave it unchanged and say so in the report.`);
+  }
+}
+
 /** Text written back in a file's own form: its byte-order mark and its line endings. */
 function inFileForm(text: string, original: string): string {
   const body = textForMatch(text);
@@ -115,7 +128,7 @@ function writablePath(roots: ProjectRoot[], scope: TaskFileScope, given: string)
 export function writeTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: { path: string; content: string; expected_content?: string }): string {
   const target = writablePath(roots, scope, args.path);
   if (typeof args.content !== 'string' || Buffer.byteLength(args.content) > MAX_FILE) throw new Error('Text content must be at most 2 MiB.');
-  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : undefined;
+  const existing = fs.existsSync(target) ? readEditableText(target, args.path) : undefined;
   if (existing !== undefined && (args.expected_content === undefined || textForMatch(existing) !== textForMatch(args.expected_content))) {
     throw new Error('File already exists or changed. Use project_edit_file, or supply its current content as expected_content (line endings do not matter). Re-read the file and retry.');
   }
@@ -128,7 +141,7 @@ export function writeTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: 
 export function editTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: { path: string; old_text: string; new_text: string }): string {
   const target = writablePath(roots, scope, args.path);
   if (!args.old_text || typeof args.new_text !== 'string' || fs.statSync(target).size > MAX_FILE) throw new Error('Provide a nonempty exact old_text and bounded new_text.');
-  const current = fs.readFileSync(target, 'utf8');
+  const current = readEditableText(target, args.path);
   const view = textForMatch(current);
   const oldText = textForMatch(args.old_text);
   if (view.split(oldText).length !== 2) throw new Error('old_text must match exactly once (line endings do not matter). Read the current file and retry with a longer, unique old_text.');
@@ -138,7 +151,7 @@ export function editTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: {
 
 export function deleteTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args: { path: string; expected_content: string }): string {
   const target = writablePath(roots, scope, args.path);
-  if (fs.statSync(target).size > MAX_FILE || typeof args.expected_content !== 'string' || textForMatch(fs.readFileSync(target, 'utf8')) !== textForMatch(args.expected_content)) {
+  if (fs.statSync(target).size > MAX_FILE || typeof args.expected_content !== 'string' || textForMatch(readEditableText(target, args.path)) !== textForMatch(args.expected_content)) {
     throw new Error('Deletion requires the current content as expected_content (line endings do not matter). Re-read the file and retry.');
   }
   fs.unlinkSync(target);

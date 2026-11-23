@@ -1,4 +1,5 @@
 import type { FeatureSpec, FeatureSpecRecord } from './featureSpecContract.js';
+import { isPathInside } from '../utils/samePath.js';
 import { isImplementationTask } from './agentRoleContracts.js';
 import { canonicalRepository, sameRepository } from '../utils/repositoryName.js';
 import Database from 'better-sqlite3';
@@ -2373,9 +2374,8 @@ export class SQLiteService {
   }
 
   isPathAllowed(targetPath: string): boolean {
-    const normalized = path.resolve(targetPath);
-    const allowed = this.getAllowedPaths();
-    return allowed.some(p => normalized === p || normalized.startsWith(p + path.sep));
+    // Windows folder names ignore case: C:\Users\Me\.alpha and c:\users\me\.alpha are one folder.
+    return this.getAllowedPaths().some(allowed => isPathInside(targetPath, allowed));
   }
 
   /** Last board cursor this desktop has safely applied for a workspace. */

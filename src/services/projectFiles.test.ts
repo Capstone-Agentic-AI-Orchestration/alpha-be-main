@@ -108,8 +108,24 @@ describe('reading a project through alpha-project-files', () => {
 describe('git through alpha-project-files', () => {
   it('turns off what could run a program from the repository', () => {
     const diff = gitArgs('diff', { rel: 'src' });
-    expect(diff).toEqual(expect.arrayContaining(['core.fsmonitor=false', '--no-ext-diff', '--no-textconv', ':(exclude,glob)**/.env']));
+    expect(diff).toEqual(expect.arrayContaining(['core.fsmonitor=false', '--no-ext-diff', '--no-textconv', ':(exclude,glob,icase)**/.env']));
     expect(gitArgs('status')).toContain('core.fsmonitor=false');
+  });
+
+  it('leaves out of a diff every file project_read_file hides, in any letter case', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-secret-diff-'));
+    try {
+      const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: repo, encoding: 'utf8' });
+      git('init', '-q');
+      const files = ['src/app.ts', '.ENV', 'config/.env.local', 'keys/server.PEM', 'keys/id_rsa', 'certs/site.pfx'];
+      for (const file of files) { fs.mkdirSync(path.join(repo, path.dirname(file)), { recursive: true }); fs.writeFileSync(path.join(repo, file), 'one\n'); }
+      git('add', '-A'); git('commit', '-qm', 'base');
+      for (const file of files) fs.writeFileSync(path.join(repo, file), 'two\n');
+      const shown = git(...gitArgs('diff'));
+      expect(shown).toContain('src/app.ts');
+      for (const secret of files.slice(1)) expect(shown).not.toContain(secret);
+    } finally { fs.rmSync(repo, { recursive: true, force: true }); }
   });
 
   it('refuses a ref that would be read as an option', () => {
