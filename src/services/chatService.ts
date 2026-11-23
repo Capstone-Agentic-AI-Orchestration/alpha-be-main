@@ -7,7 +7,7 @@ import { executeOrchestrationDecision } from './orchestrationDecision.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
-import { Agent, ChatMessage, ChatThread } from '../models/index.js';
+import { Agent, ChatMessage, ChatThread, type Project } from '../models/index.js';
 import { providerResumesSessions, runCliTurn } from './cliRunner.js';
 import {
   ensureWorkspacesRoot,
@@ -18,7 +18,7 @@ import { resolveAgent, resolveAgentLogged } from './personaService.js';
 import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import {
   DEFAULT_ASSISTANT,
-  DEFAULT_ASSISTANT_PROMPT,
+  assistantPromptFor,
   describeRuntimeModel,
   clearUsageLimit,
   defaultAssistantCandidates,
@@ -180,6 +180,8 @@ import { runWithWorkspace } from './workspaceContext.js';
 import { describeBoardTasks, describeProjectBuild, type BoardTaskRecord } from './chatBuildContext.js';
 import { isAskThreadId } from './boardThreads.js';
 import { projectMemoryBlock } from './repositoryMemory.js';
+import { chatProductPicture, chatViewer, type ChatViewer } from './chatProductContext.js';
+import { combinedAnswerPrompt, composeCombinedAnswer, finishedReports, type HandoffReport } from './handoffSummary.js';
 
 export interface SendMessageParams {
   buildDecision?: ChatBuildDecision;
@@ -268,6 +270,16 @@ export interface SendMessageResult {
   agentMessages: ChatMessage[];
   build?: ProjectBuildStartResult;
   builds?: ProjectBuildStartResult[];
+}
+
+/** What Alpha is given for one turn; see ChatService.alphaTurnContext. */
+interface AlphaTurnContext {
+  repositoryMemory: string;
+  productPicture?: string;
+  servers: string[];
+  roots: ProjectRoot[];
+  projectFolder?: { dir: string; repos: string[] };
+  systemPrompt(runtime: DefaultAssistantRuntime, recentConversation: string | undefined): string;
 }
 
 interface ActiveChatTurn {
@@ -580,6 +592,12 @@ export class ChatService extends EventEmitter {
 
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
     const { threadId, content, senderName = 'You', workspaceId, workspaceRole } = params;
+    const viewerRole = params.routing?.context.role ?? params.buildRequest?.context.role ?? workspaceRole;
+    const viewer = chatViewer(viewerRole, params.routing?.context);
+    // Routing, builds and their decisions are the team's. A client reaching them is a bug upstream: refuse loudly.
+    if (viewer.audience === 'client' && (params.routing || params.buildRequest || params.buildDecision)) {
+      throw new ChatRouteError('Project builds are available to the internal project team.', 403);
+    }
     const now = new Date().toISOString();
     const selectedSkills = resolveSelectedChatSkills(params.skillIds ?? []);
 
@@ -690,9 +708,11 @@ export class ChatService extends EventEmitter {
     const targetAgentId = params.targetAgentId !== undefined
       ? params.targetAgentId ?? undefined
       : thread.targetAgentId;
+    // A client talks to Alpha only: agents are part of how the work is done, which clients never see.
     let addressed = mentioned.length
       ? mentioned
       : resolveChatTarget(targetAgentId, agents);
+    if (viewer.audience === 'client') addressed = [];
     // The board's Ask Alpha conversation is answered by the Manager Agent, which keeps the board.
     const boardAsk = Boolean(params.routing?.answerOnly && isAskThreadId(threadId));
     if (params.routing && !boardAsk && addressed.length === 1 &&
@@ -729,7 +749,7 @@ export class ChatService extends EventEmitter {
       turn.currentAgentName = DEFAULT_ASSISTANT.name;
       const routingPrompt = params.routing ? await this.routingPromptFor(params.routing, thread) : undefined;
       const reply = await this.runWithSteering(turn, requestContent, prompt =>
-        this.generateDefaultReply(appendSkillGuidance(prompt, selectedSkills.guidance), threadId, workspaceId, runId, activityCallId, routingPrompt, params.userId, params.routing?.context)
+        this.generateDefaultReply(appendSkillGuidance(prompt, selectedSkills.guidance), threadId, workspaceId, runId, activityCallId, routingPrompt, params.userId, viewer)
       );
       if (!reply || turn.stopRequested) {
         if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -823,6 +843,8 @@ export class ChatService extends EventEmitter {
     const project = thread.projectId
       ? sqliteService.getProjects().find(item => item.id === thread!.projectId)
       : undefined;
+    // What became of each handed-off specialist, for Alpha's combined answer. Unreached ones did not start.
+    const handoffReports = new Map<string, HandoffReport>();
     for (const [index, agent] of addressed.entries()) {
       if (turn.stopRequested) break;
       const handoff = handoffs?.find(item => item.agentId === agent.id);
@@ -915,6 +937,7 @@ export class ChatService extends EventEmitter {
       saveChatMessageAndShare(message);
       this.emit('chat_message', message);
       agentMessages.push(message);
+      if (handoff) handoffReports.set(agent.id, { agentName: agent.name, outcome: reply.failed ? 'failed' : 'reported', content: reply.content });
       if (activityCallId) {
         try {
           if (reply.failed) agentCallService.failChatTurn(activityCallId, 'The agent runtime could not complete this project chat turn.');
@@ -925,12 +948,79 @@ export class ChatService extends EventEmitter {
       }
     }
 
+    if (handoffs && params.routing && !turn.stopRequested) {
+      const combined = await this.combineHandoffReports({
+        params, routing: params.routing, project, threadId, messageId, viewer, turn,
+        question: parseChatOverride(content).content || content,
+        reports: addressed.map(agent => handoffReports.get(agent.id) ?? { agentName: agent.name, outcome: 'not_started' })
+      });
+      if (combined) agentMessages.push(combined);
+    }
+
     if (!agentMessages.length) {
       const stopped = this.stoppedMessage(threadId);
       saveChatMessageAndShare(stopped);
       agentMessages.push(stopped);
     }
     return { userMessage, agentMessage: agentMessages[0], agentMessages };
+  }
+
+  /**
+   * Alpha's one answer after a read-only handoff: the person's question answered in plain terms
+   * from the specialists' reports, pointing at them for detail, with every specialist who did not
+   * report named by code. Saved like every reply, so it has the thread's visibility (handoffs are
+   * internal only), and a retry of the same message finds it by id.
+   */
+  private async combineHandoffReports(input: {
+    params: SendMessageParams; routing: ChatRoutingContext; project?: Project; threadId: string; messageId: string;
+    viewer: ChatViewer; turn: ActiveChatTurn; question: string; reports: HandoffReport[];
+  }): Promise<ChatMessage | undefined> {
+    const { routing, threadId, turn, reports } = input;
+    const prompt = combinedAnswerPrompt(input.question, reports);
+    const finished = finishedReports(reports);
+    const activityCallId = await this.startProjectChatActivity({
+      params: { ...input.params, workspaceId: routing.context.workspaceId, userId: routing.context.userId },
+      project: input.project, threadId, messageId: input.messageId, agent: DEFAULT_ASSISTANT, instruction: prompt, turn
+    });
+    // With no report to combine there is nothing for a model to say: the message says so itself.
+    const answer = finished.length
+      ? await this.writeCombinedAnswer({ prompt, threadId, routing, viewer: input.viewer, turn, activityCallId, reportedBy: finished })
+      : undefined;
+    if (turn.stopRequested) {
+      if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
+      return undefined;
+    }
+    const usable = answer && answer.senderType !== 'system' && !this.failedDefaultReplies.has(answer) ? answer : undefined;
+    const message: ChatMessage = {
+      id: `${input.messageId}-handoff-summary`, threadId, senderType: 'agent', senderName: DEFAULT_ASSISTANT.name,
+      content: composeCombinedAnswer(usable?.content, reports),
+      thinkingProcess: answer?.thinkingProcess,
+      timestamp: new Date().toISOString()
+    };
+    saveChatMessageAndShare(message);
+    this.emit('chat_message', message);
+    if (activityCallId) finishCombinedActivity(activityCallId, message.id, Boolean(answer && !usable));
+    return message;
+  }
+
+  /** Alpha's combining turn, recorded on its activity as receiving each specialist's report. */
+  private async writeCombinedAnswer(input: {
+    prompt: string; threadId: string; routing: ChatRoutingContext; viewer: ChatViewer; turn: ActiveChatTurn;
+    activityCallId?: string; reportedBy: HandoffReport[];
+  }): Promise<ChatMessage> {
+    const { activityCallId, turn, routing } = input;
+    if (activityCallId) {
+      try {
+        for (const report of input.reportedBy) agentCallService.recordChatTurnHandoff(activityCallId, report.agentName);
+      } catch {
+        // A missing activity event never blocks the answer.
+      }
+    }
+    const runId = activityCallId ?? `chat-${randomUUID()}`;
+    turn.currentCallId = activityCallId;
+    turn.currentRunId = runId;
+    turn.currentAgentName = DEFAULT_ASSISTANT.name;
+    return this.generateDefaultReply(input.prompt, input.threadId, routing.context.workspaceId, runId, activityCallId, undefined, routing.context.userId, input.viewer);
   }
 
   /**
@@ -1646,7 +1736,7 @@ export class ChatService extends EventEmitter {
       undefined,
       await this.routingPromptFor({ ...input.routing, answerOnly: true }, thread),
       input.routing.context.userId,
-      input.routing.context
+      chatViewer(input.routing.context.role, input.routing.context)
     );
     reply.content = parseAlphaRoute(reply.content).message || reply.content;
     saveChatMessageAndShare(reply);
@@ -1662,6 +1752,47 @@ export class ChatService extends EventEmitter {
     };
   }
 
+  /**
+   * What Alpha is given for one turn, by who reads the answer.
+   *
+   * The team gets the Orchestrator's prompt, the product picture, the code and how the work is
+   * going. A client gets the client prompt, its runtime, the brief and its own conversation, and
+   * nothing else: no routing, repositories, code, preview, agents or builds are read for it, so
+   * none can reach the model.
+   */
+  private async alphaTurnContext(input: {
+    viewer: ChatViewer; threadId: string; workspaceId?: string; prompt: string; routingPrompt?: string; project?: Project;
+  }): Promise<AlphaTurnContext> {
+    const { viewer, threadId, workspaceId, project } = input;
+    const productPicture = project ? chatProductPicture(project, viewer.audience, workspaceId) : undefined;
+    const join = (parts: Array<string | undefined>) => parts.filter(Boolean).join('\n\n---\n\n');
+    if (viewer.audience === 'client') {
+      return {
+        repositoryMemory: '', productPicture, servers: [], roots: [],
+        systemPrompt: (runtime, recent) => join([assistantPromptFor('client'), describeRuntimeModel(runtime), productPicture, recent])
+      };
+    }
+    const projectRepos = project ? reposForProject(project) : [];
+    const localCode = project ? projectReadRoots(project) : { roots: [] as ProjectRoot[], missing: [] as string[] };
+    const preview = await previewChatContext(viewer.context, threadId, input.prompt, localCode.roots);
+    const roots = preview.roots;
+    const servers = roots.length ? ['alpha-github', 'alpha-project-files'] : ['alpha-github'];
+    // The project's repository memory opens the assistant's context, as it does every agent's.
+    const repositoryMemory = project ? await projectMemoryBlock(project) : '';
+    const build = project ? describeProjectBuild(sqliteService.getLatestOrchestrationSnapshot(project.id, threadId),
+      agentId => sqliteService.getAgents().find(agent => agent.id === agentId)?.name ?? agentId, threadId) : undefined;
+    return {
+      repositoryMemory, productPicture, servers, roots,
+      projectFolder: project ? { dir: ensureProjectFolder(project), repos: projectRepos } : undefined,
+      // The coordinator never implements a task itself, even if the composer grants Full access: no approval skills.
+      systemPrompt: (runtime, recent) => join([repositoryMemory, assistantPromptFor(viewer.role), describeRuntimeModel(runtime),
+        input.routingPrompt, productPicture, recent, describeWorkspaceForAlpha(workspaceId), preview.text,
+        describeOrchestratorGitHubAccess(projectRepos),
+        describeLocalProjectFiles(project?.name ?? null, roots, localCode.missing),
+        build,
+        describeChatToolPolicy(servers, [], 'read', true)])
+    };
+  }
 
   /**
    * Answer a message that named no agent.
@@ -1681,7 +1812,8 @@ export class ChatService extends EventEmitter {
     /** Orchestrator instructions for this turn, when Alpha may route it. */
     routingPrompt?: string,
     ownerId?: string,
-    previewContext?: WorkspaceContext
+    /** Who reads the answer: decides what Alpha is given (see alphaTurnContext). */
+    viewer: ChatViewer = chatViewer(undefined)
   ): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
@@ -1724,16 +1856,8 @@ export class ChatService extends EventEmitter {
     }
 
     const assistantProject = threadProject(threadId);
-    const projectRepos = assistantProject ? reposForProject(assistantProject) : [];
-    const localCode = assistantProject ? projectReadRoots(assistantProject) : { roots: [] as ProjectRoot[], missing: [] as string[] };
-    const preview = await previewChatContext(previewContext, threadId, prompt, localCode.roots);
-    localCode.roots = preview.roots;
-    const assistantServers = localCode.roots.length ? ['alpha-github', 'alpha-project-files'] : ['alpha-github'];
-    // The project's repository memory opens the assistant's context, as it does every agent's.
-    const repositoryMemory = assistantProject ? await projectMemoryBlock(assistantProject) : '';
+    const turnContext = await this.alphaTurnContext({ viewer, threadId, workspaceId, prompt, routingPrompt, project: assistantProject });
     const cwd = chatScratchFolder(threadId, assistantProject?.name ?? 'Alpha');
-    // The coordinator never implements a task itself, even if the composer grants Full access.
-    const approvalSkills: string[] = [];
 
     // A runtime whose plan is used up is asked last, so its turn is not spent
     // waiting on an answer that will only repeat the limit.
@@ -1766,27 +1890,19 @@ export class ChatService extends EventEmitter {
         modelName: runtime.modelName,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         // The tool policy still applies: a chat inspects, it does not mutate.
-        systemPrompt: [repositoryMemory, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel(runtime), routingPrompt, recentConversation, describeWorkspaceForAlpha(workspaceId), preview.text,
-          describeOrchestratorGitHubAccess(projectRepos),
-          describeLocalProjectFiles(assistantProject?.name ?? null, localCode.roots, localCode.missing),
-          assistantProject ? describeProjectBuild(sqliteService.getLatestOrchestrationSnapshot(assistantProject.id, threadId),
-            agentId => sqliteService.getAgents().find(agent => agent.id === agentId)?.name ?? agentId, threadId) : undefined,
-          describeChatToolPolicy(assistantServers, approvalSkills, approvalSkills.includes('sk-git') ? 'write' : 'read', approvalSkills.length === 0)]
-          .filter(Boolean)
-          .join('\n\n---\n\n'),
+        systemPrompt: turnContext.systemPrompt(runtime, recentConversation),
         personaName: DEFAULT_ASSISTANT.name,
         prompt: [sessionMemoryPrompt(threadId, ownerId), prompt].filter(Boolean).join('\n\n'),
         priorSession: priorSession?.cliSessionId ?? null,
-        // Routing rules, the eligible roster and repository memory can change between turns,
-        // including on a CLI resume, and some CLIs only read the persona with a first message.
-        personaChanged: Boolean(routingPrompt) || Boolean(repositoryMemory),
+        // Routing rules, the eligible roster, repository memory and the product picture can change
+        // between turns, including on a CLI resume, and some CLIs only read the persona with a first message.
+        personaChanged: Boolean(routingPrompt) || Boolean(turnContext.repositoryMemory) || Boolean(turnContext.productPicture),
         // Read-only GitHub tools: a chat turn without the sk-git skill gets 'read' access from mcpAccessFor.
-        mcpServers: assistantServers,
-        autonomyLevel: approvalSkills.includes('sk-git') ? 'Full Autonomy' : undefined,
+        mcpServers: turnContext.servers,
         // Set, even empty, for Codex and Claude: the turn then reads files only through Alpha.
-        projectRoots: localCode.roots,
+        projectRoots: turnContext.roots,
         // The project's repositories are cloned into its folder on this computer.
-        projectFolder: assistantProject ? { dir: ensureProjectFolder(assistantProject), repos: projectRepos } : undefined,
+        projectFolder: turnContext.projectFolder,
         onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
       });
 
@@ -2096,6 +2212,16 @@ export const chatService = new ChatService();
  * doubling it.
  */
 const PRIOR_REPLY_CHARS = 800;
+
+/** Close the combined answer's activity entry; a bookkeeping failure never loses the answer. */
+function finishCombinedActivity(activityCallId: string, messageId: string, modelFailed: boolean): void {
+  try {
+    if (modelFailed) agentCallService.failChatTurn(activityCallId, 'The selected runtime could not write the combined answer.');
+    else agentCallService.completeChatTurn(activityCallId, messageId);
+  } catch (error) {
+    logInfo(`Chat activity session could not be finalized: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 function describePriorReplies(messages: ChatMessage[]): string {
   const lines = messages.map(m => {
