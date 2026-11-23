@@ -52,6 +52,15 @@ const classifySchema = command.extend({
   items: z.array(z.object({ id, classification: z.enum(['revision', 'fix', 'out_of_scope']), pmNote: text(2000).default('') }).strict()).min(1).max(50),
 }).strict();
 const acceptFinalSchema = command.extend({ fullName, consent: z.literal(true) }).strict();
+const changeRequestSchema = command.extend({ title: z.string().trim().min(1).max(300), description: text(8000).default('') }).strict();
+const sendQuoteSchema = command.extend({
+  amount: z.number().finite().min(0).max(1_000_000_000),
+  currency: z.string().regex(/^[A-Z]{3}$/).default('PHP'),
+  description: text(8000).optional(),
+}).strict();
+const decideQuoteSchema = command.extend({
+  decision: z.enum(['accept', 'decline']), fullName: fullName.optional(), consent: z.literal(true).optional(),
+}).strict();
 const shortTitle = (body: string) => { const line = body.split(/\s+/).join(' '); return line.length > 120 ? line.slice(0, 119) + '…' : line; };
 const clause = z.object({ title: z.string().trim().min(1).max(300), body: z.string().trim().min(1).max(8000) }).strict();
 const contractDraftSchema = z.object({
@@ -441,6 +450,71 @@ export class ClientProjectStages {
           where workspace_id=$1 and project_id=$2 and client_user_id=$3`, [...threadParams(thread), value.fullName]);
         return { refId: null, metadata: { name: value.fullName }, moveTo: 'completed' };
       });
+  }
+
+  /** Client: ask for new work outside the contract. It is quoted before anything starts. */
+  async requestChange(target: ProjectTarget, subject: TicketSubject, input: unknown) {
+    const value = parseStageInput(changeRequestSchema, input);
+    return this.mutate(target, subject, undefined, 'client', value.operationId, 'quote_requested', { title: value.title, description: value.description },
+      async ({ sql, thread, stage }) => {
+        if (stage !== 'development' && stage !== 'completed') stageMismatch('Change requests start once development has begun.');
+        const quote = randomUUID();
+        await sql.query(`insert into alpha_private.client_project_quotes(workspace_id,project_id,client_user_id,id,kind,title,description,status,requested_by_kind)
+          values ($1,$2,$3,$4,'change_request',$5,$6,'requested','client')`, [...threadParams(thread), quote, value.title, value.description]);
+        // The conversation shows what was asked; the full description stays on the quote.
+        return { refId: quote, body: (value.description ? `${value.title}\n\n${value.description}` : value.title).slice(0, 4000) };
+      });
+  }
+
+  /** PM: price a requested quote and send it to the client. */
+  async sendQuote(target: ProjectTarget, subject: TicketSubject, quoteId: unknown, input: unknown, clientId?: unknown) {
+    const quote = parseStageInput(id, quoteId);
+    const value = parseStageInput(sendQuoteSchema, input);
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'quote_sent', { quote, amount: value.amount, currency: value.currency, description: value.description },
+      async ({ sql, thread, subject: pm }) => {
+        await this.quoteIn(sql, thread, quote, 'requested', 'This quote was already sent.');
+        await sql.query(`update alpha_private.client_project_quotes set amount=$5,currency=$6,description=coalesce($7,description),status='sent',sent_by=$8,sent_at=now()
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`,
+        [...threadParams(thread), quote, value.amount.toFixed(2), value.currency, value.description ?? null, pm.userId]);
+        return { refId: quote };
+      });
+  }
+
+  /**
+   * Client: accept (with a typed name) or decline a quote. Accepting a paid
+   * round's quote sends that round to the PM; declining it reopens the round.
+   */
+  async decideQuote(target: ProjectTarget, subject: TicketSubject, quoteId: unknown, input: unknown) {
+    const quote = parseStageInput(id, quoteId);
+    const value = parseStageInput(decideQuoteSchema, input);
+    if (value.decision === 'accept' && (!value.fullName || value.consent !== true)) invalid();
+    const action = value.decision === 'accept' ? 'quote_accepted' : 'quote_declined';
+    return this.mutate(target, subject, undefined, 'client', value.operationId, action, { quote, decision: value.decision, fullName: value.fullName ?? null },
+      async ({ sql, thread }) => {
+        const row = await this.quoteIn(sql, thread, quote, 'sent', 'This quote is not waiting for your decision.');
+        const accepted = value.decision === 'accept';
+        await sql.query(`update alpha_private.client_project_quotes set status=$5,decided_name=$6,decided_at=now()
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`,
+        [...threadParams(thread), quote, accepted ? 'accepted' : 'declined', accepted ? value.fullName : null]);
+        if (row.kind === 'paid_revision' && row.round_id) {
+          await sql.query(accepted
+            ? `update alpha_private.client_project_revision_rounds set status='submitted'
+                where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='awaiting_quote'`
+            : `update alpha_private.client_project_revision_rounds set status='open',submitted_at=null,paid=false,quote_id=null
+                where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='awaiting_quote'`,
+          [...threadParams(thread), row.round_id]);
+        }
+        return { refId: quote, metadata: accepted ? { name: value.fullName } : {} };
+      });
+  }
+
+  /** Quote `quote`, locked, when its status is `status`; otherwise a stage mismatch. */
+  protected async quoteIn(sql: Sql, thread: StageThread, quote: string, status: string, message: string) {
+    const { rows } = await sql.query<{ kind: string; round_id: string | null; status: string }>(`select kind,round_id,status
+      from alpha_private.client_project_quotes where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 for update`,
+    [...threadParams(thread), quote]);
+    if (!rows[0] || rows[0].status !== status) stageMismatch(message);
+    return rows[0];
   }
 
   /** The thread's round that is not yet classified, if any. */

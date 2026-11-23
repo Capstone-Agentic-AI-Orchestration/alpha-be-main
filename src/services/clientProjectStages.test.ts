@@ -301,3 +301,60 @@ describe('project stages: development', () => {
     expect(shared.stage.final).toBeNull();
   });
 });
+
+describe('project stages: quotes', () => {
+  it('prices a paid round; accepting the quote sends the round to the PM', async () => {
+    await toDevelopmentStage();
+    for (let round = 0; round < 3; round += 1) await feedbackRound([`Change ${round}`], ['revision']);
+    const shared = await stages.shareBuild(target, pm, cmd({ note: 'Build 4' }), 'client-a');
+    await stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['One more change'] });
+    const paid = await stages.submitRound(target, client, shared.receipt.refId, cmd({ acceptPaid: true }));
+    const quote = paid.stage.quotes[0]!;
+
+    await expect(stages.decideQuote(target, client, quote.id, cmd({ decision: 'accept', fullName: 'Juan Dela Cruz', consent: true })))
+      .rejects.toMatchObject({ code: 'stage_mismatch' });
+    const sent = await stages.sendQuote(target, pm, quote.id, cmd({ amount: 2500, currency: 'PHP' }), 'client-a');
+    expect(sent.stage.quotes[0]).toMatchObject({ status: 'sent', amount: '2500.00', currency: 'PHP' });
+    expect(sent.stage.nextAction).toMatchObject({ who: 'client', kind: 'decide_quote' });
+    await expect(stages.decideQuote(target, client, quote.id, cmd({ decision: 'accept' }))).rejects.toMatchObject({ code: 'invalid_stage_input' });
+
+    const accepted = await stages.decideQuote(target, client, quote.id, cmd({ decision: 'accept', fullName: 'Juan Dela Cruz', consent: true }));
+    expect(accepted.stage.quotes[0]).toMatchObject({ status: 'accepted', decidedName: 'Juan Dela Cruz' });
+    expect(accepted.stage.rounds[0]).toMatchObject({ number: 4, status: 'submitted', paid: true });
+    expect(accepted.stage.nextAction).toMatchObject({ who: 'pm', kind: 'classify_round' });
+    const items = accepted.stage.rounds[0]!.items;
+    const classified = await stages.classifyRound(target, pm, accepted.stage.rounds[0]!.id, cmd({ items: items.map(item => ({ id: item.id, classification: 'revision' })) }), 'client-a');
+    expect(classified.stage.revisionsUsed).toBe(3);
+  });
+
+  it('reopens a paid round when its quote is declined', async () => {
+    await toDevelopmentStage();
+    await db.query(`update alpha_private.client_project_stages set revision_limit=0`);
+    const shared = await stages.shareBuild(target, pm, cmd({ note: '' }), 'client-a');
+    await stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['Paid change'] });
+    const paid = await stages.submitRound(target, client, shared.receipt.refId, cmd({ acceptPaid: true }));
+    await stages.sendQuote(target, pm, paid.stage.quotes[0]!.id, cmd({ amount: 900 }), 'client-a');
+    const declined = await stages.decideQuote(target, client, paid.stage.quotes[0]!.id, cmd({ decision: 'decline' }));
+    expect(declined.stage.quotes[0]).toMatchObject({ status: 'declined', decidedName: null });
+    expect(declined.stage.rounds[0]).toMatchObject({ status: 'open', paid: false, quoteId: null, submittedAt: null });
+  });
+
+  it('lets the client ask for new work after closure, quoted before anything starts', async () => {
+    await toDevelopmentStage();
+    await stages.markFinalDelivery(target, pm, cmd({ note: '' }), 'client-a');
+    await stages.acceptFinal(target, client, cmd({ fullName: 'Juan Dela Cruz', consent: true }));
+    const asked = await stages.requestChange(target, client, cmd({ title: 'Add a gift card page', description: 'For the holidays.' }));
+    expect(asked.stage).toMatchObject({ stage: 'completed', nextAction: { who: 'pm', kind: 'send_quote' },
+      quotes: [expect.objectContaining({ kind: 'change_request', title: 'Add a gift card page', requestedBy: 'client', amount: null })] });
+    await stages.sendQuote(target, pm, asked.receipt.refId, cmd({ amount: 12000, description: 'Design and build, 1 week.' }), 'client-a');
+    const accepted = await stages.decideQuote(target, client, asked.receipt.refId, cmd({ decision: 'accept', fullName: 'Juan Dela Cruz', consent: true }));
+    expect(accepted.stage).toMatchObject({ stage: 'completed', nextAction: null,
+      quotes: [expect.objectContaining({ status: 'accepted', amount: '12000.00', description: 'Design and build, 1 week.' })] });
+    const timeline = (await conversation.timeline(target, client)).items.filter(item => item.stage?.action === 'quote_requested');
+    expect(timeline[0]?.body).toBe('Add a gift card page\n\nFor the holidays.');
+  });
+
+  it('refuses change requests before development', async () => {
+    await expect(stages.requestChange(target, client, cmd({ title: 'Too early' }))).rejects.toMatchObject({ code: 'stage_mismatch' });
+  });
+});
