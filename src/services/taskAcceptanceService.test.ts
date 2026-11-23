@@ -689,7 +689,8 @@ describe('task acceptance and targeted correction', () => {
     // The owner fixes the lint error in its own file, so it is never left for later work. The retry
     // continues attempt 1's checkpoint, and reports that attempt's files as its work too.
     expect(launches[1].taskPackage.earlierAttemptChangedPaths).toEqual(['src/accounts.ts', 'tests/accounts.spec.ts']);
-    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), 'import { accounts } from "../src/accounts";\n');
+    const acceptedTest = 'import { accounts } from "../src/accounts";\ntest("stores accounts", () => { expect(accounts.size).toBe(0); });\n';
+    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), acceptedTest);
     resultCommit = commit(repository, 'Fix the account test lint error');
     snapshot = (await orchestration.handleRunnerCompleted({
       ...completedRun(launches[1], resultCommit, launches[1].taskPackage.earlierAttemptChangedPaths!), verificationEvidence: observed(['test', 'lint'])
@@ -699,20 +700,35 @@ describe('task acceptance and targeted correction', () => {
     });
     expect(accepted.decision).toBe('accepted');
 
-    // auth-api builds on accounts-data and its scope names tests/**, so it may update that task's test file.
-    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), 'import { accounts } from "../src/accounts";\nimport { signIn } from "../src/auth";\n');
+    // auth-api builds on accounts-data and its scope names tests/**, so it may update that task's test
+    // file, but not drop the test it delivered: that fails closed instead of relying on the reviewer.
+    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), 'import { signIn } from "../src/auth";\n');
     fs.writeFileSync(path.join(repository, 'src', 'auth.ts'), 'export const signIn = (email: string) => email;\n');
-    resultCommit = commit(repository, 'Add sign-in and update the account test');
+    resultCommit = commit(repository, 'Add sign-in and drop the account test');
     snapshot = (await orchestration.handleRunnerCompleted({
       ...completedRun(launches[2], resultCommit, ['src/auth.ts', 'tests/accounts.spec.ts']), verificationEvidence: observed(['test', 'lint'])
     }))!;
-    const evolved = await acceptance.evaluateAndAccept({
+    const weakened = await acceptance.evaluateAndAccept({
       workspaceId, runId: snapshot.run.id, taskId: 'auth-api', attemptId: launches[2].attemptId, acceptedBy: 'orchestrator'
+    });
+    expect(weakened.decision).toBe('retrying');
+    expect(weakened.snapshot.findings).toEqual(expect.arrayContaining([expect.objectContaining({
+      status: 'open', path: 'tests/accounts.spec.ts',
+      evidence: expect.objectContaining({ check: 'accepted_artifact_weakened', acceptedTaskId: 'accounts-data' })
+    })]));
+
+    // Keeping the test and adding to the file is accepted, and recorded for the reviewers that build on auth-api.
+    fs.writeFileSync(path.join(repository, 'tests', 'accounts.spec.ts'), `${acceptedTest}import { signIn } from "../src/auth";\n`);
+    resultCommit = commit(repository, 'Keep the account test');
+    snapshot = (await orchestration.handleRunnerCompleted({
+      ...completedRun(launches[3], resultCommit, ['src/auth.ts', 'tests/accounts.spec.ts']), verificationEvidence: observed(['test', 'lint'])
+    }))!;
+    const evolved = await acceptance.evaluateAndAccept({
+      workspaceId, runId: snapshot.run.id, taskId: 'auth-api', attemptId: launches[3].attemptId, acceptedBy: 'orchestrator'
     });
     expect(evolved.decision).toBe('awaiting_approval');
     expect(evolved.snapshot.findings.filter(finding => finding.status === 'open')).toEqual([]);
-    // The change to accepted work is recorded for the reviewers that build on auth-api.
-    expect(evolved.snapshot.attempts.find(attempt => attempt.id === launches[2].attemptId)?.result)
+    expect(evolved.snapshot.attempts.find(attempt => attempt.id === launches[3].attemptId)?.result)
       .toHaveProperty('acceptanceEvidence.evolvedAcceptedPaths', [{ path: 'tests/accounts.spec.ts', ownerTaskId: 'accounts-data' }]);
   });
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { taskAuditEvidence, finalDependencyAuditProblem } from './orchestrationAuditEvidence.js';
 import type { PrototypeRun, RunVerificationEvidence } from '../models/index.js';
 import { normalizeAndValidateAgentReport } from './orchestrationAgentReport.js';
-import { getCurrentBranch, getGitChangedPaths, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
+import { getCurrentBranch, getGitChangedPaths, getGitFileAtCommit, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { runVerification, type VerificationResult } from './verificationService.js';
 import { projectRunWorkspacePath } from './workspaceService.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -46,14 +46,21 @@ interface AcceptanceDependencies {
   getHeadCommit: typeof getHeadCommit;
   isGitWorkingTreeClean: typeof isGitWorkingTreeClean;
   getGitChangedPaths: typeof getGitChangedPaths;
+  getGitFileAtCommit: typeof getGitFileAtCommit;
   worktreePathFor: typeof projectRunWorkspacePath;
   runVerification: typeof runVerification;
 }
 
 const REPORT_ONLY_CORRECTION_CHECKS = REPORT_FORMAT_CHECKS;
 const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
-  'scope_violation', 'accepted_artifact_mutation', 'required_check', 'verification_failed', 'tool_blocker'
+  'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'required_check', 'verification_failed', 'tool_blocker'
 ]);
+
+/** Test files whose cases and assertions an update to accepted work must keep. */
+const TEST_FILE = /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
+const TEST_CASE = /\b(?:it|test)(?:\.(?:each|only|skip)\s*\([^)]*\))?\s*\(/g;
+const ASSERTION = /\bexpect\s*\(|\bassert(?:\.\w+)?\s*\(/g;
+const MAX_WEAKENING_CHECK_BYTES = 1024 * 1024;
 
 /** Same case rule as the write tool (pathMatchesScope), so a file it allowed is never rejected here. */
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
@@ -182,6 +189,7 @@ export class TaskAcceptanceService {
       getHeadCommit,
       isGitWorkingTreeClean,
       getGitChangedPaths,
+      getGitFileAtCommit,
       worktreePathFor: projectRunWorkspacePath,
       runVerification,
       ...dependencies
@@ -704,6 +712,20 @@ export class TaskAcceptanceService {
         acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
       }, modifiedAcceptedPath);
     }
+    // Building on a task allows updating its files, never removing them or weakening its tests:
+    // fail closed here rather than trusting the reviewer to notice.
+    for (const filePath of changedPaths) {
+      const owner = acceptedPathOwners.get(filePath);
+      if (!owner || owner.taskId === task.id || restoredAcceptedPaths.has(filePath) ||
+          !taskAllowsPath(task, filePath) || !dependsTransitivelyOn(task, owner.taskId, snapshot.tasks)) continue;
+      const weakened = await this.acceptedFileWeakening(worktreePath, filePath, owner.commit, attempt.resultCommit);
+      if (weakened) {
+        return fail(`This task ${weakened} in ${filePath}, which accepted task ${owner.taskId} delivered. Work that builds on ${owner.taskId} may update its files but not delete them or remove their tests or assertions. Restore what was removed and keep the update.`, {
+          check: 'accepted_artifact_weakened', changedPath: filePath,
+          acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
+        }, filePath);
+      }
+    }
     const scopeOwners = snapshot.tasks.filter(candidate =>
       (candidate.status === 'accepted' || candidate.id === task.id) &&
       sameRepository((candidate.repository ?? snapshot.run.repository), (task.repository ?? snapshot.run.repository)));
@@ -786,6 +808,26 @@ export class TaskAcceptanceService {
       ...(task.dependencyAudit ? { dependencyAudits: taskAuditEvidence(snapshot, task, attempt, worktree,
         validateAttemptReport(attempt).success ? (attempt.result?.agentReport as { auditEvidenceIds?: string[] }).auditEvidenceIds : undefined) } : {})
     };
+  }
+
+  /**
+   * How a change weakened an accepted file, or undefined when it did not: deleted it, or (for a test
+   * file) left fewer test cases or assertions than the accepted version. The counts are a heuristic for
+   * JavaScript and TypeScript tests; a file too large to read is treated as weakened (fail closed).
+   */
+  private async acceptedFileWeakening(worktreePath: string, filePath: string, acceptedCommit: string, resultCommit: string): Promise<string | undefined> {
+    const read = (commit: string) => this.dependencies.getGitFileAtCommit(worktreePath, commit, filePath, MAX_WEAKENING_CHECK_BYTES)
+      .then(content => content ?? null, () => undefined);
+    const after = await read(resultCommit);
+    if (after === undefined) return 'deleted a file';
+    if (!TEST_FILE.test(filePath)) return undefined;
+    const before = await read(acceptedCommit);
+    if (before === null || after === null) return 'changed a test file too large to compare';
+    if (before === undefined) return undefined;
+    const count = (source: string, pattern: RegExp) => source.match(pattern)?.length ?? 0;
+    if (count(after, TEST_CASE) < count(before, TEST_CASE)) return 'removed test cases';
+    if (count(after, ASSERTION) < count(before, ASSERTION)) return 'removed assertions';
+    return undefined;
   }
 
   /**
