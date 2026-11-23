@@ -1,7 +1,7 @@
 import { featureSpecSourceHash, plannerRequirementsFromSpec, specPlanningBrief } from './featureSpecContract.js';
 import { sameRepository } from '../utils/repositoryName.js';
 import { manualChecklistRequirements } from './issueChecklist.js';
-import { boardCardSpec, selectBoardCards, type BoardCardSelection } from './boardCardBuild.js';
+import { boardCardSpec, isBuildRecord, selectBoardCards, type BoardCardSelection } from './boardCardBuild.js';
 import { isBoardThreadId } from './boardThreads.js';
 import { roleCanPlan } from './agentRoleContracts.js';
 import crypto from 'node:crypto';
@@ -34,6 +34,7 @@ import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
 import { repositoryFileOverview } from './repositoryOverview.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
+import { agentProductPicture } from './productPictureSource.js';
 
 export interface ProjectBuildStartResult {
   /**
@@ -595,8 +596,16 @@ async function startOrchestratedProjectBuild(input: {
   const reservation = reservations[0];
   if (!reservation) return blocked('No selected codebase could be reserved for the build.', project);
   const planner = new OrchestrationPlanner();
+  // The cards this build was asked to build: the plan's fit check must cover each one.
+  const buildsCards = (boardCards?.cards ?? (issue && !isBuildRecord(issue) ? [issue] : []))
+    .map(card => ({ key: card.identifier, title: card.title }));
   let planned;
   try {
+    // The detected stack and the project description, read from the planning checkouts.
+    const projectContext = composeProjectContext({
+      description: project.description,
+      repositories: reservations.map(item => ({ repository: item.repository, dir: item.worktreePath }))
+    });
     // A restored plan is used as it was; orchestrationService.start validates it like any other.
     planned = input.presetPlan ? { plan: structuredClone(input.presetPlan) } : await planner.createPlan({
       runId: reservation.runId,
@@ -611,11 +620,10 @@ async function startOrchestratedProjectBuild(input: {
       // The team's notes (AGENTS.md) as committed at each planning checkpoint, first in the planner's context.
       repositoryMemory: renderProjectMemory(await Promise.all(reservations.map(item =>
         readMemoryAtCommit(item.repository, item.worktreePath, item.baseCommit)))),
-      // The detected stack and the project description, read from the planning checkouts.
-      projectContext: composeProjectContext({
-        description: project.description,
-        repositories: reservations.map(item => ({ repository: item.repository, dir: item.worktreePath }))
-      }),
+      projectContext,
+      // What the product is, from Alpha's own records, read now: the plan must fit it.
+      productPicture: agentProductPicture(project, projectContext),
+      buildsCards,
       repositoryContext: planningContexts[0]?.context.context ?? '',
       availableScripts: planningContexts[0]?.context.scripts ?? [],
       repositories: planningContexts.map(item => ({

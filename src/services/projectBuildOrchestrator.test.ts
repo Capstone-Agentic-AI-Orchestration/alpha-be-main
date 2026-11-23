@@ -213,6 +213,7 @@ async function load(
       getSquadRuns: () => squadRuns,
       getRunsForSquadRun: () => [],
       getIssues: () => issueRows,
+      listProjectOrchestrationSnapshots: () => [],
       getActiveOrchestrationForProject: activeWorkflow,
       getOrchestrationByRequestKey: () => undefined,
       getFeatureSpec: (issueId: string) => featureSpecRows.get(issueId) ?? null,
@@ -472,6 +473,9 @@ describe('project builds triggered from chat', () => {
     expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
       goal: 'Build a full stack calculator.',
       projectContext: expect.stringContaining('Project: Keep the interface accessible.'),
+      // The product as Alpha records it, read for this plan; a chat request names no cards to build.
+      productPicture: expect.stringContaining('Brief (project description): Keep the interface accessible.'),
+      buildsCards: [],
       planner: expect.objectContaining({ id: 'agent-1', role: 'Research Agent' }),
       eligibleAgents: [
         expect.objectContaining({ id: 'agent-1', role: 'Research Agent', ready: true, official: false }),
@@ -515,6 +519,11 @@ describe('project builds triggered from chat', () => {
 
     expect(result[0]).toMatchObject({ status: 'plan_ready', issueId: 'issue-7', issueIdentifier: 'CALC-7' });
     expect(startOrchestration).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-7' }));
+    // The card being built is what the plan's fit check must cover, and the planner sees it on the board.
+    expect(plannerCreatePlan).toHaveBeenCalledWith(expect.objectContaining({
+      buildsCards: [{ key: 'CALC-7', title: 'Keyboard input' }],
+      productPicture: expect.stringContaining('[todo] CALC-7 Keyboard input')
+    }));
     expect(createdIssue).not.toHaveBeenCalled();
     expect(issueRows).toHaveLength(1);
   });

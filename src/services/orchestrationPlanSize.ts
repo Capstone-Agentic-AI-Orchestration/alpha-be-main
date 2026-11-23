@@ -54,5 +54,17 @@ export function splitOversizedTasks(candidate: unknown): { candidate: unknown; d
   }
   if (!lastPart.size) return { candidate, decisions };
   waitForLastParts(tasks, lastPart);
-  return { candidate: { ...plan, tasks }, decisions };
+  const fitCheck = (plan as { fitCheck?: unknown }).fitCheck;
+  return { candidate: { ...plan, tasks, ...(Array.isArray(fitCheck) ? { fitCheck: partsInFitCheck(fitCheck, lastPart) } : {}) }, decisions };
+}
+
+/** A split task's fit-check entry covers each of its parts: the parts are the same work. */
+function partsInFitCheck(entries: unknown[], lastPart: ReadonlyMap<string, string>): unknown[] {
+  return entries.flatMap(entry => {
+    const subject = (entry as { subject?: unknown } | null)?.subject;
+    const last = typeof subject === 'string' ? lastPart.get(subject) : undefined;
+    if (!last || (entry as { subjectType?: unknown }).subjectType === 'card') return [entry];
+    const count = Number(last.slice(last.lastIndexOf('-part-') + '-part-'.length));
+    return [entry, ...Array.from({ length: count - 1 }, (_, index) => ({ ...(entry as object), subject: `${subject}-part-${index + 2}` }))];
+  });
 }

@@ -3,6 +3,7 @@ import { isBuildRecord } from './boardCardBuild.js';
 import type { FeatureSpecRecord } from './featureSpecContract.js';
 import { isSpecialistBlocker, SPECIALIST_BLOCKER_PREFIX } from './orchestrationRecoveryPolicy.js';
 import type { OrchestrationRunStatus, OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
 
 /**
  * What a project is, as Alpha's own records say: the brief, the planned work, what was asked for
@@ -146,7 +147,7 @@ function section(title: string, lines: readonly string[], more = 0): string {
 }
 
 /** The picture as a prompt block: labelled by source, passed as data, never as instructions. */
-export function renderProductPicture(picture: ProductPicture): string {
+export function renderProductPicture(picture: ProductPicture, maxChars = MAX_PRODUCT_PICTURE_CHARS): string {
   const brief = picture.brief ? `Brief (project description): ${picture.brief}` : 'Brief: none recorded yet.';
   if (picture.audience === 'client') {
     return [`## About ${picture.projectName}`, brief].join('\n\n');
@@ -165,7 +166,8 @@ export function renderProductPicture(picture: ProductPicture): string {
     section('Open product questions (a specialist stopped on these)', picture.openQuestions)
   ].filter(Boolean);
   const text = parts.join('\n\n');
-  return text.length > MAX_PRODUCT_PICTURE_CHARS ? `${text.slice(0, MAX_PRODUCT_PICTURE_CHARS - 14).trimEnd()}\n… (shortened)` : text;
+  const limit = Math.min(maxChars, MAX_PRODUCT_PICTURE_CHARS);
+  return text.length > limit ? `${text.slice(0, limit - 14).trimEnd()}\n… (shortened)` : text;
 }
 
 /** Where the team picture reads from. The default is this desktop's store; tests pass their own. */
@@ -183,13 +185,28 @@ export interface ProductPictureSource {
 export function productPictureFor(
   project: Pick<Project, 'id' | 'name' | 'description'>,
   audience: ProductAudience,
-  source: ProductPictureSource
+  source: ProductPictureSource,
+  maxChars = MAX_PRODUCT_PICTURE_CHARS
 ): string {
-  if (audience === 'client') return renderProductPicture(clientProductPicture(project));
+  if (audience === 'client') return renderProductPicture(clientProductPicture(project), maxChars);
   return renderProductPicture(teamProductPicture({
     project,
     issues: source.issues(project.id),
     snapshots: source.snapshots(project.id),
     approvedSpec: issueId => source.approvedSpec(issueId)
-  }));
+  }), maxChars);
+}
+
+/** Below this much room the picture would be a heading and half a brief: leave it out instead. */
+const MIN_PICTURE_BESIDE_CHARS = 400;
+
+/**
+ * Room for the team picture next to the project context a planner or specialist already gets (the
+ * brief and the detected stack, `composeProjectContext`). The two together stay within
+ * MAX_PROJECT_CONTEXT_CHARS: the picture is shortened, never the project context, so a long brief
+ * is never dropped to make room. The picture opens with the brief, so shortening keeps it longest.
+ */
+export function productPictureRoom(projectContext: string | undefined): number {
+  const room = Math.min(MAX_PRODUCT_PICTURE_CHARS, MAX_PROJECT_CONTEXT_CHARS - (projectContext?.length ?? 0));
+  return room < MIN_PICTURE_BESIDE_CHARS ? 0 : room;
 }

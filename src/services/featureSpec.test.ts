@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { plannedJson } from '../test/planFitFixture.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { checklistFromSpec, FeatureSpecError, featureSpecSourceHash, parseFeatureSpec, plannerRequirementsFromSpec, specPlanningBrief, type FeatureSpec } from './featureSpecContract.js';
 import { tickSpecChecklist } from './orchestrationFinalization.js';
@@ -77,7 +78,7 @@ describe('feature spec contract', () => {
 describe('planning from an approved feature spec', () => {
   it('sends the spec to the planner and keeps its requirements and exclusions', async () => {
     const plan = { schemaVersion: 1, goal: input.goal, exclusions: spec.exclusions, requirements, tasks: [backendTask('empty-state', ['REQ-1', 'REQ-2'])] };
-    const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(plan)));
+    const turn = vi.fn(async (_options: CliTurnOptions) => response(plannedJson(plan)));
     const result = await new OrchestrationPlanner(turn).createPlan(input);
     expect(turn.mock.calls[0][0].prompt).toContain('A person approved approvedSpec');
     expect(turn.mock.calls[0][0].prompt).toContain('Open an empty board');
@@ -87,10 +88,10 @@ describe('planning from an approved feature spec', () => {
   it('rejects reworded requirements and a dropped exclusion', async () => {
     const reworded = { schemaVersion: 1, goal: input.goal, exclusions: spec.exclusions,
       requirements: [{ ...requirements[0], description: 'Something else.' }, requirements[1]], tasks: [backendTask('empty-state', ['REQ-1', 'REQ-2'])] };
-    await expect(new OrchestrationPlanner(vi.fn(async () => response(JSON.stringify(reworded)))).createPlan(input))
+    await expect(new OrchestrationPlanner(vi.fn(async () => response(plannedJson(reworded)))).createPlan(input))
       .rejects.toThrow(/approved feature spec requirements exactly/);
     const dropped = { schemaVersion: 1, goal: input.goal, exclusions: [], requirements, tasks: [backendTask('empty-state', ['REQ-1', 'REQ-2'])] };
-    await expect(new OrchestrationPlanner(vi.fn(async () => response(JSON.stringify(dropped)))).createPlan(input))
+    await expect(new OrchestrationPlanner(vi.fn(async () => response(plannedJson(dropped)))).createPlan(input))
       .rejects.toThrow(/Keep every exclusion/);
   });
 
@@ -103,7 +104,7 @@ describe('planning from an approved feature spec', () => {
       ],
       tasks: [backendTask('explain', ['REQ-1'], { milestoneId: 'm1', repository: 'acme/app' })]
     };
-    const result = await new OrchestrationPlanner(vi.fn(async () => response(JSON.stringify(roadmap)))).createPlan({
+    const result = await new OrchestrationPlanner(vi.fn(async () => response(plannedJson(roadmap)))).createPlan({
       ...input, repositories: [{ repository: 'acme/app', repositoryContext: 'TypeScript app.', availableScripts: ['test'] }]
     });
     expect(result.plan.schemaVersion).toBe(2);

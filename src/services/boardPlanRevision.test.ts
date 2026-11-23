@@ -5,6 +5,9 @@ vi.mock('./sqliteService.js', () => ({ sqliteService: {
   getOrchestrationSnapshot: () => mocks.snapshot,
   getAgents: () => [{ id: 'orchestrator', role: 'Orchestrator Agent', name: 'Orchestrator' }, { id: 'frontend', role: 'Frontend Agent', name: 'Frontend' }],
   getRuntimes: () => [],
+  getProjects: () => [{ id: 'project', name: 'Login app', description: 'A members-only portal.' }],
+  getIssues: () => [{ id: 'card-9', projectId: 'project', identifier: 'LOG-9', title: 'Password reset', status: 'todo', labels: [], createdAt: '2026-11-20' }],
+  listProjectOrchestrationSnapshots: () => [], getFeatureSpec: () => null,
   replaceUnstartedPlan: mocks.replace
 } }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { canAccessProjectAgentRun: async () => true } }));
@@ -18,7 +21,9 @@ vi.mock('../utils/gitUtils.js', () => ({ getCurrentBranch: async () => 'alpha/bu
 import { correctPlanBeforeStart, reviseBoardPlan } from './boardPlanRevision.js';
 
 const plan = { goal: 'Add login.', exclusions: [], requirements: [{ id: 'login', description: 'Login screen.' }], projectContext: '',
-  tasks: [{ id: 'login-form', title: 'Login form', repository: 'acme/web', ownerAgentId: 'frontend', dependsOn: [], required: true }] };
+  tasks: [{ id: 'login-form', title: 'Login form', repository: 'acme/web', ownerAgentId: 'frontend', dependsOn: [], required: true }],
+  fitCheck: [{ subject: 'login-form', subjectType: 'task', verdict: 'fits', reason: 'Members sign in.' },
+    { subject: 'LOG-3', subjectType: 'card', verdict: 'fits', reason: 'The login card.' }] };
 const workspace = (repository: string, optional: boolean) => ({ repository, branchName: 'alpha/build', baseRef: 'main', baseCommit: 'a'.repeat(40), worktreePath: `/w/${repository}`, optional });
 const context = { userId: 'alice', workspaceId: 'ws', role: 'dev' } as any;
 
@@ -40,6 +45,10 @@ describe('planning again inside a saved build', () => {
       expect.objectContaining({ repository: 'acme/api', optional: true })
     ]);
     expect(input.repositories[0].repository).toBe('acme/web');
+    // Planning again reads the product as recorded now and checks the same cards again.
+    expect(input.productPicture).toContain('Brief (project description): A members-only portal.');
+    expect(input.productPicture).toContain('LOG-9 Password reset');
+    expect(input.buildsCards).toEqual([{ key: 'LOG-3' }]);
   });
 
   it('corrects a plan before start once, saves it as the next version and lists what changed', async () => {

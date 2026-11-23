@@ -114,7 +114,7 @@ export function boardCardSpec(
   const brief = [
     'The person asked Alpha to build these board tasks. Each task\'s checklist items are its requirements, and every requirement starts with its task\'s title. Build them in this order; a later task may rely on an earlier one:',
     ...cards.map(describe),
-    'These tasks are the current product scope. Where projectContext describes the product differently, follow these tasks.'
+    'These tasks are the scope the person asked to build now. Where the brief, a chat request or a recorded decision describes the product differently, do not pick a side silently: list the conflict in fitCheck and surface it to the person.'
   ].join('\n');
   return { requirements, exclusions: [...new Set(exclusions)], brief: clip(brief, 3_000) };
 }

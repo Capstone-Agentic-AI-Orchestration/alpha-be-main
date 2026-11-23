@@ -57,6 +57,23 @@ const scopePattern = z.string().trim().min(1).max(240).refine(value =>
   !value.split('/').some(segment => segment === '..' || segment === '.' || segment === '')
 , 'Scope patterns must be relative repository paths without dot segments.');
 
+/** One line of a plan's fit check (see `fitCheck` below). */
+export const planFitCheckEntrySchema = z.object({
+  /** A task id in this plan, or the key of a board card the plan builds (for example PRO-102). */
+  subject: identifier,
+  subjectType: z.enum(['task', 'card']),
+  verdict: z.enum(['fits', 'conflicts']),
+  /** What it fits, or what it conflicts with (the brief, a chat request, a recorded decision) and how. */
+  reason: z.string().trim().min(1).max(600),
+  /**
+   * For a conflict: the `about` of the plan decision that records it, or the settled planning
+   * question whose answer decided it. Empty for an entry that fits.
+   */
+  surfacedIn: z.string().trim().min(1).max(600).optional()
+}).strict();
+
+export type PlanFitCheckEntry = z.infer<typeof planFitCheckEntrySchema>;
+
 export const orchestrationPlanSchema = z.object({
   schemaVersion: z.union([z.literal(1), z.literal(2)]),
   /** Alpha stamps new plans; absent only on saved plans predating role separation. */
@@ -84,6 +101,14 @@ export const orchestrationPlanSchema = z.object({
     decision: detailText,
     toChange: detailText.optional()
   }).strict()).max(12).optional(),
+  /**
+   * The planner's check of the plan against the product: one entry per task and per board card the
+   * plan builds, saying whether it fits the brief, the chat requests and the recorded decisions, or
+   * what it conflicts with. Every conflict names where it was surfaced to the person (planFitCheck.ts).
+   * Required of every plan the Orchestrator makes or corrects; absent on plans saved before it, which
+   * keep running under the rules they were approved with.
+   */
+  fitCheck: z.array(planFitCheckEntrySchema).max(MAX_PLAN_TASKS + 20).optional(),
   requirements: z.array(z.object({
     id: identifier,
     description: detailText

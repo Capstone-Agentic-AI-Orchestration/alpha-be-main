@@ -11,6 +11,8 @@ import type { OrchestrationPlan } from './orchestrationContract.js';
 import type { OrchestrationRepositoryWorkspace, OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { planRepositoryCoverage } from './orchestrationWorkspace.js';
 import { describePlanChanges } from './orchestrationPlanChanges.js';
+import { agentProductPicture } from './productPictureSource.js';
+import { fitCheckCards } from './planFitCheck.js';
 
 /** A saved plan the Orchestrator may plan again: unstarted, unchanged since it was opened. */
 function unstartedSnapshot(runId: string, revision: number): OrchestrationSnapshot {
@@ -48,10 +50,14 @@ async function unstartedPlanningInput(context: WorkspaceContext, snapshot: Orche
   if (!planner) throw new Error('No authorized planning agent with an available model is ready.');
   const optional = new Set(planRepositoryCoverage(snapshot.run).optionalRepositories.map(item => item.toLowerCase()));
   const contexts = roots.map(root => ({ ...root, context: repositoryPlanningContext(root.worktreePath) }));
+  const project = sqliteService.getProjects().find(item => item.id === snapshot.run.projectId);
   return { runId: snapshot.run.id, cwd: roots[0].worktreePath, goal,
     exclusions: snapshot.run.plan.exclusions, approvedRequirements: snapshot.run.plan.requirements,
     // A revision keeps the saved project context (it used to be dropped) and reads the same memory.
     projectContext: snapshot.run.plan.projectContext,
+    // The product as recorded now, not when the plan was first made; and the same cards to check again.
+    ...(project ? { productPicture: agentProductPicture(project, snapshot.run.plan.projectContext) } : {}),
+    buildsCards: fitCheckCards(snapshot.run.plan),
     repositoryMemory: renderProjectMemory(await Promise.all(roots.map(root => readMemoryAtCommit(root.repository, root.worktreePath, root.baseCommit)))),
     repositoryContext: contexts[0].context.context, availableScripts: contexts[0].context.scripts,
     repositories: contexts.map(item => ({ repository: item.repository, repositoryContext: item.context.context, availableScripts: item.context.scripts,
