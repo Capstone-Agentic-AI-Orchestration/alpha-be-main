@@ -261,7 +261,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/recovery/ac
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
-  const actionNames = ['explain_failure', 'retry_report_format', 'repair_and_continue', 'provide_guidance', 'recheck_prerequisite',
+  const actionNames = ['explain_failure', 'retry_report_format', 'repair_and_continue', 'provide_guidance', 'apply_proposed_fix', 'recheck_prerequisite',
     'plan_final_validation_corrections', 'resume_checkpoint', 'review_saved_changes', 'keep_paused', 'cancel_build'] as const;
   const integerFields = ['expectedRunRevision', 'expectedRecoveryRevision'] as const;
   if (!integerFields.every(key => Number.isSafeInteger(body[key]) && Number(body[key]) >= 0) ||

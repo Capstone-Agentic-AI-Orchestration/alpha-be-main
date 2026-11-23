@@ -33,6 +33,7 @@ import {
   workAttemptCount,
   REPORT_FORMAT_CHECKS
 } from './orchestrationRecoveryPolicy.js';
+import { fixGuidance, resolutionOf, withResolution, type ResolutionRecord } from './blockerResolutionRecord.js';
 
 export interface OrchestrationRecoveryState {
   runId: string;
@@ -128,12 +129,57 @@ function getObservedChecks(attempt?: OrchestrationAttemptRecord): Array<{ name: 
   });
 }
 
+/** A verified fix the Orchestrator held back for the person, still waiting to be applied. */
+function heldBackFix(episode: OrchestrationRecoveryEpisode): ResolutionRecord | undefined {
+  const record = resolutionOf(episode);
+  return record?.outcome === 'escalated' && record.proposedFix && episode.phase !== 'repairing' ? record : undefined;
+}
+
+function resolutionProjection(record: ResolutionRecord): OrchestrationRecoveryProjection['orchestratorResolution'] {
+  return {
+    outcome: record.outcome,
+    ...(record.tier !== undefined ? { tier: record.tier } : {}),
+    ...(record.escalation ? { escalation: record.escalation } : {}),
+    ...(record.diagnosis ? { diagnosis: record.diagnosis } : {}),
+    ...(record.question ? { question: record.question } : {}),
+    ...(record.proposedFix ? { proposedFix: record.proposedFix.instructions } : {}),
+    ...(record.citations?.length ? { evidence: record.citations.map(citation => citation.source === 'repository'
+      ? `${citation.repository}:${citation.path}` : 'Recorded product decision') } : {})
+  };
+}
+
+/**
+ * What the person's action does to the Orchestrator's record: applying its held-back fix makes the
+ * fix theirs; any other step while it is still resolving overtakes it.
+ */
+function resolutionAfterPersonAction(episode: OrchestrationRecoveryEpisode, heldBack: ResolutionRecord | undefined, actorId: string): ResolutionRecord | undefined {
+  if (heldBack) return { ...heldBack, outcome: 'retrying', appliedBy: actorId };
+  const resolution = resolutionOf(episode);
+  if (resolution?.outcome === 'resolving') return { ...resolution, outcome: 'superseded', finishedAt: new Date().toISOString() };
+  return undefined;
+}
+
+/** The chat milestone for a person's retry: an applied fix, their direction, or a plain repair. */
+function personActionMilestone(input: {
+  action: OrchestrationRecoveryActionName; heldBack: boolean; guidance?: string; summary: string; taskTitle?: string;
+}): { key: string; content: string } | undefined {
+  const subject = input.taskTitle ? '“' + input.taskTitle + '”' : 'this build';
+  if (input.heldBack) {
+    return { key: 'proposed_fix_applied', content: `You applied the Orchestrator's proposed fix for ${subject}. The same specialist is retrying with it; the result goes through the same checks and review.` };
+  }
+  if (input.action === 'provide_guidance' || input.guidance) {
+    return { key: 'guidance_received', content: `Direction received for ${subject}: ${safeRecoverySummary(input.guidance ?? '')} Alpha will keep the approved task and repository boundaries.` };
+  }
+  return milestoneFor('repairing', input.summary, input.taskTitle);
+}
+
 function publicProjection(
   snapshot: OrchestrationSnapshot,
   episode: OrchestrationRecoveryEpisode,
   canControl: boolean
 ): OrchestrationRecoveryProjection {
   const task = episode.taskId ? snapshot.tasks.find(item => item.id === episode.taskId) : undefined;
+  const resolution = resolutionOf(episode);
   const actionState = recoveryAvailableActions({
     snapshot,
     category: episode.category,
@@ -143,7 +189,8 @@ function publicProjection(
     repeatedFailure: episode.evidence.repeatedFailure === true,
     finalValidationCorrectionReady: episode.evidence.finalValidationCorrectionReady === true,
     finalValidationCorrectionReason: typeof episode.evidence.finalValidationCorrectionError === 'string'
-      ? episode.evidence.finalValidationCorrectionError : undefined
+      ? episode.evidence.finalValidationCorrectionError : undefined,
+    proposedFixReady: Boolean(heldBackFix(episode))
   });
   return {
     id: episode.id,
@@ -166,7 +213,9 @@ function publicProjection(
     createdAt: episode.createdAt,
     updatedAt: episode.updatedAt,
     availableActions: actionState.availableActions,
-    actionReasons: actionState.actionReasons
+    actionReasons: actionState.actionReasons,
+    ...(resolution?.outcome === 'resolving' ? { resolving: true } : {}),
+    ...(resolution ? { orchestratorResolution: resolutionProjection(resolution) } : {})
   };
 }
 
@@ -329,9 +378,14 @@ export class OrchestrationRecoveryService {
         ? milestoneFor(nextPhase, currentEpisode.summary, taskTitle, reportCorrectionsUsed)
         : undefined;
       if (nextPhase !== currentEpisode.phase || repeatedReportCorrection) {
+        // An Orchestrator fix that passed acceptance is recorded as such, for the approval list.
+        const resolution = resolutionOf(currentEpisode);
+        const resolved = nextPhase === 'resolved' && resolution?.outcome === 'retrying'
+          ? withResolution(currentEpisode, { ...resolution, outcome: 'retry_accepted', finishedAt: new Date().toISOString() })
+          : currentEpisode;
         const saved = this.store.saveOrchestrationRecoveryEpisode({
           episode: {
-            ...currentEpisode,
+            ...resolved,
             phase: nextPhase,
             attemptsUsed: currentEpisode.taskId ? workAttemptCount(snapshot, currentEpisode.taskId) : currentEpisode.attemptsUsed,
             updatedAt: new Date().toISOString(),
@@ -417,7 +471,9 @@ export class OrchestrationRecoveryService {
         observedChecks: getObservedChecks(evidenceAttempt),
         repository: snapshot.run.repository,
         repeatedFailure,
-        ...(finalValidation ? { finalValidationCorrectionReady, ...(finalValidationCorrectionError ? { finalValidationCorrectionError } : {}) } : {})
+        ...(finalValidation ? { finalValidationCorrectionReady, ...(finalValidationCorrectionError ? { finalValidationCorrectionError } : {}) } : {}),
+        // What the Orchestrator did about this recovery outlives each refreshed failure detail.
+        ...(currentEpisode.evidence.resolution ? { resolution: currentEpisode.evidence.resolution } : {})
       },
       threadId: binding?.threadId ?? currentEpisode.threadId,
       buildMessageId: binding?.buildMessageId ?? currentEpisode.buildMessageId,
@@ -477,6 +533,13 @@ export class OrchestrationRecoveryService {
   }
 
   explain(episode: OrchestrationRecoveryEpisode): string {
+    // When the Orchestrator looked into it, its diagnosis and question explain it, not the raw error.
+    const resolution = resolutionOf(episode);
+    if (resolution?.diagnosis && ['escalated', 'retry_failed'].includes(resolution.outcome)) {
+      const question = resolution.question ? ` ${resolution.question.text}` : '';
+      const fix = resolution.proposedFix ? ' Alpha has a verified fix ready for you to apply.' : '';
+      return `The Orchestrator looked into this: ${resolution.diagnosis}${question}${fix}`.trim();
+    }
     return `${CATEGORY_EXPLANATIONS[episode.category]} ${safeRecoverySummary(episode.summary)}`.trim();
   }
 
@@ -586,19 +649,22 @@ export class OrchestrationRecoveryService {
           return { accepted: true, actionId: created.action.id, message };
         }
 
+        const heldBack = input.action === 'apply_proposed_fix' ? heldBackFix(episode) : undefined;
+        if (input.action === 'apply_proposed_fix' && !heldBack) throw new Error('There is no proposed fix to apply. Refresh the build.');
+        const retryDirection = heldBack ? safeRecoveryGuidance(fixGuidance(heldBack.diagnosis, heldBack.proposedFix!, heldBack.citations)) : guidance;
+        const resolutionAfterAction = resolutionAfterPersonAction(episode, heldBack, input.actorId);
+        const actedEpisode = resolutionAfterAction ? withResolution(episode, resolutionAfterAction) : episode;
         const startedEpisode = this.store.saveOrchestrationRecoveryEpisode({
           episode: {
-            ...episode,
+            ...actedEpisode,
             phase: 'repairing',
             attemptsUsed: episode.taskId ? workAttemptCount(snapshot, episode.taskId) : episode.attemptsUsed,
-            guidance,
+            guidance: retryDirection,
             updatedAt: new Date().toISOString(),
             resolvedAt: undefined
           },
           expectedRevision: episode.revision,
-          milestone: input.action === 'provide_guidance' || guidance
-            ? { key: 'guidance_received', content: `Direction received for ${actionTask?.title ? `“${actionTask.title}”` : 'this build'}: ${safeRecoverySummary(guidance ?? '')} Alpha will keep the approved task and repository boundaries.` }
-            : milestoneFor('repairing', episode.summary, actionTask?.title),
+          milestone: personActionMilestone({ action: input.action, heldBack: Boolean(heldBack), guidance, summary: episode.summary, taskTitle: actionTask?.title }),
           actorId: input.actorId
         }).episode;
         const { orchestrationService, taskAcceptanceService } = await import('./orchestrationRuntime.js');
@@ -697,7 +763,7 @@ export class OrchestrationRecoveryService {
           });
         } else {
           if (!actionTask) throw new Error('This recovery has no failed task to restart.');
-          const retryGuidance = guidance ?? (
+          const retryGuidance = retryDirection ?? (
             input.action === 'repair_and_continue' && workAttemptCount(snapshot, actionTask.id) >= AUTO_REPAIR_ATTEMPT_LIMIT
               ? 'Repair the saved failure evidence and continue within the already approved task scope.'
               : undefined

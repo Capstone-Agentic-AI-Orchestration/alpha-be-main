@@ -16,7 +16,9 @@ import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTa
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
-import { TEST_FILE, testWeakening } from './testWeakening.js';
+import { isTestFile, testFileWeakening } from './testWeakening.js';
+import { classifyRisk } from './riskTier.js';
+import { ORCHESTRATOR_FIX_REVIEW_CHECK, unapprovedOrchestratorFix } from './blockerResolutionRecord.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
@@ -54,7 +56,7 @@ interface AcceptanceDependencies {
 
 const REPORT_ONLY_CORRECTION_CHECKS = REPORT_FORMAT_CHECKS;
 const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
-  'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'required_check', 'verification_failed', 'tool_blocker'
+  'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'test_weakened', 'required_check', 'verification_failed', 'tool_blocker'
 ]);
 
 const MAX_WEAKENING_CHECK_BYTES = 1024 * 1024;
@@ -723,6 +725,18 @@ export class TaskAcceptanceService {
         }, filePath);
       }
     }
+    // Every task's own diff, not only changes to accepted work: tests that existed before the task
+    // keep their cases, titles and assertions.
+    for (const filePath of changedPaths) {
+      const owner = acceptedPathOwners.get(filePath);
+      if (owner && owner.taskId !== task.id && !restoredAcceptedPaths.has(filePath)) continue;
+      const weakened = await this.ownTestWeakening(worktreePath, filePath, diffStartingCommit, attempt.resultCommit);
+      if (weakened) {
+        return fail(`This task ${weakened} in ${filePath}. A task may add and update tests but not delete, skip or replace them or remove assertions. Restore what was removed and keep the update.`, {
+          check: 'test_weakened', changedPath: filePath, baselineCommit: diffStartingCommit
+        }, filePath);
+      }
+    }
     const scopeOwners = snapshot.tasks.filter(candidate =>
       (candidate.status === 'accepted' || candidate.id === task.id) &&
       sameRepository((candidate.repository ?? snapshot.run.repository), (task.repository ?? snapshot.run.repository)));
@@ -758,7 +772,49 @@ export class TaskAcceptanceService {
         check: 'verification_failed', verification
       });
     }
+    // Last, so ordinary failures still get their automatic repair first: only work that would
+    // otherwise be accepted is held here, and its check is not an automatic one.
+    const overreach = this.orchestratorFixOverreach(snapshot, task, changedPaths,
+      [...acceptedPathOwners].filter(([, owner]) => owner.taskId !== task.id).map(([filePath]) => filePath));
+    if (overreach) return fail(overreach.reason, overreach.evidence, overreach.evidence.sensitivePaths[0] ?? overreach.evidence.outsidePaths[0]);
     return null;
+  }
+
+  /**
+   * The risk gate on what an Orchestrator fix actually did, not only on what it said it would change:
+   * a retry that changed a sensitive area (or, in `strict`, earlier accepted work), or files beyond the
+   * fix's expected files and what the task already had, is held for the person. A fix the person
+   * applied is theirs and is not held.
+   */
+  private orchestratorFixOverreach(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    changedPaths: readonly string[],
+    otherTasksAcceptedPaths: readonly string[]
+  ): { reason: string; evidence: { check: string; sensitivePaths: string[]; outsidePaths: string[] } } | undefined {
+    const resolution = unapprovedOrchestratorFix(this.store.getOpenOrchestrationRecoveryEpisode(snapshot.run.id), task.id);
+    if (!resolution) return undefined;
+    const repository = task.repository ?? snapshot.run.repository;
+    const setting = this.store.getProjectOrchestrationSetting(snapshot.run.projectId);
+    const risk = classifyRisk({
+      paths: changedPaths.map(filePath => ({ repository, path: filePath })),
+      acceptedPaths: otherTasksAcceptedPaths.map(filePath => ({ repository, path: filePath })),
+      projectPatterns: setting.sensitivePaths
+    });
+    const sensitivePaths = risk.classifiedPaths
+      .filter(item => item.tier >= 2 || (item.tier === 1 && setting.autonomy === 'strict'))
+      .map(item => item.path);
+    const cleared = new Set([
+      ...(resolution.priorChangedPaths ?? []),
+      ...(resolution.proposedFix?.expectedFiles ?? []).filter(file => sameRepository(file.repository, repository)).map(file => file.path)
+    ]);
+    const outsidePaths = changedPaths.filter(filePath => !cleared.has(filePath));
+    if (!sensitivePaths.length && !outsidePaths.length) return undefined;
+    const named = [...sensitivePaths, ...outsidePaths.filter(filePath => !sensitivePaths.includes(filePath))].slice(0, 5).join(', ');
+    return {
+      reason: `The Orchestrator's fix for this task changed ${named}, beyond what Alpha may change on its own. The work is kept and waits for the person to approve the fix.`,
+      evidence: { check: ORCHESTRATOR_FIX_REVIEW_CHECK, sensitivePaths, outsidePaths }
+    };
   }
 
   private async acceptanceEvidence(
@@ -807,21 +863,38 @@ export class TaskAcceptanceService {
     };
   }
 
+  /** A file at a commit: its content, null when too large to read, undefined when absent. */
+  private readForWeakening(worktreePath: string, filePath: string, commit: string): Promise<string | null | undefined> {
+    return this.dependencies.getGitFileAtCommit(worktreePath, commit, filePath, MAX_WEAKENING_CHECK_BYTES)
+      .then(content => content ?? null, () => undefined);
+  }
+
   /**
    * How a change weakened an accepted file, or undefined when it did not: deleted it, or (for a test
-   * file) removed or skipped tests or removed assertions (testWeakening, a JavaScript/TypeScript
-   * heuristic). A file too large to read is treated as weakened (fail closed).
+   * file) removed, skipped or replaced tests or removed assertions (testFileWeakening, parsed). A file
+   * too large to read or that does not parse is treated as weakened (fail closed).
    */
   private async acceptedFileWeakening(worktreePath: string, filePath: string, acceptedCommit: string, resultCommit: string): Promise<string | undefined> {
-    const read = (commit: string) => this.dependencies.getGitFileAtCommit(worktreePath, commit, filePath, MAX_WEAKENING_CHECK_BYTES)
-      .then(content => content ?? null, () => undefined);
-    const after = await read(resultCommit);
+    const after = await this.readForWeakening(worktreePath, filePath, resultCommit);
     if (after === undefined) return 'deleted a file';
-    if (!TEST_FILE.test(filePath)) return undefined;
-    const before = await read(acceptedCommit);
+    if (!isTestFile(filePath)) return undefined;
+    const before = await this.readForWeakening(worktreePath, filePath, acceptedCommit);
     if (before === null || after === null) return 'changed a test file too large to compare';
+    return testFileWeakening(filePath, before, after);
+  }
+
+  /**
+   * How this task's own diff weakened a test file that existed before it started, or undefined. The
+   * rule for accepted files, applied to every test the task found in place: whatever happened
+   * before, deleting, skipping or replacing tests or removing assertions does not pass.
+   */
+  private async ownTestWeakening(worktreePath: string, filePath: string, baselineCommit: string, resultCommit: string): Promise<string | undefined> {
+    if (!isTestFile(filePath)) return undefined;
+    const before = await this.readForWeakening(worktreePath, filePath, baselineCommit);
     if (before === undefined) return undefined;
-    return testWeakening(before, after);
+    const after = await this.readForWeakening(worktreePath, filePath, resultCommit);
+    if (before === null || after === null) return 'changed a test file too large to compare';
+    return testFileWeakening(filePath, before, after);
   }
 
   /**

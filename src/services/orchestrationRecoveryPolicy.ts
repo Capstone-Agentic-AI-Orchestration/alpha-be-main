@@ -190,9 +190,11 @@ export function recoveryAvailableActions(input: {
   repeatedFailure?: boolean;
   finalValidationCorrectionReady?: boolean;
   finalValidationCorrectionReason?: string;
+  /** The Orchestrator's verified fix, held back for the person (a sensitive area or strict autonomy). */
+  proposedFixReady?: boolean;
 }): { availableActions: OrchestrationRecoveryActionName[]; actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>> } {
   const { snapshot, category, taskId, canControl, episodeAgeMs, repeatedFailure = false,
-    finalValidationCorrectionReady = false, finalValidationCorrectionReason } = input;
+    finalValidationCorrectionReady = false, finalValidationCorrectionReason, proposedFixReady = false } = input;
   const availableActions: OrchestrationRecoveryActionName[] = ['explain_failure', 'review_saved_changes'];
   const actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>> = {};
   const task = taskId ? snapshot.tasks.find(item => item.id === taskId) : undefined;
@@ -272,6 +274,12 @@ export function recoveryAvailableActions(input: {
     }
   }
 
+  // The Orchestrator's verified fix runs through the same guided retry and acceptance gate as
+  // direction the person types, so it is offered exactly where that direction would be.
+  if (proposedFixReady && canAct && task && ['failed', 'blocked'].includes(task.status)) {
+    if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('apply_proposed_fix');
+    else actionReasons.apply_proposed_fix = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
+  }
   if (canAct && snapshot.run.status === 'recovery_required' && !snapshot.run.currentTaskId) {
     availableActions.push('resume_checkpoint');
   }

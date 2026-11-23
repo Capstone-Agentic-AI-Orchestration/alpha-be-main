@@ -179,6 +179,33 @@ describe('task orchestration persistence', () => {
     expect(() => runWithWorkspace('ws-default', () => store!.setProjectOrchestrationEnabled('project-opt-in', false, 'user-1'))).toThrow(/always enabled on desktop/);
   });
 
+  it('adds the autonomy columns to an existing settings table, defaulting to standard', () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-autonomy-'));
+    const dbPath = path.join(directory, 'alpha.db');
+    store = new SQLiteService({ dbPath, seedDefaults: false });
+    runWithWorkspace('ws-default', () => store!.createProject({ id: 'project-autonomy', name: 'Autonomy', key: 'AUT' }));
+    store.close();
+    store = undefined;
+    const legacyDb = new Database(dbPath);
+    legacyDb.exec(`
+      DROP TABLE project_orchestration_settings;
+      CREATE TABLE project_orchestration_settings (
+        workspace_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), updated_by TEXT, updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, project_id));
+      INSERT INTO project_orchestration_settings VALUES ('ws-default', 'project-autonomy', 1, 'legacy-user', '2026-10-20T00:00:00.000Z');
+    `);
+    legacyDb.close();
+
+    store = new SQLiteService({ dbPath, seedDefaults: false });
+    expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-autonomy')))
+      .toMatchObject({ enabled: true, autonomy: 'standard', sensitivePaths: [], updatedBy: 'legacy-user' });
+    runWithWorkspace('ws-default', () => store!.setProjectOrchestrationSettings('project-autonomy', { autonomy: 'off' }, 'user-1'));
+    expect(runWithWorkspace('ws-default', () => store!.getProjectOrchestrationSetting('project-autonomy').autonomy)).toBe('off');
+    expect(() => runWithWorkspace('ws-default', () => store!.setProjectOrchestrationSettings('project-autonomy', { autonomy: 'reckless' as never }, 'user-1')))
+      .toThrow(/Unknown autonomy level/);
+  });
+
   it('adds orchestration tables when opening a populated database from before orchestration', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-orchestration-legacy-db-'));
     const dbPath = path.join(directory, 'alpha.db');

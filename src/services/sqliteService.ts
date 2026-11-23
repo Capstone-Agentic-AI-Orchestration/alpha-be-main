@@ -41,8 +41,11 @@ import {
   OrchestrationRecoveryEpisode,
   OrchestrationRecoveryActionRecord,
   OrchestrationRecoveryActionName,
-  OrchestrationRecoveryMilestone
+  OrchestrationRecoveryMilestone,
+  ProjectOrchestrationSetting,
+  OrchestrationAutonomy
 } from '../models/index.js';
+import { DEFAULT_ORCHESTRATION_AUTONOMY, ORCHESTRATION_AUTONOMY_LEVELS } from '../models/index.js';
 import { agentFilePath, syncAgentFile, deleteAgentFile, readAgentFile } from './agentFileService.js';
 import { ensureMemoryScaffold } from './memoryService.js';
 import {
@@ -672,6 +675,8 @@ export class SQLiteService {
         workspace_id TEXT NOT NULL,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        autonomy TEXT NOT NULL DEFAULT 'standard' CHECK (autonomy IN ('off', 'standard', 'strict')),
+        sensitive_paths TEXT NOT NULL DEFAULT '[]',
         updated_by TEXT,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (workspace_id, project_id)
@@ -1703,6 +1708,8 @@ export class SQLiteService {
       ,['agent_calls', "origin TEXT NOT NULL DEFAULT 'agent_call'"]
       ,['orchestration_tasks', 'correction_of_task_id TEXT']
       ,['orchestration_tasks', 'correction_cycle INTEGER']
+      ,['project_orchestration_settings', "autonomy TEXT NOT NULL DEFAULT 'standard' CHECK (autonomy IN ('off', 'standard', 'strict'))"]
+      ,['project_orchestration_settings', "sensitive_paths TEXT NOT NULL DEFAULT '[]'"]
     ];
 
 
@@ -2642,28 +2649,44 @@ export class SQLiteService {
     }));
   }
 
-  getProjectOrchestrationSetting(projectId: string): { enabled: boolean; updatedAt?: string; updatedBy?: string } {
-    const row = this.db.prepare(`SELECT enabled, updated_at, updated_by
+  getProjectOrchestrationSetting(projectId: string): ProjectOrchestrationSetting {
+    const row = this.db.prepare(`SELECT enabled, autonomy, sensitive_paths, updated_at, updated_by
       FROM project_orchestration_settings WHERE workspace_id = ? AND project_id = ?`)
-      .get(this.workspaceId(), projectId) as { enabled: number; updated_at: string; updated_by: string | null } | undefined;
+      .get(this.workspaceId(), projectId) as { enabled: number; autonomy: string; sensitive_paths: string; updated_at: string; updated_by: string | null } | undefined;
     // Keep old per-project rows readable for migration history, but an old
     // disabled value can no longer route desktop builds around the orchestrator.
-    return row ? { enabled: true, updatedAt: row.updated_at, updatedBy: row.updated_by ?? undefined } : { enabled: true };
+    if (!row) return { enabled: true, autonomy: DEFAULT_ORCHESTRATION_AUTONOMY, sensitivePaths: [] };
+    const autonomy = ORCHESTRATION_AUTONOMY_LEVELS.find(level => level === row.autonomy) ?? DEFAULT_ORCHESTRATION_AUTONOMY;
+    const sensitivePaths = this.parseJsonArray(row.sensitive_paths).filter((item): item is string => typeof item === 'string');
+    return { enabled: true, autonomy, sensitivePaths, updatedAt: row.updated_at, updatedBy: row.updated_by ?? undefined };
   }
 
-  setProjectOrchestrationEnabled(projectId: string, enabled: boolean, updatedBy: string): { enabled: boolean; updatedAt: string; updatedBy: string } {
+  setProjectOrchestrationEnabled(projectId: string, enabled: boolean, updatedBy: string): ProjectOrchestrationSetting {
+    return this.setProjectOrchestrationSettings(projectId, { enabled }, updatedBy);
+  }
+
+  /** Saves the autonomy level and the project's extra sensitive paths; omitted fields keep their value. */
+  setProjectOrchestrationSettings(
+    projectId: string,
+    input: { enabled?: boolean; autonomy?: OrchestrationAutonomy; sensitivePaths?: readonly string[] },
+    updatedBy: string
+  ): ProjectOrchestrationSetting {
     const workspaceId = this.workspaceId();
     const now = new Date().toISOString();
     return this.db.transaction(() => {
       const project = this.db.prepare('SELECT id FROM projects WHERE workspace_id = ? AND id = ?').get(workspaceId, projectId);
       if (!project) throw new Error('Project not found');
-      if (!enabled) throw new Error('Project orchestration is always enabled on desktop');
-      this.db.prepare(`INSERT INTO project_orchestration_settings (workspace_id, project_id, enabled, updated_by, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(workspace_id, project_id) DO UPDATE SET enabled = excluded.enabled,
-          updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-        .run(workspaceId, projectId, 1, updatedBy, now);
-      return { enabled: true, updatedAt: now, updatedBy };
+      if (input.enabled === false) throw new Error('Project orchestration is always enabled on desktop');
+      const current = this.getProjectOrchestrationSetting(projectId);
+      const autonomy = input.autonomy ?? current.autonomy;
+      if (!ORCHESTRATION_AUTONOMY_LEVELS.includes(autonomy)) throw new Error('Unknown autonomy level');
+      const sensitivePaths = [...(input.sensitivePaths ?? current.sensitivePaths)];
+      this.db.prepare(`INSERT INTO project_orchestration_settings (workspace_id, project_id, enabled, autonomy, sensitive_paths, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(workspace_id, project_id) DO UPDATE SET enabled = excluded.enabled, autonomy = excluded.autonomy,
+          sensitive_paths = excluded.sensitive_paths, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+        .run(workspaceId, projectId, 1, autonomy, JSON.stringify(sensitivePaths), updatedBy, now);
+      return { enabled: true, autonomy, sensitivePaths, updatedAt: now, updatedBy };
     })();
   }
 

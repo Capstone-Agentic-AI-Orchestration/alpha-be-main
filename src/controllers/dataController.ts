@@ -50,7 +50,7 @@ import {
 } from '../services/agentFileService.js';
 import { resolveAgent } from '../services/personaService.js';
 import { agentReadiness } from '../services/agentReadiness.js';
-import { Agent, Issue } from '../models/index.js';
+import { Agent, Issue, ORCHESTRATION_AUTONOMY_LEVELS, type OrchestrationAutonomy } from '../models/index.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { SKILL_TOOLS } from '../services/toolPolicy.js';
 import {
@@ -743,7 +743,27 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
  * Local capability endpoint for desktop project builds. Orchestration is
  * always enabled on desktop; neither this endpoint nor its compatibility
  * write route grants repository or agent permissions.
+ *
+ * The autonomy setting (how far Alpha resolves a stuck build on its own) is
+ * internal to the team: clients never see or change it, so it is read and
+ * written only by roles that may read squads (clients cannot).
  */
+const MAX_SENSITIVE_PATHS = 50;
+
+/** The project's extra sensitive path globs, or an error message. */
+function sensitivePathsInput(value: unknown): string[] | string {
+  if (!Array.isArray(value) || value.length > MAX_SENSITIVE_PATHS) return `sensitivePaths must be a list of at most ${MAX_SENSITIVE_PATHS} path patterns`;
+  const paths: string[] = [];
+  for (const item of value) {
+    const pattern = typeof item === 'string' ? item.trim().replace(/\\/g, '/') : '';
+    if (!pattern || pattern.length > 200 || pattern.startsWith('/') || /^[a-z]:/i.test(pattern) || pattern.split('/').includes('..')) {
+      return 'Each sensitive path must be a repository-relative pattern such as src/billing/**';
+    }
+    paths.push(pattern);
+  }
+  return [...new Set(paths)];
+}
+
 dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.read')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
@@ -753,22 +773,36 @@ dataRouter.get('/projects/:id/orchestration-settings', route(async (req: Request
     return res.json({ enabled: false, available: false, localOnly: true,
       reason: 'Task orchestration runs on an authorized Alpha desktop with the repository checkout.' });
   }
-  const setting = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id));
-  res.json({ ...setting, enabled: true, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
+  const { autonomy, sensitivePaths, ...setting } = runWithWorkspace(req.workspace!.workspaceId, () => sqliteService.getProjectOrchestrationSetting(project.id));
+  const team = workspaceRegistry.can(req.workspace!.role, 'squad.read');
+  res.json({ ...setting, ...(team ? { autonomy, sensitivePaths } : {}), enabled: true, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
     reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The Orchestrator is unavailable in this desktop version. Update the app before starting a build.' });
 }));
 
 dataRouter.put('/projects/:id/orchestration-settings', desktopOnly, route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.update')) return;
   if (!requireDiscoverableProject(req, res, req.params.id)) return;
-  if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
-  if (!req.body.enabled) return res.status(400).json({ error: 'Project orchestration is always enabled on desktop.' });
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+  const changesAutonomy = body.autonomy !== undefined || body.sensitivePaths !== undefined;
+  if (body.enabled === undefined && !changesAutonomy) return res.status(400).json({ error: 'enabled must be a boolean' });
+  if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  if (body.enabled === false) return res.status(400).json({ error: 'Project orchestration is always enabled on desktop.' });
+  if (changesAutonomy && !requireWorkspaceCapability(req, res, 'squad.read')) return;
+  if (body.autonomy !== undefined && !ORCHESTRATION_AUTONOMY_LEVELS.includes(body.autonomy as OrchestrationAutonomy)) {
+    return res.status(400).json({ error: `autonomy must be one of ${ORCHESTRATION_AUTONOMY_LEVELS.join(', ')}` });
+  }
+  const sensitivePaths = body.sensitivePaths === undefined ? undefined : sensitivePathsInput(body.sensitivePaths);
+  if (typeof sensitivePaths === 'string') return res.status(400).json({ error: sensitivePaths });
   const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
-  const setting = runWithWorkspace(req.workspace!.workspaceId, () =>
-    sqliteService.setProjectOrchestrationEnabled(project.id, req.body.enabled, req.workspace!.userId)
+  const { autonomy, sensitivePaths: savedPaths, ...setting } = runWithWorkspace(req.workspace!.workspaceId, () =>
+    sqliteService.setProjectOrchestrationSettings(project.id, {
+      ...(body.autonomy !== undefined ? { autonomy: body.autonomy as OrchestrationAutonomy } : {}),
+      ...(sensitivePaths ? { sensitivePaths } : {})
+    }, req.workspace!.userId)
   );
-  res.json({ ...setting, available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
+  const team = workspaceRegistry.can(req.workspace!.role, 'squad.read');
+  res.json({ ...setting, ...(team ? { autonomy, sensitivePaths: savedPaths } : {}), available: ALPHA_ORCHESTRATION_ENABLED, localOnly: true,
     reason: ALPHA_ORCHESTRATION_ENABLED ? undefined : 'The Orchestrator is unavailable in this desktop version. Update the app before starting a build.' });
 }));
 
