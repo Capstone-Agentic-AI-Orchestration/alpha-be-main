@@ -12,6 +12,7 @@ import { resolveProjectWorkspace } from '../services/workspaceService.js';
 import { MEMORY_FILES } from '../services/repositoryMemory.js';
 import { orchestrationSessionId } from '../services/orchestrationSession.js';
 import { dependencyAuditEvidenceSchema } from '../services/dependencyAuditContract.js';
+import { resolvedWithoutYou } from '../services/resolvedWithoutYou.js';
 import type { OrchestrationRunStatus } from '../services/orchestrationStateMachine.js';
 import {
   requireProjectWorkspace,
@@ -317,6 +318,9 @@ function safeOrchestrationProjection(
       updatedAt: snapshot.run.updatedAt
     },
     recovery,
+    // Fixes the Orchestrator made on its own, listed at approval. Team only: this route needs squad.read.
+    resolvedWithoutYou: resolvedWithoutYou(snapshot,
+      runWithWorkspace(snapshot.run.workspaceId, () => sqliteService.listOrchestrationRecoveryEpisodes(snapshot.run.id))),
     milestones: snapshot.run.plan.milestones?.map(milestone => {
       const tasks = snapshot.tasks.filter(task => task.milestoneId === milestone.id && task.required);
       return { id: milestone.id, title: safeOperationalText(milestone.title, 240) ?? '',
