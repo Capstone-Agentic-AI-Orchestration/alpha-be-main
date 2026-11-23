@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
+import { projectBrief } from './productPicture.js';
 import { describeRepositoryExecution, packageManagerFor, readManifest } from './repositoryExecution.js';
 
 /**
@@ -62,7 +63,7 @@ export function composeProjectContext(input: {
       execution
     ].filter(Boolean).join('\n'));
   }
-  const description = input.description?.trim();
+  const description = projectBrief(input.description);
   const context = [description ? 'Project: ' + description : '', ...sections].filter(Boolean).join('\n\n');
   return context.length > MAX_PROJECT_CONTEXT_CHARS ? context.slice(0, MAX_PROJECT_CONTEXT_CHARS - 14).trimEnd() + '\n… (shortened)' : context;
 }
