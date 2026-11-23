@@ -77,3 +77,17 @@ describe('saved work with ordinary dot files and unusual names', () => {
     }
   });
 });
+
+describe('the file names a saved patch touches', () => {
+  it('reads both sides of every file, renames and copies included, quoted names decoded', async () => {
+    const { patchHeaderPaths } = await import('./orchestrationSavedArchives.js');
+    const patch = [
+      'diff --git a/src/app.ts b/src/app.ts', '--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1 +1 @@', '-a', '+b',
+      'diff --git a/src/old.ts b/secrets/moved.ts', 'similarity index 100%', 'rename from src/old.ts', 'rename to secrets/moved.ts',
+      'diff --git a/src/base.ts b/infra/copy.ts', 'copy from src/base.ts', 'copy to infra/copy.ts',
+      String.raw`diff --git "a/src/caf\303\251.ts" "b/src/caf\303\251.ts"`, String.raw`--- "a/src/caf\303\251.ts"`, String.raw`+++ "b/src/caf\303\251.ts"`,
+      'diff --git a/src/new.ts b/src/new.ts', 'new file mode 100644', '--- /dev/null', '+++ b/src/new.ts'
+    ].join('\n');
+    expect(patchHeaderPaths(patch)).toEqual(['src/app.ts', 'src/old.ts', 'secrets/moved.ts', 'src/base.ts', 'infra/copy.ts', 'src/café.ts', 'src/new.ts']);
+  });
+});

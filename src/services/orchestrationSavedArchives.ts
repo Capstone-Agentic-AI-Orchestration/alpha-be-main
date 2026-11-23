@@ -70,6 +70,56 @@ export function numstatPaths(output: string): string[] {
   return paths.filter(Boolean);
 }
 
+/** A git-quoted path ("a/caf\303\251.ts") as the bytes it names, decoded as UTF-8. */
+function unquoteGitPath(value: string): string {
+  if (!value.startsWith('"') || !value.endsWith('"') || value.length < 2) return value;
+  const bytes: number[] = [];
+  const simple: Record<string, number> = { n: 10, t: 9, r: 13, '"': 34, '\\': 92, a: 7, b: 8, f: 12, v: 11 };
+  const body = value.slice(1, -1);
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index];
+    if (char !== '\\') { bytes.push(...Buffer.from(char, 'utf8')); continue; }
+    const next = body[index + 1] ?? '';
+    if (/[0-7]/.test(next)) {
+      const octal = body.slice(index + 1, index + 4);
+      bytes.push(parseInt(octal, 8));
+      index += octal.length;
+    } else {
+      bytes.push(simple[next] ?? next.charCodeAt(0));
+      index += 1;
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+/** The path after an "a/" or "b/" prefix, quoted or not; undefined for /dev/null. */
+function sidePath(raw: string): string | undefined {
+  const value = unquoteGitPath(raw.trim());
+  if (value === '/dev/null') return undefined;
+  return /^[ab]\//.test(value) ? value.slice(2) : value;
+}
+
+/**
+ * Every file name a unified git patch touches, read from its headers: the old and new sides of
+ * each file, and both names of a rename or copy. Restore checks these against the step's scope
+ * as well as git's numstat summary.
+ */
+export function patchHeaderPaths(patch: string): string[] {
+  const paths: string[] = [];
+  for (const raw of patch.split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    const header = ['rename from ', 'rename to ', 'copy from ', 'copy to '].find(prefix => line.startsWith(prefix));
+    if (header) { paths.push(unquoteGitPath(line.slice(header.length).trim())); continue; }
+    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      const rest = line.slice(4);
+      const tab = rest.indexOf('\t');
+      const name = sidePath(tab >= 0 ? rest.slice(0, tab) : rest);
+      if (name) paths.push(name);
+    }
+  }
+  return [...new Set(paths)];
+}
+
 export function listSavedArchives(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord) {
   const root = path.join(process.env.ALPHA_HOME || path.join(os.homedir(), '.alpha'), 'preserved', safeName(snapshot.run.id));
   if (!fs.existsSync(root)) return [];
@@ -99,7 +149,10 @@ export async function restoreSavedArchive(snapshot: OrchestrationSnapshot, task:
   if (entry.patch) {
     // -z keeps file names exactly as they are; without it git quotes unusual names and they fail the scope check.
     const stat = await exec('git', ['apply', '--numstat', '-z', entry.patch.file], { cwd, windowsHide: true });
-    const paths = numstatPaths(stat.stdout);
+    // Two independent readings must both stay in scope: git's own summary, and every file name
+    // the patch headers name (including both sides of a rename or copy), so a difference between
+    // them can never let a file outside the step's scope through.
+    const paths = [...numstatPaths(stat.stdout), ...patchHeaderPaths(fs.readFileSync(entry.patch.file, 'utf8'))];
     if (!paths.length || paths.some(file => !entry.allows(file))) throw new Error('The patch contains paths outside the approved scope.');
     await exec('git', ['apply', '--check', entry.patch.file], { cwd, windowsHide: true });
   }
