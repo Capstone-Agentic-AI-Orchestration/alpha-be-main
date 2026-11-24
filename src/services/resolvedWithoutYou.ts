@@ -3,9 +3,12 @@ import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { resolutionOf } from './blockerResolutionRecord.js';
 import { safeRecoveryGuidance, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
 
-/** One file or decision the Orchestrator cited for its fix, verified by Alpha before it acted. */
+/**
+ * One file or product record the Orchestrator cited for its fix, verified by Alpha before it acted.
+ * `commit` is the checkpoint the quote was found at, so a link shows the file as it was checked.
+ */
 export type ResolvedWithoutYouEvidence =
-  | { source: 'repository'; repository: string; path: string; quote: string }
+  | { source: 'repository'; repository: string; path: string; quote: string; commit?: string }
   | { source: 'product_picture'; quote: string };
 
 /**
@@ -27,6 +30,7 @@ export interface ResolvedWithoutYouItem {
 }
 
 const MAX_QUOTE = 300;
+const COMMIT = /^[0-9a-f]{40,64}$/i;
 const MAX_EVIDENCE = 12;
 
 function shortQuote(value: string): string {
@@ -50,7 +54,8 @@ export function resolvedWithoutYou(
     if (record.outcome !== 'retry_accepted' && record.outcome !== 'retrying') return [];
     const evidence: ResolvedWithoutYouEvidence[] = (record.citations ?? []).slice(0, MAX_EVIDENCE).map(citation =>
       citation.source === 'repository'
-        ? { source: 'repository', repository: citation.repository, path: citation.path, quote: shortQuote(citation.quote) }
+        ? { source: 'repository', repository: safeRecoverySummary(citation.repository), path: safeRecoverySummary(citation.path),
+          quote: shortQuote(citation.quote), ...(COMMIT.test(citation.commit ?? '') ? { commit: citation.commit } : {}) }
         : { source: 'product_picture', quote: shortQuote(citation.quote) });
     const taskTitle = episode.taskId ? titles.get(episode.taskId) : undefined;
     return [{

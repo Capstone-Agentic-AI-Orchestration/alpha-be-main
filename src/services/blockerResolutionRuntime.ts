@@ -7,9 +7,10 @@ import { OrchestrationPlanner } from './orchestrationPlanner.js';
 import { plannerIdentity, readyProjectAgents, selectPlanner } from './planningAgents.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { getGitChangedPaths, getGitFileAtCommit, getHeadCommit } from '../utils/gitUtils.js';
-import { productPictureFor, renderProductPicture, teamProductPicture } from './productPicture.js';
+import { productPictureFor, teamProductPicture } from './productPicture.js';
 import { desktopProductPictureSource } from './productPictureSource.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
+import { productRecordsOf } from './resolutionEvidence.js';
 
 function workspacesOf(snapshot: OrchestrationSnapshot) {
   const { run } = snapshot;
@@ -48,13 +49,14 @@ export function desktopBlockerResolution(input: {
     git: { head: getHeadCommit, changedPaths: getGitChangedPaths, fileAtCommit: getGitFileAtCommit },
     productPicture(snapshot) {
       const project = store.getProjects().find(item => item.id === snapshot.run.projectId);
-      if (!project) return { prompt: '', settled: '' };
+      if (!project) return { prompt: '', records: [] };
       const source = desktopProductPictureSource;
       const picture = teamProductPicture({
         project, issues: source.issues(project.id), snapshots: source.snapshots(project.id), approvedSpec: issueId => source.approvedSpec(issueId)
       });
-      // Open questions are context for the prompt, never evidence: a question cannot answer itself.
-      return { prompt: productPictureFor(project, 'team', source), settled: renderProductPicture({ ...picture, openQuestions: [] }) };
+      // Evidence is the brief and the recorded decisions only, as data: board cards, chat requests
+      // and build goals are text anyone can write, and an open question cannot answer itself.
+      return { prompt: productPictureFor(project, 'team', source), records: productRecordsOf(picture) };
     },
     async repositoryMemory(snapshot) {
       const entries = await Promise.all(workspacesOf(snapshot).filter(item => item.worktreePath).map(async item =>

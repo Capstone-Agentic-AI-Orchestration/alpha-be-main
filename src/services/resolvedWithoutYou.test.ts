@@ -38,7 +38,7 @@ describe('resolved without you', () => {
       problem: 'formatDate is defined twice, so lint fails.',
       fix: 'Import formatDate from src/lib/date.ts instead of redefining it.',
       evidence: [
-        { source: 'repository', repository: 'acme/shop-fe', path: 'src/lib/date.ts', quote: 'export function formatDate(' },
+        { source: 'repository', repository: 'acme/shop-fe', path: 'src/lib/date.ts', quote: 'export function formatDate(', commit: 'c'.repeat(40) },
         { source: 'product_picture', quote: 'Bookings show the local date.' }
       ],
       resolvedAt: '2026-11-24T10:04:00.000Z'
@@ -80,5 +80,28 @@ describe('resolved without you', () => {
     expect(items[0].problem).not.toMatch(/Users|abc123/);
     expect(items[0].fix).not.toContain('ghp_');
     expect(items[0].evidence[0].quote.length).toBeLessThanOrEqual(300);
+  });
+
+  it('cleans the fix and evidence as thoroughly as every other recovery text, keeping line breaks', () => {
+    const [item] = resolvedWithoutYou(snapshot, [episode('r1', {
+      outcome: 'retry_accepted', tier: 0,
+      proposedFix: { ...fix, instructions: [
+        'Read the file at C:\\Users\\dev\\shop\\.env and /Users/dev/notes.txt.',
+        'Connect with postgres://admin:hunter2@db.internal/shop and client_secret=abc123 or private_key: "xyz".',
+        '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----',
+        'Then run lint.\u0007'
+      ].join('\n') },
+      citations: [{ source: 'repository', repository: 'acme/shop-fe', path: 'src/a.ts', quote: 'password = "hunter2" in /home/dev/a.ts', commit: 'not-a-commit' }]
+    })]);
+
+    for (const leaked of ['Users', 'hunter2', 'abc123', 'xyz', 'MIIEow', '\u0007', '/home/dev']) {
+      expect(item.fix + item.evidence.map(entry => entry.quote).join(' ')).not.toContain(leaked);
+    }
+    expect(item.fix).toContain('[local path]');
+    expect(item.fix).toContain('postgres://[redacted]@db.internal/shop');
+    expect(item.fix).toContain('[redacted private key]');
+    expect(item.fix.split('\n')).toHaveLength(4);
+    // A commit that is not a git commit id is dropped rather than put in a link.
+    expect(item.evidence[0]).not.toHaveProperty('commit');
   });
 });

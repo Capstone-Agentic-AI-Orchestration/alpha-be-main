@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { classifyRecoveryCategory, isContentFreeDirection, isSpecialistBlocker, isToolOrEnvironmentBlocker, recoveryAvailableActions, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
+import { classifyRecoveryCategory, isContentFreeDirection, isSpecialistBlocker, isToolOrEnvironmentBlocker, recoveryAvailableActions, redactSensitiveText, safeRecoveryGuidance, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
 
 function blockedReviewSnapshot(reportOnlyRetries: number): OrchestrationSnapshot {
   return {
@@ -68,6 +68,17 @@ describe('orchestration recovery classification and report retry', () => {
     expect(safe).not.toContain('C:\\Users\\Francis');
     expect(safe).toContain('[redacted]');
     expect(safe).toContain('[local path]');
+  });
+
+  it('cleans direction and fixes with the same redaction as summaries, keeping their line breaks', () => {
+    const text = 'Open /Users/dev/app/.env\nUse postgres://u:p4ss@db/x, client_secret=abc123 and private_key: "k1"\n' +
+      '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\u0000done';
+    for (const clean of [redactSensitiveText(text), safeRecoveryGuidance(text)]) {
+      for (const leaked of ['/Users/dev', 'p4ss', 'abc123', 'k1', '\u0000']) expect(clean).not.toContain(leaked);
+      expect(clean).toContain('[redacted private key]');
+      expect(clean.split('\n')).toHaveLength(3);
+    }
+    expect(safeRecoverySummary(text)).not.toContain('\n');
   });
 
   it('offers bounded rechecks after a saved workspace-preparation failure', () => {
