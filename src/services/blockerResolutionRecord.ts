@@ -1,4 +1,6 @@
 import type { OrchestrationRecoveryEpisode } from '../models/index.js';
+import type { PlanFitCheckEntry } from './orchestrationContract.js';
+import type { PrerequisiteTaskProposal } from './blockerResolutionTurn.js';
 import type { RiskTier } from './riskTier.js';
 import type { VerifiedCitation } from './resolutionEvidence.js';
 
@@ -10,20 +12,25 @@ import type { VerifiedCitation } from './resolutionEvidence.js';
  * resolving: the Orchestrator is looking into it now.
  * retrying: its verified fix went to the same specialist (or the person applied a held-back fix).
  * retry_accepted / retry_failed: how that retry ended at the acceptance gate.
+ * prerequisite_added: the plan was missing work the task needs; it was added and the task waits for
+ *   it (saved in the same transaction as the amended plan, so the recovery closes with it).
  * escalated: it went to the person, with the reason in `escalation`.
  * interrupted: Alpha stopped mid-way (a restart); never retried automatically.
  * superseded: the person acted first.
  */
 export type ResolutionOutcome =
-  | 'resolving' | 'retrying' | 'retry_accepted' | 'retry_failed' | 'escalated' | 'interrupted' | 'superseded';
+  | 'resolving' | 'retrying' | 'retry_accepted' | 'retry_failed' | 'prerequisite_added' | 'escalated' | 'interrupted' | 'superseded';
 
 /**
  * `out_of_bounds`: the Orchestrator's retry changed files it was not cleared for (a sensitive area,
  * or beyond its expected files), so acceptance held the work for the person.
+ * For missing work (prerequisiteTasks.ts): `too_large` over the task or dependency limits,
+ * `fit_conflict` the work conflicts with the product, `plan_check` the amended plan failed the run's
+ * plan check, `build_budget` the build's token, cost or time budget is spent.
  */
 export type ResolutionEscalation =
   | 'product' | 'sensitive' | 'strict' | 'unverified' | 'outside_scope' | 'repeat' | 'budget' | 'unavailable' | 'retry_refused'
-  | 'out_of_bounds';
+  | 'out_of_bounds' | 'too_large' | 'fit_conflict' | 'plan_check' | 'build_budget';
 
 /** The acceptance check that holds an Orchestrator retry which went beyond what it was cleared to change. */
 export const ORCHESTRATOR_FIX_REVIEW_CHECK = 'orchestrator_fix_review';
@@ -39,17 +46,34 @@ export interface ProposedFix {
   expectedFiles: Array<{ repository: string; path: string }>;
 }
 
+/**
+ * Work the plan was missing, as the Orchestrator proposed it (checked, not yet re-keyed): applied
+ * by rebuilding the amendment from the current plan (prerequisiteTasks.ts), so every check runs
+ * again at that moment. `summary` is what the person and the approval list read.
+ */
+export interface ProposedPrerequisite {
+  summary: string;
+  tasks: PrerequisiteTaskProposal[];
+  fitCheck: PlanFitCheckEntry[];
+  /** The ids the tasks were saved under, once added. */
+  addedTaskIds?: string[];
+}
+
 export interface ResolutionRecord {
   outcome: ResolutionOutcome;
   fingerprint: string;
   /** True when an Orchestrator turn ran (counts toward the per-build cap). */
   turn: boolean;
+  /** What the Orchestrator answered: a fix, missing work, or a question for the person. */
+  answer?: 'fix' | 'prerequisite' | 'needs_owner';
   tier?: RiskTier;
   escalation?: ResolutionEscalation;
   diagnosis?: string;
   question?: ResolutionQuestion;
   /** A verified fix held back for the person (sensitive area, or `strict` autonomy). */
   proposedFix?: ProposedFix;
+  /** Missing work the Orchestrator added (prerequisite_added) or held back for the person. */
+  proposedPrerequisite?: ProposedPrerequisite;
   citations?: VerifiedCitation[];
   refusedCitations?: Array<{ quote: string; reason: string }>;
   classifiedPaths?: Array<{ repository: string; path: string; tier: RiskTier; categories: string[] }>;
@@ -65,7 +89,21 @@ export interface ResolutionRecord {
   finishedAt?: string;
 }
 
-const OUTCOMES: ReadonlySet<string> = new Set(['resolving', 'retrying', 'retry_accepted', 'retry_failed', 'escalated', 'interrupted', 'superseded']);
+const OUTCOMES: ReadonlySet<string> = new Set(['resolving', 'retrying', 'retry_accepted', 'retry_failed', 'prerequisite_added', 'escalated', 'interrupted', 'superseded']);
+
+/**
+ * A verified proposal the Orchestrator held back for the person, still waiting to be applied in one
+ * step (apply_proposed_fix): a fix for the same specialist, or the work the plan was missing.
+ */
+export function heldBackProposal(episode: OrchestrationRecoveryEpisode): ResolutionRecord | undefined {
+  const record = resolutionOf(episode);
+  return record?.outcome === 'escalated' && (record.proposedFix || record.proposedPrerequisite) && episode.phase !== 'repairing' ? record : undefined;
+}
+
+/** The words for what Alpha proposes or did: the fix's instructions, or the work it adds. */
+export function proposalText(record: Pick<ResolutionRecord, 'proposedFix' | 'proposedPrerequisite'>): string | undefined {
+  return record.proposedFix?.instructions ?? record.proposedPrerequisite?.summary;
+}
 
 /** The episode's resolution, or undefined when the Orchestrator never looked at it. */
 export function resolutionOf(episode: Pick<OrchestrationRecoveryEpisode, 'evidence'> | undefined): ResolutionRecord | undefined {

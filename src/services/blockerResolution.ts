@@ -1,9 +1,17 @@
-import type { OrchestrationRecoveryEpisode, ProjectOrchestrationSetting } from '../models/index.js';
+import type { Agent, OrchestrationRecoveryEpisode, ProjectOrchestrationSetting } from '../models/index.js';
 import type { SQLiteService } from './sqliteService.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import type { PlannerAgentIdentity } from './orchestrationPlanner.js';
-import type { BlockerResolution, BlockerResolutionInput, BlockerFix } from './blockerResolutionTurn.js';
+import type { BlockerResolution, BlockerResolutionInput, BlockerFix, PrerequisiteAnswer } from './blockerResolutionTurn.js';
+import type { OrchestrationPlan } from './orchestrationContract.js';
 import { runWithWorkspace } from './workspaceContext.js';
+import { DomainRefusal } from './domainRefusal.js';
+import {
+  PrerequisiteRefusal,
+  buildPrerequisiteAmendment,
+  prerequisiteSummary,
+  type PrerequisiteAmendment
+} from './prerequisiteTasks.js';
 import { sameRepository } from '../utils/repositoryName.js';
 import { scopeAllowsPath } from '../utils/pathScope.js';
 import { logError } from '../utils/logger.js';
@@ -18,7 +26,7 @@ import {
   safeRecoverySummary,
   workAttemptCount
 } from './orchestrationRecoveryPolicy.js';
-import { classifyRisk, type RepositoryPath, type RiskClassification } from './riskTier.js';
+import { classifyRisk, type RepositoryPath, type RiskClassification, type RiskTier } from './riskTier.js';
 import { isSafeRelativePath, verifyCitations, type CheckpointReader } from './resolutionEvidence.js';
 import { isTestFile, testFileWeakening } from './testWeakening.js';
 import {
@@ -26,19 +34,22 @@ import {
   fixGuidance,
   resolutionOf,
   withResolution,
+  type ProposedPrerequisite,
   type ResolutionEscalation,
   type ResolutionRecord
 } from './blockerResolutionRecord.js';
 
 /**
  * Alpha resolves a stuck task on its own when the answer is in the evidence and the area is safe,
- * and asks the person only for decisions that are theirs (BLOCKER_RESOLUTION_PLAN, phases 1-2).
+ * and asks the person only for decisions that are theirs (BLOCKER_RESOLUTION_PLAN, phases 1-3).
  *
  * The loop, run after recovery has recorded why a task stopped: gather the failure and the work,
- * ask the Orchestrator for a cited fix or a framed question, verify every citation, classify the
- * risk in code, then either send the fix to the same specialist through the normal guided retry
- * (and the unchanged acceptance gate), or leave the build waiting for the person with the
- * Orchestrator's diagnosis, its question, and any verified fix ready to apply in one step.
+ * ask the Orchestrator for a cited fix, the work the plan is missing, or a framed question; verify
+ * every citation, check any added work against the run's plan rules and classify the risk in code;
+ * then either send the fix to the same specialist through the normal guided retry (and the
+ * unchanged acceptance gate), add the missing work in one transaction so the task waits for it, or
+ * leave the build waiting for the person with the Orchestrator's diagnosis, its question, and any
+ * verified fix or missing work ready to apply in one step.
  */
 
 /** At most this many Orchestrator turns per build; after that every stuck task goes to the person. */
@@ -73,6 +84,19 @@ export interface BlockerResolutionDependencies {
    */
   productPicture(snapshot: OrchestrationSnapshot): { prompt: string; records: string[] };
   repositoryMemory?(snapshot: OrchestrationSnapshot): Promise<string | undefined>;
+  /**
+   * Add the missing work and continue the build (OrchestrationService.addPrerequisiteTasks): one
+   * transaction with the recovery record. Refuses with DomainRefusal `stale`, `plan_check` or `budget`.
+   */
+  addPrerequisites(input: {
+    workspaceId: string; runId: string; taskId: string; expectedRunRevision: number; expectedTaskRevision: number;
+    plan: OrchestrationPlan; actorId: string; reason: string;
+    recovery: { episode: OrchestrationRecoveryEpisode; expectedRevision: number; milestone?: { key: string; content: string } };
+  }): Promise<OrchestrationSnapshot>;
+  /** The specialists that may own added work for this build (ready project agents, as planning uses). */
+  eligibleAgents(snapshot: OrchestrationSnapshot): Promise<Array<Pick<Agent, 'id' | 'role'> & { name?: string }>>;
+  /** The check scripts a repository of the build defines now, for the checks added work must pass. */
+  checkScripts(snapshot: OrchestrationSnapshot, repository: string): readonly string[];
   /** Recovery bookkeeping after the retry starts (reconcile the episode, deliver chat milestones). */
   afterRetry(snapshot: OrchestrationSnapshot): Promise<void>;
   flushMilestones(): Promise<unknown>;
@@ -95,8 +119,11 @@ interface Gathered {
 }
 
 type Decision =
-  | { act: true; resolution: ResolutionRecord; guidance: string }
+  | { act: 'retry'; resolution: ResolutionRecord; guidance: string }
+  | { act: 'prerequisite'; resolution: ResolutionRecord; amendment: PrerequisiteAmendment }
   | { act: false; resolution: ResolutionRecord };
+
+type EligibleAgents = Awaited<ReturnType<BlockerResolutionDependencies['eligibleAgents']>>;
 
 function taskRepository(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord): string {
   return task.repository ?? snapshot.run.repository;
@@ -186,16 +213,32 @@ function milestoneText(taskTitle: string, record: ResolutionRecord): { key: stri
   if (record.outcome === 'interrupted') {
     return { key: 'orchestrator_interrupted', content: `Alpha was interrupted while resolving ${subject}. It will not retry on its own; the build waits for your direction.` };
   }
+  const added = record.proposedPrerequisite?.tasks.map(task => `“${task.title}”`).join(', ') ?? '';
+  if (record.outcome === 'prerequisite_added') {
+    return { key: 'orchestrator_prerequisite', content: `Alpha found that ${subject} needs work the plan did not have, and added it: ${added}.${diagnosis} ${subject} waits for it; the added work goes through the same checks and an independent review, and it is listed for you at approval.` };
+  }
   if (record.outcome !== 'escalated') return undefined;
   const options = record.question?.options.map(option => option.label).join(' / ');
   const optionList = options ? ' Options: ' + options + '.' : '';
   const openQuestion = record.question ? ' The open question: ' + record.question.text : '';
+  const why = record.reasons?.length ? ` ${record.reasons.slice(0, 3).join(' ')}` : '';
+  const missingWork = Boolean(record.proposedPrerequisite);
   const reasons: Record<ResolutionEscalation, string> = {
     product: `${subject} needs a product decision from you.${diagnosis} ${record.question?.text ?? ''}${optionList}`,
-    sensitive: `Alpha found a fix for ${subject}, but it touches a sensitive area, so it is yours to approve.${diagnosis} You can apply the proposed fix in one step or give other direction.`,
-    strict: `Alpha found a fix for ${subject} that changes earlier accepted work. This project resolves only mechanical problems on its own, so it is yours to approve.${diagnosis}`,
+    sensitive: missingWork
+      ? `${subject} needs work the plan did not have (${added}), and it touches a sensitive area, so it is yours to approve.${diagnosis} You can add it in one step or give other direction.`
+      : `Alpha found a fix for ${subject}, but it touches a sensitive area, so it is yours to approve.${diagnosis} You can apply the proposed fix in one step or give other direction.`,
+    strict: missingWork
+      ? `${subject} needs work the plan did not have (${added}). This project resolves only mechanical problems on its own, so adding it is yours to approve.${diagnosis}`
+      : `Alpha found a fix for ${subject} that changes earlier accepted work. This project resolves only mechanical problems on its own, so it is yours to approve.${diagnosis}`,
+    too_large: `${subject} needs more work than Alpha adds to a running plan on its own, so it waits for you.${diagnosis}${why}`,
+    fit_conflict: `${subject} needs work that conflicts with the product as recorded, so it is yours to decide.${diagnosis}${why}`,
+    plan_check: `The work Alpha would add for ${subject} did not pass the build's plan checks, so it did not add it.${diagnosis}${why}`,
+    build_budget: `${subject} needs work the plan did not have, but the build has spent its budget, so it waits for you.${why}`,
     unverified: `Alpha could not verify the evidence for a fix to ${subject}, so it did not act on it.${diagnosis}`,
-    outside_scope: `The fix Alpha found for ${subject} would change files outside the task's scope or repository, so it did not act on it.${diagnosis}`,
+    outside_scope: record.answer === 'prerequisite'
+      ? `${subject} needs work outside this build's repositories or the task's requirements, so Alpha did not add it.${diagnosis}${why}`
+      : `The fix Alpha found for ${subject} would change files outside the task's scope or repository, so it did not act on it.${diagnosis}`,
     repeat: `${subject} stopped on the same problem Alpha already handled in this build, so it is yours now.${openQuestion}`,
     budget: `Alpha has resolved ${MAX_RESOLUTIONS_PER_BUILD} problems in this build already, so ${subject} waits for you.`,
     unavailable: `Alpha could not look into why ${subject} stopped, so it waits for you.${diagnosis}`,
@@ -281,7 +324,8 @@ export class BlockerResolutionService {
 
     let decision: Decision;
     try {
-      const gathered = await this.gather(snapshot, stuck);
+      const agents = await this.deps.eligibleAgents(snapshot).catch(() => []);
+      const gathered = await this.gather(snapshot, stuck, agents);
       const picture = this.deps.productPicture(snapshot);
       const answer = await this.deps.planner.resolveBlocker({
         ...gathered.input,
@@ -289,7 +333,10 @@ export class BlockerResolutionService {
         productPicture: picture.prompt,
         repositoryMemory: await this.deps.repositoryMemory?.(snapshot).catch(() => undefined)
       });
-      decision = await this.decide(resolutionOf(marked)!, answer, gathered, setting, picture.records, stuck);
+      const base = { ...resolutionOf(marked)!, answer: answer.outcome };
+      decision = answer.outcome === 'prerequisite'
+        ? await this.decidePrerequisite(base, answer, gathered, setting, picture.records, { snapshot, stuck, agents })
+        : await this.decide(base, answer, gathered, setting, picture.records, stuck);
     } catch (error) {
       const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
       decision = escalation(resolutionOf(marked)!, 'unavailable', { diagnosis: detail });
@@ -297,8 +344,8 @@ export class BlockerResolutionService {
     return this.apply(snapshot, marked, stuck, decision);
   }
 
-  /** The failure, the task, its work so far and what its dependencies delivered. */
-  private async gather(snapshot: OrchestrationSnapshot, stuck: StuckTask): Promise<Gathered> {
+  /** The failure, the task, its work so far, what its dependencies delivered, and the plan around it. */
+  private async gather(snapshot: OrchestrationSnapshot, stuck: StuckTask, agents: EligibleAgents): Promise<Gathered> {
     const { run } = snapshot;
     const { task, attempt, episode } = stuck;
     const repository = taskRepository(snapshot, task);
@@ -354,8 +401,16 @@ export class BlockerResolutionService {
         goal: run.plan.goal,
         task: {
           id: task.id, title: task.title, description: task.description, kind: task.kind, repository,
-          acceptanceCriteria: task.acceptanceCriteria, requiredChecks: buildTaskRequiredChecks(snapshot, task), scope: task.scope
+          acceptanceCriteria: task.acceptanceCriteria, requiredChecks: buildTaskRequiredChecks(snapshot, task), scope: task.scope,
+          requirementIds: task.requirementIds
         },
+        plan: {
+          requirements: run.plan.requirements.filter(item => task.requirementIds.includes(item.id)),
+          exclusions: run.plan.exclusions ?? [],
+          tasks: snapshot.tasks.slice(0, 64).map(item => ({ id: item.id, title: item.title, kind: item.kind,
+            repository: taskRepository(snapshot, item), status: item.status, dependsOn: item.dependsOn }))
+        },
+        eligibleAgents: agents.map(agent => ({ id: agent.id, role: agent.role, ...(agent.name ? { name: agent.name } : {}) })),
         failure: {
           summary: safeRecoverySummary(episode.summary),
           ...(isSpecialistBlocker(reason) ? { blocker: safeRecoverySummary(reason.slice(SPECIALIST_BLOCKER_PREFIX.length)) } : {}),
@@ -372,7 +427,7 @@ export class BlockerResolutionService {
   /** Whether the Orchestrator's answer may act alone, decided in code. */
   private async decide(
     base: ResolutionRecord,
-    answer: BlockerResolution,
+    answer: Exclude<BlockerResolution, PrerequisiteAnswer>,
     gathered: Gathered,
     setting: ProjectOrchestrationSetting,
     productRecords: readonly string[],
@@ -412,9 +467,78 @@ export class BlockerResolutionService {
     if (risk.tier >= 2) return escalation(base, 'sensitive', { ...classified, proposedFix });
     if (risk.tier === 1 && setting.autonomy === 'strict') return escalation(base, 'strict', { ...classified, proposedFix });
     return {
-      act: true,
+      act: 'retry',
       resolution: { ...base, ...classified, proposedFix, priorChangedPaths: gathered.changedPaths.slice(0, 200), outcome: 'retrying' },
       guidance: safeRecoveryGuidance(fixGuidance(diagnosis, proposedFix, check.verified))
+    };
+  }
+
+  /**
+   * Whether the work the Orchestrator says the plan is missing may be added alone, decided in code:
+   * verified repository evidence, the amended plan passing the run's plan and fit checks with an
+   * independent review (buildPrerequisiteAmendment), and the risk of the added work, the stopped
+   * task's own changes and the texts. Added work is structural (tier 1) at least, so `strict` always
+   * asks; a sensitive area asks with the work ready to add in one step.
+   */
+  private async decidePrerequisite(
+    base: ResolutionRecord,
+    answer: PrerequisiteAnswer,
+    gathered: Gathered,
+    setting: ProjectOrchestrationSetting,
+    productRecords: readonly string[],
+    context: { snapshot: OrchestrationSnapshot; stuck: StuckTask; agents: EligibleAgents }
+  ): Promise<Decision> {
+    const { snapshot, stuck } = context;
+    const diagnosis = safeRecoverySummary(answer.diagnosis);
+    const check = await verifyCitations(answer.citations, { reader: gathered.reader, productRecords });
+    const evidence = {
+      diagnosis,
+      citations: check.verified,
+      ...(check.refused.length ? { refusedCitations: check.refused.map(item => ({ quote: item.citation.quote.slice(0, 200), reason: item.reason })) } : {})
+    };
+    if (check.refused.length || !check.verified.length) return escalation(base, 'unverified', evidence);
+    if (!check.verified.some(citation => citation.source === 'repository')) {
+      return escalation(base, 'unverified', { ...evidence, reasons: [PRODUCT_ONLY_EVIDENCE] });
+    }
+    let amendment: PrerequisiteAmendment;
+    try {
+      amendment = buildPrerequisiteAmendment({
+        snapshot, blockedTaskId: stuck.task.id, proposal: answer, agents: context.agents,
+        scripts: repository => this.deps.checkScripts(snapshot, repository)
+      });
+    } catch (error) {
+      if (!(error instanceof PrerequisiteRefusal)) throw error;
+      return escalation(base, error.reason, { ...evidence, reasons: [safeRecoverySummary(error.message)] });
+    }
+    const added = amendment.plan.tasks.filter(task => amendment.prerequisiteIds.includes(task.id));
+    const scopePaths = added.flatMap(task => task.scope.includePaths.map(pattern => ({ repository: task.repository!, path: pattern })));
+    const acceptedInScope = gathered.acceptedPaths.filter(file => added.some(task => sameRepository(task.repository!, file.repository) &&
+      scopeAllowsPath(task.scope, file.path)));
+    const risk = classifyRisk({
+      paths: [...gathered.changedPaths.map(filePath => ({ repository: gathered.repository, path: filePath })), ...scopePaths, ...acceptedInScope],
+      acceptedPaths: gathered.acceptedPaths,
+      texts: [gathered.input.failure.summary, gathered.input.failure.blocker ?? '', ...gathered.input.failure.findings, answer.diagnosis, answer.whyMissing,
+        ...answer.tasks.flatMap(task => [task.title, task.description, ...task.acceptanceCriteria])],
+      weakenedTests: gathered.weakenedTests,
+      projectPatterns: setting.sensitivePaths
+    });
+    // Adding work to the plan is structural whatever the paths say.
+    const tier = Math.max(1, risk.tier) as RiskTier;
+    const proposedPrerequisite: ProposedPrerequisite = {
+      summary: safeRecoveryGuidance(prerequisiteSummary(stuck.task.title, added.map(task => ({ ...task, repository: task.repository! })))),
+      tasks: answer.tasks, fitCheck: answer.fitCheck
+    };
+    const classified = {
+      ...evidence, tier, classifiedPaths: risk.classifiedPaths, proposedPrerequisite,
+      reasons: [...risk.reasons.map(reason => reason.detail), 'It adds work the plan did not have.'].slice(0, 20)
+    };
+    if (tier >= 2) return escalation(base, 'sensitive', classified);
+    if (setting.autonomy === 'strict') return escalation(base, 'strict', classified);
+    return {
+      act: 'prerequisite',
+      resolution: { ...base, ...classified, outcome: 'prerequisite_added',
+        proposedPrerequisite: { ...proposedPrerequisite, addedTaskIds: [...amendment.prerequisiteIds, ...amendment.reviewIds] } },
+      amendment
     };
   }
 
@@ -438,6 +562,7 @@ export class BlockerResolutionService {
     }
     const finishedAt = this.now();
     if (!decision.act) return this.finish(latest, { ...decision.resolution, finishedAt }, stuck.task.title);
+    if (decision.act === 'prerequisite') return this.addPrerequisites(snapshot, marked, latest, stuck, decision, finishedAt);
     const started = this.finish(latest, { ...decision.resolution, finishedAt }, stuck.task.title, {
       initiatedBy: 'orchestrator', guidance: decision.guidance, phase: 'repairing'
     });
@@ -455,6 +580,55 @@ export class BlockerResolutionService {
       const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
       return this.finish(current, { ...decision.resolution, outcome: 'escalated', escalation: 'retry_refused', diagnosis: detail, finishedAt },
         stuck.task.title, { phase: 'waiting_for_user' });
+    }
+  }
+
+  /**
+   * Add the missing work. The amended plan and the closed recovery are saved in one transaction, so
+   * a restart leaves either both or neither. A person acting first (`stale`) wins; a plan check or
+   * budget refusal at that moment goes to the person.
+   */
+  private async addPrerequisites(
+    snapshot: OrchestrationSnapshot,
+    marked: OrchestrationRecoveryEpisode,
+    latest: OrchestrationRecoveryEpisode,
+    stuck: StuckTask,
+    decision: Extract<Decision, { act: 'prerequisite' }>,
+    finishedAt: string
+  ): Promise<ResolutionRecord | undefined> {
+    const { store } = this.deps;
+    const record: ResolutionRecord = { ...decision.resolution, finishedAt };
+    try {
+      const updated = await this.deps.addPrerequisites({
+        workspaceId: snapshot.run.workspaceId, runId: snapshot.run.id, taskId: stuck.task.id,
+        expectedRunRevision: snapshot.run.revision, expectedTaskRevision: stuck.task.revision,
+        plan: decision.amendment.plan, actorId: 'orchestrator',
+        reason: `“${stuck.task.title}” needs work the plan did not have.`,
+        recovery: {
+          episode: withResolution({ ...latest, phase: 'resolved', initiatedBy: 'orchestrator', updatedAt: finishedAt, resolvedAt: finishedAt }, record),
+          expectedRevision: latest.revision,
+          milestone: milestoneText(stuck.task.title, record)
+        }
+      });
+      void this.deps.flushMilestones().catch(error => logError('Could not deliver the Orchestrator\'s build update:', error));
+      await this.deps.afterRetry(store.getOrchestrationSnapshot(snapshot.run.id) ?? updated);
+      return record;
+    } catch (error) {
+      const current = store.getOpenOrchestrationRecoveryEpisode(snapshot.run.id);
+      const code = error instanceof DomainRefusal ? error.code : undefined;
+      if (code === 'stale' || !current || current.id !== latest.id || current.revision !== latest.revision) {
+        this.supersede(current, marked);
+        return undefined;
+      }
+      const refusals: Record<string, ResolutionEscalation> = { budget: 'build_budget', plan_check: 'plan_check' };
+      const reason = refusals[code ?? ''] ?? 'retry_refused';
+      const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
+      // Spent budget can be raised and the work added then; other refusals would refuse again.
+      const { proposedPrerequisite, ...rest } = decision.resolution;
+      const heldBack = reason === 'build_budget' && proposedPrerequisite
+        ? { proposedPrerequisite: { summary: proposedPrerequisite.summary, tasks: proposedPrerequisite.tasks, fitCheck: proposedPrerequisite.fitCheck } } : {};
+      return this.finish(current, { ...rest, ...heldBack,
+        outcome: 'escalated', escalation: reason, reasons: [detail], finishedAt }, stuck.task.title);
     }
   }
 

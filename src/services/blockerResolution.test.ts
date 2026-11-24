@@ -142,6 +142,10 @@ function harness(initial: OrchestrationSnapshot, answers: string[], setting: Par
     store,
     planner: new OrchestrationPlanner(turn as never),
     plannerFor: plannerFor as never,
+    // Missing work is covered with the real store in blockerResolutionPrerequisite.test.ts.
+    addPrerequisites: async () => { throw new Error('No prerequisite expected in this harness.'); },
+    eligibleAgents: async () => [],
+    checkScripts: () => ['test', 'lint'],
     async retryTask(input) {
       retries.push(input);
       const current = state.snapshot;

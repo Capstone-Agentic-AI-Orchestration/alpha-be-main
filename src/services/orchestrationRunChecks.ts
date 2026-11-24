@@ -19,7 +19,9 @@ export type RunPlanCheck =
   /** A blocked build's replacement audit plan; its baseline audits cover every codebase. */
   | 'audit_replan'
   /** Correction and validation tasks added after review; built by code, not the model. */
-  | 'review_correction';
+  | 'review_correction'
+  /** A blocked build's plan after the Orchestrator added the tasks it was missing (prerequisiteTasks.ts). */
+  | 'prerequisite';
 
 type Agents = readonly Pick<Agent, 'id' | 'role'>[];
 
@@ -35,6 +37,9 @@ export function checkRunPlan(run: OrchestrationRunRecord, plan: OrchestrationPla
       return validateOrchestrationPlan(plan, agents, { initialPlan: true, repositories: planRepositoryCoverage(run).repositories });
     case 'review_correction':
       return validateOrchestrationPlan(plan, agents);
+    case 'prerequisite':
+      // As a milestone expansion: every codebase rule, the whole graph, review independence.
+      return validateOrchestrationPlan(plan, agents, planRepositoryCoverage(run));
   }
 }
 

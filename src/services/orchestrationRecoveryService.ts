@@ -33,7 +33,10 @@ import {
   workAttemptCount,
   REPORT_FORMAT_CHECKS
 } from './orchestrationRecoveryPolicy.js';
-import { fixGuidance, resolutionOf, withResolution, type ResolutionRecord } from './blockerResolutionRecord.js';
+import { fixGuidance, heldBackProposal, proposalText, resolutionOf, withResolution, type ResolutionRecord } from './blockerResolutionRecord.js';
+import { PrerequisiteRefusal, buildPrerequisiteAmendment } from './prerequisiteTasks.js';
+import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
+import { definedCheckScripts } from './repositoryExecution.js';
 
 export interface OrchestrationRecoveryState {
   runId: string;
@@ -129,11 +132,6 @@ function getObservedChecks(attempt?: OrchestrationAttemptRecord): Array<{ name: 
   });
 }
 
-/** A verified fix the Orchestrator held back for the person, still waiting to be applied. */
-function heldBackFix(episode: OrchestrationRecoveryEpisode): ResolutionRecord | undefined {
-  const record = resolutionOf(episode);
-  return record?.outcome === 'escalated' && record.proposedFix && episode.phase !== 'repairing' ? record : undefined;
-}
 
 /**
  * The Orchestrator's record as the team sees it. Cleaned again on the way out, so a record saved
@@ -152,7 +150,7 @@ function resolutionProjection(record: ResolutionRecord): OrchestrationRecoveryPr
     ...(record.escalation ? { escalation: record.escalation } : {}),
     ...(record.diagnosis ? { diagnosis: safeRecoverySummary(record.diagnosis) } : {}),
     ...(question ? { question } : {}),
-    ...(record.proposedFix ? { proposedFix: safeRecoveryGuidance(record.proposedFix.instructions) } : {}),
+    ...(proposalText(record) ? { proposedFix: safeRecoveryGuidance(proposalText(record)!) } : {}),
     ...(record.citations?.length ? { evidence: record.citations.map(citation => citation.source === 'repository'
       ? safeRecoverySummary(`${citation.repository}:${citation.path}`) : 'Product record') } : {})
   };
@@ -200,7 +198,7 @@ function publicProjection(
     finalValidationCorrectionReady: episode.evidence.finalValidationCorrectionReady === true,
     finalValidationCorrectionReason: typeof episode.evidence.finalValidationCorrectionError === 'string'
       ? episode.evidence.finalValidationCorrectionError : undefined,
-    proposedFixReady: Boolean(heldBackFix(episode))
+    proposedFixReady: Boolean(heldBackProposal(episode))
   });
   return {
     id: episode.id,
@@ -547,7 +545,9 @@ export class OrchestrationRecoveryService {
     const resolution = resolutionOf(episode);
     if (resolution?.diagnosis && ['escalated', 'retry_failed'].includes(resolution.outcome)) {
       const question = resolution.question ? ` ${resolution.question.text}` : '';
-      const fix = resolution.proposedFix ? ' Alpha has a verified fix ready for you to apply.' : '';
+      let fix = '';
+      if (resolution.proposedFix) fix = ' Alpha has a verified fix ready for you to apply.';
+      else if (resolution.proposedPrerequisite) fix = ' Alpha has the missing work ready for you to add.';
       return `The Orchestrator looked into this: ${resolution.diagnosis}${question}${fix}`.trim();
     }
     return `${CATEGORY_EXPLANATIONS[episode.category]} ${safeRecoverySummary(episode.summary)}`.trim();
@@ -659,8 +659,11 @@ export class OrchestrationRecoveryService {
           return { accepted: true, actionId: created.action.id, message };
         }
 
-        const heldBack = input.action === 'apply_proposed_fix' ? heldBackFix(episode) : undefined;
+        const heldBack = input.action === 'apply_proposed_fix' ? heldBackProposal(episode) : undefined;
         if (input.action === 'apply_proposed_fix' && !heldBack) throw new Error('There is no proposed fix to apply. Refresh the build.');
+        if (heldBack?.proposedPrerequisite) {
+          return await this.addHeldBackPrerequisite({ input, snapshot, episode, heldBack, actionId: created.action.id });
+        }
         const retryDirection = heldBack ? safeRecoveryGuidance(fixGuidance(heldBack.diagnosis, heldBack.proposedFix!, heldBack.citations)) : guidance;
         const resolutionAfterAction = resolutionAfterPersonAction(episode, heldBack, input.actorId);
         const actedEpisode = resolutionAfterAction ? withResolution(episode, resolutionAfterAction) : episode;
@@ -830,6 +833,61 @@ export class OrchestrationRecoveryService {
         throw error;
       }
     });
+  }
+
+  /**
+   * The person adds the missing work the Orchestrator held back. The amendment is rebuilt from the
+   * plan as it is now, so every check runs again at this moment, and it is saved with the closed
+   * recovery in one transaction. Failures reach the caller, which records the action as failed.
+   */
+  private async addHeldBackPrerequisite(args: {
+    input: OrchestrationRecoveryActionInput; snapshot: OrchestrationSnapshot; episode: OrchestrationRecoveryEpisode;
+    heldBack: ResolutionRecord; actionId: string;
+  }): Promise<OrchestrationRecoveryActionResult> {
+    const { input, snapshot, episode, heldBack } = args;
+    const task = snapshot.tasks.find(item => item.id === episode.taskId);
+    if (!task || !heldBack.proposedPrerequisite) throw new Error('This recovery has no stopped task to add work for. Refresh the build.');
+    let amendment;
+    try {
+      amendment = buildPrerequisiteAmendment({
+        snapshot, blockedTaskId: task.id, proposal: heldBack.proposedPrerequisite,
+        agents: this.store.getAgents().filter(agent => !agent.isArchived),
+        scripts: repository => {
+          const workspace = repositoryWorkspaceForRun(snapshot.run, repository);
+          return workspace?.worktreePath ? definedCheckScripts(workspace.worktreePath) : [];
+        }
+      });
+    } catch (error) {
+      if (error instanceof PrerequisiteRefusal) throw new Error(`The missing work can no longer be added: ${error.message}`);
+      throw error;
+    }
+    const now = new Date().toISOString();
+    const record: ResolutionRecord = {
+      ...heldBack, outcome: 'prerequisite_added', appliedBy: input.actorId, finishedAt: now,
+      proposedPrerequisite: { ...heldBack.proposedPrerequisite, addedTaskIds: [...amendment.prerequisiteIds, ...amendment.reviewIds] }
+    };
+    const titles = heldBack.proposedPrerequisite.tasks.map(item => `“${item.title}”`).join(', ');
+    const { orchestrationService } = await import('./orchestrationRuntime.js');
+    const updated = await orchestrationService.addPrerequisiteTasks({
+      workspaceId: input.workspaceId, runId: input.runId, taskId: task.id,
+      expectedRunRevision: input.expectedRunRevision, expectedTaskRevision: task.revision,
+      plan: amendment.plan, actorId: input.actorId, reason: `The person added the work “${task.title}” needs.`,
+      recovery: {
+        episode: withResolution({ ...episode, phase: 'resolved', updatedAt: now, resolvedAt: now }, record),
+        expectedRevision: episode.revision,
+        milestone: { key: 'proposed_prerequisite_added', content: `You added the work “${task.title}” needs: ${titles}. “${task.title}” waits for it; the added work goes through the same checks and an independent review.` }
+      }
+    });
+    const refreshed = this.store.getOrchestrationSnapshot(input.runId) ?? updated;
+    this.syncSnapshot(refreshed, input.actorId);
+    await this.flushPendingMilestones();
+    const message = `Alpha added the missing work. “${task.title}” waits for it, and the build continues.`;
+    const result = { message, runStatus: refreshed.run.status, currentTaskId: refreshed.run.currentTaskId };
+    this.store.finishOrchestrationRecoveryAction({
+      recoveryId: episode.id, idempotencyKey: input.idempotencyKey, actorId: input.actorId, status: 'completed', result
+    });
+    const state = await this.getState({ workspaceId: input.workspaceId, runId: input.runId, canControl: true });
+    return { accepted: true, actionId: args.actionId, runStatus: refreshed.run.status, currentTaskId: refreshed.run.currentTaskId, message, state };
   }
 
   async flushPendingMilestones(): Promise<number> {

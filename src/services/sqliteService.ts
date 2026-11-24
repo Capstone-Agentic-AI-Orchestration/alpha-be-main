@@ -59,9 +59,12 @@ import { currentWorkspaceId, DEFAULT_WORKSPACE_ID, runWithWorkspace } from './wo
 import { analyticsFrom } from './runAnalytics.js';
 import { BUILTIN_SKILLS } from './builtinSkills.js';
 import { normalizeBuildSteps } from '../store/buildSteps.js';
-import { MAX_PLAN_TASKS, parseOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
+import { MAX_PLAN_TASKS, parseOrchestrationPlan, type OrchestrationPlan, type OrchestrationTaskDefinition, type PlanFitCheckEntry } from './orchestrationContract.js';
 import { checkMilestoneStage, checkRunPlan } from './orchestrationRunChecks.js';
 import { DomainRefusal } from './domainRefusal.js';
+import { prerequisiteAmendmentProblems } from './prerequisiteTasks.js';
+import { appendFitCheck } from './planFitCheck.js';
+import { milestoneDecisions } from './milestoneDecisions.js';
 import type { PersistedReviewFinding } from './orchestrationReviewWorkflow.js';
 import { assertPersonComment } from './taskComments.js';
 import {
@@ -3667,10 +3670,16 @@ export class SQLiteService {
     return this.getOrchestrationSnapshot(input.runId)!;
   }
 
+  /**
+   * Add the next milestone's tasks. Its plan's decisions and fit check are saved with them (named by
+   * the milestone, see milestoneDecisions), so the plan document, the product picture and the chat
+   * show what the Orchestrator decided for a milestone nobody approves.
+   */
   appendOrchestrationMilestone(input: {
     runId: string; expectedRevision: number; expectedPlanVersion: number;
     milestoneId: string; tasks: OrchestrationTaskDefinition[];
     checkpoints: Array<{ repository: string; commit: string }>; actorId: string;
+    decisions?: OrchestrationPlan['decisions']; fitCheck?: PlanFitCheckEntry[];
   }): OrchestrationSnapshot {
     const workspaceId = this.workspaceId();
     const now = new Date().toISOString();
@@ -3686,7 +3695,12 @@ export class SQLiteService {
         tasks: input.tasks.map(({ milestoneId: _milestoneId, ...task }) => task) });
       const stageIssues = checkMilestoneStage(stage, next.repositories, this.getAgents().filter(agent => !agent.isArchived));
       if (stageIssues.length) throw new DomainRefusal(`Invalid milestone tasks: ${stageIssues.map(issue => issue.detail).join(' ')}`, 'plan_check', [], stageIssues);
-      const plan = parseOrchestrationPlan({ ...snapshot.run.plan, tasks: [...snapshot.run.plan.tasks, ...input.tasks] });
+      const addedIds = new Set(input.tasks.map(task => task.id));
+      const decisions = milestoneDecisions(snapshot.run.plan.decisions ?? [], next.title, input.decisions ?? []);
+      const fitCheck = (input.fitCheck ?? []).filter(entry => entry.subjectType === 'card' || addedIds.has(entry.subject));
+      const plan = parseOrchestrationPlan({ ...snapshot.run.plan, tasks: [...snapshot.run.plan.tasks, ...input.tasks],
+        ...(decisions.saved.length ? { decisions: decisions.saved } : {}),
+        ...(fitCheck.length ? { fitCheck: appendFitCheck(snapshot.run.plan.fitCheck ?? [], fitCheck) } : {}) });
       const issues = checkRunPlan(snapshot.run, plan, 'milestone', this.getAgents().filter(agent => !agent.isArchived));
       if (issues.length) throw new DomainRefusal(`Invalid milestone plan: ${issues.map(issue => issue.detail).join(' ')}`, 'plan_check', [], issues);
       const version = snapshot.run.planVersion + 1;
@@ -3700,7 +3714,63 @@ export class SQLiteService {
         task.dependsOn.length ? 'pending' : 'ready', 0, 0, now);
       this.db.prepare('UPDATE orchestration_runs SET plan_version = ?, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ?')
         .run(version, now, workspaceId, input.runId);
-      this.appendOrchestrationEvent(input.runId, 'plan_amended', { planVersion: version, milestoneId: next.id, addedTaskIds: input.tasks.map(task => task.id), checkpoints: input.checkpoints }, input.actorId, now);
+      this.appendOrchestrationEvent(input.runId, 'plan_amended', { planVersion: version, milestoneId: next.id, addedTaskIds: input.tasks.map(task => task.id), checkpoints: input.checkpoints,
+        ...(decisions.added.length ? { decisions: decisions.added } : {}),
+        ...(decisions.unsaved.length ? { unsavedDecisions: decisions.unsaved } : {}) }, input.actorId, now);
+    })();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  /**
+   * A blocked build's plan with the work it was missing (prerequisiteTasks.ts), all in one
+   * transaction: the new plan version, the added tasks, the stopped task waiting for them as pending,
+   * the build executing again, a `plan_amended` event, and the recovery record when one is given (so
+   * a restart never leaves a plan amended without its record, or the reverse). Refused, with nothing
+   * saved, when the build, the task or the recovery changed since they were read (`stale`: the person
+   * acted first) or the amended plan fails its checks (`plan_check`).
+   */
+  amendBlockedRunWithPrerequisites(input: {
+    runId: string; expectedRunRevision: number; expectedPlanVersion: number;
+    taskId: string; expectedTaskRevision: number;
+    plan: OrchestrationPlan; actorId: string; reason: string;
+    recovery?: { episode: OrchestrationRecoveryEpisode; expectedRevision: number; milestone?: { key: string; content: string } };
+    now?: string;
+  }): OrchestrationSnapshot {
+    const workspaceId = this.workspaceId();
+    const now = input.now ?? new Date().toISOString();
+    const stale = () => new DomainRefusal('The build changed before the missing work could be added. Refresh it before continuing.', 'stale');
+    this.db.transaction(() => {
+      const snapshot = this.getOrchestrationSnapshot(input.runId);
+      const task = snapshot?.tasks.find(item => item.id === input.taskId);
+      if (!snapshot || snapshot.run.status !== 'blocked' || snapshot.run.currentTaskId || snapshot.run.pauseRequestedAt ||
+          snapshot.run.revision !== input.expectedRunRevision || snapshot.run.planVersion !== input.expectedPlanVersion ||
+          !task || !['failed', 'blocked'].includes(task.status) || task.revision !== input.expectedTaskRevision ||
+          snapshot.attempts.some(attempt => ['starting', 'running', 'submitted'].includes(attempt.status))) throw stale();
+      const plan = parseOrchestrationPlan(input.plan);
+      const problems = prerequisiteAmendmentProblems(snapshot, plan, input.taskId, this.getAgents().filter(agent => !agent.isArchived));
+      if (problems.length) throw new DomainRefusal(`The missing work cannot be added: ${problems.join(' ')}`, 'plan_check');
+      const added = plan.tasks.filter(definition => !snapshot.run.plan.tasks.some(old => old.id === definition.id));
+      const accepted = new Set(snapshot.tasks.filter(item => item.status === 'accepted').map(item => item.id));
+      const waiting = plan.tasks.find(definition => definition.id === input.taskId)!;
+      const version = snapshot.run.planVersion + 1;
+      this.db.prepare('INSERT INTO orchestration_plans (workspace_id, run_id, version, schema_version, plan_json, source, activated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(workspaceId, input.runId, version, plan.schemaVersion, JSON.stringify(plan), 'recovery', now, now);
+      this.db.prepare('UPDATE orchestration_tasks SET plan_version = ? WHERE workspace_id = ? AND run_id = ? AND plan_version = ?')
+        .run(version, workspaceId, input.runId, input.expectedPlanVersion);
+      const held = this.db.prepare("UPDATE orchestration_tasks SET depends_on_json = ?, status = 'pending', revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND run_id = ? AND task_id = ? AND plan_version = ? AND revision = ?")
+        .run(JSON.stringify(waiting.dependsOn), now, workspaceId, input.runId, input.taskId, version, input.expectedTaskRevision);
+      if (held.changes !== 1) throw stale();
+      const insert = this.db.prepare('INSERT INTO orchestration_tasks (workspace_id, run_id, plan_version, task_id, title, description, kind, owner_agent_id, depends_on_json, requirement_ids_json, acceptance_json, checks_json, scope_json, required, status, revision, attempt_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const definition of added) insert.run(workspaceId, input.runId, version, definition.id, definition.title, definition.description, definition.kind, definition.ownerAgentId,
+        JSON.stringify(definition.dependsOn), JSON.stringify(definition.requirementIds), JSON.stringify(definition.acceptanceCriteria), JSON.stringify(definition.requiredChecks),
+        JSON.stringify(definition.scope), definition.required ? 1 : 0, definition.dependsOn.every(id => accepted.has(id)) ? 'ready' : 'pending', 0, 0, now);
+      const resumed = this.db.prepare("UPDATE orchestration_runs SET plan_version = ?, status = 'executing', current_task_id = NULL, stopped_reason = NULL, revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ? AND status = 'blocked' AND revision = ? AND plan_version = ? AND current_task_id IS NULL")
+        .run(version, now, workspaceId, input.runId, input.expectedRunRevision, input.expectedPlanVersion);
+      if (resumed.changes !== 1) throw stale();
+      this.appendOrchestrationEvent(input.runId, 'plan_amended', {
+        planVersion: version, reason: input.reason, addedTaskIds: added.map(definition => definition.id), waitingTaskId: input.taskId
+      }, input.actorId, now);
+      if (input.recovery) this.saveOrchestrationRecoveryEpisode({ ...input.recovery, actorId: input.actorId, now });
     })();
     return this.getOrchestrationSnapshot(input.runId)!;
   }

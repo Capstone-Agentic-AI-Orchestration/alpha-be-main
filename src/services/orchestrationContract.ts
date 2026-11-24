@@ -19,6 +19,8 @@ export const MAX_TASK_ACCEPTANCE_CRITERIA = 12;
 export const MAX_PROJECT_CONTEXT_CHARS = 8_000;
 /** How many decisions one plan may show the person. */
 export const MAX_PLAN_DECISIONS = 12;
+/** Scope patterns that name the whole repository; a code task needs a narrower one. */
+export const UNIVERSAL_SCOPE_PATTERNS: ReadonlySet<string> = new Set(['*', '**', '**/*', '*.*']);
 
 export const orchestrationTaskKindSchema = z.enum([
   'requirements',
