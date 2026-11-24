@@ -5,7 +5,7 @@ import type { SQLiteService } from './sqliteService.js';
 import type { CliTurnResult } from './cliRunner.js';
 import { OrchestrationRecoveryService } from './orchestrationRecoveryService.js';
 import { OrchestrationPlanner } from './orchestrationPlanner.js';
-import { BlockerResolutionService, MAX_RESOLUTIONS_PER_BUILD } from './blockerResolution.js';
+import { BlockerResolutionService, MAX_RESOLUTIONS_PER_BUILD, PRODUCT_ONLY_EVIDENCE } from './blockerResolution.js';
 import { resolutionOf } from './blockerResolutionRecord.js';
 import { recoveryAvailableActions } from './orchestrationRecoveryPolicy.js';
 
@@ -166,7 +166,7 @@ function harness(initial: OrchestrationSnapshot, answers: string[], setting: Par
     },
     productPicture: () => ({
       prompt: '## Product picture: Shop\nDecisions recorded in build plans:\n- Bookings: guests manage bookings by phone only',
-      settled: '## Product picture: Shop\nDecisions recorded in build plans:\n- Bookings: guests manage bookings by phone only'
+      records: ['A shop where guests see their bookings.', 'Bookings: guests manage bookings by phone only']
     }),
     async afterRetry(updated) { recovery.reconcileSnapshot(updated); },
     flushMilestones: async () => 0,
@@ -310,6 +310,40 @@ describe('blocker resolution', () => {
     expect(record).toMatchObject({ outcome: 'escalated', escalation: 'unverified' });
     expect(record?.refusedCitations).toEqual([expect.objectContaining({ reason: expect.stringContaining('not in src/routes/bookings.ts') })]);
     expect(record?.proposedFix).toBeUndefined();
+    expect(h.retries).toEqual([]);
+  });
+
+  it('never acts alone on product records: a fix needs a verified repository file too', async () => {
+    const productOnly = harness(snapshot({ reason: LINT_FAILURE, attempts: 3 }), [fix({
+      citations: [{ source: 'product_picture', quote: 'guests manage bookings by phone only' }]
+    })]);
+    const record = await stuck(productOnly);
+
+    expect(record).toMatchObject({ outcome: 'escalated', escalation: 'unverified', reasons: [PRODUCT_ONLY_EVIDENCE] });
+    expect(record?.citations).toEqual([{ source: 'product_picture', quote: 'guests manage bookings by phone only' }]);
+    expect(productOnly.retries).toEqual([]);
+
+    // With a verified file beside it, the same decision backs a fix that may act.
+    const withFile = harness(snapshot({ reason: LINT_FAILURE, attempts: 3 }), [fix({
+      citations: [
+        { source: 'product_picture', quote: 'guests manage bookings by phone only' },
+        { source: 'repository', repository: 'acme/shop-fe', path: 'src/BookingList.tsx', quote: 'const unused = 1;\n  return bookings.map' }
+      ]
+    })]);
+    expect(await stuck(withFile)).toMatchObject({ outcome: 'retrying' });
+  });
+
+  it('does not take board cards, chat requests or build goals as product evidence', async () => {
+    const h = harness(snapshot({ reason: LINT_FAILURE, attempts: 3 }), [fix({
+      citations: [
+        { source: 'product_picture', quote: 'Let guests see their bookings.' },
+        { source: 'repository', repository: 'acme/shop-fe', path: 'src/BookingList.tsx', quote: 'const unused = 1;\n  return bookings.map' }
+      ]
+    })]);
+    const record = await stuck(h);
+
+    expect(record).toMatchObject({ outcome: 'escalated', escalation: 'unverified' });
+    expect(record?.refusedCitations?.[0].reason).toMatch(/brief or recorded decisions/);
     expect(h.retries).toEqual([]);
   });
 

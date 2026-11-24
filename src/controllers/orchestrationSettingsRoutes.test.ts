@@ -93,14 +93,22 @@ describe('project autonomy setting', () => {
     expect((await call(app, 'PUT', '/api/projects/p1/orchestration-settings', { enabled: false })).status).toBe(400);
   });
 
-  it('never shows or changes autonomy for a client', async () => {
-    const app = await startApi();
+  it('tells a client nothing about orchestration and lets a client change nothing', async () => {
     role = 'client';
+    const app = await startApi();
+    // Someone on the team changed the setting, so there is a who and when to leak.
+    const { sqliteService: store } = await import('../services/sqliteService.js');
+    const { runWithWorkspace: inWorkspace } = await import('../services/workspaceContext.js');
+    inWorkspace('ws-default', () => store.setProjectOrchestrationSettings('p1', { autonomy: 'standard' }, 'Dev1'));
     const read = await call(app, 'GET', '/api/projects/p1/orchestration-settings');
-    expect(read.body?.autonomy).toBeUndefined();
-    expect(read.body?.sensitivePaths).toBeUndefined();
-    const write = await call(app, 'PUT', '/api/projects/p1/orchestration-settings', { autonomy: 'off' });
-    expect(write.status).toBeGreaterThanOrEqual(403);
+    expect(read.status).toBe(403);
+    for (const field of ['enabled', 'available', 'autonomy', 'sensitivePaths', 'updatedAt', 'updatedBy', 'reason']) {
+      expect(read.body).not.toHaveProperty(field);
+    }
+    expect(JSON.stringify(read.body)).not.toMatch(/orchestrat/i);
+    for (const body of [{ autonomy: 'off' }, { enabled: true }]) {
+      expect((await call(app, 'PUT', '/api/projects/p1/orchestration-settings', body)).status).toBe(403);
+    }
     const { sqliteService } = await import('../services/sqliteService.js');
     const { runWithWorkspace } = await import('../services/workspaceContext.js');
     expect(runWithWorkspace('ws-default', () => sqliteService.getProjectOrchestrationSetting('p1').autonomy)).toBe('standard');

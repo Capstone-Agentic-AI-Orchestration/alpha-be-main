@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isSafeRelativePath, normalizeQuote, verifyCitations, type CheckpointReader } from './resolutionEvidence.js';
+import { isSafeRelativePath, normalizeQuote, productRecordsOf, verifyCitations, type CheckpointReader } from './resolutionEvidence.js';
 
 const files: Record<string, Record<string, string>> = {
   'acme/shop-be': {
@@ -45,12 +45,26 @@ describe('resolution evidence', () => {
     ]);
   });
 
-  it('verifies a recorded product decision against the settled product picture only', async () => {
-    const picture = 'Decisions recorded in build plans:\n- Project A: keep it informational, no booking form';
-    const ok = await verifyCitations([{ source: 'product_picture', quote: 'keep it informational, no booking form' }], { reader, productPicture: picture });
+  it('verifies a recorded product decision against the product records only', async () => {
+    const records = ['A shop for Project A and Project B.', 'Project A: keep it informational, no booking form'];
+    const ok = await verifyCitations([{ source: 'product_picture', quote: 'keep it informational, no booking form' }], { reader, productRecords: records });
     expect(ok.verified).toHaveLength(1);
-    const invented = await verifyCitations([{ source: 'product_picture', quote: 'Project A takes bookings online' }], { reader, productPicture: picture });
-    expect(invented.refused[0].reason).toMatch(/not in the project's recorded product picture/);
+    const invented = await verifyCitations([{ source: 'product_picture', quote: 'Project A takes bookings online' }], { reader, productRecords: records });
+    expect(invented.refused[0].reason).toMatch(/not in the project's brief or recorded decisions/);
+  });
+
+  it('does not let a quote span two records, or quote anything when there are none', async () => {
+    const records = ['A shop for Project A and Project B.', 'Project A: keep it informational, no booking form'];
+    const spanning = await verifyCitations([{ source: 'product_picture', quote: 'Project B. Project A: keep it' }], { reader, productRecords: records });
+    expect(spanning.verified).toEqual([]);
+    const none = await verifyCitations([{ source: 'product_picture', quote: 'Built by Alpha from this project' }], { reader });
+    expect(none.verified).toEqual([]);
+  });
+
+  it('reads the product records from the brief and decisions fields only', () => {
+    expect(productRecordsOf({ brief: '  A shop for guests.  ', decisions: ['Bookings: phone only', ' '] }))
+      .toEqual(['A shop for guests.', 'Bookings: phone only']);
+    expect(productRecordsOf({ decisions: [] })).toEqual([]);
   });
 
   it('normalizes quotes and recognises safe paths', () => {

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { sameRepository } from '../utils/repositoryName.js';
+import type { TeamProductPicture } from './productPicture.js';
 
 /**
  * No fact without verified evidence (BLOCKER_RESOLUTION_PLAN principle 2). Every claim in an
@@ -36,6 +37,14 @@ export interface CheckpointReader {
   checkpoint(repository: string): Promise<{ repository: string; dir: string; commit: string } | undefined>;
   /** File content at a commit; undefined when it is too large to read, throws when it is absent. */
   read(dir: string, commit: string, filePath: string, maxBytes: number): Promise<string | undefined>;
+}
+
+/**
+ * What a product citation may quote, read from the team product picture's fields (never its
+ * rendered text): the project brief and each recorded decision, one entry each.
+ */
+export function productRecordsOf(picture: Pick<TeamProductPicture, 'brief' | 'decisions'>): string[] {
+  return [picture.brief ?? '', ...picture.decisions].map(record => record.trim()).filter(Boolean);
 }
 
 /** Whitespace-insensitive, so a quote wrapped or re-indented by the model still matches. */
@@ -78,23 +87,27 @@ async function verifyRepositoryCitation(
 }
 
 /**
- * Checks every citation. `productPicture` is the team picture's settled part (decisions, brief,
- * planned and finished work), never its open questions: a question cannot be its own answer.
+ * Checks every citation. `productRecords` are the project's own product records, one entry each:
+ * its brief and the decisions recorded in plans. Never the rendered product picture, whose board
+ * cards, chat requests and build goals anyone on the board can write, and never its open
+ * questions: a question cannot be its own answer. A quote must sit inside one record.
  */
 export async function verifyCitations(
   citations: readonly Citation[],
-  input: { reader: CheckpointReader; productPicture?: string }
+  input: { reader: CheckpointReader; productRecords?: readonly string[] }
 ): Promise<CitationCheck> {
+  const records = (input.productRecords ?? []).map(normalizeQuote).filter(Boolean);
   const verified: VerifiedCitation[] = [];
   const refused: CitationRefusal[] = [];
   for (const citation of citations.slice(0, MAX_CITATIONS)) {
     const problem = quoteProblem(citation.quote);
     if (problem) { refused.push({ citation, reason: problem }); continue; }
     if (citation.source === 'product_picture') {
-      if (input.productPicture && normalizeQuote(input.productPicture).includes(normalizeQuote(citation.quote))) {
+      const quote = normalizeQuote(citation.quote);
+      if (records.some(record => record.includes(quote))) {
         verified.push({ source: 'product_picture', quote: citation.quote });
       } else {
-        refused.push({ citation, reason: 'the quoted decision is not in the project\'s recorded product picture' });
+        refused.push({ citation, reason: 'the quoted decision is not in the project\'s brief or recorded decisions' });
       }
       continue;
     }

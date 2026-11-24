@@ -135,16 +135,26 @@ function heldBackFix(episode: OrchestrationRecoveryEpisode): ResolutionRecord | 
   return record?.outcome === 'escalated' && record.proposedFix && episode.phase !== 'repairing' ? record : undefined;
 }
 
+/**
+ * The Orchestrator's record as the team sees it. Cleaned again on the way out, so a record saved
+ * before the shared redaction (or by an older version) cannot show a path or credential.
+ */
 function resolutionProjection(record: ResolutionRecord): OrchestrationRecoveryProjection['orchestratorResolution'] {
+  const question = record.question ? {
+    text: safeRecoverySummary(record.question.text),
+    why: safeRecoverySummary(record.question.why),
+    options: record.question.options.map(option => ({ label: safeRecoverySummary(option.label),
+      ...(option.description ? { description: safeRecoverySummary(option.description) } : {}) }))
+  } : undefined;
   return {
     outcome: record.outcome,
     ...(record.tier !== undefined ? { tier: record.tier } : {}),
     ...(record.escalation ? { escalation: record.escalation } : {}),
-    ...(record.diagnosis ? { diagnosis: record.diagnosis } : {}),
-    ...(record.question ? { question: record.question } : {}),
-    ...(record.proposedFix ? { proposedFix: record.proposedFix.instructions } : {}),
+    ...(record.diagnosis ? { diagnosis: safeRecoverySummary(record.diagnosis) } : {}),
+    ...(question ? { question } : {}),
+    ...(record.proposedFix ? { proposedFix: safeRecoveryGuidance(record.proposedFix.instructions) } : {}),
     ...(record.citations?.length ? { evidence: record.citations.map(citation => citation.source === 'repository'
-      ? `${citation.repository}:${citation.path}` : 'Recorded product decision') } : {})
+      ? safeRecoverySummary(`${citation.repository}:${citation.path}`) : 'Product record') } : {})
   };
 }
 
