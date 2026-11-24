@@ -92,7 +92,7 @@ export function unapprovedOrchestratorFix(episode: OrchestrationRecoveryEpisode 
 /** The guidance a specialist receives for an Orchestrator fix, within the guidance limit. */
 export function fixGuidance(diagnosis: string | undefined, fix: ProposedFix, citations: readonly VerifiedCitation[] = []): string {
   const evidence = citations.map(citation => citation.source === 'repository'
-    ? `${citation.repository}:${citation.path}` : 'the recorded product decision');
+    ? `${citation.repository}:${citation.path}` : 'the project\'s product records');
   return [
     diagnosis ? `The Orchestrator looked into why this task stopped: ${diagnosis}` : 'The Orchestrator looked into why this task stopped.',
     `Do this: ${fix.instructions}`,

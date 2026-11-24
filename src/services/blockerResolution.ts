@@ -45,6 +45,8 @@ import {
 export const MAX_RESOLUTIONS_PER_BUILD = 3;
 const MAX_HANDOFF_SUMMARY_CHARS = 1_500;
 const MAX_WEAKENING_READ_BYTES = 1024 * 1024;
+/** Why a fix backed only by product records goes to the person. */
+export const PRODUCT_ONLY_EVIDENCE = 'The fix cites only product records, not a file in the repositories, so Alpha did not act on it alone.';
 
 type ResolverStore = Pick<SQLiteService,
   'getOrchestrationSnapshot' | 'getOpenOrchestrationRecoveryEpisode' | 'listOrchestrationRecoveryEpisodes' |
@@ -65,8 +67,11 @@ export interface BlockerResolutionDependencies {
     /** Undefined when too large; throws when the file is absent at that commit. */
     fileAtCommit(dir: string, commit: string, filePath: string, maxBytes: number): Promise<string | undefined>;
   };
-  /** The team product picture for the prompt, and its settled part (no open questions) for citations. */
-  productPicture(snapshot: OrchestrationSnapshot): { prompt: string; settled: string };
+  /**
+   * The team product picture for the prompt, and the product records a citation may quote: the
+   * project brief and the recorded decisions, one entry each (see verifyCitations).
+   */
+  productPicture(snapshot: OrchestrationSnapshot): { prompt: string; records: string[] };
   repositoryMemory?(snapshot: OrchestrationSnapshot): Promise<string | undefined>;
   /** Recovery bookkeeping after the retry starts (reconcile the episode, deliver chat milestones). */
   afterRetry(snapshot: OrchestrationSnapshot): Promise<void>;
@@ -284,7 +289,7 @@ export class BlockerResolutionService {
         productPicture: picture.prompt,
         repositoryMemory: await this.deps.repositoryMemory?.(snapshot).catch(() => undefined)
       });
-      decision = await this.decide(resolutionOf(marked)!, answer, gathered, setting, picture.settled, stuck);
+      decision = await this.decide(resolutionOf(marked)!, answer, gathered, setting, picture.records, stuck);
     } catch (error) {
       const detail = safeRecoverySummary(error instanceof Error ? error.message : String(error));
       decision = escalation(resolutionOf(marked)!, 'unavailable', { diagnosis: detail });
@@ -370,7 +375,7 @@ export class BlockerResolutionService {
     answer: BlockerResolution,
     gathered: Gathered,
     setting: ProjectOrchestrationSetting,
-    settledPicture: string,
+    productRecords: readonly string[],
     stuck: StuckTask
   ): Promise<Decision> {
     const diagnosis = safeRecoverySummary(answer.diagnosis);
@@ -382,13 +387,17 @@ export class BlockerResolutionService {
             ...(option.description ? { description: safeRecoverySummary(option.description) } : {}) })) }
       });
     }
-    const check = await verifyCitations(answer.citations, { reader: gathered.reader, productPicture: settledPicture });
+    const check = await verifyCitations(answer.citations, { reader: gathered.reader, productRecords });
     const evidence = {
       diagnosis,
       citations: check.verified,
       ...(check.refused.length ? { refusedCitations: check.refused.map(item => ({ quote: item.citation.quote.slice(0, 200), reason: item.reason })) } : {})
     };
     if (check.refused.length || !check.verified.length) return escalation(base, 'unverified', evidence);
+    // A product record says what to build, not where the code is: acting alone needs a file in the repositories.
+    if (!check.verified.some(citation => citation.source === 'repository')) {
+      return escalation(base, 'unverified', { ...evidence, reasons: [PRODUCT_ONLY_EVIDENCE] });
+    }
     const outside = this.outsideTask(answer, gathered, stuck.task);
     if (outside) return escalation(base, 'outside_scope', { ...evidence, reasons: [outside] });
     const risk: RiskClassification = classifyRisk({

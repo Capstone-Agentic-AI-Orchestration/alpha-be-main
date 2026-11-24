@@ -78,6 +78,25 @@ describe('apply the proposed fix', () => {
     expect(milestones).toContain('proposed_fix_applied');
   });
 
+  it('shows a held-back fix saved before the shared redaction without its paths or credentials', async () => {
+    process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
+    vi.resetModules();
+    vi.doMock('./orchestrationRuntime.js', () => ({ orchestrationService: { retryTask }, taskAcceptanceService: {} }));
+    const { OrchestrationRecoveryService } = await import('./orchestrationRecoveryService.js');
+    const { store, episode } = fixture();
+    const current = episode();
+    const resolution = current.evidence.resolution as Record<string, any>;
+    current.evidence = { resolution: { ...resolution,
+      proposedFix: { ...resolution.proposedFix, instructions: 'Copy C:\\Users\\dev\\.env and use postgres://u:p4ss@db/x with client_secret=abc123.' },
+      citations: [...resolution.citations, { source: 'product_picture', quote: 'Guests sign in with email.' }] } };
+
+    const state = await new OrchestrationRecoveryService(store).getState({ workspaceId: 'ws-1', runId: 'run-1', canControl: true });
+    const shown = state.recovery?.orchestratorResolution;
+
+    expect(shown?.proposedFix).toBe('Copy [local path] and use postgres://[redacted]@db/x with client_secret=[redacted]');
+    expect(shown?.evidence).toEqual(['acme/shop-fe:src/auth/session.ts', 'Product record']);
+  });
+
   it('is not offered once there is no held-back fix', async () => {
     process.env.ALPHA_ORCHESTRATION_ENABLED = '1';
     vi.resetModules();

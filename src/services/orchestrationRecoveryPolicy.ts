@@ -313,24 +313,33 @@ export function recoveryAvailableActions(input: {
   return { availableActions: [...new Set(availableActions)], actionReasons };
 }
 
-export function safeRecoverySummary(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]/g, ' ')
+/**
+ * Removes what must never leave this machine or reach a person's screen: control characters,
+ * private key blocks, local paths, bearer tokens, credential values, provider tokens and
+ * credentials in URLs. Keeps line breaks, tabs and length, so each caller decides its own shape.
+ * Every recovery text (summaries, direction, the Orchestrator's fixes and evidence) goes through it.
+ */
+export function redactSensitiveText(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ')
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi, '[redacted private key]')
     .replace(/(?:[a-z]:\\|\\\\[^\s]+|\/(?:Users|home|private|tmp|var|mnt)\/)[^\s,;)]*/gi, '[local path]')
     .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
     .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|secret|authorization)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
     .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g, '[redacted token]')
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi, '[redacted private key]')
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@');
+}
+
+/** One short line: redacted, whitespace collapsed, at most 500 characters. */
+export function safeRecoverySummary(value: string): string {
+  return redactSensitiveText(value)
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 500);
 }
 
+/** Direction for a specialist (the person's or the Orchestrator's fix): redacted, line breaks kept. */
 export function safeRecoveryGuidance(value: string): string {
-  return value
-    .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
-    .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization)\b(\s*[:=]\s*)[^\s,;]+/gi, '$1$2[redacted]')
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g, '[redacted token]')
+  return redactSensitiveText(value)
     .trim()
     .slice(0, MAX_RECOVERY_GUIDANCE_CHARS);
 }

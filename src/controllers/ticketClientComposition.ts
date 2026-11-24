@@ -3,6 +3,7 @@ import { ClientProjectProposals } from '../services/clientProjectProposals.js';
 import type { Router } from 'express';
 import { PostgresClientProjectPortal } from '../services/clientProjectPortal.js';
 import { ClientProjectConversation } from '../services/clientProjectConversation.js';
+import { ClientProjectStages } from '../services/clientProjectStages.js';
 import { ProjectUat } from '../services/projectUat.js';
 import { createProjectUatBuilds } from '../services/projectUatBuilds.js';
 
@@ -103,6 +104,7 @@ export function createTicketClientComposition(input: {
     projectProposals: new ClientProjectProposals(input.database, ALPHA_ORG),
     projectPortal: new PostgresClientProjectPortal(input.database),
     projectConversation: new ClientProjectConversation(input.database, new PostgresClientProjectPortal(input.database)),
+    projectStages: new ClientProjectStages(input.database, new PostgresClientProjectPortal(input.database)),
     projectUat: new ProjectUat(input.database,new PostgresClientProjectPortal(input.database),createProjectUatBuilds(input.database),
       new SupabaseTicketDocumentObjectStore(input.supabaseUrl,input.supabaseServiceRoleKey)),
     sessionStore: new PostgresTicketClientSessionStore(input.database),
