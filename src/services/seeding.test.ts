@@ -3,8 +3,9 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { OFFICIAL_AGENT_TEMPLATES, PREVIOUS_TEMPLATE_PROMPTS } from './officialAgentTemplates.js';
+import { LOOK_FIRST, OFFICIAL_AGENT_TEMPLATES, PREVIOUS_TEMPLATE_PROMPTS } from './officialAgentTemplates.js';
 import { OFFICIAL_AGENT_TEMPLATE_V4 } from './officialAgentTemplateV4.js';
+import { OFFICIAL_AGENT_TEMPLATE_V5 } from './officialAgentTemplateV5.js';
 
 /**
  * Seeding must happen exactly once, and must not be inferred.
@@ -191,6 +192,30 @@ describe('seeding runs once', () => {
 });
 
 describe('official agent instruction upgrades', () => {
+  const versionOf = (key: string) => OFFICIAL_AGENT_TEMPLATES.find(template => template.key === key)!.version;
+
+  it('moves every untouched agent to the look-first blocker wording and keeps an edited one as written', async () => {
+    const first = await startDaemon(); first.close();
+    const db = new Database(dbPath());
+    for (const template of OFFICIAL_AGENT_TEMPLATES) {
+      const edited = template.key === 'frontend' ? '\nAsk the design lead before changing colours.' : '';
+      db.prepare('UPDATE agents SET template_version = ?, system_prompt = ? WHERE template_key = ?')
+        .run(template.version - 1, OFFICIAL_AGENT_TEMPLATE_V5[template.key] + edited, template.key);
+      const { id } = db.prepare('SELECT id FROM agents WHERE template_key = ?').get(template.key) as { id: string };
+      fs.rmSync(path.join(tmp, 'agents', id + '.md'), { force: true });
+    }
+    db.close();
+    const svc = await startDaemon();
+    for (const agent of svc.getAgents()) {
+      if (agent.templateKey === 'frontend') {
+        expect(agent).toMatchObject({ templateVersion: versionOf('frontend') - 1, systemPrompt: expect.stringContaining('Ask the design lead') });
+        expect(agent.systemPrompt).not.toContain(LOOK_FIRST);
+      } else {
+        expect(agent).toMatchObject({ templateVersion: versionOf(agent.templateKey!), systemPrompt: expect.stringContaining(LOOK_FIRST) });
+      }
+    }
+  });
+
   it('upgrades untouched v4 audit instructions while retaining custom personas and model settings', async () => {
     const first = await startDaemon(); first.close();
     const db = new Database(dbPath());
@@ -202,10 +227,10 @@ describe('official agent instruction upgrades', () => {
     }
     db.close();
     const upgraded = await startDaemon();
-    expect(upgraded.getAgents().find(agent => agent.templateKey === 'security')).toMatchObject({ templateVersion: 5, modelName: 'chosen-model', systemPrompt: expect.stringContaining('lead independent') });
+    expect(upgraded.getAgents().find(agent => agent.templateKey === 'security')).toMatchObject({ templateVersion: versionOf('security'), modelName: 'chosen-model', systemPrompt: expect.stringContaining('lead independent') });
     expect(upgraded.getAgents().find(agent => agent.templateKey === 'backend')).toMatchObject({ templateVersion: 4, modelName: 'chosen-model', systemPrompt: expect.stringContaining('Use the project logger.') });
   });
-  it('upgrades untouched v3 roles and default permission metadata while keeping Manager and custom grants', async () => {
+  it('upgrades untouched earlier roles and default permission metadata while keeping Manager and custom grants', async () => {
     const first = await startDaemon(); first.close();
     const db = new Database(dbPath());
     for (const key of ['manager', 'github-finalization'] as const) {
@@ -218,9 +243,9 @@ describe('official agent instruction upgrades', () => {
       .run('Semi-Autonomous (Requires Approval)', JSON.stringify(['sk-fs', 'sk-bash', 'sk-git']), JSON.stringify(['alpha-github', 'alpha-hosting']));
     db.close();
     const svc = await startDaemon();
-    // The latest previous Manager wording is v6, so this also proves an untouched v6 Manager reaches v7 (board management).
-    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: 7, phase: 'Planning', skills: ['sk-browser'] });
-    expect(svc.getAgents().find(agent => agent.templateKey === 'github-finalization')).toMatchObject({ templateVersion: 5, autonomyLevel: 'Supervised', skills: [], mcpServers: ['alpha-github'] });
+    // The latest earlier wording is the one before look-first blockers, so this also proves those agents reach the current version.
+    expect(svc.getAgents().find(agent => agent.templateKey === 'manager')).toMatchObject({ templateVersion: versionOf('manager'), phase: 'Planning', skills: ['sk-browser'] });
+    expect(svc.getAgents().find(agent => agent.templateKey === 'github-finalization')).toMatchObject({ templateVersion: versionOf('github-finalization'), autonomyLevel: 'Supervised', skills: [], mcpServers: ['alpha-github'] });
     expect(svc.getAgents()).toHaveLength(11);
   });
   /** Put three official agents back on version 1, the way an older install left them. */
