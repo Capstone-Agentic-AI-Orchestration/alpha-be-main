@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AGENT_ROLE_CONTRACTS, agentRoleContract, roleCanOwnTask, roleCanPlan } from './agentRoleContracts.js';
-import { OFFICIAL_AGENT_TEMPLATES, PREVIOUS_TEMPLATE_PROMPTS } from './officialAgentTemplates.js';
+import { LOOK_FIRST, OFFICIAL_AGENT_TEMPLATES, PREVIOUS_TEMPLATE_PROMPTS } from './officialAgentTemplates.js';
 import { orchestrationTaskKindSchema, roleCanOwnSavedTask } from './orchestrationContract.js';
 
 describe('official role boundaries', () => {
@@ -14,7 +14,10 @@ describe('official role boundaries', () => {
       expect(template.systemPrompt).not.toContain('undefined');
       // The Manager moved to v6 when it began writing feature specs.
       // Manager v7 adds board management for developers.
-      expect(template.version).toBe(template.key === 'manager' ? 7 : 5);
+      // Every role moved up one when blockers became look-first (Manager v8, the rest v6).
+      expect(template.version).toBe(template.key === 'manager' ? 8 : 6);
+      expect(template.systemPrompt).toContain('When blocked: ' + LOOK_FIRST);
+      expect(template.systemPrompt).toContain('say in your summary what you searched');
       expect(PREVIOUS_TEMPLATE_PROMPTS[template.key].length).toBeGreaterThanOrEqual(3);
     }
   });
