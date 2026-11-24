@@ -12,6 +12,13 @@ export function orchestrationPlanDocument(plan: OrchestrationPlan, version: numb
   if (plan.exclusions.length) lines.push('', '## Exclusions', '', ...plan.exclusions.map(value => `- ${prose(value)}`));
   if (plan.decisions?.length) lines.push('', '## What the Orchestrator decided', '',
     ...plan.decisions.map(item => '- **' + prose(item.about) + '**: ' + prose(item.decision) + (item.toChange ? ' To change this: ' + prose(item.toChange) : '')));
+  if (plan.fitCheck?.length) {
+    // Conflicts first: they are what the person approving needs to weigh.
+    const ordered = [...plan.fitCheck].sort((a, b) => Number(b.verdict === 'conflicts') - Number(a.verdict === 'conflicts'));
+    lines.push('', '## Fit with the product', '', ...ordered.map(item =>
+      `- **${prose(item.subject)}** (${item.subjectType}) ${item.verdict === 'conflicts' ? 'conflicts' : 'fits'}: ${prose(item.reason)}` +
+      (item.surfacedIn ? ` See: ${prose(item.surfacedIn)}` : '')));
+  }
   if (plan.projectContext) lines.push('', '## Project guidance', '', prose(plan.projectContext));
   if (plan.milestones?.length) {
     lines.push('', '## Milestone roadmap', '');

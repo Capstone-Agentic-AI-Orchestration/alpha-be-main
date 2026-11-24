@@ -39,7 +39,7 @@ describe('board cards named in a chat build request', () => {
     expect(spec.requirements.map(item => item.description)).toEqual(['PRO-103 title: Define Expense type', 'PRO-106 title: PRO-106 title']);
     expect(spec.requirements[1].id).toMatch(/^CARD-/);
     expect(spec.brief).toContain('1. PRO-103 title (priority: high)');
-    expect(spec.brief).toContain('follow these tasks');
+    expect(spec.brief).toContain('list the conflict in fitCheck');
   });
 });
 

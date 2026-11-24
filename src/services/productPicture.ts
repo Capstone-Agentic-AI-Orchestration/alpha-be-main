@@ -3,6 +3,7 @@ import { isBuildRecord } from './boardCardBuild.js';
 import type { FeatureSpecRecord } from './featureSpecContract.js';
 import { isSpecialistBlocker, SPECIALIST_BLOCKER_PREFIX } from './orchestrationRecoveryPolicy.js';
 import type { OrchestrationRunStatus, OrchestrationSnapshot } from './orchestrationStateMachine.js';
+import { MAX_PROJECT_CONTEXT_CHARS } from './orchestrationContract.js';
 
 /**
  * What a project is, as Alpha's own records say: the brief, the planned work, what was asked for
@@ -36,7 +37,7 @@ export interface TeamProductPicture {
   delivered: string[];
   awaitingApproval: string[];
   inProgress: string[];
-  /** Choices recorded in build plans (`about: decision`). */
+  /** Choices recorded in build plans a person approved (`about: decision`). */
   decisions: string[];
   /** Product questions a specialist stopped on and nobody has answered. */
   openQuestions: string[];
@@ -100,6 +101,22 @@ function buildLine(snapshot: OrchestrationSnapshot): string {
   return `${goal} Accepted so far: ${shown}${more}.`;
 }
 
+/** Statuses a build reaches only through executing, which only a person's plan approval starts. */
+const PAST_PLAN_APPROVAL: ReadonlySet<OrchestrationRunStatus> = new Set([
+  'executing', 'paused', 'validating', 'recovery_required', 'awaiting_approval', 'publishing', 'completed'
+]);
+
+/**
+ * Whether a person approved this build's plan. Until then its decisions are the Orchestrator's
+ * proposals, not the product's: they must not steer other plans, specialists or the blocker
+ * resolver, and a plan being revised must not read its own. A blocked build may be stuck before or
+ * after approval; it counts as approved only once a specialist has started work (an attempt exists),
+ * which only follows approval. Read from the snapshot alone, so every reader applies the same rule.
+ */
+export function planApproved(snapshot: OrchestrationSnapshot): boolean {
+  return PAST_PLAN_APPROVAL.has(snapshot.run.status) || (snapshot.attempts?.length ?? 0) > 0;
+}
+
 function openQuestion(snapshot: OrchestrationSnapshot): string | undefined {
   if (!['blocked', 'paused'].includes(snapshot.run.status)) return undefined;
   const latest = [...snapshot.attempts].reverse().find(attempt => ['failed', 'rejected', 'recovery_required'].includes(attempt.status));
@@ -122,7 +139,7 @@ export function teamProductPicture(input: {
   const builds = input.snapshots.filter(snapshot => !ENDED_BUILDS.has(snapshot.run.status));
   const byStatus = (statuses: readonly OrchestrationRunStatus[]) => builds
     .filter(snapshot => statuses.includes(snapshot.run.status)).slice(0, MAX_BUILDS).map(buildLine);
-  const decisions = builds.flatMap(snapshot => (snapshot.run.plan.decisions ?? [])
+  const decisions = builds.filter(planApproved).flatMap(snapshot => (snapshot.run.plan.decisions ?? [])
     .map(item => `${oneLine(item.about, 60)}: ${oneLine(item.decision)}`));
   return {
     audience: 'team',
@@ -146,7 +163,7 @@ function section(title: string, lines: readonly string[], more = 0): string {
 }
 
 /** The picture as a prompt block: labelled by source, passed as data, never as instructions. */
-export function renderProductPicture(picture: ProductPicture): string {
+export function renderProductPicture(picture: ProductPicture, maxChars = MAX_PRODUCT_PICTURE_CHARS): string {
   const brief = picture.brief ? `Brief (project description): ${picture.brief}` : 'Brief: none recorded yet.';
   if (picture.audience === 'client') {
     return [`## About ${picture.projectName}`, brief].join('\n\n');
@@ -161,11 +178,12 @@ export function renderProductPicture(picture: ProductPicture): string {
     section('Delivered builds', picture.delivered),
     section('Builds waiting for approval', picture.awaitingApproval),
     section('Builds in progress', picture.inProgress),
-    section('Decisions recorded in build plans', picture.decisions),
+    section('Decisions recorded in approved build plans', picture.decisions),
     section('Open product questions (a specialist stopped on these)', picture.openQuestions)
   ].filter(Boolean);
   const text = parts.join('\n\n');
-  return text.length > MAX_PRODUCT_PICTURE_CHARS ? `${text.slice(0, MAX_PRODUCT_PICTURE_CHARS - 14).trimEnd()}\n… (shortened)` : text;
+  const limit = Math.min(maxChars, MAX_PRODUCT_PICTURE_CHARS);
+  return text.length > limit ? `${text.slice(0, limit - 14).trimEnd()}\n… (shortened)` : text;
 }
 
 /** Where the team picture reads from. The default is this desktop's store; tests pass their own. */
@@ -183,13 +201,28 @@ export interface ProductPictureSource {
 export function productPictureFor(
   project: Pick<Project, 'id' | 'name' | 'description'>,
   audience: ProductAudience,
-  source: ProductPictureSource
+  source: ProductPictureSource,
+  maxChars = MAX_PRODUCT_PICTURE_CHARS
 ): string {
-  if (audience === 'client') return renderProductPicture(clientProductPicture(project));
+  if (audience === 'client') return renderProductPicture(clientProductPicture(project), maxChars);
   return renderProductPicture(teamProductPicture({
     project,
     issues: source.issues(project.id),
     snapshots: source.snapshots(project.id),
     approvedSpec: issueId => source.approvedSpec(issueId)
-  }));
+  }), maxChars);
+}
+
+/** Below this much room the picture would be a heading and half a brief: leave it out instead. */
+const MIN_PICTURE_BESIDE_CHARS = 400;
+
+/**
+ * Room for the team picture next to the project context a planner or specialist already gets (the
+ * brief and the detected stack, `composeProjectContext`). The two together stay within
+ * MAX_PROJECT_CONTEXT_CHARS: the picture is shortened, never the project context, so a long brief
+ * is never dropped to make room. The picture opens with the brief, so shortening keeps it longest.
+ */
+export function productPictureRoom(projectContext: string | undefined): number {
+  const room = Math.min(MAX_PRODUCT_PICTURE_CHARS, MAX_PROJECT_CONTEXT_CHARS - (projectContext?.length ?? 0));
+  return room < MIN_PICTURE_BESIDE_CHARS ? 0 : room;
 }

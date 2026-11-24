@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { plannedJson } from '../test/planFitFixture.js';
 
 import type { Agent } from '../models/index.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
@@ -69,7 +70,7 @@ describe("the Orchestrator's one correction", () => {
   it('gets the plan and what was wrong, and returns a plan that passes, in one model call', async () => {
     const cwd = directory();
     try {
-      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(frontendOnly)));
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(plannedJson(frontendOnly)));
       const corrected = await new OrchestrationPlanner(turn).correctPlan(input(cwd), ghost, new OrchestrationPlanningError('Unknown owner ghost.', 'invalid_plan'));
       expect(corrected.tasks[0].ownerAgentId).toBe('frontend');
       expect(turn).toHaveBeenCalledTimes(1);
@@ -80,7 +81,7 @@ describe("the Orchestrator's one correction", () => {
   it('stops after that one try, keeping both plans', async () => {
     const cwd = directory();
     try {
-      const turn = vi.fn(async (_options: CliTurnOptions) => response(JSON.stringify(ghost)));
+      const turn = vi.fn(async (_options: CliTurnOptions) => response(plannedJson(ghost)));
       const error = await new OrchestrationPlanner(turn).correctPlan(input(cwd), ghost, new OrchestrationPlanningError('Unknown owner ghost.', 'invalid_plan')).catch(value => value);
       expect(error).toBeInstanceOf(OrchestrationPlanningError);
       expect(error.message).toContain('tried one correction');

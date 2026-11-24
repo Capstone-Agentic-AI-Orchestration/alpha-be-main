@@ -17,7 +17,10 @@ const snapshot: any = { run: { id: 'run', workspaceId: 'workspace', projectId: '
   repository: 'acme/api', repositoryWorkspaces: [{ repository: 'acme/api', worktreePath: 'C:/fixture', baseCommit: 'a'.repeat(40) }],
   plan: { goal: 'Create an API and client.', exclusions: [], requirements: [{ id: 'R1', description: 'API' }, { id: 'R2', description: 'Client' }], milestones: [{ id: 'first' }, milestone] } },
   tasks: [{ id: 'prior', repository: 'acme/api', status: 'accepted' }], attempts: [{ taskId: 'prior', status: 'accepted', resultCommit: 'b'.repeat(40) }] };
-const store: any = { getProjects: () => [{ id: 'project', key: 'PRJ' }], getRuntimes: () => [], getAgents: () => [
+const store: any = { getProjects: () => [{ id: 'project', key: 'PRJ', name: 'Tasks', description: 'A task tracker for small teams.' }],
+  getIssues: () => [{ id: 'card-1', projectId: 'project', identifier: 'PRJ-7', title: 'Due dates', status: 'todo', labels: [], createdAt: '2026-11-20' }],
+  listProjectOrchestrationSnapshots: () => [], getFeatureSpec: () => null,
+  getRuntimes: () => [], getAgents: () => [
   { id: 'planner', name: 'Orchestrator', role: 'Orchestrator Agent' }, { id: 'backend', name: 'Backend', role: 'Backend Agent' }
 ] };
 
@@ -38,6 +41,9 @@ describe('just-in-time milestone evidence', () => {
     expect(input.approvedRequirements).toEqual([{ id: 'R2', description: 'Client' }]);
     expect(input.acceptedEvidence).toContain('createTask(title: string)');
     expect(input.acceptedEvidence).toContain('b'.repeat(40));
+    // The product as recorded now, read from the same store.
+    expect(input.productPicture).toContain('Brief (project description): A task tracker for small teams.');
+    expect(input.productPicture).toContain('PRJ-7 Due dates');
     expect(result.tasks[0]).toMatchObject({ milestoneId: 'second', id: expect.stringMatching(/^m2-/) });
     expect(result.checkpoints).toEqual([{ repository: 'acme/api', commit: 'b'.repeat(40) }]);
     expect(mocks.resolve).toHaveBeenCalledTimes(2);

@@ -17,6 +17,7 @@ import { parseAgentReport } from './orchestrationAgentReport.js';
 export { parseAgentReport } from './orchestrationAgentReport.js';
 import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationPublicationRecord, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { SQLiteService } from './sqliteService.js';
+import { agentProductPicture, storeProductPictureSource } from './productPictureSource.js';
 import { runWithWorkspace } from './workspaceContext.js';
 import { buildHumanReviewAmendment, type OrchestrationReviewAmendment } from './orchestrationReviewWorkflow.js';
 import type { Milestone, MilestoneExpansion, PlanNextMilestone } from './orchestrationMilestonePlanner.js';
@@ -166,11 +167,17 @@ export interface OrchestrationLaunchRequest {
 }
 
 export interface OrchestrationTaskPackage {
-  /** 7 added repository memory; saved version 6 packages run without it. */
-  packageVersion: 6 | 7;
+  /** 7 added repository memory, 8 the product picture; saved older packages run without them. */
+  packageVersion: 6 | 7 | 8;
   reportSchemaVersion: number;
   goal: string;
   projectContext: string;
+  /**
+   * The team product picture (brief, board, chat requests, builds, recorded decisions, open
+   * questions), read fresh when the task is dispatched, so a decision made during the build reaches
+   * the next task. Internal only, like the whole package. Absent before version 8.
+   */
+  productPicture?: string;
   /**
    * The project's repository memory (AGENTS.md of each repository) as committed at
    * each repository's checkpoint when the task was prepared. Part of the package, so
@@ -1782,11 +1789,13 @@ export class OrchestrationService {
       ? await this.createReviewInputs(snapshot, task)
       : [];
     const memory = await repositoryMemoryAtCheckpoints(snapshot);
+    const productPicture = this.productPictureFor(snapshot);
     const taskPackage: OrchestrationTaskPackage = {
-      packageVersion: 7,
+      packageVersion: 8,
       reportSchemaVersion: ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
       goal: snapshot.run.plan.goal,
       projectContext: snapshot.run.plan.projectContext ?? '',
+      ...(productPicture ? { productPicture } : {}),
       ...(memory.text ? { repositoryMemory: memory.text, repositoryMemorySources: memory.sources } : {}),
       ...(snapshot.run.plan.chatSkillIds?.length ? { chatSkillIds: snapshot.run.plan.chatSkillIds } : {}),
       ...(snapshot.run.plan.chatSkillGuidance ? { chatSkillGuidance: snapshot.run.plan.chatSkillGuidance } : {}),
@@ -1848,6 +1857,12 @@ export class OrchestrationService {
       throw new Error(`The independent review package exceeds Alpha’s ${MAX_REVIEW_CONTEXT_BYTES / 1024} KiB context limit. Split the work into smaller tasks or request human review.`);
     }
     return taskPackage;
+  }
+
+  /** The team product picture for a task, read now from this store, sized beside the plan's project context. */
+  private productPictureFor(snapshot: OrchestrationSnapshot): string {
+    const project = this.store.getProjects().find(item => item.id === snapshot.run.projectId);
+    return project ? agentProductPicture(project, snapshot.run.plan.projectContext, storeProductPictureSource(this.store)) : '';
   }
 
   private async createReviewInputs(

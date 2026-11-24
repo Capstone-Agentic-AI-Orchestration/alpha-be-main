@@ -3,7 +3,7 @@ import type { Issue } from '../models/index.js';
 import type { FeatureSpecRecord } from './featureSpecContract.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import {
-  MAX_PRODUCT_PICTURE_CHARS, productPictureFor, projectBrief, renderProductPicture, teamProductPicture, type ProductPictureSource
+  MAX_PRODUCT_PICTURE_CHARS, planApproved, productPictureFor, projectBrief, renderProductPicture, teamProductPicture, type ProductPictureSource
 } from './productPicture.js';
 import { composeProjectContext } from './projectPlaybook.js';
 
@@ -73,6 +73,25 @@ describe('product picture', () => {
     // A cancelled build delivered nothing.
     expect(text).not.toContain('Redesign everything');
     expect(text).not.toContain('Cancelled work');
+  });
+
+  it('takes decisions only from plans a person approved, so a proposal never steers other work', () => {
+    const decided = (about: string, status: string, attempts: unknown[] = []) =>
+      build(`${about} build`, status, { run: { status, plan: { goal: `${about} build`, decisions: [{ about, decision: `${about} decision.` }] } }, attempts });
+    const runs = [
+      decided('Planning', 'planning'),
+      decided('Waiting', 'awaiting_plan_approval'),
+      decided('Refused before approval', 'blocked'),
+      decided('Stuck after work started', 'blocked', [{ status: 'rejected', failureReason: 'A check failed.' }]),
+      decided('Running', 'executing'),
+      decided('Shipped', 'completed')
+    ];
+    const text = productPictureFor(project, 'team', { ...source, snapshots: () => runs });
+    for (const about of ['Planning', 'Waiting', 'Refused before approval']) expect(text).not.toContain(`${about} decision.`);
+    for (const about of ['Stuck after work started', 'Running', 'Shipped']) expect(text).toContain(`${about}: ${about} decision.`);
+    expect(runs.map(planApproved)).toEqual([false, false, false, true, true, true]);
+    // The unapproved plans still show as builds; only their decisions are held back.
+    expect(text).toContain('Waiting build');
   });
 
   it('gives a client the brief only, without reading any orchestration data', () => {
