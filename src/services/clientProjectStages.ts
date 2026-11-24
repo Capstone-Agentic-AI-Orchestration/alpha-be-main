@@ -7,7 +7,7 @@ import {
   loadStageSummary, lockStageRow, type ContractTerms, type PocFeature, type StageSummary, type StageThread,
 } from '../store/clientProjectStageStore.js';
 import { defaultContractTerms, type ContractSource } from './projectContractTerms.js';
-import { canTransition, contentHash, revisionsUsed, roundCounts, submitRequiresQuote, type ProjectStage } from './projectStageRules.js';
+import { canTransition, contentHash, revisionsUsed, roundCounts, roundIsExtra, type ProjectStage } from './projectStageRules.js';
 import type { PostgresClientProjectPortal, ProjectTarget } from './clientProjectPortal.js';
 
 /**
@@ -47,20 +47,13 @@ const signOffSchema = command.extend({ contentHash: z.string().regex(/^[a-f0-9]{
 const countersignSchema = command.extend({ fullName }).strict();
 const shareBuildSchema = command.extend({ note: text(4000).default('') }).strict();
 const roundItemsSchema = z.object({ items: z.array(z.string().trim().min(1).max(4000)).max(50) }).strict();
-const submitRoundSchema = command.extend({ acceptPaid: z.boolean().default(false) }).strict();
+const submitRoundSchema = command.extend({ acknowledgeExtra: z.boolean().default(false) }).strict();
 const classifySchema = command.extend({
   items: z.array(z.object({ id, classification: z.enum(['revision', 'fix', 'out_of_scope']), pmNote: text(2000).default('') }).strict()).min(1).max(50),
 }).strict();
 const acceptFinalSchema = command.extend({ fullName, consent: z.literal(true) }).strict();
 const changeRequestSchema = command.extend({ title: z.string().trim().min(1).max(300), description: text(8000).default('') }).strict();
-const sendQuoteSchema = command.extend({
-  amount: z.number().finite().min(0).max(1_000_000_000),
-  currency: z.string().regex(/^[A-Z]{3}$/).default('PHP'),
-  description: text(8000).optional(),
-}).strict();
-const decideQuoteSchema = command.extend({
-  decision: z.enum(['accept', 'decline']), fullName: fullName.optional(), consent: z.literal(true).optional(),
-}).strict();
+const answerRequestSchema = command.extend({ decision: z.enum(['will_do', 'wont_do']), reply: text(4000).default('') }).strict();
 const shortTitle = (body: string) => { const line = body.split(/\s+/).join(' '); return line.length > 120 ? line.slice(0, 119) + '…' : line; };
 const clause = z.object({ title: z.string().trim().min(1).max(300), body: z.string().trim().min(1).max(8000) }).strict();
 const contractDraftSchema = z.object({
@@ -82,7 +75,7 @@ export type StageAction =
   | 'stage_set' | 'poc_published' | 'poc_changes_requested' | 'poc_approved'
   | 'contract_issued' | 'contract_voided' | 'contract_signed' | 'contract_countersigned'
   | 'build_shared' | 'round_submitted' | 'round_classified'
-  | 'quote_requested' | 'quote_sent' | 'quote_accepted' | 'quote_declined'
+  | 'request_made' | 'request_answered'
   | 'final_delivered' | 'final_accepted';
 
 export interface StageReceipt { operationId: string; action: StageAction; refId: string | null; version: number }
@@ -352,14 +345,14 @@ export class ClientProjectStages {
   }
 
   /**
-   * Client: send the round. While included rounds remain it goes straight to
-   * the PM. Once they are used, it needs `acceptPaid`: the round waits for a
-   * quote, and only an accepted quote sends it on.
+   * Client: send the round to the PM. Once the included rounds are used, the
+   * round is extra: the client must confirm (`acknowledgeExtra`) that it costs
+   * additional. Nothing is charged in Alpha.
    */
   async submitRound(target: ProjectTarget, subject: TicketSubject, roundId: unknown, input: unknown) {
     const round = parseStageInput(id, roundId);
     const value = parseStageInput(submitRoundSchema, input);
-    return this.mutate(target, subject, undefined, 'client', value.operationId, 'round_submitted', { round, acceptPaid: value.acceptPaid },
+    return this.mutate(target, subject, undefined, 'client', value.operationId, 'round_submitted', { round, acknowledgeExtra: value.acknowledgeExtra },
       async ({ sql, thread, stage }) => {
         if (stage !== 'development') stageMismatch('Feedback rounds are part of development.');
         const current = await this.roundIn(sql, thread, round, ['open'], 'This round was already sent. Refresh to see it.');
@@ -367,31 +360,23 @@ export class ClientProjectStages {
           where workspace_id=$1 and project_id=$2 and client_user_id=$3 and round_id=$4 order by position`, [...threadParams(thread), round]);
         if (!items.length) throw new TicketWorkflowError(400, 'round_empty', 'Add at least one change before sending the round.');
         const row = await lockStageRow(sql, thread, true);
-        const { rows: rounds } = await sql.query<{ counts: boolean | null; paid: boolean }>(`select counts,paid from alpha_private.client_project_revision_rounds
+        const { rows: rounds } = await sql.query<{ counts: boolean | null }>(`select counts from alpha_private.client_project_revision_rounds
           where workspace_id=$1 and project_id=$2 and client_user_id=$3`, threadParams(thread));
-        if (!submitRequiresQuote(revisionsUsed(rounds, row.revisions_offset), row.revision_limit)) {
-          await sql.query(`update alpha_private.client_project_revision_rounds set status='submitted',submitted_at=now()
-            where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), round]);
-          return { refId: round, metadata: { number: current.number } };
+        const extra = roundIsExtra(revisionsUsed(rounds, row.revisions_offset), row.revision_limit);
+        if (extra && !value.acknowledgeExtra) {
+          throw new TicketWorkflowError(409, 'extra_round_unconfirmed',
+            `Your ${row.revision_limit} included revision rounds are used. This round costs additional; confirm to send it.`);
         }
-        if (!value.acceptPaid) {
-          throw new TicketWorkflowError(409, 'revision_limit_reached',
-            `Your ${row.revision_limit} included revision rounds are used. This round needs a quote first.`);
-        }
-        const quote = randomUUID();
-        await sql.query(`insert into alpha_private.client_project_quotes(workspace_id,project_id,client_user_id,id,kind,round_id,title,description,
-            status,requested_by_kind) values ($1,$2,$3,$4,'paid_revision',$5,$6,$7,'requested','client')`,
-        [...threadParams(thread), quote, round, `Revision round ${current.number}`, items.map(item => '• ' + item.body).join('\n').slice(0, 8000)]);
-        await sql.query(`update alpha_private.client_project_revision_rounds set status='awaiting_quote',submitted_at=now(),paid=true,quote_id=$5
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), round, quote]);
-        return { refId: round, metadata: { number: current.number, paid: true } };
+        await sql.query(`update alpha_private.client_project_revision_rounds set status='submitted',submitted_at=now(),extra=$5
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), round, extra]);
+        return { refId: round, metadata: extra ? { number: current.number, extra: true } : { number: current.number } };
       });
   }
 
   /**
    * PM: label each note of a submitted round. The round counts against the
    * included rounds only if a note is a revision; each out-of-scope note
-   * becomes a change request waiting for a quote.
+   * becomes a change request for the PM to answer.
    */
   async classifyRound(target: ProjectTarget, subject: TicketSubject, roundId: unknown, input: unknown, clientId?: unknown) {
     const round = parseStageInput(id, roundId);
@@ -412,8 +397,8 @@ export class ClientProjectStages {
             where workspace_id=$1 and project_id=$2 and client_user_id=$3 and round_id=$4 and id=$5`,
           [...threadParams(thread), round, item.id, label.classification, label.pmNote]);
           if (label.classification === 'out_of_scope') {
-            await sql.query(`insert into alpha_private.client_project_quotes(workspace_id,project_id,client_user_id,id,kind,round_id,title,description,
-                status,requested_by_kind) values ($1,$2,$3,$4,'change_request',$5,$6,$7,'requested','pm')`,
+            await sql.query(`insert into alpha_private.client_project_requests(workspace_id,project_id,client_user_id,id,round_id,title,description,
+                status,requested_by_kind) values ($1,$2,$3,$4,$5,$6,$7,'open','pm')`,
             [...threadParams(thread), randomUUID(), round, shortTitle(item.body), item.body]);
           }
         }
@@ -452,69 +437,34 @@ export class ClientProjectStages {
       });
   }
 
-  /** Client: ask for new work outside the contract. It is quoted before anything starts. */
+  /** Client: ask for new work outside the contract. The client is told it costs additional; the PM answers. */
   async requestChange(target: ProjectTarget, subject: TicketSubject, input: unknown) {
     const value = parseStageInput(changeRequestSchema, input);
-    return this.mutate(target, subject, undefined, 'client', value.operationId, 'quote_requested', { title: value.title, description: value.description },
+    return this.mutate(target, subject, undefined, 'client', value.operationId, 'request_made', { title: value.title, description: value.description },
       async ({ sql, thread, stage }) => {
         if (stage !== 'development' && stage !== 'completed') stageMismatch('Change requests start once development has begun.');
-        const quote = randomUUID();
-        await sql.query(`insert into alpha_private.client_project_quotes(workspace_id,project_id,client_user_id,id,kind,title,description,status,requested_by_kind)
-          values ($1,$2,$3,$4,'change_request',$5,$6,'requested','client')`, [...threadParams(thread), quote, value.title, value.description]);
-        // The conversation shows what was asked; the full description stays on the quote.
-        return { refId: quote, body: (value.description ? `${value.title}\n\n${value.description}` : value.title).slice(0, 4000) };
+        const request = randomUUID();
+        await sql.query(`insert into alpha_private.client_project_requests(workspace_id,project_id,client_user_id,id,title,description,status,requested_by_kind)
+          values ($1,$2,$3,$4,$5,$6,'open','client')`, [...threadParams(thread), request, value.title, value.description]);
+        // The conversation shows what was asked; the full description stays on the request.
+        return { refId: request, body: (value.description ? `${value.title}\n\n${value.description}` : value.title).slice(0, 4000) };
       });
   }
 
-  /** PM: price a requested quote and send it to the client. */
-  async sendQuote(target: ProjectTarget, subject: TicketSubject, quoteId: unknown, input: unknown, clientId?: unknown) {
-    const quote = parseStageInput(id, quoteId);
-    const value = parseStageInput(sendQuoteSchema, input);
-    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'quote_sent', { quote, amount: value.amount, currency: value.currency, description: value.description },
+  /** PM: answer a change request with "will do" or "won't do", and an optional reply the client sees. */
+  async answerRequest(target: ProjectTarget, subject: TicketSubject, requestId: unknown, input: unknown, clientId?: unknown) {
+    const request = parseStageInput(id, requestId);
+    const value = parseStageInput(answerRequestSchema, input);
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'request_answered', { request, decision: value.decision, reply: value.reply },
       async ({ sql, thread, subject: pm }) => {
-        await this.quoteIn(sql, thread, quote, 'requested', 'This quote was already sent.');
-        await sql.query(`update alpha_private.client_project_quotes set amount=$5,currency=$6,description=coalesce($7,description),status='sent',sent_by=$8,sent_at=now()
+        const { rows } = await sql.query<{ title: string; status: string }>(`select title,status from alpha_private.client_project_requests
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 for update`, [...threadParams(thread), request]);
+        if (!rows[0] || rows[0].status !== 'open') stageMismatch('This request was already answered.');
+        await sql.query(`update alpha_private.client_project_requests set status=$5,reply=$6,answered_by=$7,answered_at=now()
           where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`,
-        [...threadParams(thread), quote, value.amount.toFixed(2), value.currency, value.description ?? null, pm.userId]);
-        return { refId: quote };
+        [...threadParams(thread), request, value.decision, value.reply, pm.userId]);
+        return { refId: request, body: value.reply || null, metadata: { decision: value.decision, title: rows[0].title } };
       });
-  }
-
-  /**
-   * Client: accept (with a typed name) or decline a quote. Accepting a paid
-   * round's quote sends that round to the PM; declining it reopens the round.
-   */
-  async decideQuote(target: ProjectTarget, subject: TicketSubject, quoteId: unknown, input: unknown) {
-    const quote = parseStageInput(id, quoteId);
-    const value = parseStageInput(decideQuoteSchema, input);
-    if (value.decision === 'accept' && (!value.fullName || value.consent !== true)) invalid();
-    const action = value.decision === 'accept' ? 'quote_accepted' : 'quote_declined';
-    return this.mutate(target, subject, undefined, 'client', value.operationId, action, { quote, decision: value.decision, fullName: value.fullName ?? null },
-      async ({ sql, thread }) => {
-        const row = await this.quoteIn(sql, thread, quote, 'sent', 'This quote is not waiting for your decision.');
-        const accepted = value.decision === 'accept';
-        await sql.query(`update alpha_private.client_project_quotes set status=$5,decided_name=$6,decided_at=now()
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`,
-        [...threadParams(thread), quote, accepted ? 'accepted' : 'declined', accepted ? value.fullName : null]);
-        if (row.kind === 'paid_revision' && row.round_id) {
-          await sql.query(accepted
-            ? `update alpha_private.client_project_revision_rounds set status='submitted'
-                where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='awaiting_quote'`
-            : `update alpha_private.client_project_revision_rounds set status='open',submitted_at=null,paid=false,quote_id=null
-                where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='awaiting_quote'`,
-          [...threadParams(thread), row.round_id]);
-        }
-        return { refId: quote, metadata: accepted ? { name: value.fullName } : {} };
-      });
-  }
-
-  /** Quote `quote`, locked, when its status is `status`; otherwise a stage mismatch. */
-  protected async quoteIn(sql: Sql, thread: StageThread, quote: string, status: string, message: string) {
-    const { rows } = await sql.query<{ kind: string; round_id: string | null; status: string }>(`select kind,round_id,status
-      from alpha_private.client_project_quotes where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 for update`,
-    [...threadParams(thread), quote]);
-    if (!rows[0] || rows[0].status !== status) stageMismatch(message);
-    return rows[0];
   }
 
   /** The thread's round that is not yet classified, if any. */

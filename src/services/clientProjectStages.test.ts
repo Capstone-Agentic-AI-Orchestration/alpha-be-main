@@ -252,11 +252,11 @@ describe('project stages: development', () => {
     summary = await feedbackRound(['Make the header blue', 'Add a loyalty program'], ['revision', 'out_of_scope']);
     expect(summary.revisionsUsed).toBe(1);
     expect(summary.rounds[0]).toMatchObject({ number: 2, status: 'classified', counts: true });
-    expect(summary.quotes).toEqual([expect.objectContaining({ kind: 'change_request', status: 'requested', title: 'Add a loyalty program', requestedBy: 'pm' })]);
-    expect(summary.nextAction).toMatchObject({ who: 'pm', kind: 'send_quote' });
+    expect(summary.requests).toEqual([expect.objectContaining({ status: 'open', title: 'Add a loyalty program', requestedBy: 'pm', roundId: summary.rounds[0]!.id })]);
+    expect(summary.nextAction).toMatchObject({ who: 'pm', kind: 'answer_request' });
   });
 
-  it('asks for a quote once the included rounds are used', async () => {
+  it('reminds the client that a round past the included ones costs additional, then sends it as usual', async () => {
     await toDevelopmentStage();
     for (let round = 0; round < 3; round += 1) await feedbackRound([`Change ${round}`], ['revision']);
     expect((await stages.summary(target, client)).revisionsUsed).toBe(3);
@@ -264,12 +264,24 @@ describe('project stages: development', () => {
     const shared = await stages.shareBuild(target, pm, cmd({ note: 'Build 4' }), 'client-a');
     const roundId = shared.receipt.refId!;
     await stages.saveRoundItems(target, client, roundId, { items: ['One more change'] });
-    await expect(stages.submitRound(target, client, roundId, cmd())).rejects.toMatchObject({ code: 'revision_limit_reached' });
-    const paid = await stages.submitRound(target, client, roundId, cmd({ acceptPaid: true }));
-    expect(paid.stage.rounds[0]).toMatchObject({ number: 4, status: 'awaiting_quote', paid: true });
-    expect(paid.stage.quotes[0]).toMatchObject({ kind: 'paid_revision', status: 'requested', title: 'Revision round 4', amount: null });
-    expect(paid.stage.revisionsUsed).toBe(3);
-    expect(paid.stage.nextAction).toMatchObject({ who: 'pm', kind: 'send_quote' });
+    await expect(stages.submitRound(target, client, roundId, cmd())).rejects.toMatchObject({ code: 'extra_round_unconfirmed' });
+    const sent = await stages.submitRound(target, client, roundId, cmd({ acknowledgeExtra: true }));
+    expect(sent.stage.rounds[0]).toMatchObject({ number: 4, status: 'submitted', extra: true });
+    const events = (await conversation.timeline(target, pm)).items.filter(item => item.stage?.action === 'round_submitted');
+    expect(events.at(-1)?.stage).toMatchObject({ number: 4, extra: true });
+    expect(sent.stage.requests).toEqual([]);
+    expect(sent.stage.nextAction).toMatchObject({ who: 'pm', kind: 'classify_round' });
+    const items = sent.stage.rounds[0]!.items;
+    const classified = await stages.classifyRound(target, pm, roundId, cmd({ items: items.map(item => ({ id: item.id, classification: 'revision' })) }), 'client-a');
+    expect(classified.stage.revisionsUsed).toBe(4);
+  });
+
+  it('does not ask for confirmation while included rounds remain', async () => {
+    await toDevelopmentStage();
+    const shared = await stages.shareBuild(target, pm, cmd({ note: '' }), 'client-a');
+    await stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['A change'] });
+    const sent = await stages.submitRound(target, client, shared.receipt.refId, cmd({ acknowledgeExtra: true }));
+    expect(sent.stage.rounds[0]).toMatchObject({ status: 'submitted', extra: false });
   });
 
   it('keeps one round open at a time and refuses empty or repeated sends', async () => {
@@ -302,56 +314,33 @@ describe('project stages: development', () => {
   });
 });
 
-describe('project stages: quotes', () => {
-  it('prices a paid round; accepting the quote sends the round to the PM', async () => {
-    await toDevelopmentStage();
-    for (let round = 0; round < 3; round += 1) await feedbackRound([`Change ${round}`], ['revision']);
-    const shared = await stages.shareBuild(target, pm, cmd({ note: 'Build 4' }), 'client-a');
-    await stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['One more change'] });
-    const paid = await stages.submitRound(target, client, shared.receipt.refId, cmd({ acceptPaid: true }));
-    const quote = paid.stage.quotes[0]!;
-
-    await expect(stages.decideQuote(target, client, quote.id, cmd({ decision: 'accept', fullName: 'Juan Dela Cruz', consent: true })))
-      .rejects.toMatchObject({ code: 'stage_mismatch' });
-    const sent = await stages.sendQuote(target, pm, quote.id, cmd({ amount: 2500, currency: 'PHP' }), 'client-a');
-    expect(sent.stage.quotes[0]).toMatchObject({ status: 'sent', amount: '2500.00', currency: 'PHP' });
-    expect(sent.stage.nextAction).toMatchObject({ who: 'client', kind: 'decide_quote' });
-    await expect(stages.decideQuote(target, client, quote.id, cmd({ decision: 'accept' }))).rejects.toMatchObject({ code: 'invalid_stage_input' });
-
-    const accepted = await stages.decideQuote(target, client, quote.id, cmd({ decision: 'accept', fullName: 'Juan Dela Cruz', consent: true }));
-    expect(accepted.stage.quotes[0]).toMatchObject({ status: 'accepted', decidedName: 'Juan Dela Cruz' });
-    expect(accepted.stage.rounds[0]).toMatchObject({ number: 4, status: 'submitted', paid: true });
-    expect(accepted.stage.nextAction).toMatchObject({ who: 'pm', kind: 'classify_round' });
-    const items = accepted.stage.rounds[0]!.items;
-    const classified = await stages.classifyRound(target, pm, accepted.stage.rounds[0]!.id, cmd({ items: items.map(item => ({ id: item.id, classification: 'revision' })) }), 'client-a');
-    expect(classified.stage.revisionsUsed).toBe(3);
-  });
-
-  it('reopens a paid round when its quote is declined', async () => {
-    await toDevelopmentStage();
-    await db.query(`update alpha_private.client_project_stages set revision_limit=0`);
-    const shared = await stages.shareBuild(target, pm, cmd({ note: '' }), 'client-a');
-    await stages.saveRoundItems(target, client, shared.receipt.refId!, { items: ['Paid change'] });
-    const paid = await stages.submitRound(target, client, shared.receipt.refId, cmd({ acceptPaid: true }));
-    await stages.sendQuote(target, pm, paid.stage.quotes[0]!.id, cmd({ amount: 900 }), 'client-a');
-    const declined = await stages.decideQuote(target, client, paid.stage.quotes[0]!.id, cmd({ decision: 'decline' }));
-    expect(declined.stage.quotes[0]).toMatchObject({ status: 'declined', decidedName: null });
-    expect(declined.stage.rounds[0]).toMatchObject({ status: 'open', paid: false, quoteId: null, submittedAt: null });
-  });
-
-  it('lets the client ask for new work after closure, quoted before anything starts', async () => {
+describe('project stages: change requests', () => {
+  it('lets the client ask for new work after closure, and the PM answer it without a price', async () => {
     await toDevelopmentStage();
     await stages.markFinalDelivery(target, pm, cmd({ note: '' }), 'client-a');
     await stages.acceptFinal(target, client, cmd({ fullName: 'Juan Dela Cruz', consent: true }));
     const asked = await stages.requestChange(target, client, cmd({ title: 'Add a gift card page', description: 'For the holidays.' }));
-    expect(asked.stage).toMatchObject({ stage: 'completed', nextAction: { who: 'pm', kind: 'send_quote' },
-      quotes: [expect.objectContaining({ kind: 'change_request', title: 'Add a gift card page', requestedBy: 'client', amount: null })] });
-    await stages.sendQuote(target, pm, asked.receipt.refId, cmd({ amount: 12000, description: 'Design and build, 1 week.' }), 'client-a');
-    const accepted = await stages.decideQuote(target, client, asked.receipt.refId, cmd({ decision: 'accept', fullName: 'Juan Dela Cruz', consent: true }));
-    expect(accepted.stage).toMatchObject({ stage: 'completed', nextAction: null,
-      quotes: [expect.objectContaining({ status: 'accepted', amount: '12000.00', description: 'Design and build, 1 week.' })] });
-    const timeline = (await conversation.timeline(target, client)).items.filter(item => item.stage?.action === 'quote_requested');
-    expect(timeline[0]?.body).toBe('Add a gift card page\n\nFor the holidays.');
+    expect(asked.stage).toMatchObject({ stage: 'completed', nextAction: { who: 'pm', kind: 'answer_request' },
+      requests: [expect.objectContaining({ status: 'open', title: 'Add a gift card page', requestedBy: 'client', reply: '', answeredAt: null })] });
+    await expect(stages.answerRequest(target, client, asked.receipt.refId, cmd({ decision: 'will_do' }), 'client-a'))
+      .rejects.toMatchObject({ status: 403 });
+    const answered = await stages.answerRequest(target, pm, asked.receipt.refId, cmd({ decision: 'will_do', reply: 'We can start next week.' }), 'client-a');
+    expect(answered.stage).toMatchObject({ stage: 'completed', nextAction: null,
+      requests: [expect.objectContaining({ status: 'will_do', reply: 'We can start next week.' })] });
+    await expect(stages.answerRequest(target, pm, asked.receipt.refId, cmd({ decision: 'wont_do' }), 'client-a'))
+      .rejects.toMatchObject({ code: 'stage_mismatch' });
+    const timeline = (await conversation.timeline(target, client)).items.filter(item => item.kind === 'stage_event');
+    expect(timeline.find(item => item.stage?.action === 'request_made')?.body).toBe('Add a gift card page\n\nFor the holidays.');
+    expect(timeline.find(item => item.stage?.action === 'request_answered')).toMatchObject({ body: 'We can start next week.',
+      stage: { decision: 'will_do', title: 'Add a gift card page', extra: false } });
+  });
+
+  it('records a "won’t do" with no reply', async () => {
+    await toDevelopmentStage();
+    const asked = await stages.requestChange(target, client, cmd({ title: 'A mobile app too' }));
+    const answered = await stages.answerRequest(target, pm, asked.receipt.refId, cmd({ decision: 'wont_do' }), 'client-a');
+    expect(answered.stage.requests[0]).toMatchObject({ status: 'wont_do', reply: '' });
+    expect(answered.stage.nextAction).toMatchObject({ who: 'pm', kind: 'share_build' });
   });
 
   it('refuses change requests before development', async () => {

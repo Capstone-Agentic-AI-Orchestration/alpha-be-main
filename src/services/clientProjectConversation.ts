@@ -31,7 +31,11 @@ export type ConversationItemKind = 'message' | 'note' | 'request' | 'clarificati
   | 'stage_event';
 
 /** A stage event in the timeline: what happened, to which POC/contract/round/quote, with its version number or signer's name. */
-export interface ConversationStageEvent { action: string; refId: string | null; number: number | null; name: string | null; stage: string | null }
+/** A stage event in the timeline. `decision`, `title` and `extra` describe change-request answers and extra rounds. */
+export interface ConversationStageEvent {
+  action: string; refId: string | null; number: number | null; name: string | null; stage: string | null;
+  decision: string | null; title: string | null; extra: boolean;
+}
 
 export interface ConversationItem {
   id: string;
@@ -100,7 +104,7 @@ interface TimelineRow {
   id: string; kind: ConversationItemKind; author: 'client' | 'pm'; body: string | null; created_at: string | Date;
   ticket_id: string | null; reference: string | null; title: string | null;
   issue_id: string | null; identifier: string | null; issue_title: string | null;
-  stage: { action: string; refId: string | null; number: unknown; name: unknown; stage: unknown } | null;
+  stage: { action: string; refId: string | null; number: unknown; name: unknown; stage: unknown; decision: unknown; title: unknown; extra: unknown } | null;
 }
 interface RequestRow {
   workspace_id: string; id: string; reference: string; title: string; description: string | null; status: string;
@@ -114,6 +118,9 @@ function stageEvent(raw: NonNullable<TimelineRow['stage']>): ConversationStageEv
     number: typeof raw.number === 'number' ? raw.number : null,
     name: typeof raw.name === 'string' ? raw.name : null,
     stage: typeof raw.stage === 'string' ? raw.stage : null,
+    decision: typeof raw.decision === 'string' ? raw.decision : null,
+    title: typeof raw.title === 'string' ? raw.title : null,
+    extra: raw.extra === true,
   };
 }
 
@@ -155,7 +162,7 @@ export class ClientProjectConversation {
           union all
           select 'se:'||e.id,'stage_event',e.actor_kind,e.body,e.created_at,null,null,
             jsonb_build_object('action',e.action,'refId',e.ref_id,'number',e.metadata->'number','name',e.metadata->'name',
-              'stage',e.metadata->'stage')
+              'stage',e.metadata->'stage','decision',e.metadata->'decision','title',e.metadata->'title','extra',e.metadata->'extra')
           from alpha_private.client_project_stage_events e
           where e.workspace_id=$1 and e.project_id=$2 and e.client_user_id=$3
         ),

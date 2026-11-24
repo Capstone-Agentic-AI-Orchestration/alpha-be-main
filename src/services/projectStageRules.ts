@@ -9,9 +9,10 @@ import { createHash } from 'node:crypto';
 export type ProjectStage = 'unset' | 'poc' | 'contract' | 'development' | 'completed';
 export type PocStatus = 'draft' | 'published' | 'changes_requested' | 'superseded' | 'approved';
 export type ContractStatus = 'draft' | 'issued' | 'client_signed' | 'countersigned' | 'void';
-export type RoundStatus = 'open' | 'awaiting_quote' | 'submitted' | 'classified';
+export type RoundStatus = 'open' | 'submitted' | 'classified';
 export type RevisionClassification = 'revision' | 'fix' | 'out_of_scope';
-export type QuoteStatus = 'requested' | 'sent' | 'accepted' | 'declined' | 'withdrawn';
+/** A change request outside the contract. Alpha takes no payments: the client is reminded it costs extra, and the PM answers. */
+export type RequestStatus = 'open' | 'will_do' | 'wont_do';
 
 export const STAGE_LABEL: Record<ProjectStage, string> = {
   unset: 'Stage not set', poc: 'Proof of concept', contract: 'Contract', development: 'Development', completed: 'Completed',
@@ -35,13 +36,20 @@ export function roundCounts(classifications: readonly RevisionClassification[]):
   return classifications.includes('revision');
 }
 
-/** Included rounds used: rounds used before stages existed, plus counted rounds that were not paid for. */
-export function revisionsUsed(rounds: ReadonlyArray<{ counts: boolean | null; paid: boolean }>, offset: number): number {
-  return offset + rounds.filter(round => round.counts === true && !round.paid).length;
+/**
+ * Rounds used: rounds used before stages existed, plus rounds that held a
+ * revision. It can pass the limit; the rounds past it are extra.
+ */
+export function revisionsUsed(rounds: ReadonlyArray<{ counts: boolean | null }>, offset: number): number {
+  return offset + rounds.filter(round => round.counts === true).length;
 }
 
-/** Once the included rounds are used, the next round needs an accepted quote first. */
-export function submitRequiresQuote(used: number, limit: number): boolean {
+/**
+ * Once the included rounds are used, the next round is extra: the client is
+ * reminded it costs additional and confirms before sending it. Nothing is
+ * charged in Alpha.
+ */
+export function roundIsExtra(used: number, limit: number): boolean {
   return used >= limit;
 }
 
@@ -51,18 +59,16 @@ export interface StageState {
   contract: { status: ContractStatus } | null;
   round: { status: RoundStatus; number: number } | null;
   finalDelivered: boolean;
-  quotes: ReadonlyArray<{ status: QuoteStatus }>;
+  requests: ReadonlyArray<{ status: RequestStatus }>;
 }
 
 export type NextActionKind =
   | 'set_stage' | 'publish_poc' | 'review_poc' | 'issue_contract' | 'sign_contract' | 'countersign_contract'
-  | 'send_quote' | 'decide_quote' | 'share_build' | 'submit_round' | 'classify_round' | 'accept_final';
+  | 'answer_request' | 'share_build' | 'submit_round' | 'classify_round' | 'accept_final';
 export interface NextAction { who: 'client' | 'pm'; kind: NextActionKind; label: string }
 
-function quoteAction(quotes: StageState['quotes']): NextAction | null {
-  if (quotes.some(quote => quote.status === 'requested')) return { who: 'pm', kind: 'send_quote', label: 'Send a quote' };
-  if (quotes.some(quote => quote.status === 'sent')) return { who: 'client', kind: 'decide_quote', label: 'Review the quote' };
-  return null;
+function requestAction(requests: StageState['requests']): NextAction | null {
+  return requests.some(request => request.status === 'open') ? { who: 'pm', kind: 'answer_request', label: 'Answer a change request' } : null;
 }
 
 function pocAction(poc: StageState['poc']): NextAction {
@@ -78,10 +84,10 @@ function contractAction(contract: StageState['contract']): NextAction {
 }
 
 function developmentAction(state: StageState): NextAction {
-  const quote = quoteAction(state.quotes);
-  if (quote) return quote;
   if (state.round?.status === 'open') return { who: 'client', kind: 'submit_round', label: `Send your feedback on build ${state.round.number}` };
   if (state.round?.status === 'submitted') return { who: 'pm', kind: 'classify_round', label: `Review feedback round ${state.round.number}` };
+  const request = requestAction(state.requests);
+  if (request) return request;
   if (state.finalDelivered) return { who: 'client', kind: 'accept_final', label: 'Review the final delivery' };
   return { who: 'pm', kind: 'share_build', label: 'Share the next build' };
 }
@@ -93,7 +99,7 @@ export function nextAction(state: StageState): NextAction | null {
     case 'poc': return pocAction(state.poc);
     case 'contract': return contractAction(state.contract);
     case 'development': return developmentAction(state);
-    case 'completed': return quoteAction(state.quotes);
+    case 'completed': return requestAction(state.requests);
   }
 }
 

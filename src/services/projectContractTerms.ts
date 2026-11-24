@@ -31,13 +31,12 @@ export function defaultContractClauses(revisionLimit: number, pocNumber: number)
     { title: 'Product Development Stage',
       body: `The developed product includes a maximum of ${rounds(revisionLimit)} of revisions based on the approved POC and the agreed `
         + 'project specifications. A round is one set of feedback on a shared build. Fixing defects, or anything that does not match '
-        + 'the approved POC, is not a revision. Further rounds are quoted and need the client\'s approval before work starts.' },
+        + 'the approved POC, is not a revision. Further rounds cost additional and are billed separately.' },
     { title: 'Project Completion and Contract Closure',
       body: 'Upon completion, delivery and final acceptance of the agreed deliverables, this contract is considered closed.' },
     { title: 'Additional Requests After Contract Closure',
       body: 'Any new features, modifications, enhancements or requests made after contract closure that fall outside the original '
-        + 'agreed scope are subject to additional charges. Such requests need a separate quotation and the client\'s approval before '
-        + 'implementation.' },
+        + 'agreed scope are subject to additional charges, agreed separately before the work starts.' },
   ];
 }
 
