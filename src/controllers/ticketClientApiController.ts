@@ -381,9 +381,7 @@ export function createTicketClientApiRouter(
       router.post(stagePath + '/rounds/:roundId/submit', write((req, subject) =>
         stages.submitRound(target(req), subject, req.params.roundId, req.body)));
       router.post(stagePath + '/final/accept', write((req, subject) => stages.acceptFinal(target(req), subject, req.body)));
-      router.post(stagePath + '/quotes', write((req, subject) => stages.requestChange(target(req), subject, req.body)));
-      router.post(stagePath + '/quotes/:quoteId/decision', write((req, subject) =>
-        stages.decideQuote(target(req), subject, req.params.quoteId, req.body)));
+      router.post(stagePath + '/requests', write((req, subject) => stages.requestChange(target(req), subject, req.body)));
     }
   }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { canTransition, canonicalJson, contentHash, nextAction, revisionsUsed, roundCounts, submitRequiresQuote, type StageState } from './projectStageRules.js';
+import { canTransition, canonicalJson, contentHash, nextAction, revisionsUsed, roundCounts, roundIsExtra, type StageState } from './projectStageRules.js';
 
-const base: StageState = { stage: 'poc', poc: null, contract: null, round: null, finalDelivered: false, quotes: [] };
+const base: StageState = { stage: 'poc', poc: null, contract: null, round: null, finalDelivered: false, requests: [] };
 
 describe('project stage rules', () => {
   it('moves forward one stage at a time, and lets a legacy project pick where it starts', () => {
@@ -15,14 +15,14 @@ describe('project stage rules', () => {
     expect(canTransition('unset', 'contract')).toBe(false);
   });
 
-  it('counts a round only when it holds a revision, and never a paid one', () => {
+  it('counts a round only when it holds a revision, and marks rounds past the limit as extra', () => {
     expect(roundCounts(['fix', 'fix'])).toBe(false);
     expect(roundCounts(['fix', 'revision'])).toBe(true);
     expect(roundCounts(['out_of_scope'])).toBe(false);
-    expect(revisionsUsed([{ counts: true, paid: false }, { counts: false, paid: false }, { counts: null, paid: false }], 0)).toBe(1);
-    expect(revisionsUsed([{ counts: true, paid: true }], 1)).toBe(1);
-    expect(submitRequiresQuote(2, 3)).toBe(false);
-    expect(submitRequiresQuote(3, 3)).toBe(true);
+    expect(revisionsUsed([{ counts: true }, { counts: false }, { counts: null }], 0)).toBe(1);
+    expect(revisionsUsed([{ counts: true }, { counts: true }], 3)).toBe(5);
+    expect(roundIsExtra(2, 3)).toBe(false);
+    expect(roundIsExtra(3, 3)).toBe(true);
   });
 
   it('says whose turn it is', () => {
@@ -37,11 +37,13 @@ describe('project stage rules', () => {
     expect(nextAction(dev)).toMatchObject({ who: 'pm', kind: 'share_build' });
     expect(nextAction({ ...dev, round: { status: 'open', number: 1 } })).toMatchObject({ who: 'client', kind: 'submit_round' });
     expect(nextAction({ ...dev, round: { status: 'submitted', number: 1 } })).toMatchObject({ who: 'pm', kind: 'classify_round' });
-    expect(nextAction({ ...dev, quotes: [{ status: 'requested' }] })).toMatchObject({ who: 'pm', kind: 'send_quote' });
-    expect(nextAction({ ...dev, quotes: [{ status: 'sent' }] })).toMatchObject({ who: 'client', kind: 'decide_quote' });
+    expect(nextAction({ ...dev, requests: [{ status: 'open' }] })).toMatchObject({ who: 'pm', kind: 'answer_request' });
+    expect(nextAction({ ...dev, requests: [{ status: 'will_do' }] })).toMatchObject({ who: 'pm', kind: 'share_build' });
+    expect(nextAction({ ...dev, round: { status: 'open', number: 2 }, requests: [{ status: 'open' }] }))
+      .toMatchObject({ who: 'client', kind: 'submit_round' });
     expect(nextAction({ ...dev, finalDelivered: true })).toMatchObject({ who: 'client', kind: 'accept_final' });
     expect(nextAction({ ...base, stage: 'completed' })).toBeNull();
-    expect(nextAction({ ...base, stage: 'completed', quotes: [{ status: 'requested' }] })).toMatchObject({ who: 'pm', kind: 'send_quote' });
+    expect(nextAction({ ...base, stage: 'completed', requests: [{ status: 'open' }] })).toMatchObject({ who: 'pm', kind: 'answer_request' });
   });
 
   it('hashes the same content the same way whatever the key order', () => {

@@ -41,7 +41,7 @@ export function createPmProjectStageRouter(app: ClientProjectStages, relay = rel
   router.post(base + '/rounds/:roundId/classify', handle((req, subject, target, clientId) =>
     app.classifyRound(target, subject, req.params.roundId, req.body, clientId)));
   router.post(base + '/final', handle((req, subject, target, clientId) => app.markFinalDelivery(target, subject, req.body, clientId)));
-  router.post(base + '/quotes/:quoteId/send', handle((req, subject, target, clientId) =>
-    app.sendQuote(target, subject, req.params.quoteId, req.body, clientId)));
+  router.post(base + '/requests/:requestId/answer', handle((req, subject, target, clientId) =>
+    app.answerRequest(target, subject, req.params.requestId, req.body, clientId)));
   return router;
 }

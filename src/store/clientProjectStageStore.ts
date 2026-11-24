@@ -2,7 +2,7 @@ import type { Sql } from './database.js';
 import { ticketSqlIso } from './ticketPostgresCodec.js';
 import {
   nextAction, revisionsUsed, STAGE_LABEL,
-  type ContractStatus, type NextAction, type PocStatus, type ProjectStage, type QuoteStatus,
+  type ContractStatus, type NextAction, type PocStatus, type ProjectStage, type RequestStatus,
   type RevisionClassification, type RoundStatus, type StageState,
 } from '../services/projectStageRules.js';
 
@@ -32,20 +32,20 @@ export interface ContractView {
 export interface RevisionItemView { id: string; position: number; body: string; classification: RevisionClassification | null; pmNote: string }
 export interface RoundView {
   id: string; number: number; status: RoundStatus; buildNote: string; previewUrl: string | null; counts: boolean | null;
-  paid: boolean; quoteId: string | null; openedAt: string; submittedAt: string | null; classifiedAt: string | null;
+  extra: boolean; openedAt: string; submittedAt: string | null; classifiedAt: string | null;
   items: RevisionItemView[];
 }
-export interface QuoteView {
-  id: string; kind: 'paid_revision' | 'change_request'; roundId: string | null; title: string; description: string;
-  amount: string | null; currency: string; status: QuoteStatus; requestedBy: 'pm' | 'client'; requestedAt: string;
-  sentAt: string | null; decidedName: string | null; decidedAt: string | null;
+/** A change request outside the contract. No price: the client is reminded it costs extra, and the PM answers. */
+export interface RequestView {
+  id: string; roundId: string | null; title: string; description: string; status: RequestStatus;
+  requestedBy: 'pm' | 'client'; requestedAt: string; reply: string; answeredAt: string | null;
 }
 export interface StageSummary {
   stage: ProjectStage; stageLabel: string; revisionLimit: number; revisionsUsed: number; version: number; stageChangedAt: string;
   nextAction: NextAction | null;
   poc: PocVersionView | null; pocDraft: PocVersionView | null;
   pocHistory: Array<{ id: string; number: number; status: PocStatus; publishedAt: string | null }>;
-  contract: ContractView | null; rounds: RoundView[]; quotes: QuoteView[];
+  contract: ContractView | null; rounds: RoundView[]; requests: RequestView[];
   final: { deliveredAt: string; note: string; acceptedAt: string | null; acceptedName: string | null } | null;
   clientId?: string;
 }
@@ -68,14 +68,13 @@ interface ContractRow {
   pm_signed_name: string | null; pm_signed_at: Time | null;
 }
 interface RoundRow {
-  id: string; number: number; status: RoundStatus; build_note: string; preview_url: string | null; counts: boolean | null; paid: boolean;
-  quote_id: string | null; opened_at: Time; submitted_at: Time | null; classified_at: Time | null;
+  id: string; number: number; status: RoundStatus; build_note: string; preview_url: string | null; counts: boolean | null; extra: boolean;
+  opened_at: Time; submitted_at: Time | null; classified_at: Time | null;
 }
 interface ItemRow { round_id: string; id: string; position: number; body: string; classification: RevisionClassification | null; pm_note: string }
-interface QuoteRow {
-  id: string; kind: 'paid_revision' | 'change_request'; round_id: string | null; title: string; description: string; amount: string | null;
-  currency: string; status: QuoteStatus; requested_by_kind: 'pm' | 'client'; requested_at: Time; sent_at: Time | null;
-  decided_name: string | null; decided_at: Time | null;
+interface RequestRow {
+  id: string; round_id: string | null; title: string; description: string; status: RequestStatus;
+  requested_by_kind: 'pm' | 'client'; requested_at: Time; reply: string; answered_at: Time | null;
 }
 
 const THREAD = 'workspace_id=$1 and project_id=$2 and client_user_id=$3';
@@ -127,32 +126,30 @@ async function loadContract(sql: Sql, thread: StageThread): Promise<ContractView
 }
 
 async function loadRounds(sql: Sql, thread: StageThread): Promise<RoundView[]> {
-  const { rows } = await sql.query<RoundRow>(`select id,number,status,build_note,preview_url,counts,paid,quote_id,opened_at,submitted_at,classified_at
+  const { rows } = await sql.query<RoundRow>(`select id,number,status,build_note,preview_url,counts,extra,opened_at,submitted_at,classified_at
     from alpha_private.client_project_revision_rounds where ${THREAD} order by number desc`, params(thread));
   if (!rows.length) return [];
   const { rows: items } = await sql.query<ItemRow>(`select round_id,id,position,body,classification,pm_note
     from alpha_private.client_project_revision_items where ${THREAD} order by position`, params(thread));
   return rows.map(row => ({
     id: row.id, number: row.number, status: row.status, buildNote: row.build_note, previewUrl: row.preview_url,
-    counts: row.counts, paid: row.paid, quoteId: row.quote_id, openedAt: ticketSqlIso(row.opened_at),
+    counts: row.counts, extra: row.extra, openedAt: ticketSqlIso(row.opened_at),
     submittedAt: iso(row.submitted_at), classifiedAt: iso(row.classified_at),
     items: items.filter(item => item.round_id === row.id).map(item => ({
       id: item.id, position: item.position, body: item.body, classification: item.classification, pmNote: item.pm_note })),
   }));
 }
 
-async function loadQuotes(sql: Sql, thread: StageThread): Promise<QuoteView[]> {
-  const { rows } = await sql.query<QuoteRow>(`select id,kind,round_id,title,description,amount::text as amount,currency,status,
-      requested_by_kind,requested_at,sent_at,decided_name,decided_at
-    from alpha_private.client_project_quotes where ${THREAD} and status<>'withdrawn' order by requested_at desc,id collate "C"`, params(thread));
+async function loadRequests(sql: Sql, thread: StageThread): Promise<RequestView[]> {
+  const { rows } = await sql.query<RequestRow>(`select id,round_id,title,description,status,requested_by_kind,requested_at,reply,answered_at
+    from alpha_private.client_project_requests where ${THREAD} order by requested_at desc,id collate "C"`, params(thread));
   return rows.map(row => ({
-    id: row.id, kind: row.kind, roundId: row.round_id, title: row.title, description: row.description, amount: row.amount,
-    currency: row.currency, status: row.status, requestedBy: row.requested_by_kind, requestedAt: ticketSqlIso(row.requested_at),
-    sentAt: iso(row.sent_at), decidedName: row.decided_name, decidedAt: iso(row.decided_at),
+    id: row.id, roundId: row.round_id, title: row.title, description: row.description, status: row.status,
+    requestedBy: row.requested_by_kind, requestedAt: ticketSqlIso(row.requested_at), reply: row.reply, answeredAt: iso(row.answered_at),
   }));
 }
 
-function stageState(row: StageRow, pocs: PocVersionView[], contract: ContractView | null, rounds: RoundView[], quotes: QuoteView[]): StageState {
+function stageState(row: StageRow, pocs: PocVersionView[], contract: ContractView | null, rounds: RoundView[], requests: RequestView[]): StageState {
   const latest = pocs.find(poc => poc.status !== 'draft') ?? null;
   const active = rounds.find(round => round.status !== 'classified') ?? null;
   return {
@@ -161,31 +158,30 @@ function stageState(row: StageRow, pocs: PocVersionView[], contract: ContractVie
     contract: contract ? { status: contract.status } : null,
     round: active ? { status: active.status, number: active.number } : null,
     finalDelivered: row.final_delivered_at !== null && row.final_accepted_at === null,
-    quotes: quotes.map(quote => ({ status: quote.status })),
+    requests: requests.map(request => ({ status: request.status })),
   };
 }
 
-/** Everything both sides need to show the stage. Drafts and unsent quote amounts stay with the PM. */
+/** Everything both sides need to show the stage. Drafts stay with the PM. */
 export async function loadStageSummary(sql: Sql, thread: StageThread, audience: 'client' | 'pm'): Promise<StageSummary> {
   const row = await lockStageRow(sql, thread, false);
   // One connection per transaction: read in turn.
   const pocRows = await loadPocs(sql, thread);
   const contract = await loadContract(sql, thread);
   const rounds = await loadRounds(sql, thread);
-  const quotes = await loadQuotes(sql, thread);
+  const requests = await loadRequests(sql, thread);
   const pocs = pocRows.map(pocView);
   const published = pocs.filter(poc => poc.status !== 'draft');
   const forClient = audience === 'client';
   const visibleContract = forClient && contract?.status === 'draft' ? null : contract;
-  const visibleQuotes = forClient ? quotes.map(quote => quote.status === 'requested' ? { ...quote, amount: null } : quote) : quotes;
   return {
     stage: row.stage, stageLabel: STAGE_LABEL[row.stage], revisionLimit: row.revision_limit,
     revisionsUsed: revisionsUsed(rounds, row.revisions_offset), version: row.version, stageChangedAt: ticketSqlIso(row.stage_changed_at),
-    nextAction: nextAction(stageState(row, pocs, contract, rounds, quotes)),
+    nextAction: nextAction(stageState(row, pocs, contract, rounds, requests)),
     poc: published[0] ?? null,
     pocDraft: forClient ? null : pocs.find(poc => poc.status === 'draft') ?? null,
     pocHistory: published.map(poc => ({ id: poc.id, number: poc.number, status: poc.status, publishedAt: poc.publishedAt })),
-    contract: visibleContract, rounds, quotes: visibleQuotes,
+    contract: visibleContract, rounds, requests,
     final: row.final_delivered_at ? {
       deliveredAt: ticketSqlIso(row.final_delivered_at), note: row.final_delivered_note ?? '',
       acceptedAt: iso(row.final_accepted_at), acceptedName: row.final_accepted_name,
