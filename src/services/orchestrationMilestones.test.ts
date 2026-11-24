@@ -10,6 +10,9 @@ import { BuildWorkspaceLostError } from './orchestrationCheckpoints.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { initialTaskRecords } from './orchestrationStateMachine.js';
 import type { MilestoneExpansion, PlanNextMilestone } from './orchestrationMilestonePlanner.js';
+import { milestoneDecisions } from './milestoneDecisions.js';
+import { milestoneDecisionsNotice } from './orchestrationChatNotice.js';
+import { teamProductPicture } from './productPicture.js';
 
 const agents = [{ id: 'architect', role: 'Architecture Agent' }] as const;
 const plan = parseOrchestrationPlan({ schemaVersion: 2, goal: 'Design the service, then its client.',
@@ -120,6 +123,49 @@ describe('adaptive milestone boundaries', () => {
     expect((await finish()).run.status).toBe('validating');
     expect(() => store!.appendOrchestrationMilestone({ runId: active.run.id, expectedRevision: active.run.revision, expectedPlanVersion: 1,
       milestoneId: 'second', ...expansion, actorId: 'user' })).toThrow(/changed/);
+  });
+
+  it('saves a later milestone\'s decisions and fit check, so they reach the plan, the product picture and the chat', async () => {
+    const decided: MilestoneExpansion = { ...expansion,
+      decisions: [{ about: 'Client storage', decision: 'The client caches the contract locally.', toChange: 'Ask for a server-side cache instead.' }],
+      fitCheck: [{ subject: 'design-client', subjectType: 'task', verdict: 'fits', reason: 'Serves the client requirement.' },
+        { subject: 'PRO-7', subjectType: 'card', verdict: 'conflicts', reason: 'The card asks for offline mode, which the brief rules out.', surfacedIn: 'Should the client work offline?' }] };
+    const { service, active } = await setup(vi.fn(async () => decided));
+    const expanded = await (await submit(service, active))();
+
+    expect(expanded.run.plan.decisions).toEqual([expect.objectContaining({ about: 'Client contract: Client storage', decision: 'The client caches the contract locally.' })]);
+    expect(expanded.run.plan.fitCheck).toEqual(decided.fitCheck);
+    // The document escapes Markdown punctuation; read it as plain text.
+    const document = store!.ensureOrchestrationPlanDocuments(active.run.id).find(item => item.version === 2)!.content.replace(/\\/g, '');
+    expect(document).toContain('## What the Orchestrator decided');
+    expect(document).toMatch(/Client contract: Client storage.*The client caches the contract locally\. To change this: Ask for a server-side cache instead\./);
+    expect(document).toMatch(/PRO-7.*offline mode/);
+    // The build's plan was approved, so the decision is part of the product picture now.
+    const picture = teamProductPicture({ project: { name: 'Shop', description: '' }, issues: [], snapshots: [expanded] });
+    expect(picture.decisions).toContain('Client contract: Client storage: The client caches the contract locally.');
+    expect(store!.listOrchestrationEvents(active.run.id, 0, 500).find(event => event.type === 'plan_amended')?.payload)
+      .toMatchObject({ decisions: [expect.objectContaining({ about: 'Client contract: Client storage' })] });
+  });
+
+  it('words a milestone\'s decisions and settled conflicts for the chat, and keeps approved decisions when the list is full', () => {
+    expect(milestoneDecisionsNotice({ milestoneTitle: 'Client contract', decisions: [], conflicts: [] })).toBeUndefined();
+    expect(milestoneDecisionsNotice({ milestoneTitle: 'Client contract',
+      decisions: [{ about: 'Client contract: Client storage', decision: 'Cache locally.', toChange: 'Ask for a server cache.' }],
+      conflicts: [{ subject: 'Design client', reason: 'The brief rules out offline mode.', surfacedIn: 'Should the client work offline?' }] }))
+      .toBe([
+        '**Alpha planned the next milestone: Client contract.**',
+        'What the Orchestrator decided:',
+        '- **Client contract: Client storage**: Cache locally. To change this: Ask for a server cache.',
+        'Where the work conflicts with the product, and how that was settled:',
+        '- Design client: The brief rules out offline mode. (settled by: Should the client work offline?)',
+        'Tell me here if you want any of it done differently.'
+      ].join('\n'));
+    const approved = Array.from({ length: 11 }, (_, index) => ({ about: `Topic ${index}`, decision: 'Approved.' }));
+    const joined = milestoneDecisions(approved, 'Second', [{ about: 'A', decision: 'One.' }, { about: 'B', decision: 'Two.' }, { about: 'Topic 0', decision: 'Approved.' }]);
+    expect(joined.saved).toHaveLength(12);
+    expect(joined.saved.slice(0, 11)).toEqual(approved);
+    expect(joined.added).toEqual([{ about: 'Second: A', decision: 'One.' }]);
+    expect(joined.unsaved).toEqual([{ about: 'Second: B', decision: 'Two.' }, { about: 'Second: Topic 0', decision: 'Approved.' }]);
   });
 
   it('gives refused milestone tasks back to the Orchestrator once, with the reason', async () => {

@@ -18,7 +18,7 @@ import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
 import { isTestFile, testFileWeakening } from './testWeakening.js';
 import { classifyRisk } from './riskTier.js';
-import { ORCHESTRATOR_FIX_REVIEW_CHECK, unapprovedOrchestratorFix } from './blockerResolutionRecord.js';
+import { ORCHESTRATOR_FIX_REVIEW_CHECK, unapprovedOrchestratorFix, unapprovedOrchestratorTask } from './blockerResolutionRecord.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
 import {
   AUTO_REPAIR_ATTEMPT_LIMIT,
@@ -793,7 +793,8 @@ export class TaskAcceptanceService {
     otherTasksAcceptedPaths: readonly string[]
   ): { reason: string; evidence: { check: string; sensitivePaths: string[]; outsidePaths: string[] } } | undefined {
     const resolution = unapprovedOrchestratorFix(this.store.getOpenOrchestrationRecoveryEpisode(snapshot.run.id), task.id);
-    if (!resolution) return undefined;
+    const addedBy = resolution ? undefined : unapprovedOrchestratorTask(this.store.listOrchestrationRecoveryEpisodes(snapshot.run.id), task.id);
+    if (!resolution && !addedBy) return undefined;
     const repository = task.repository ?? snapshot.run.repository;
     const setting = this.store.getProjectOrchestrationSetting(snapshot.run.projectId);
     const risk = classifyRisk({
@@ -804,6 +805,15 @@ export class TaskAcceptanceService {
     const sensitivePaths = risk.classifiedPaths
       .filter(item => item.tier >= 2 || (item.tier === 1 && setting.autonomy === 'strict'))
       .map(item => item.path);
+    if (!resolution) {
+      // A task the Orchestrator added: acceptance already holds it to its scope; what it may not do
+      // alone is change a sensitive area, which a broad scope pattern cannot show in advance.
+      if (!sensitivePaths.length) return undefined;
+      return {
+        reason: `This task was added by the Orchestrator and changed ${sensitivePaths.slice(0, 5).join(', ')}, a sensitive area Alpha may not change on its own. The work is kept and waits for the person to approve it.`,
+        evidence: { check: ORCHESTRATOR_FIX_REVIEW_CHECK, sensitivePaths, outsidePaths: [] }
+      };
+    }
     const cleared = new Set([
       ...(resolution.priorChangedPaths ?? []),
       ...(resolution.proposedFix?.expectedFiles ?? []).filter(file => sameRepository(file.repository, repository)).map(file => file.path)

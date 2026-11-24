@@ -1,6 +1,6 @@
 import type { OrchestrationRecoveryEpisode } from '../models/index.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { resolutionOf } from './blockerResolutionRecord.js';
+import { proposalText, resolutionOf } from './blockerResolutionRecord.js';
 import { safeRecoveryGuidance, safeRecoverySummary } from './orchestrationRecoveryPolicy.js';
 
 /**
@@ -19,9 +19,13 @@ export interface ResolvedWithoutYouItem {
   recoveryId: string;
   taskId?: string;
   taskTitle?: string;
-  /** `retry_accepted`: the fix passed acceptance. `retrying`: the specialist is applying it now. */
-  status: 'retry_accepted' | 'retrying';
-  /** 0 mechanical, 1 structural (changes earlier accepted work). */
+  /**
+   * `retry_accepted`: the fix passed acceptance. `retrying`: the specialist is applying it now.
+   * `prerequisite_added`: work the plan was missing was added before the task (`fix` says what);
+   * it runs through the same checks and an independent review like every task.
+   */
+  status: 'retry_accepted' | 'retrying' | 'prerequisite_added';
+  /** 0 mechanical, 1 structural (changes earlier accepted work, or adds work to the plan). */
   tier: number;
   problem: string;
   fix: string;
@@ -50,8 +54,9 @@ export function resolvedWithoutYou(
   const titles = new Map(snapshot.tasks.map(task => [task.id, task.title]));
   return episodes.flatMap(episode => {
     const record = resolutionOf(episode);
-    if (!record || record.appliedBy || !record.proposedFix) return [];
-    if (record.outcome !== 'retry_accepted' && record.outcome !== 'retrying') return [];
+    const fix = record && proposalText(record);
+    if (!record || record.appliedBy || !fix) return [];
+    if (record.outcome !== 'retry_accepted' && record.outcome !== 'retrying' && record.outcome !== 'prerequisite_added') return [];
     const evidence: ResolvedWithoutYouEvidence[] = (record.citations ?? []).slice(0, MAX_EVIDENCE).map(citation =>
       citation.source === 'repository'
         ? { source: 'repository', repository: safeRecoverySummary(citation.repository), path: safeRecoverySummary(citation.path),
@@ -65,7 +70,7 @@ export function resolvedWithoutYou(
       status: record.outcome,
       tier: record.tier ?? 0,
       problem: safeRecoverySummary(record.diagnosis ?? episode.summary),
-      fix: safeRecoveryGuidance(record.proposedFix.instructions),
+      fix: safeRecoveryGuidance(fix),
       evidence,
       resolvedAt: record.finishedAt ?? episode.updatedAt
     }];

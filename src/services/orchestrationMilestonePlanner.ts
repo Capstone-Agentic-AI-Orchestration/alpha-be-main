@@ -4,7 +4,7 @@ import type { SQLiteService } from './sqliteService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner } from './orchestrationPlanner.js';
 import { plannableAgents, plannerIdentity, readyProjectAgents, selectPlanner } from './planningAgents.js';
-import { type OrchestrationPlan, type OrchestrationTaskDefinition } from './orchestrationContract.js';
+import { type OrchestrationPlan, type OrchestrationTaskDefinition, type PlanFitCheckEntry } from './orchestrationContract.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { plannerModelName, repositoryPlanningContext } from './projectBuildOrchestrator.js';
 import { getGitChangedPaths, getGitFileAtCommit, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
@@ -13,7 +13,17 @@ import { planRepositoryCoverage } from './orchestrationWorkspace.js';
 import { readAgentProductPicture, storeProductPictureSource } from './productPictureSource.js';
 
 export type Milestone = NonNullable<OrchestrationPlan['milestones']>[number];
-export type MilestoneExpansion = { tasks: OrchestrationTaskDefinition[]; checkpoints: Array<{ repository: string; commit: string }> };
+/**
+ * A milestone's tasks, and what its plan decided and checked: saved with the tasks so the person
+ * sees them (appendOrchestrationMilestone), as nobody approves a later milestone's plan.
+ */
+export type MilestoneExpansion = {
+  tasks: OrchestrationTaskDefinition[];
+  checkpoints: Array<{ repository: string; commit: string }>;
+  decisions?: OrchestrationPlan['decisions'];
+  /** Task entries name the ids the tasks are saved under. */
+  fitCheck?: PlanFitCheckEntry[];
+};
 /** `refused`: why the build's checks refused this milestone's last tasks, for the Orchestrator's one correction. */
 export type PlanNextMilestone = (snapshot: OrchestrationSnapshot, milestone: Milestone, refused?: string) => Promise<MilestoneExpansion>;
 
@@ -126,6 +136,12 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
     });
     await assertStillCurrent(snapshot, workspaces, checkpoints, result.plan.tasks);
     const ids = new Map(result.plan.tasks.map(task => [task.id, `m${(run.plan.milestones?.findIndex(item => item.id === milestone.id) ?? -1) + 1}-${createHash('sha256').update(task.id).digest('hex').slice(0, 16)}`]));
-    return { checkpoints, tasks: result.plan.tasks.map(task => ({ ...task, id: ids.get(task.id)!, milestoneId: milestone.id, dependsOn: task.dependsOn.map(id => ids.get(id)!) })) };
+    const fitCheck = result.plan.fitCheck?.map(entry => entry.subjectType === 'task' && ids.has(entry.subject) ? { ...entry, subject: ids.get(entry.subject)! } : entry);
+    return {
+      checkpoints,
+      tasks: result.plan.tasks.map(task => ({ ...task, id: ids.get(task.id)!, milestoneId: milestone.id, dependsOn: task.dependsOn.map(id => ids.get(id)!) })),
+      ...(result.plan.decisions?.length ? { decisions: result.plan.decisions } : {}),
+      ...(fitCheck?.length ? { fitCheck } : {})
+    };
   };
 }

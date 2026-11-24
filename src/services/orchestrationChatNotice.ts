@@ -70,6 +70,37 @@ export async function postPlanCorrectedNotice(store: NoticeStore, snapshot: Orch
   ].join('\n'), 'build').catch(() => undefined);
 }
 
+/**
+ * What the Orchestrator decided for a later milestone, and any conflict its fit check settled. Nobody
+ * approves a milestone's plan, so this is where the person learns of them while the build runs.
+ * Nothing is posted when there was nothing to decide.
+ */
+export function milestoneDecisionsNotice(input: {
+  milestoneTitle: string;
+  decisions: ReadonlyArray<{ about: string; decision: string; toChange?: string }>;
+  conflicts: ReadonlyArray<{ subject: string; reason: string; surfacedIn?: string }>;
+}): string | undefined {
+  if (!input.decisions.length && !input.conflicts.length) return undefined;
+  const lines = [`**Alpha planned the next milestone: ${input.milestoneTitle}.**`];
+  const toChange = (value?: string) => value ? ' To change this: ' + value : '';
+  const settledBy = (value?: string) => value ? ' (settled by: ' + value + ')' : '';
+  if (input.decisions.length) {
+    lines.push('What the Orchestrator decided:', ...input.decisions.map(item => `- **${item.about}**: ${item.decision}${toChange(item.toChange)}`));
+  }
+  if (input.conflicts.length) {
+    lines.push('Where the work conflicts with the product, and how that was settled:',
+      ...input.conflicts.map(item => `- ${item.subject}: ${item.reason}${settledBy(item.surfacedIn)}`));
+  }
+  lines.push('Tell me here if you want any of it done differently.');
+  return lines.join('\n');
+}
+
+export async function postMilestoneDecisionsNotice(store: NoticeStore, snapshot: OrchestrationSnapshot, milestoneId: string,
+  input: Parameters<typeof milestoneDecisionsNotice>[0]): Promise<void> {
+  const content = milestoneDecisionsNotice(input);
+  if (content) await post(store, snapshot, `${snapshot.run.id}-milestone-${milestoneId}-decisions`, content).catch(() => undefined);
+}
+
 export async function postPublishedNotice(store: NoticeStore, snapshot: OrchestrationSnapshot, publications: OrchestrationPublicationRecord[]): Promise<void> {
   await post(store, snapshot, `${snapshot.run.id}-published`, publishedNotice(publications)).catch(() => undefined);
 }

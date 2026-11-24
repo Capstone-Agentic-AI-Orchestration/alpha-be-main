@@ -9,6 +9,7 @@ import {
   ORCHESTRATION_AGENT_REPORT_SCHEMA_VERSION,
   ensureTaskAssignmentReasons,
   parseOrchestrationPlan,
+  type OrchestrationPlan,
   type PlanValidationIssue,
   type OrchestrationRequiredCheck,
   type OrchestrationTaskKind
@@ -30,6 +31,7 @@ import { OrchestrationPublicationService } from './orchestrationPublication.js';
 import { authorizedRepositoriesForRun, repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { checkNewRunPlan, checkRunPlan } from './orchestrationRunChecks.js';
 import { DomainRefusal } from './domainRefusal.js';
+import { milestoneDecisionAbout } from './milestoneDecisions.js';
 import { memorySources, readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import { preserveAndRestoreWorktree, worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 import { isBuildWorkspaceLost, latestCheckpointCommit, taskChangeBaseline } from './orchestrationCheckpoints.js';
@@ -552,8 +554,12 @@ export class OrchestrationService {
    * the build with that reason, as before.
    */
   private async appendMilestone(snapshot: OrchestrationSnapshot, milestone: Milestone, actorId: string): Promise<OrchestrationSnapshot> {
-    const append = (expansion: MilestoneExpansion) => this.store.appendOrchestrationMilestone({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision,
-      expectedPlanVersion: snapshot.run.planVersion, milestoneId: milestone.id, ...expansion, actorId });
+    const append = (expansion: MilestoneExpansion) => {
+      const saved = this.store.appendOrchestrationMilestone({ runId: snapshot.run.id, expectedRevision: snapshot.run.revision,
+        expectedPlanVersion: snapshot.run.planVersion, milestoneId: milestone.id, ...expansion, actorId });
+      void this.announceMilestone(saved, milestone, expansion);
+      return saved;
+    };
     const first = await this.planNextMilestone!(snapshot, milestone);
     try {
       return append(first);
@@ -561,6 +567,46 @@ export class OrchestrationService {
       if (!(error instanceof DomainRefusal) || error.code !== 'plan_check') throw error;
       return append(await this.planNextMilestone!(snapshot, milestone, error.message));
     }
+  }
+
+  /** The milestone's decisions and settled conflicts, in the build's chat (best effort, as every notice). */
+  private async announceMilestone(snapshot: OrchestrationSnapshot, milestone: Milestone, expansion: MilestoneExpansion): Promise<void> {
+    const { postMilestoneDecisionsNotice } = await import('./orchestrationChatNotice.js');
+    await postMilestoneDecisionsNotice(this.store, snapshot, milestone.id, {
+      milestoneTitle: milestone.title,
+      decisions: (expansion.decisions ?? []).map(item => ({ ...item, about: milestoneDecisionAbout(milestone.title, item.about) })),
+      conflicts: (expansion.fitCheck ?? []).filter(entry => entry.verdict === 'conflicts')
+        .map(entry => ({ subject: snapshot.tasks.find(task => task.id === entry.subject)?.title ?? entry.subject, reason: entry.reason,
+          ...(entry.surfacedIn ? { surfacedIn: entry.surfacedIn } : {}) }))
+    }).catch(error => logError('Could not post the milestone decisions:', error));
+  }
+
+  /**
+   * Add the work a stopped task needs that the plan was missing (prerequisiteTasks.ts), then
+   * continue the build with it. Refused (DomainRefusal) when the build's token, cost or time budget
+   * is spent (`budget`), the build changed (`stale`) or the amended plan fails its checks
+   * (`plan_check`); nothing changes then. The recovery record, when given, is saved in the same
+   * transaction as the amended plan.
+   */
+  async addPrerequisiteTasks(input: {
+    workspaceId: string; runId: string; taskId: string;
+    expectedRunRevision: number; expectedTaskRevision: number;
+    plan: OrchestrationPlan; actorId: string; reason: string;
+    recovery?: Parameters<SQLiteService['amendBlockedRunWithPrerequisites']>[0]['recovery'];
+    now?: string;
+  }): Promise<OrchestrationSnapshot> {
+    return runWithWorkspace(input.workspaceId, () => this.serialize(input.workspaceId, input.runId, async () => {
+      const current = this.store.getOrchestrationSnapshot(input.runId);
+      if (!current) throw new Error('Orchestration run not found.');
+      const budget = this.recoveryBudgetStop(current);
+      if (budget) throw new DomainRefusal(budget.reason, 'budget');
+      const amended = this.store.amendBlockedRunWithPrerequisites({
+        runId: input.runId, expectedRunRevision: input.expectedRunRevision, expectedPlanVersion: current.run.planVersion,
+        taskId: input.taskId, expectedTaskRevision: input.expectedTaskRevision, plan: input.plan,
+        actorId: input.actorId, reason: input.reason, recovery: input.recovery, now: input.now
+      });
+      return this.dispatchNextUnlocked(amended, input.actorId, undefined, input.now);
+    }));
   }
 
   async startPlannedWork(input: {

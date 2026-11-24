@@ -4,7 +4,9 @@ import type { OrchestrationRecoveryService } from './orchestrationRecoveryServic
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { BlockerResolutionService } from './blockerResolution.js';
 import { OrchestrationPlanner } from './orchestrationPlanner.js';
-import { plannerIdentity, readyProjectAgents, selectPlanner } from './planningAgents.js';
+import { plannableAgents, plannerIdentity, readyProjectAgents, selectPlanner } from './planningAgents.js';
+import { definedCheckScripts } from './repositoryExecution.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { getGitChangedPaths, getGitFileAtCommit, getHeadCommit } from '../utils/gitUtils.js';
 import { productPictureFor, teamProductPicture } from './productPicture.js';
@@ -25,27 +27,36 @@ function workspacesOf(snapshot: OrchestrationSnapshot) {
  */
 export function desktopBlockerResolution(input: {
   store: SQLiteService;
-  orchestration: Pick<OrchestrationService, 'retryTask'>;
+  orchestration: Pick<OrchestrationService, 'retryTask' | 'addPrerequisiteTasks'>;
   recovery: Pick<OrchestrationRecoveryService, 'reconcileSnapshot' | 'flushPendingMilestones'>;
   planner?: OrchestrationPlanner;
 }): BlockerResolutionService {
   const { store, orchestration, recovery } = input;
   const planner = input.planner ?? new OrchestrationPlanner();
+  /** The build owner's ready project agents with fresh access, as planning reads them; empty without access. */
+  async function readyAgents(snapshot: OrchestrationSnapshot) {
+    const { run } = snapshot;
+    const context = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
+    if (!context || !workspaceRegistry.can(context.role, 'squad.run') || !workspaceRegistry.canAccessProjectBuilds(context, run.projectId)) return [];
+    const project = store.getProjects().find(item => item.id === run.projectId);
+    if (!project) return [];
+    return readyProjectAgents({ agents: store.getAgents(), runtimes: store.getRuntimes(), context, projectId: run.projectId, projectKey: project.key });
+  }
   return new BlockerResolutionService({
     store,
     planner,
     async plannerFor(snapshot) {
-      const { run } = snapshot;
-      const context = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
-      if (!context || !workspaceRegistry.can(context.role, 'squad.run') || !workspaceRegistry.canAccessProjectBuilds(context, run.projectId)) return undefined;
-      const project = store.getProjects().find(item => item.id === run.projectId);
-      if (!project) return undefined;
       const runtimes = store.getRuntimes();
-      const eligible = await readyProjectAgents({ agents: store.getAgents(), runtimes, context, projectId: run.projectId, projectKey: project.key });
-      const identity = selectPlanner(eligible, runtimes);
+      const identity = selectPlanner(await readyAgents(snapshot), runtimes);
       return identity ? plannerIdentity(identity, runtimes) : undefined;
     },
+    eligibleAgents: async snapshot => plannableAgents(await readyAgents(snapshot)),
+    checkScripts(snapshot, repository) {
+      const workspace = workspacesOf(snapshot).find(item => sameRepository(item.repository, repository));
+      return workspace?.worktreePath ? definedCheckScripts(workspace.worktreePath) : [];
+    },
     retryTask: retry => orchestration.retryTask(retry),
+    addPrerequisites: amendment => orchestration.addPrerequisiteTasks(amendment),
     git: { head: getHeadCommit, changedPaths: getGitChangedPaths, fileAtCommit: getGitFileAtCommit },
     productPicture(snapshot) {
       const project = store.getProjects().find(item => item.id === snapshot.run.projectId);

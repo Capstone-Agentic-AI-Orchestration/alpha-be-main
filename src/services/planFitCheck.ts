@@ -1,4 +1,4 @@
-import type { OrchestrationPlan } from './orchestrationContract.js';
+import { MAX_PLAN_TASKS, type OrchestrationPlan, type PlanFitCheckEntry } from './orchestrationContract.js';
 
 /**
  * The required fit check (PRODUCT_EXPLANATION_PLAN phase 4). Before a plan is accepted, the planner
@@ -87,6 +87,25 @@ export function fitCheckProblems(plan: OrchestrationPlan, scope: FitCheckScope):
       : `fitCheck lists a conflict for ${named(unsurfaced.map(entry => entry.subject))}. Nobody approves a later milestone's plan, so its decisions are not shown to the person: plan this milestone without the conflicting work if its requirements allow, or ask one planning question (needsDecision) instead of returning a plan.`);
   }
   return problems;
+}
+
+/** As many fit-check entries as a saved plan may carry (orchestrationPlanSchema). */
+export const MAX_FIT_CHECK_ENTRIES = MAX_PLAN_TASKS + 20;
+
+/**
+ * A saved plan's fit check with the entries for work added later (a milestone's tasks, a missing
+ * prerequisite): a subject checked again takes its newest entry. When the list would outgrow the
+ * plan's limit, the oldest entries that fit go first, so every conflict stays visible.
+ */
+export function appendFitCheck(existing: readonly PlanFitCheckEntry[], added: readonly PlanFitCheckEntry[]): PlanFitCheckEntry[] {
+  const key = (entry: PlanFitCheckEntry) => `${entry.subjectType}:${entry.subject.toUpperCase()}`;
+  const replaced = new Set(added.map(key));
+  const merged = [...existing.filter(entry => !replaced.has(key(entry))), ...added];
+  while (merged.length > MAX_FIT_CHECK_ENTRIES) {
+    const oldestFit = merged.findIndex(entry => entry.verdict === 'fits');
+    merged.splice(oldestFit >= 0 ? oldestFit : 0, 1);
+  }
+  return merged;
 }
 
 /** The board cards a saved plan's fit check covered, so a revision of it covers them again. */
