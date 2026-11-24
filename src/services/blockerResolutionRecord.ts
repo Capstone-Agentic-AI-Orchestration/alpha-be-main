@@ -127,6 +127,16 @@ export function unapprovedOrchestratorFix(episode: OrchestrationRecoveryEpisode 
   return episode?.taskId === taskId && resolution?.outcome === 'retrying' && !resolution.appliedBy ? resolution : undefined;
 }
 
+/**
+ * The resolution that added this task to the plan without a person (prerequisite_added, not
+ * applied by someone). Its work is held to the same risk gate as an Orchestrator fix: what it
+ * actually changed is classified at acceptance, whatever its scope patterns looked like.
+ */
+export function unapprovedOrchestratorTask(episodes: readonly OrchestrationRecoveryEpisode[], taskId: string): ResolutionRecord | undefined {
+  return episodes.map(episode => resolutionOf(episode)).find((record): record is ResolutionRecord => record?.outcome === 'prerequisite_added' &&
+    !record.appliedBy && Boolean(record.proposedPrerequisite?.addedTaskIds?.includes(taskId)));
+}
+
 /** The guidance a specialist receives for an Orchestrator fix, within the guidance limit. */
 export function fixGuidance(diagnosis: string | undefined, fix: ProposedFix, citations: readonly VerifiedCitation[] = []): string {
   const evidence = citations.map(citation => citation.source === 'repository'

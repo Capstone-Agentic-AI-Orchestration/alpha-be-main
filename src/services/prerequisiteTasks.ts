@@ -94,7 +94,15 @@ function pendingReviewsFollowing(snapshot: Snapshot, plan: readonly Orchestratio
     taskIds.every(id => ancestors(plan, task.id).has(id)));
 }
 
-const broadScope = (patterns: readonly string[]) => !patterns.length || patterns.some(pattern => UNIVERSAL_SCOPE_PATTERNS.has(pattern));
+/**
+ * Added work must name where it goes: every pattern starts with a concrete folder or file, so a
+ * pattern like `**` or `*.ts` (all of the repository) cannot be read as a narrow, safe path. Its
+ * actual changes are still classified at acceptance (taskAcceptanceService, unapprovedOrchestratorTask).
+ */
+const broadScope = (patterns: readonly string[]) => !patterns.length || patterns.some(pattern => {
+  const first = pattern.replace(/^\.\/+/, '').replace(/^\/+/, '').split('/')[0];
+  return UNIVERSAL_SCOPE_PATTERNS.has(pattern) || !first || /[*?[\]{}!]/.test(first);
+});
 const quoted = (title: string) => `“${title}”`;
 
 /** What every added task is checked against: the stopped task, the build and the ids Alpha assigns. */

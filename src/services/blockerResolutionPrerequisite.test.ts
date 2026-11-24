@@ -399,7 +399,10 @@ describe('missing prerequisite tasks', () => {
     expect(build(four)).toThrow(expect.objectContaining({ reason: 'too_large' }));
     expect(build([{ ...four[0], dependsOn: ['review-fe'] }])).toThrow(expect.objectContaining({ reason: 'plan_check',
       message: expect.stringContaining('may wait only for accepted work') }));
-    expect(build([{ ...four[0], scope: { includePaths: ['**'], excludePaths: [] } }])).toThrow(expect.objectContaining({ reason: 'plan_check' }));
+    for (const pattern of ['**', '**/*.ts', '*.ts', './**/auth/**', '*/routes/**']) {
+      expect(build([{ ...four[0], id: 'bookings-api', scope: { includePaths: ['src/routes/**', pattern], excludePaths: [] } }]))
+        .toThrow(expect.objectContaining({ reason: 'plan_check', message: expect.stringContaining('narrow path scope') }));
+    }
     expect(build([{ ...four[0], id: 'bookings-api', scope: { includePaths: ['../shop-fe/src/**'], excludePaths: [] } }])).toThrow(expect.objectContaining({ reason: 'plan_check',
       message: expect.stringContaining('not a valid plan') }));
   });
