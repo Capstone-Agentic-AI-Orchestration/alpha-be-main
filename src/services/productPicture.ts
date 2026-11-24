@@ -37,7 +37,7 @@ export interface TeamProductPicture {
   delivered: string[];
   awaitingApproval: string[];
   inProgress: string[];
-  /** Choices recorded in build plans (`about: decision`). */
+  /** Choices recorded in build plans a person approved (`about: decision`). */
   decisions: string[];
   /** Product questions a specialist stopped on and nobody has answered. */
   openQuestions: string[];
@@ -101,6 +101,22 @@ function buildLine(snapshot: OrchestrationSnapshot): string {
   return `${goal} Accepted so far: ${shown}${more}.`;
 }
 
+/** Statuses a build reaches only through executing, which only a person's plan approval starts. */
+const PAST_PLAN_APPROVAL: ReadonlySet<OrchestrationRunStatus> = new Set([
+  'executing', 'paused', 'validating', 'recovery_required', 'awaiting_approval', 'publishing', 'completed'
+]);
+
+/**
+ * Whether a person approved this build's plan. Until then its decisions are the Orchestrator's
+ * proposals, not the product's: they must not steer other plans, specialists or the blocker
+ * resolver, and a plan being revised must not read its own. A blocked build may be stuck before or
+ * after approval; it counts as approved only once a specialist has started work (an attempt exists),
+ * which only follows approval. Read from the snapshot alone, so every reader applies the same rule.
+ */
+export function planApproved(snapshot: OrchestrationSnapshot): boolean {
+  return PAST_PLAN_APPROVAL.has(snapshot.run.status) || (snapshot.attempts?.length ?? 0) > 0;
+}
+
 function openQuestion(snapshot: OrchestrationSnapshot): string | undefined {
   if (!['blocked', 'paused'].includes(snapshot.run.status)) return undefined;
   const latest = [...snapshot.attempts].reverse().find(attempt => ['failed', 'rejected', 'recovery_required'].includes(attempt.status));
@@ -123,7 +139,7 @@ export function teamProductPicture(input: {
   const builds = input.snapshots.filter(snapshot => !ENDED_BUILDS.has(snapshot.run.status));
   const byStatus = (statuses: readonly OrchestrationRunStatus[]) => builds
     .filter(snapshot => statuses.includes(snapshot.run.status)).slice(0, MAX_BUILDS).map(buildLine);
-  const decisions = builds.flatMap(snapshot => (snapshot.run.plan.decisions ?? [])
+  const decisions = builds.filter(planApproved).flatMap(snapshot => (snapshot.run.plan.decisions ?? [])
     .map(item => `${oneLine(item.about, 60)}: ${oneLine(item.decision)}`));
   return {
     audience: 'team',
@@ -162,7 +178,7 @@ export function renderProductPicture(picture: ProductPicture, maxChars = MAX_PRO
     section('Delivered builds', picture.delivered),
     section('Builds waiting for approval', picture.awaitingApproval),
     section('Builds in progress', picture.inProgress),
-    section('Decisions recorded in build plans', picture.decisions),
+    section('Decisions recorded in approved build plans', picture.decisions),
     section('Open product questions (a specialist stopped on these)', picture.openQuestions)
   ].filter(Boolean);
   const text = parts.join('\n\n');

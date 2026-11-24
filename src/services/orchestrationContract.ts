@@ -17,6 +17,8 @@ export const MAX_TASK_DEPENDENCIES = 8;
 export const MAX_TASK_REQUIREMENTS = 12;
 export const MAX_TASK_ACCEPTANCE_CRITERIA = 12;
 export const MAX_PROJECT_CONTEXT_CHARS = 8_000;
+/** How many decisions one plan may show the person. */
+export const MAX_PLAN_DECISIONS = 12;
 
 export const orchestrationTaskKindSchema = z.enum([
   'requirements',
@@ -99,8 +101,14 @@ export const orchestrationPlanSchema = z.object({
   decisions: z.array(z.object({
     about: shortText,
     decision: detailText,
-    toChange: detailText.optional()
-  }).strict()).max(12).optional(),
+    toChange: detailText.optional(),
+    /**
+     * Set when Alpha wrote the entry itself (an untouched repository, a split task, a fit check that
+     * could not be done), never by the planner: Alpha strips it from model output. Only the
+     * planner's own decisions can surface a fit-check conflict (planFitCheck.ts).
+     */
+    by: z.literal('alpha').optional()
+  }).strict()).max(MAX_PLAN_DECISIONS).optional(),
   /**
    * The planner's check of the plan against the product: one entry per task and per board card the
    * plan builds, saying whether it fits the brief, the chat requests and the recorded decisions, or

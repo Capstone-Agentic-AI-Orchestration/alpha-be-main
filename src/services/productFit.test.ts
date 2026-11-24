@@ -5,14 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Issue } from '../models/index.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { MAX_PROJECT_CONTEXT_CHARS, parseOrchestrationPlan, validateOrchestrationPlan } from './orchestrationContract.js';
-import { OrchestrationPlanner } from './orchestrationPlanner.js';
+import { OrchestrationPlanner, pictureMissingDecision } from './orchestrationPlanner.js';
 import { orchestrationPlanDocument } from './orchestrationPlanDocument.js';
 import { splitOversizedTasks } from './orchestrationPlanSize.js';
 import type { OrchestrationTaskPackage } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { fitCheckCards, fitCheckProblems } from './planFitCheck.js';
+import { fitCheckCards, fitCheckConflicts, fitCheckProblems } from './planFitCheck.js';
 import { productPictureFor, productPictureRoom, type ProductPictureSource } from './productPicture.js';
-import { AGENT_PRODUCT_PICTURE_UNAVAILABLE, agentProductPicture } from './productPictureSource.js';
+import { AGENT_PRODUCT_PICTURE_UNAVAILABLE, agentProductPicture, readAgentProductPicture } from './productPictureSource.js';
 import { appendOrchestrationTaskPolicy, formatOrchestrationTaskPackage, productFitInstruction, RunnerService } from './runnerService.js';
 import { plannedJson } from '../test/planFitFixture.js';
 
@@ -37,8 +37,9 @@ const projectAIssues: Issue[] = [
 const projectASource: ProductPictureSource = {
   issues: () => projectAIssues,
   snapshots: () => [{
+    // Approved and started: a specialist stopped on the question (Project A's blocker).
     run: { status: 'blocked', plan: { goal: 'Complete the expense workflow tasks', decisions: [{ about: 'Scope', decision: 'Expense tracking stays out until the owner decides.' }] } },
-    tasks: [], attempts: []
+    tasks: [], attempts: [{ taskId: 't1', status: 'rejected', failureReason: 'The specialist reported a blocker: Should Project A stay informational?' }]
   } as unknown as OrchestrationSnapshot],
   approvedSpec: () => null
 };
@@ -55,6 +56,10 @@ const expenseTask = {
   requirementIds: ['REQ-EXPENSES'], acceptanceCriteria: ['Expenses can be added, edited and deleted.']
 };
 const CONFLICT_DECISION = 'Expense workflow vs the informational brief';
+/** The planner's own decision on the conflict: names every conflicting card and task, and says how to choose otherwise. */
+const conflictDecision = { about: CONFLICT_DECISION,
+  decision: 'PRO-102, PRO-103, PRO-104, PRO-105, PRO-106 and task expenses are built as asked, although the brief says informational.',
+  toChange: 'Say "keep it informational" and Alpha will plan without the expense cards.' };
 
 const planningInput = {
   runId: 'run-fit', cwd: 'D:/repositories/project-a', goal: KEEP_INFORMATIONAL,
@@ -105,7 +110,7 @@ describe('the planner gets the product picture', () => {
   it('says plainly when no picture was supplied instead of leaving the planner to guess', async () => {
     const turn = scripted(plannedJson({ schemaVersion: 1, goal: 'Landing page', requirements: [{ id: 'REQ-SITE', description: 'Landing page.' }], tasks: [landingTask] }));
     await new OrchestrationPlanner(turn).createPlan({ ...planningInput, productPicture: undefined });
-    expect(turn.mock.calls[0][0].prompt).toContain('"productPicture": "Not available for this plan."');
+    expect(turn.mock.calls[0][0].prompt).toContain('"productPicture": "Not available for this plan: no product picture was supplied for this plan.');
   });
 });
 
@@ -129,8 +134,7 @@ describe('a Project A plan against "keep it informational"', () => {
   });
 
   it('may build the cards when it records the conflict as a decision the person sees when approving', async () => {
-    const decision = { about: CONFLICT_DECISION, decision: 'The cards are built as asked, although the brief says informational; nothing else changes.',
-      toChange: 'Say "keep it informational" and Alpha will plan without the expense cards.' };
+    const decision = conflictDecision;
     const plan = expensePlan([...cardConflicts(CONFLICT_DECISION), taskConflict(CONFLICT_DECISION)], [decision]);
     const result = await new OrchestrationPlanner(scripted(plan)).createPlan(cardBuildInput);
     expect(result.plan.decisions).toContainEqual(decision);
@@ -151,9 +155,9 @@ describe('a Project A plan against "keep it informational"', () => {
 describe('the required fit check is enforced', () => {
   it('refuses a plan whose fit check misses a card it builds, after one correction', async () => {
     const missing = expensePlan([...cardConflicts(CONFLICT_DECISION).slice(1), taskConflict(CONFLICT_DECISION)],
-      [{ about: CONFLICT_DECISION, decision: 'Built as asked.' }]);
+      [conflictDecision]);
     const turn = scripted(missing);
-    await expect(new OrchestrationPlanner(turn).createPlan(cardBuildInput)).rejects.toThrow(/no entry for board card PRO-102/);
+    await expect(new OrchestrationPlanner(turn).createPlan(cardBuildInput)).rejects.toThrow(/no card entry for board card PRO-102/);
     expect(turn).toHaveBeenCalledTimes(2);
     expect(turn.mock.calls[1][0].prompt).toContain("Keep the plan's fit check complete while correcting it.");
   });
@@ -174,15 +178,15 @@ describe('the required fit check is enforced', () => {
   });
 
   it('names every missing task, and is satisfied by entries for split task parts', () => {
-    const plan = parseOrchestrationPlan(expensePlan([taskConflict(CONFLICT_DECISION)], [{ about: CONFLICT_DECISION, decision: 'Built as asked.' }]));
-    expect(fitCheckProblems({ ...plan, tasks: [...plan.tasks, { ...plan.tasks[0], id: 'summary' }] }, { cards: [], settledQuestions: [] }))
-      .toEqual([expect.stringContaining('no entry for task summary')]);
+    const plan = parseOrchestrationPlan(expensePlan([taskConflict(CONFLICT_DECISION)], [conflictDecision]));
+    expect(fitCheckProblems({ ...plan, tasks: [...plan.tasks, { ...plan.tasks[0], id: 'summary' }] }, { cards: [], settledQuestions: [], decisionsVisible: true }))
+      .toEqual([expect.stringContaining('no task entry for summary')]);
     const requirementIds = Array.from({ length: 14 }, (_, index) => `REQ-${index}`);
-    const oversized = { ...expensePlan([taskConflict(CONFLICT_DECISION)], [{ about: CONFLICT_DECISION, decision: 'Built as asked.' }]),
+    const oversized = { ...expensePlan([taskConflict(CONFLICT_DECISION)], [conflictDecision]),
       requirements: requirementIds.map(id => ({ id, description: id })), tasks: [{ ...expenseTask, requirementIds }] };
     const split = parseOrchestrationPlan(splitOversizedTasks(oversized).candidate);
     expect(split.tasks.map(task => task.id)).toEqual(['expenses', 'expenses-part-2']);
-    expect(fitCheckProblems(split, { cards: [], settledQuestions: [] })).toEqual([]);
+    expect(fitCheckProblems(split, { cards: [], settledQuestions: [], decisionsVisible: true })).toEqual([]);
   });
 });
 
@@ -193,7 +197,7 @@ describe('plans saved before the fit check', () => {
     expect(saved.fitCheck).toBeUndefined();
     expect(validateOrchestrationPlan(saved, [{ id: 'frontend-agent', role: 'Frontend Agent' }])).toEqual([]);
     expect(fitCheckCards(saved)).toEqual([]);
-    expect(fitCheckProblems(saved, { cards: [], settledQuestions: [] })).toEqual([expect.stringContaining('no fitCheck')]);
+    expect(fitCheckProblems(saved, { cards: [], settledQuestions: [], decisionsVisible: true })).toEqual([expect.stringContaining('no fitCheck')]);
   });
 
   it('a revision checks again the cards the saved plan was checked against', () => {
@@ -310,5 +314,89 @@ describe('task packages carry the picture, read fresh at dispatch', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe('only a decision the person can act on surfaces a conflict', () => {
+  const scope = { cards: [], settledQuestions: [], decisionsVisible: true };
+  const withDecision = (decision: Record<string, unknown>) =>
+    parseOrchestrationPlan(expensePlan([taskConflict(String(decision.about))], [decision]));
+
+  it('does not count a decision Alpha added, the general fit note, or one that does not name the work or say how to change it', () => {
+    expect(fitCheckProblems(withDecision({ ...conflictDecision, by: 'alpha' }), scope)).toEqual([expect.stringContaining('not surfaced')]);
+    expect(fitCheckProblems(withDecision({ ...conflictDecision, about: 'Fit with the product' }), scope)).toEqual([expect.stringContaining('not surfaced')]);
+    expect(fitCheckProblems(withDecision({ ...conflictDecision, toChange: undefined }), scope)).toEqual([expect.stringContaining('not surfaced')]);
+    expect(fitCheckProblems(withDecision({ ...conflictDecision, decision: 'The expense cards are built as asked.' }), scope))
+      .toEqual([expect.stringContaining('not surfaced')]);
+    expect(fitCheckProblems(withDecision(conflictDecision), scope)).toEqual([]);
+  });
+
+  it('never lets the planner mark its own decision as written by Alpha', async () => {
+    const plan = expensePlan([...cardConflicts(CONFLICT_DECISION), taskConflict(CONFLICT_DECISION)], [{ ...conflictDecision, by: 'alpha' }]);
+    const result = await new OrchestrationPlanner(scripted(plan)).createPlan(cardBuildInput);
+    expect(result.plan.decisions?.find(item => item.about === CONFLICT_DECISION)).not.toHaveProperty('by');
+  });
+
+  it('matches coverage by subject type: a task entry does not cover a card of the same name', () => {
+    const plan = parseOrchestrationPlan(expensePlan([taskConflict(CONFLICT_DECISION),
+      { subject: 'PRO-102', subjectType: 'task', verdict: 'fits', reason: 'Mislabelled.' }], [conflictDecision]));
+    expect(fitCheckProblems(plan, { ...scope, cards: [{ key: 'PRO-102' }] })).toEqual([expect.stringContaining('no card entry for board card PRO-102')]);
+  });
+
+  it('in a later milestone, which nobody approves, a conflict must be asked rather than recorded', async () => {
+    const plan = parseOrchestrationPlan(expensePlan([taskConflict(CONFLICT_DECISION)], [conflictDecision]));
+    expect(fitCheckProblems(plan, { ...scope, decisionsVisible: false })).toEqual([expect.stringContaining('Nobody approves a later milestone')]);
+    const turn = scripted(plan);
+    await expect(new OrchestrationPlanner(turn).createPlan({ ...planningInput, approvedRequirements: plan.requirements,
+      milestoneContext: { id: 'm2', title: 'Expenses', objective: 'Expenses.' } })).rejects.toThrow(/Nobody approves a later milestone/);
+    expect(turn.mock.calls[0][0].prompt).toContain('This is a later milestone: nobody approves its plan');
+  });
+
+  it('shows every conflict next to the decisions in the plan-ready chat message', async () => {
+    const { describePlanDecisions } = await import('./chatService.js');
+    const plan = parseOrchestrationPlan(expensePlan([...cardConflicts(CONFLICT_DECISION), taskConflict(CONFLICT_DECISION)], [conflictDecision]));
+    const text = describePlanDecisions(plan.decisions, fitCheckConflicts(plan))!;
+    expect(text).toContain('**Where this plan goes against the product**');
+    for (const subject of [...EXPENSE_KEYS, 'expenses']) expect(text).toContain(`- **${subject}:**`);
+    expect(text).toContain(`(see: ${CONFLICT_DECISION})`);
+    expect(text.indexOf('goes against the product')).toBeLessThan(text.indexOf('What the Orchestrator decided'));
+    expect(describePlanDecisions(undefined, fitCheckConflicts(plan))).toContain('PRO-102');
+  });
+});
+
+describe('a plan made without the product picture says so where the person approves', () => {
+  const plan = { schemaVersion: 1, goal: 'Landing page', requirements: [{ id: 'REQ-SITE', description: 'Landing page.' }], tasks: [landingTask] };
+
+  it('carries Alpha\'s own decision that fit was not checked, with the reason, even when every task is marked as fitting', async () => {
+    const result = await new OrchestrationPlanner(scripted(plannedJson(plan))).createPlan({ ...planningInput, productPicture: undefined,
+      productPictureMissing: "the project's records could not be read" });
+    expect(result.plan.decisions?.[0]).toEqual(pictureMissingDecision("the project's records could not be read"));
+    expect(result.plan.decisions?.[0].decision).toContain('Not checked against the product\'s records: the project\'s records could not be read.');
+  });
+
+  it('counts a picture cut to nothing by the context bound as missing too', async () => {
+    const result = await new OrchestrationPlanner(scripted(plannedJson(plan))).createPlan({ ...planningInput,
+      projectContext: 'p'.repeat(MAX_PROJECT_CONTEXT_CHARS) });
+    expect(result.plan.decisions?.[0]).toMatchObject({ about: 'Fit with the product', by: 'alpha',
+      decision: expect.stringContaining('the project context left no room for it') });
+  });
+
+  it('refuses a plan whose own decisions crowd that note out', async () => {
+    const crowded = { ...plan, decisions: Array.from({ length: 12 }, (_, index) => ({ about: `Choice ${index}`, decision: 'Chosen.' })) };
+    await expect(new OrchestrationPlanner(scripted(plannedJson(crowded))).createPlan({ ...planningInput, productPicture: undefined }))
+      .rejects.toThrow(/must keep Alpha's "Fit with the product" decision/);
+  });
+
+  it('a picture that was read adds no such note', async () => {
+    const result = await new OrchestrationPlanner(scripted(plannedJson(plan))).createPlan(planningInput);
+    expect(result.plan.decisions ?? []).not.toContainEqual(expect.objectContaining({ by: 'alpha', about: 'Fit with the product' }));
+  });
+
+  it('says why the picture is missing: no project, no room, or unreadable records', () => {
+    expect(readAgentProductPicture(undefined, '', projectASource)).toEqual({ productPictureMissing: 'the project record was not found' });
+    expect(readAgentProductPicture(projectA, 'x'.repeat(MAX_PROJECT_CONTEXT_CHARS), projectASource).productPictureMissing).toContain('no room');
+    const failing: ProductPictureSource = { ...projectASource, issues: () => { throw new Error('locked'); } };
+    expect(readAgentProductPicture(projectA, '', failing)).toEqual({ productPictureMissing: "the project's records could not be read" });
+    expect(readAgentProductPicture(projectA, '', projectASource).productPicture).toContain('Brief (project description)');
   });
 });

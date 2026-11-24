@@ -1,7 +1,7 @@
 import { MAX_TASK_REQUIREMENTS } from './orchestrationContract.js';
 
 type RawTask = Record<string, unknown> & { id?: unknown; requirementIds?: unknown; dependsOn?: unknown; title?: unknown };
-type RawDecision = { about: string; decision: string };
+type RawDecision = { about: string; decision: string; by: 'alpha' };
 
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
@@ -50,7 +50,7 @@ export function splitOversizedTasks(candidate: unknown): { candidate: unknown; d
     tasks.push(...parts);
     lastPart.set(task.id, String(parts[parts.length - 1].id));
     decisions.push({ about: String(task.title ?? task.id).slice(0, 240),
-      decision: 'Split into ' + parts.length + ' consecutive parts, because one task covers at most ' + MAX_TASK_REQUIREMENTS + ' requirements. Each part handles the next requirements, in order.' });
+      decision: 'Split into ' + parts.length + ' consecutive parts, because one task covers at most ' + MAX_TASK_REQUIREMENTS + ' requirements. Each part handles the next requirements, in order.', by: 'alpha' });
   }
   if (!lastPart.size) return { candidate, decisions };
   waitForLastParts(tasks, lastPart);

@@ -34,7 +34,8 @@ import { orchestrationSessionId } from './orchestrationSession.js';
 import { chatBuildRequestKey } from './chatBuildIdentity.js';
 import { repositoryFileOverview } from './repositoryOverview.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
-import { agentProductPicture } from './productPictureSource.js';
+import { readAgentProductPicture } from './productPictureSource.js';
+import { fitCheckConflicts } from './planFitCheck.js';
 
 export interface ProjectBuildStartResult {
   /**
@@ -60,6 +61,8 @@ export interface ProjectBuildStartResult {
   decision?: PlanningDecision;
   /** Calls the Orchestrator made instead of stopping, shown with the plan. */
   decisions?: Array<{ about: string; decision: string; toChange?: string }>;
+  /** Where the plan goes against the product (its fit check), shown with the plan so the person approving sees every conflict. */
+  fitConflicts?: Array<{ subject: string; reason: string; surfacedIn?: string }>;
 }
 
 interface StartProjectBuildInput {
@@ -622,7 +625,7 @@ async function startOrchestratedProjectBuild(input: {
         readMemoryAtCommit(item.repository, item.worktreePath, item.baseCommit)))),
       projectContext,
       // What the product is, from Alpha's own records, read now: the plan must fit it.
-      productPicture: agentProductPicture(project, projectContext),
+      ...readAgentProductPicture(project, projectContext),
       buildsCards,
       repositoryContext: planningContexts[0]?.context.context ?? '',
       availableScripts: planningContexts[0]?.context.scripts ?? [],
@@ -748,7 +751,12 @@ async function startOrchestratedProjectBuild(input: {
       ));
     }
     const started = orchestrationStartResult(snapshot, project, repository);
-    const withDecisions = planned.plan.decisions?.length ? { ...started, decisions: planned.plan.decisions } : started;
+    const conflicts = fitCheckConflicts(planned.plan);
+    const withDecisions = {
+      ...started,
+      ...(planned.plan.decisions?.length ? { decisions: planned.plan.decisions } : {}),
+      ...(conflicts.length ? { fitConflicts: conflicts } : {})
+    };
     return cardNote ? { ...withDecisions, reason: [cardNote, started.reason].filter(Boolean).join(' ') } : withDecisions;
   } catch (error) {
     const persisted = runWithWorkspace(workspaceId, () => sqliteService.getOrchestrationByRequestKey(requestKey));

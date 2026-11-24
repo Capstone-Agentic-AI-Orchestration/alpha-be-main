@@ -44,12 +44,30 @@ export function agentProductPicture(
   projectContext: string | undefined,
   source: ProductPictureSource = desktopProductPictureSource
 ): string {
+  const read = readAgentProductPicture(project, projectContext, source);
+  if (read.productPicture) return read.productPicture;
+  return read.productPictureMissing === PICTURE_UNREADABLE ? AGENT_PRODUCT_PICTURE_UNAVAILABLE : '';
+}
+
+const PICTURE_UNREADABLE = "the project's records could not be read";
+
+/**
+ * The team picture for a planning turn, or why there is none. The planner records a missing
+ * picture as a visible plan decision, so the person approving knows fit with the product was not
+ * checked (orchestrationPlanner `pictureMissingDecision`). Spread straight into the planning input.
+ */
+export function readAgentProductPicture(
+  project: Pick<Project, 'id' | 'name' | 'description'> | undefined,
+  projectContext: string | undefined,
+  source: ProductPictureSource = desktopProductPictureSource
+): { productPicture: string; productPictureMissing?: undefined } | { productPicture?: undefined; productPictureMissing: string } {
+  if (!project) return { productPictureMissing: 'the project record was not found' };
   const room = productPictureRoom(projectContext);
-  if (!room) return '';
+  if (!room) return { productPictureMissing: "the project's saved ground rules fill the whole planning context, leaving no room for its records" };
   try {
-    return productPictureFor(project, 'team', source, room);
+    return { productPicture: productPictureFor(project, 'team', source, room) };
   } catch (error) {
     logInfo(`Product picture for ${project.name} could not be read for an agent: ${error instanceof Error ? error.message : String(error)}`);
-    return AGENT_PRODUCT_PICTURE_UNAVAILABLE;
+    return { productPictureMissing: PICTURE_UNREADABLE };
   }
 }

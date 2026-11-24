@@ -10,7 +10,7 @@ import { plannerModelName, repositoryPlanningContext } from './projectBuildOrche
 import { getGitChangedPaths, getGitFileAtCommit, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
 import { readMemoryAtCommit, renderProjectMemory } from './repositoryMemory.js';
 import { planRepositoryCoverage } from './orchestrationWorkspace.js';
-import { agentProductPicture, storeProductPictureSource } from './productPictureSource.js';
+import { readAgentProductPicture, storeProductPictureSource } from './productPictureSource.js';
 
 export type Milestone = NonNullable<OrchestrationPlan['milestones']>[number];
 export type MilestoneExpansion = { tasks: OrchestrationTaskDefinition[]; checkpoints: Array<{ repository: string; commit: string }> };
@@ -113,7 +113,7 @@ export function milestonePlanner(store: SQLiteService, planner = new Orchestrati
       acceptedEvidence,
       projectContext: run.plan.projectContext, exclusions: run.plan.exclusions,
       // The product as recorded now (requests and decisions may have changed since the build began).
-      productPicture: agentProductPicture(project, run.plan.projectContext, storeProductPictureSource(store)),
+      ...readAgentProductPicture(project, run.plan.projectContext, storeProductPictureSource(store)),
       // Repository memory as committed at the checkpoints this milestone plans from.
       repositoryMemory: renderProjectMemory(await Promise.all(checkpoints.map(item => {
         const dir = workspaces.find(workspace => workspace.repository === item.repository)!.worktreePath;
