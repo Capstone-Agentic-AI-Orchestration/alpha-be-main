@@ -131,6 +131,22 @@ describe('agentReadiness', () => {
     expect(r.status).toBe('signed_out');
   });
 
+  /**
+   * A Claude subscription login has no model list, so the scan lists Claude
+   * Code's aliases. Agents pinned to a full name before that change must stay
+   * ready: Claude Code accepts the name, and an alias list cannot prove it gone.
+   */
+  it('keeps a full Claude model name ready when the scan lists only aliases', () => {
+    const claude = { ...runtime('Anthropic', 'online', ['sonnet', 'opus', 'haiku', 'fable']), catalogSource: 'cli' as const };
+    expect(agentReadiness({ modelProvider: 'Anthropic', modelName: 'claude-sonnet-5' }, [claude]).status).toBe('ready');
+    expect(agentReadiness({ modelProvider: 'Anthropic', modelName: 'gpt-6-luna' }, [claude]).status).toBe('stale_model');
+  });
+
+  it('still flags a Claude model missing from a live API catalog', () => {
+    const claude = { ...runtime('Anthropic', 'online', ['claude-sonnet-5-5']), catalogSource: 'remote_api' as const };
+    expect(agentReadiness({ modelProvider: 'Anthropic', modelName: 'claude-sonnet-4-5' }, [claude]).status).toBe('stale_model');
+  });
+
   it('ignores an agent with no model pinned', () => {
     const r = agentReadiness(
       { modelProvider: 'Antigravity', modelName: '' },

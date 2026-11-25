@@ -20,9 +20,9 @@ beforeAll(async () => {
 });
 
 describe('runtime model catalog parsers', () => {
-  it('keeps Claude Code subscription models when no API catalog is available', () => {
+  it('lists Claude Code model aliases for a subscription login with no API catalog', () => {
     expect(claudeCatalogForAuth({ models: [], source: 'none', error: 'ANTHROPIC_API_KEY is not configured' }, 'claude.ai')).toEqual({
-      models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+      models: ['sonnet', 'opus', 'haiku', 'fable'],
       source: 'cli'
     });
   });
