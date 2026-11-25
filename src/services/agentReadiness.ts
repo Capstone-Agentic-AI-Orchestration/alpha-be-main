@@ -92,6 +92,21 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
 };
 
 /**
+ * Whether a runtime will accept this model name.
+ *
+ * Usually that means the name is in the scanned list. Claude Code on a
+ * subscription login is the exception: Anthropic offers no model list for that
+ * login, so the scan lists Claude Code's aliases (sonnet, opus, haiku, fable).
+ * Claude Code still accepts full names such as `claude-sonnet-5`, and an alias
+ * list is no evidence that one was retired. If it was, Claude Code says so on
+ * the first turn.
+ */
+export function runtimeOffersModel(runtime: RuntimeEngine, modelName: string): boolean {
+  if (runtime.models.includes(modelName)) return true;
+  return runtime.provider === 'Anthropic' && runtime.catalogSource === 'cli' && modelName.startsWith('claude-');
+}
+
+/**
  * Is this agent pinned to a model its CLI has since stopped offering?
  *
  * Providers retire model tiers on their own schedule. Antigravity 1.1.25 dropped
@@ -109,21 +124,6 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
  * runtimes report no models at all. Calling an agent broken on the strength of
  * a list we do not have would be worse than saying nothing.
  */
-/**
- * Whether a runtime will accept this model name.
- *
- * Usually that means the name is in the scanned list. Claude Code on a
- * subscription login is the exception: Anthropic offers no model list for that
- * login, so the scan lists Claude Code's aliases (sonnet, opus, haiku, fable).
- * Claude Code still accepts full names such as `claude-sonnet-5`, and an alias
- * list is no evidence that one was retired. If it was, Claude Code says so on
- * the first turn.
- */
-export function runtimeOffersModel(runtime: RuntimeEngine, modelName: string): boolean {
-  if (runtime.models.includes(modelName)) return true;
-  return runtime.provider === 'Anthropic' && runtime.catalogSource === 'cli' && modelName.startsWith('claude-');
-}
-
 function staleModel(
   agent: Pick<Agent, 'modelProvider' | 'modelName'>,
   runtime: RuntimeEngine,
