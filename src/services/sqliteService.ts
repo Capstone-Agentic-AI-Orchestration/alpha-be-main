@@ -2621,6 +2621,41 @@ export class SQLiteService {
     return remove();
   }
 
+  /**
+   * The project holding a key on this machine, in any workspace.
+   *
+   * Keys are unique across the whole file, not per workspace -- as they are in
+   * the cloud -- so a check scoped to one workspace misses the row that will
+   * actually refuse the insert.
+   */
+  findProjectByKey(key: string): { id: string; workspaceId: string; name: string; key: string; createdBy: string | null } | null {
+    const row = this.db
+      .prepare('SELECT id, workspace_id, name, key, created_by FROM projects WHERE upper(key) = upper(?) LIMIT 1')
+      .get(key) as { id: string; workspace_id: string; name: string; key: string; created_by: string | null } | undefined;
+    return row
+      ? { id: row.id, workspaceId: row.workspace_id, name: row.name, key: row.key, createdBy: row.created_by ?? null }
+      : null;
+  }
+
+  /**
+   * Give a project a key nobody here uses, so the team's project can have its own.
+   *
+   * For a leftover in another workspace, which a pull of this one cannot tell
+   * is gone: renaming keeps everything attached to it, where deleting would not.
+   * Returns the new key.
+   */
+  moveProjectKeyAside(id: string): string | null {
+    const row = this.db.prepare('SELECT key FROM projects WHERE id = ?').get(id) as { key: string } | undefined;
+    if (!row) return null;
+    const taken = this.db.prepare('SELECT 1 FROM projects WHERE upper(key) = upper(?)');
+    for (let n = 1; ; n += 1) {
+      const candidate = `${row.key}OLD${n === 1 ? '' : n}`;
+      if (taken.get(candidate)) continue;
+      this.db.prepare('UPDATE projects SET key = ? WHERE id = ?').run(candidate, id);
+      return candidate;
+    }
+  }
+
   // --- Project build data ---
   getProjectBuildSteps(projectId: string): ProjectBuildStep[] {
     const workspaceId = this.workspaceId();

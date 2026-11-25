@@ -8,7 +8,7 @@ import { readAgentFile } from './agentFileService.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { repoForProject } from './githubIssueMapping.js';
 import { sqliteService } from './sqliteService.js';
-import { runWithWorkspace } from './workspaceContext.js';
+import { currentWorkspaceId, runWithWorkspace } from './workspaceContext.js';
 import { logInfo } from '../utils/logger.js';
 import type { SyncReport } from './githubBoardSync.js';
 import { isPersonComment } from './taskComments.js';
@@ -548,7 +548,11 @@ export async function pullSharedBoard(
   runWithWorkspace(workspaceId, () => {
     // The roster first: an issue names an agent, and a squad names its members.
     applyRoster(agents, squads, report);
-    applyProjects(projects, report);
+    // A full listing and who is pulling: enough to clear a leftover that holds a team key.
+    const cleanup = syncingLogin && projects.length > 0
+      ? { workspaceId, listed: new Set(projects.map(project => project.id)), syncingLogin, removed: new Set<string>() }
+      : undefined;
+    applyProjects(projects, report, false, cleanup);
     // Before the issues, so a dropped project's cards are not written back
     // under it -- `applyIssues` skips a card whose project is not here.
     if (syncingLogin) removeDroppedProjects(projects, syncingLogin, report);
@@ -673,7 +677,7 @@ async function applySharedBoardRow(workspaceId: string, change: BoardChange, rep
       applyProjects([row as unknown as Project], report, true);
       return;
     case 'issues':
-      applyIssues([row as unknown as Issue], report);
+      applyIssues([row as unknown as Issue], report, true);
       return;
     case 'issue_comments':
       applyComments([row as unknown as IssueComment], report);
@@ -982,7 +986,66 @@ async function applyProjectAssignments(workspaceId: string, rows: ProjectAssignm
   }
 }
 
-function applyProjects(projects: Project[], report: PullReport, propagateWriteErrors = false): void {
+/**
+ * What a whole-board pull knows that a single changed row does not: the
+ * workspace, everything the team lists in it, and who is pulling. Only with
+ * all three can a leftover be told from a project that is still the team's.
+ */
+interface KeyCleanup {
+  workspaceId: string;
+  listed: ReadonlySet<string>;
+  syncingLogin: string;
+  /** Leftovers this pull already took off, so nothing later treats them as here. */
+  removed: Set<string>;
+}
+
+type KeyHolder = NonNullable<ReturnType<typeof sqliteService.findProjectByKey>>;
+
+/**
+ * Who holds the team's key for `cloud` here once leftovers are out of the way.
+ *
+ * Keys are unique across the cloud, so a project here holding the team's key
+ * under another id is not the team's project. When someone else made it, it
+ * reached this machine from the team board and is a leftover of it:
+ *
+ * - in this workspace, the team no longer lists it, so it goes, as
+ *   `removeDroppedProjects` would take it a moment later -- but after the
+ *   insert it blocked;
+ * - in another workspace this pull cannot see that workspace's list, so it is
+ *   moved to a key nobody uses instead, keeping everything attached to it.
+ *
+ * A project the person pulling made, or one with no creator, may be work that
+ * never reached the cloud. It keeps its key and is reported.
+ */
+function holderOfTeamKey(cloud: Project, allowId: string | undefined, cleanup: KeyCleanup | undefined, report: PullReport): KeyHolder | null {
+  const holder = sqliteService.findProjectByKey(cloud.key);
+  if (!holder || holder.id === cloud.id || holder.id === allowId) return null;
+  if (!cleanup) return holder;
+
+  const creator = holder.createdBy?.trim().toLowerCase();
+  if (!creator || creator === cleanup.syncingLogin.trim().toLowerCase()) return holder;
+
+  if (holder.workspaceId === cleanup.workspaceId) {
+    if (cleanup.listed.has(holder.id)) return holder;
+    if (!sqliteService.deleteProject(holder.id)) return holder;
+    cleanup.removed.add(holder.id);
+    report.projectsRemoved += 1;
+    logInfo(`Team board: removed ${holder.name} (${holder.key}): the team no longer lists it and its key is now ${cloud.name}'s.`);
+    return null;
+  }
+
+  const moved = sqliteService.moveProjectKeyAside(holder.id);
+  if (!moved) return holder;
+  logInfo(`Team board: moved ${holder.name} in workspace ${holder.workspaceId} from ${holder.key} to ${moved}: ${cloud.key} is the team's ${cloud.name}.`);
+  return null;
+}
+
+/** Who holds a key, and where when it is not this workspace. */
+function heldBy(holder: KeyHolder): string {
+  return `${holder.name}${holder.workspaceId !== currentWorkspaceId() ? ' in another workspace' : ''}`;
+}
+
+function applyProjects(projects: Project[], report: PullReport, propagateWriteErrors = false, cleanup?: KeyCleanup): void {
   const local = sqliteService.getProjects();
   const byId = new Map(local.map(project => [project.id, project]));
   const byRepo = new Map<string, Project>();
@@ -990,7 +1053,6 @@ function applyProjects(projects: Project[], report: PullReport, propagateWriteEr
     const repo = repoForProject(project)?.toLowerCase();
     if (repo) byRepo.set(repo, project);
   }
-  const keys = new Map(local.map(project => [project.key.toUpperCase(), project]));
 
   for (const cloud of projects) {
     const mine = byId.get(cloud.id);
@@ -1001,6 +1063,8 @@ function applyProjects(projects: Project[], report: PullReport, propagateWriteEr
         continue;
       }
       try {
+        // The team renamed its key to one a leftover here still holds.
+        if (next.key && next.key.toUpperCase() !== mine.key.toUpperCase()) holderOfTeamKey(cloud, mine.id, cleanup, report);
         sqliteService.updateProject(cloud.id, next);
         report.projectsUpdated += 1;
       } catch (err) {
@@ -1011,7 +1075,8 @@ function applyProjects(projects: Project[], report: PullReport, propagateWriteEr
     }
 
     const repo = repoForProject(cloud)?.toLowerCase();
-    const twin = repo ? byRepo.get(repo) : undefined;
+    const match = repo ? byRepo.get(repo) : undefined;
+    const twin = match && !cleanup?.removed.has(match.id) ? match : undefined;
     if (twin) {
       /*
        * The same repository, made here while this desktop was off the team
@@ -1019,8 +1084,8 @@ function applyProjects(projects: Project[], report: PullReport, propagateWriteEr
        * team's project, history and folder included; see `rekeyProject`.
        * Only a key held by a *different* project here stops that.
        */
-      const holder = keys.get(cloud.key.toUpperCase());
-      if ((!holder || holder.id === twin.id) && sqliteService.rekeyProject(twin.id, cloud.id, cloud.key)) {
+      const holder = holderOfTeamKey(cloud, twin.id, cleanup, report);
+      if (!holder && sqliteService.rekeyProject(twin.id, cloud.id, cloud.key)) {
         sqliteService.updateProject(cloud.id, sharedProjectFields(cloud, { ...twin, id: cloud.id }));
         byId.set(cloud.id, { ...twin, id: cloud.id, key: cloud.key });
         report.projectsAdopted += 1;
@@ -1031,22 +1096,32 @@ function applyProjects(projects: Project[], report: PullReport, propagateWriteEr
         detail:
           `This machine has its own project for ${repo} (${twin.key}), made before it joined the team, whose ` +
           `project is ${cloud.key}` +
-          (holder && holder.id !== twin.id ? `, and the key ${cloud.key} is taken here by ${holder.name}` : '') +
-          `. Rename or remove ${holder && holder.id !== twin.id ? holder.key : twin.key} to use the team's.`
+          (holder ? `, and the key ${cloud.key} is taken here by ${heldBy(holder)}` : '') +
+          `. Rename or remove ${holder ? holder.key : twin.key} to use the team's.`
       });
       continue;
     }
-    const holder = keys.get(cloud.key.toUpperCase());
+    const holder = holderOfTeamKey(cloud, undefined, cleanup, report);
     if (holder) {
       report.conflicts.push({
         project: cloud.key,
-        detail: `The key ${cloud.key} is taken on this machine by ${holder.name}. Rename or remove it to see the team's ${cloud.name}.`
+        detail: `The key ${cloud.key} is taken on this machine by ${heldBy(holder)}. Rename or remove it to see the team's ${cloud.name}.`
       });
       continue;
     }
 
-    sqliteService.createProject({ ...cloud, ...sharedProjectFields(cloud) });
-    report.projectsAdded += 1;
+    /*
+     * One project this machine cannot store must not cost the person the rest
+     * of the board: a throw here used to abort the whole pull before its cursor,
+     * its clean-up and every card were written, every time it was retried.
+     */
+    try {
+      sqliteService.createProject({ ...cloud, ...sharedProjectFields(cloud) });
+      report.projectsAdded += 1;
+    } catch (err) {
+      if (propagateWriteErrors) throw err;
+      report.conflicts.push({ project: cloud.key, detail: `Could not add ${cloud.name}: ${(err as Error).message}` });
+    }
   }
 }
 
@@ -1090,7 +1165,7 @@ function removeDroppedProjects(cloudProjects: Project[], syncingLogin: string, r
   }
 }
 
-function applyIssues(issues: Issue[], report: PullReport): void {
+function applyIssues(issues: Issue[], report: PullReport, propagateWriteErrors = false): void {
   const projects = new Set(sqliteService.getProjects().map(project => project.id));
   const local = sqliteService.getIssues();
   const byId = new Map(local.map(issue => [issue.id, issue]));
@@ -1144,8 +1219,18 @@ function applyIssues(issues: Issue[], report: PullReport): void {
       continue;
     }
 
-    sqliteService.createIssue({ ...cloud, comments: [] });
-    report.issuesAdded += 1;
+    /*
+     * Identifiers are unique across the whole file, so a card in another
+     * workspace can still refuse this one. Report it and keep pulling; one
+     * card must not keep the rest of the board off this machine.
+     */
+    try {
+      sqliteService.createIssue({ ...cloud, comments: [] });
+      report.issuesAdded += 1;
+    } catch (err) {
+      if (propagateWriteErrors) throw err;
+      report.conflicts.push({ project: cloud.identifier, detail: `Could not add ${cloud.identifier}: ${(err as Error).message}` });
+    }
   }
 }
 
