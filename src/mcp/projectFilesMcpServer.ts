@@ -10,7 +10,9 @@
  * Entry point only -- nothing imports this.
  */
 import { createInterface } from 'node:readline';
+import fs from 'node:fs';
 import { isImplementationTask } from '../services/agentRoleContracts.js';
+import { recordPlannerRead } from '../services/plannerReads.js';
 import { auditTaskDependencies, taskCanAudit, deleteTaskFile, editTaskFile, generateTaskLockfile, parseTaskFileScope, runTaskCheck, stopTaskOperations, writeTaskFile } from '../services/taskFileAccess.js';
 
 import {
@@ -18,6 +20,7 @@ import {
   listRepositories,
   parseRoots,
   readFile,
+  resolveInProject,
   runGit,
   searchFiles
 } from '../services/projectFiles.js';
@@ -27,6 +30,12 @@ const SUPPORTED_PROTOCOLS = new Set([PROTOCOL_VERSION, '2025-03-26', '2024-11-05
 
 const ROOTS = parseRoots(process.env.ALPHA_PROJECT_ROOTS);
 const TASK = parseTaskFileScope(process.env.ALPHA_TASK_SCOPE);
+/**
+ * Where to record each file this turn opens, set only for a planning turn (see plannerReads).
+ * Created at startup, so an empty log still shows the planner had these tools.
+ */
+const READ_LOG = process.env.ALPHA_READ_LOG?.trim() || null;
+if (READ_LOG) fs.appendFileSync(READ_LOG, '');
 
 interface ToolDef {
   description: string;
@@ -68,7 +77,14 @@ const TOOLS: Record<string, ToolDef> = {
       start_line: int('First line to show. Default 1.'),
       max_lines: int('How many lines, up to 2000. Default 400.')
     }, ['path']),
-    run: args => readFile(ROOTS, args)
+    run: args => {
+      const content = readFile(ROOTS, args);
+      if (READ_LOG) {
+        const target = resolveInProject(ROOTS, args.repository, args.path);
+        recordPlannerRead(READ_LOG, { repository: target.root.repo, path: target.rel });
+      }
+      return content;
+    }
   },
   project_search: {
     description: 'Search the text of the project repositories. Returns file:line: text for each match.',

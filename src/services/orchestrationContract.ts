@@ -19,6 +19,8 @@ export const MAX_TASK_ACCEPTANCE_CRITERIA = 12;
 export const MAX_PROJECT_CONTEXT_CHARS = 8_000;
 /** How many decisions one plan may show the person. */
 export const MAX_PLAN_DECISIONS = 12;
+/** Most files the planner opened that a plan keeps for its specialists (see plannerReads). */
+export const MAX_PLANNER_READS = 300;
 /** Scope patterns that name the whole repository; a code task needs a narrower one. */
 export const UNIVERSAL_SCOPE_PATTERNS: ReadonlySet<string> = new Set(['*', '**', '**/*', '*.*']);
 
@@ -119,6 +121,14 @@ export const orchestrationPlanSchema = z.object({
    * keep running under the rules they were approved with.
    */
   fitCheck: z.array(planFitCheckEntrySchema).max(MAX_PLAN_TASKS + 20).optional(),
+  /**
+   * Files the planner opened while planning, recorded by Alpha's file tools and handed to each
+   * specialist as a place to start reading. Set by Alpha, never trusted from model output.
+   */
+  plannerReads: z.array(z.object({
+    repository: z.string().trim().min(1).max(200),
+    path: z.string().trim().min(1).max(1_000)
+  }).strict()).max(MAX_PLANNER_READS).optional(),
   requirements: z.array(z.object({
     id: identifier,
     description: detailText

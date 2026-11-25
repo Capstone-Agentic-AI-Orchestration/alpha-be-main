@@ -159,6 +159,8 @@ export interface CliTurnOptions {
    * on the disk. See projectFiles.
    */
   projectRoots?: ProjectRoot[];
+  /** A planning turn's log of the files it opens through alpha-project-files (see plannerReads). */
+  readLogPath?: string;
   /** Internal assignment authority for alpha-task-files; not a user-supplied approval override. */
   taskScope?: TaskFileScope;
   /** The selected project's folder and repositories, where the clone tool puts that project's code. */
@@ -1000,7 +1002,8 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
     options.taskScope,
     undefined,
     false,
-    options.boardScope
+    options.boardScope,
+    options.readLogPath
   );
   if (mcp.serverNames.length) {
     logInfo(`MCP servers for ${runId}: ${mcp.serverNames.join(', ')}`);
