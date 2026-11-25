@@ -64,9 +64,9 @@ describe('alpha-board in a turn\'s tool config', () => {
     expect(grants.boardGrantForToken(env.ALPHA_RUN_TOKEN)).toBeNull();
   });
 
-  it('is left out for anyone but a developer, and without a board scope', async () => {
+  it('is left out for a client, and without a board scope', async () => {
     const { mcp } = await startDaemon();
-    expect(boardEnv(mcp, 'turn-pm', scope('pm'))).toBeNull();
+    expect(boardEnv(mcp, 'turn-client', scope('client'))).toBeNull();
     expect(boardEnv(mcp, 'turn-none')).toBeNull();
   });
 });

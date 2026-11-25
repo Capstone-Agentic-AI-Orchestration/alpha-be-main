@@ -150,11 +150,27 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'issue.read',
     'issue.manage',
     'ticket.manage',
+    /*
+     * Project managers work with agents exactly as developers do, and no
+     * further: chat with Alpha, run and steer Orchestrator builds, and
+     * configure agents and squads. None of it runs in the cloud: every route
+     * that starts agent work is `desktopOnly`, and the hosted web app hides
+     * these screens from a PM. The cloud still needs the grants, because the
+     * desktop app calls it for chat sync and for an agent's MCP runtime config.
+     *
+     * No `mcp.manage`, as for developers: a workspace MCP server is a command
+     * every member's desktop launches, so adding one stays an admin's call.
+     */
     'agent.read',
-    // PMs can inspect agents and build evidence, but developers/admins own
-    // agent configuration, runtime access, and Orchestrator execution.
+    'agent.run',
+    'agent.manage',
     'mcp.read',
+    'mcp.execute',
     'squad.read',
+    'squad.run',
+    'squad.manage',
+    'chat.read',
+    'chat.write',
     'build.publish',
     'deployment.read',
     'analytics.read',
@@ -184,6 +200,9 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'squad.read',
     'squad.run',
     'squad.manage',
+    // Admins chat with Alpha and the agents in the desktop app, as PMs and developers do.
+    'chat.read',
+    'chat.write',
     'build.publish',
     'deployment.read',
     'deployment.env_preview',
@@ -426,6 +445,19 @@ class WorkspaceRegistry {
 
   can(role: WorkspaceRole, capability: WorkspaceCapability): boolean {
     return CAPABILITIES[role].includes(capability);
+  }
+
+  /**
+   * Whether this role may have agents work for them: chat turns that build,
+   * Orchestrator builds, and the Manager Agent changing the board.
+   *
+   * Ask this, never `role === 'dev'`. Agent work was once developer-only and
+   * the role name was written into a dozen checks; each one silently kept
+   * project managers out after their capabilities allowed it. A source test
+   * (`oneRuleGuards.test.ts`) refuses new role-name checks.
+   */
+  canOperateAgents(role: WorkspaceRole): boolean {
+    return this.can(role, 'agent.run') && this.can(role, 'chat.write');
   }
 
   /**

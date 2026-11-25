@@ -362,16 +362,16 @@ class SkipPullRequest extends Error {}
 
 /**
  * Board access for a specialist working one build task: read the board and
- * comment on its own card, as the developer who started the build. None when
- * that person cannot be resolved or is not a developer -- agents are for
- * developers only -- and the board pass is checked again on every call.
+ * comment on its own card, as the person who started the build. None when
+ * that person cannot be resolved or may no longer operate agents, and the
+ * board pass is checked again on every call.
  */
 export async function specialistBoardScope(orchestrationRunId: string, agentId: string | null, agentName: string): Promise<BoardRunScope | undefined> {
   try {
     const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
     if (!run?.createdBy || !run.issueId) return undefined;
     const context = await workspaceRegistry.resolve(run.createdBy, run.workspaceId);
-    if (!context || context.role !== 'dev') return undefined;
+    if (!context || !workspaceRegistry.canOperateAgents(context.role)) return undefined;
     return { agentId, agentName, context, actorLogin: run.createdBy, projectId: run.projectId, access: 'comment', ownIssueId: run.issueId };
   } catch {
     // A missing board note never stops a build task.

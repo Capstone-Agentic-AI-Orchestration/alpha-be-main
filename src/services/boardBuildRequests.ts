@@ -45,9 +45,8 @@ async function dispatch(request: BoardBuildRequest, context: WorkspaceContext): 
   if (active.has(request.id)) return active.get(request.id)!;
   const work = runWithWorkspace(request.workspaceId, async () => {
     try {
-      if (context.role !== 'dev' || !workspaceRegistry.can(context.role, 'agent.run') ||
-          !workspaceRegistry.can(context.role, 'chat.write') || !workspaceRegistry.canAccessProjectBuilds(context, request.projectId)) {
-        throw new Error('Developer execution access is required. Review this request after access is restored.');
+      if (!workspaceRegistry.canOperateAgents(context.role) || !workspaceRegistry.canAccessProjectBuilds(context, request.projectId)) {
+        throw new Error('Agent execution access is required. Review this request after access is restored.');
       }
       const [issue, project] = await Promise.all([issueStore().get(request.workspaceId, request.issueId), projectStore().get(request.workspaceId, request.projectId)]);
       if (!issue || !project || issue.projectId !== project.id || issue.status === 'done' || issue.archivedAt) throw new Error('The task is no longer available for planning.');
@@ -105,7 +104,7 @@ export async function requestBoardBuild(input: { context: WorkspaceContext; issu
   /** A board run posts its builds into the project chat it was started from, not each task's own thread. */
   threadId?: string }) {
   const { context, issue, project } = input;
-  if (context.role !== 'dev' || !workspaceRegistry.can(context.role, 'agent.run') || !workspaceRegistry.can(context.role, 'chat.write') || !workspaceRegistry.canAccessProjectBuilds(context, project.id)) throw new Error('Only an authorized developer can request AI planning.');
+  if (!workspaceRegistry.canOperateAgents(context.role) || !workspaceRegistry.canAccessProjectBuilds(context, project.id)) throw new Error('Your workspace role cannot request AI planning for this project.');
   return runWithWorkspace(context.workspaceId, async () => {
     const records = sqliteService.listBoardBuildRequests(context.workspaceId) as BoardBuildRequest[];
     const existing = records.find(item => item.id === input.requestId);

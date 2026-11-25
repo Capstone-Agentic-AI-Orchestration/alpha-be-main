@@ -6,6 +6,7 @@ import { canonicalRepository, sameRepository } from '../utils/repositoryName.js'
 import { scopeAllowsPath } from '../utils/pathScope.js';
 import { isImplementationTask } from './agentRoleContracts.js';
 import { repositoryChecks, taskRequiredChecks } from './repositoryChecks.js';
+import { workspaceRegistry } from './workspaceRegistry.js';
 
 /**
  * A rule written twice drifts: a codebase allowed at planning was refused at start, a task
@@ -67,5 +68,16 @@ describe('one rule each', () => {
     expect(scopeAllowsPath({ includePaths: ['src/**'], excludePaths: ['src/generated/**'] }, 'src/app.ts')).toBe(true);
     expect(scopeAllowsPath({ includePaths: ['src/**'], excludePaths: ['src/generated/**'] }, 'src/generated/x.ts')).toBe(false);
     expect(offenders(/includePaths\.some\(\w+ => pathMatchesScope\(/, ['utils/pathScope.ts'])).toEqual([]);
+  });
+
+  it('decides who may have agents work for them only with canOperateAgents, never a role name', () => {
+    expect(['dev', 'pm', 'admin'].every(role => workspaceRegistry.canOperateAgents(role as 'dev'))).toBe(true);
+    expect(workspaceRegistry.canOperateAgents('client')).toBe(false);
+    // `role === 'dev'` once sat in a dozen agent checks and kept project managers out after their
+    // capabilities allowed them in. Architecture diagrams are a separate developer view, the
+    // default assistant picks a prompt for every non-client, and ticket audit events label who
+    // acted: none of them decides who may use agents.
+    expect(offenders(/role\s*[!=]==\s*'dev'/, ['controllers/projectRepoController.ts', 'services/defaultAssistant.ts',
+      'services/workspaceRegistry.ts', 'services/ticketLifecycleRuntime.ts'])).toEqual([]);
   });
 });

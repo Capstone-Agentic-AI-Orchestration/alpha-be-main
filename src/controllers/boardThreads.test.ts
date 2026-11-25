@@ -128,7 +128,7 @@ async function seedTask(svc: any) {
 }
 
 describe('POST /projects/:projectId/board-thread', () => {
-  it.each(['pm', 'admin', 'client'])('refuses %s access to developer prompting', async role => {
+  it.each(['client'])('refuses %s access to agent prompting', async role => {
     const { app, svc } = await startApi(role);
     const { project, issue } = await seedTask(svc);
     expect((await call(app, 'POST', '/api/projects/' + project.id + '/board-thread', {})).status).toBe(403);

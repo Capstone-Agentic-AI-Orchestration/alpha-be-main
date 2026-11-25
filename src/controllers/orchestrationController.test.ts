@@ -71,7 +71,7 @@ async function startApi(role = 'admin') {
     getOrchestrationPlanningRecoveryPreview: calls.preview
   }));
   vi.doMock('../services/workspaceService.js', () => ({ resolveProjectWorkspace: () => ({ dir: 'D:/alpha/repository' }) }));
-  vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessProjectBuilds: () => true } }));
+  vi.doMock('../services/workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canOperateAgents: (role: string) => role !== 'client', canAccessProjectBuilds: () => true } }));
   vi.doMock('../services/orchestrationRuntime.js', () => ({ orchestrationService: { approveAndPublish: calls.approveAndPublish } }));
   vi.doMock('../services/orchestrationDeliveryRuntime.js', () => ({
     orchestrationDeliveryService: { ensure: () => ({}), refresh: calls.deliveryRefresh },
@@ -130,8 +130,8 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe('developer-only board planning admission', () => {
-  it.each(['pm', 'admin', 'client'])('refuses %s before creating a queued request or invoking a planner', async role => {
+describe('board planning admission', () => {
+  it.each(['client'])('refuses %s before creating a queued request or invoking a planner', async role => {
     const { app } = await startApi(role);
     const response = await call(app, 'POST', '/api/projects/project-1/issues/issue-1/build-request', { requestId: 'test-request-one', queue: true });
     expect(response.status).toBe(403);

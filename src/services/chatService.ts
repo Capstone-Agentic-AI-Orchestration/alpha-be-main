@@ -1303,17 +1303,18 @@ export class ChatService extends EventEmitter {
   }
 
   /**
-   * The Manager Agent, which keeps the board for a developer: it answers the
-   * board's Ask Alpha conversation and takes board requests in project chats.
+   * The Manager Agent, which keeps the board for the person asking: it answers
+   * the board's Ask Alpha conversation and takes board requests in project chats.
    *
-   * Agents are for developers only. Alpha's official agents are never
+   * Only roles that may operate agents get it (developers, project managers and
+   * admins; `canOperateAgents`). Alpha's official agents are never
    * archived: if this one is missing or was archived before that rule existed,
    * the official roles are restored first. There is no fallback to a generic
    * assistant.
    */
   private async boardManager(routing: ChatRoutingContext, thread: ChatThread): Promise<{ agent: Agent } | { refusal: string }> {
-    if (routing.context.role !== 'dev') {
-      return { refusal: 'Agents work on the board only for developers. You can still change cards yourself on the board.' };
+    if (!workspaceRegistry.canOperateAgents(routing.context.role)) {
+      return { refusal: 'Your workspace role cannot have agents work on the board. You can still change cards yourself on the board.' };
     }
     const workspaceId = routing.context.workspaceId;
     const find = () => runWithWorkspace(workspaceId, () => sqliteService.getAgents())
@@ -1338,7 +1339,7 @@ export class ChatService extends EventEmitter {
   private boardOptionsFor(agent: Agent, routing: ChatRoutingContext | undefined, thread: ChatThread, managerId: string | undefined): BoardChatOptions | undefined {
     if (!routing || !thread.projectId) return undefined;
     const isManager = agent.id === managerId || agent.templateKey === 'manager';
-    if (isManager && routing.context.role === 'dev') {
+    if (isManager && workspaceRegistry.canOperateAgents(routing.context.role)) {
       return { access: 'write', records: this.boardRecordsFor(routing, thread), askPanel: isAskThreadId(thread.id) };
     }
     return { access: 'read' };
@@ -1541,7 +1542,7 @@ export class ChatService extends EventEmitter {
         .map(item => item.key ? `${item.name} (${item.key})` : item.name),
       canBuild: routing.canBuild,
       answerOnly: routing.answerOnly,
-      canUseBoardAgent: Boolean(project) && routing.context.role === 'dev',
+      canUseBoardAgent: Boolean(project) && workspaceRegistry.canOperateAgents(routing.context.role),
       pendingBuild: project ? this.pendingBuildContext(routing, thread) : undefined,
       restartableGoal: project ? this.restartableGoal(thread.id) : undefined,
       specialists: (await this.eligibleChatSpecialists(routing, thread)).map(agent => {
@@ -1583,7 +1584,7 @@ export class ChatService extends EventEmitter {
 
     // A board route reaches here only when it could not go to the Manager Agent.
     if (parsed.decision?.route === 'board') {
-      reply.content = 'Card changes are made by the Manager Agent for developers, in a project\'s chat or on its board. Select a project, or ask a developer.';
+      reply.content = 'Card changes are made by the Manager Agent, in a project\'s chat or on its board. Select a project, or ask someone whose role can use agents.';
       return null;
     }
 

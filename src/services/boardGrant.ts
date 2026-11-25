@@ -12,8 +12,9 @@ import { runWithWorkspace } from './workspaceContext.js';
  * call is checked against that person's own permissions, so an agent can
  * never do on the board what the person could not do by hand.
  *
- * Agents are for developers only: no grant is minted for a project manager,
- * admin or client, even though they manage cards by hand.
+ * Only a role that may have agents work for it gets one
+ * (`workspaceRegistry.canOperateAgents`): developers, project managers and
+ * admins in the desktop app. No grant is minted for a client.
  */
 export type BoardAccess = 'read' | 'comment' | 'write';
 
@@ -42,8 +43,7 @@ export class BoardGrantRefused extends Error {}
 
 /** Why this person cannot have an agent work on this project's board, or null. */
 export function boardAgentRefusal(context: WorkspaceContext, projectId: string): string | null {
-  if (context.role !== 'dev') return 'Agents work on the board only for developers.';
-  if (!workspaceRegistry.can(context.role, 'issue.manage') || !workspaceRegistry.can(context.role, 'agent.run')) {
+  if (!workspaceRegistry.can(context.role, 'issue.manage') || !workspaceRegistry.canOperateAgents(context.role)) {
     return 'Your workspace role cannot have agents change tasks.';
   }
   if (!workspaceRegistry.canAccessProjectBuilds(context, projectId)) return 'You do not have access to this project.';

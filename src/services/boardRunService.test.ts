@@ -5,7 +5,8 @@ import type { WorkspaceContext } from './workspaceRegistry.js';
 vi.mock('./sqliteService.js', () => ({ sqliteService: {} }));
 vi.mock('../store/stores.js', () => ({ issueStore: () => ({}), projectStore: () => ({}) }));
 vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: {
-  can: (role: string) => role === 'dev',
+  can: (role: string) => role !== 'client',
+  canOperateAgents: (role: string) => role !== 'client',
   canAccessProjectBuilds: () => true
 } }));
 import { boardBuildSourceHash, type BoardBuildRequest } from './boardBuildRequests.js';
@@ -195,8 +196,8 @@ describe('a board run', () => {
     expect((await advanceBoardRun(run, w.deps)).status).toBe('stopped');
   });
 
-  it('is refused for a non-developer, a second run on the project, a done task, or bad limits', async () => {
-    await expect(start(w, ['a'], { context: { ...dev, role: 'pm' } as WorkspaceContext })).rejects.toThrow(/Only a developer/);
+  it('is refused for a client, a second run on the project, a done task, or bad limits', async () => {
+    await expect(start(w, ['a'], { context: { ...dev, role: 'client' } as WorkspaceContext })).rejects.toThrow(/Only someone who can run builds/);
     await expect(start(w, ['a'], { maxTasks: 0 })).rejects.toThrow(/between 1 and/);
     await expect(start(w, ['a'], { maxCostUsd: -1 })).rejects.toThrow(/positive number/);
     const done = world([issue('a', 'high', { status: 'done' })]);

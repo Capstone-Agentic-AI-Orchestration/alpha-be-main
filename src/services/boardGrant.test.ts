@@ -5,10 +5,13 @@ vi.mock('./sqliteService.js', () => ({ sqliteService: { boardAssistantEnabled: (
 vi.mock('./workspaceContext.js', async importOriginal => ({ ...(await importOriginal<object>()), runWithWorkspace: (_id: string, fn: () => unknown) => fn() }));
 vi.mock('./workspaceRegistry.js', async () => {
   const roles: Record<string, string[]> = {
-    dev: ['issue.manage', 'agent.run'], admin: ['issue.manage', 'agent.run'], pm: ['issue.manage'], client: []
+    dev: ['issue.manage', 'agent.run', 'chat.write'], admin: ['issue.manage', 'agent.run', 'chat.write'],
+    pm: ['issue.manage', 'agent.run', 'chat.write'], client: []
   };
+  const can = (role: string, capability: string) => roles[role]?.includes(capability) ?? false;
   return { workspaceRegistry: {
-    can: (role: string, capability: string) => roles[role]?.includes(capability) ?? false,
+    can,
+    canOperateAgents: (role: string) => can(role, 'agent.run') && can(role, 'chat.write'),
     canAccessProjectBuilds: () => state.projectAccess
   } };
 });
@@ -21,12 +24,10 @@ const grant = (role: string) => ({ runId: 'turn', agentId: 'agent-manager', agen
 describe('board pass', () => {
   beforeEach(() => { state.enabled = true; state.projectAccess = true; });
 
-  it('is only for developers', () => {
-    expect(boardAgentRefusal(context('dev'), 'p')).toBeNull();
-    for (const role of ['pm', 'admin', 'client']) {
-      expect(boardAgentRefusal(context(role), 'p')).toBe('Agents work on the board only for developers.');
-      expect(() => mintBoardGrant(grant(role))).toThrow(BoardGrantRefused);
-    }
+  it('is for every role that operates agents, never a client', () => {
+    for (const role of ['dev', 'pm', 'admin']) expect(boardAgentRefusal(context(role), 'p')).toBeNull();
+    expect(boardAgentRefusal(context('client'), 'p')).toBe('Your workspace role cannot have agents change tasks.');
+    expect(() => mintBoardGrant(grant('client'))).toThrow(BoardGrantRefused);
   });
 
   it('is refused for a project the developer cannot reach, or with the assistant off', () => {

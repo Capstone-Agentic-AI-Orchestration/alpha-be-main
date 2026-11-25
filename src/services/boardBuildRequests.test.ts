@@ -14,7 +14,7 @@ vi.mock('./sqliteService.js', () => ({ sqliteService: {
   listBoardRuns: () => []
 } }));
 vi.mock('../store/stores.js', () => ({ issueStore: () => ({ get: async () => fixture.issue, update: vi.fn(async () => fixture.issue) }), projectStore: () => ({ get: async () => fixture.project }) }));
-vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { can: () => true, canAccessProjectBuilds: () => true, resolve: fixture.resolve } }));
+vi.mock('./workspaceRegistry.js', () => ({ workspaceRegistry: { can: (role: string) => role !== 'client', canOperateAgents: (role: string) => role !== 'client', canAccessProjectBuilds: () => true, resolve: fixture.resolve } }));
 vi.mock('./boardThreadService.js', () => ({ ensureBoardThread: () => ({ thread: { id: 'task-private' } }) }));
 vi.mock('./projectBuildOrchestrator.js', () => ({ startProjectBuild: fixture.start }));
 vi.mock('./chatService.js', () => ({ chatService: { sendMessage: async (input: any) => ({ build: await fixture.start({ messageId: input.clientMessageId, issueId: input.buildRequest.issueId, threadId: input.threadId }) }), finishTurn: vi.fn() } }));
@@ -51,9 +51,11 @@ describe('durable board planning requests', () => {
     expect(fixture.records.get('request-one').status).toBe('accepted');
     await vi.advanceTimersByTimeAsync(20_000); expect(fixture.start).toHaveBeenCalledTimes(1);
   });
-  it('requires explicit queueing and refuses PM and admin AI access before saving', async () => {
+  it('requires explicit queueing, lets PMs and admins plan like developers, and refuses clients before saving', async () => {
     await expect(submit({ queue: false })).rejects.toThrow(/queue/);
-    for (const role of ['pm', 'admin', 'client']) await expect(submit({ context: { ...context, role } })).rejects.toThrow(/developer/);
+    // Past the role check: the next refusal is the missing queue choice.
+    for (const role of ['pm', 'admin']) await expect(submit({ queue: false, context: { ...context, role } })).rejects.toThrow(/queue/);
+    await expect(submit({ context: { ...context, role: 'client' } })).rejects.toThrow(/cannot request AI planning/);
     expect(fixture.records.size).toBe(0);
   });
   it('revalidates changed requirements and revoked access after a restart', async () => {

@@ -95,8 +95,8 @@ boardAgentRouter.get('/board/assistant-settings', desktopOnly, async (req: Reque
   res.json({
     projectId,
     enabled: runWithWorkspace(workspaceId, () => sqliteService.boardAssistantEnabled(workspaceId, projectId)),
-    // Agents are for developers: the panel says why someone else sees no assistant.
-    canUse: req.workspace!.role === 'dev',
+    // Whoever may have agents work for them: the panel says why someone else sees no assistant.
+    canUse: workspaceRegistry.canOperateAgents(req.workspace!.role),
     canChange: workspaceRegistry.can(req.workspace!.role, 'workspace.manage_settings')
   });
 });
