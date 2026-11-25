@@ -407,6 +407,18 @@ describe('starting a project from an inquiry', () => {
   expect((await app.listPending(workspaceB, pmB, { filter: 'handled' })).items[0]).not.toHaveProperty('acceptedProjectName');
  });
 
+ it('shares the project of a public inquiry before its sender has an account, without granting anyone access', async () => {
+  await app.submit(inquiry, { origin: 'https://alpha.example.test', remoteAddress: '192.0.2.10' });
+  const [item] = (await app.listPending(workspaceA, pmA, {})).items;
+  const result = await starter().startProject(item.id, workspaceA, pmA, start());
+  expect(result).toMatchObject({ created: true, clientVisible: true });
+  // Shared ahead of the invitation: the sender sees it once activation binds them to this request.
+  const ticket = (await db.query<Record<string, unknown>>(
+   'select source,status,client_user_id,project_id,project_client_visible from alpha_private.tickets where id=$1', [result.ticketId])).rows[0];
+  expect(ticket).toEqual({ source: 'public_inquiry', status: 'received', client_user_id: null, project_id: result.projectId, project_client_visible: true });
+  expect((await db.query('select * from alpha_private.ticket_client_grants where ticket_id=$1', [result.ticketId])).rows).toEqual([]);
+ });
+
  it('finishes rather than repeats on a retry with the same operation', async () => {
   const { receipt } = await submitProposal();
   const first = await starter().startProject(receipt.id, workspaceA, pmA, start());
