@@ -368,11 +368,10 @@ async function discoverAnthropicCatalog(): Promise<CatalogDiscovery> {
 
 /**
  * Claude Code's Claude.ai subscription login does not provide an Anthropic API
- * key, so `/v1/models` cannot enumerate its account-backed model access. List
- * Claude Code's model aliases for that auth mode instead: Claude Code maps each
- * one to the newest model of that family, so the list never names a retired
- * version. Agents pinned to a full name keep working (see runtimeOffersModel).
- * API-key logins continue to use the live API catalog.
+ * key, so `/v1/models` cannot enumerate its account-backed model access.
+ * Claude Code's own list (discoverClaudeCodeCatalog) comes first; these aliases
+ * are the fallback when Claude Code cannot be asked. Claude Code maps each one
+ * to the newest model of that family. API-key logins use the live API catalog.
  */
 const CLAUDE_CODE_SUBSCRIPTION_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 
@@ -386,6 +385,79 @@ export function claudeCatalogForAuth(
     source: 'cli'
   };
 }
+
+/**
+ * The exact models a Claude Code sign-in can use, from Claude Code's own model picker.
+ *
+ * Claude Code answers an `initialize` control request (the handshake its Agent SDK uses for
+ * `supportedModels`) with the models it offers this account: aliases such as `opus` together
+ * with the exact model each resolves to, and older models by their exact names. The handshake
+ * starts no turn, so nothing is sent to Anthropic and none of the plan is used.
+ */
+export function claudeCodeModelIds(initializeResponse: unknown): string[] {
+  const models = (initializeResponse as { models?: unknown } | null)?.models;
+  if (!Array.isArray(models)) return [];
+  return uniqueModelIds(models.map(item => {
+    const model = (item ?? {}) as { value?: unknown; resolvedModel?: unknown };
+    // "default" is a setting, not a model; its model is listed again under its own name.
+    return model.value === 'default' ? undefined : model.resolvedModel ?? model.value;
+  }));
+}
+
+/** Ask Claude Code which models it offers this sign-in. See claudeCodeModelIds. */
+function discoverClaudeCodeCatalog(bin: string, timeoutMs = 15_000): Promise<CatalogDiscovery> {
+  const unavailable = (error: string): CatalogDiscovery => ({ models: [], source: 'none', error });
+  return new Promise(resolve => {
+    let child: ReturnType<typeof crossSpawn>;
+    try {
+      child = crossSpawn(bin, [
+        '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+        '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence'
+      ], { stdio: ['pipe', 'pipe', 'ignore'], env: childProcessEnv() });
+    } catch {
+      resolve(unavailable('Claude Code could not be started to list its models'));
+      return;
+    }
+
+    let settled = false;
+    let buffer = '';
+    const finish = (result: CatalogDiscovery) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Closing its input ends Claude Code without starting a turn.
+      child.stdin?.end();
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(unavailable('Claude Code did not list its models in time'));
+    }, timeoutMs);
+
+    child.stdout?.on('data', chunk => {
+      buffer += String(chunk);
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        let message: { type?: unknown; response?: { response?: unknown } };
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.type !== 'control_response') continue;
+        const models = claudeCodeModelIds(message.response?.response ?? message.response);
+        finish(models.length
+          ? { models, source: 'cli', fetchedAt: new Date().toISOString() }
+          : unavailable('Claude Code listed no models'));
+      }
+    });
+    child.on('error', () => finish(unavailable('Claude Code could not be started to list its models')));
+    child.on('close', () => finish(unavailable('Claude Code closed before listing its models')));
+    child.stdin?.write(JSON.stringify({ type: 'control_request', request_id: 'alpha-models', request: { subtype: 'initialize' } }) + '\n');
+  });
+}
+
 
 async function discoverGeminiCatalog(): Promise<CatalogDiscovery> {
   const apiKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)?.trim();
@@ -634,7 +706,10 @@ export class RuntimeService {
     const authProbe = await runClosedStdin(bin, ['auth', 'status'], 15_000);
     try {
       const auth = JSON.parse(authProbe.stdout);
-      const accountCatalog = claudeCatalogForAuth(catalog, auth.authMethod);
+      const listed = auth.authMethod === 'claude.ai' && !catalog.models.length
+        ? await discoverClaudeCodeCatalog(bin)
+        : null;
+      const accountCatalog = listed?.models.length ? listed : claudeCatalogForAuth(catalog, auth.authMethod);
       return {
         id: 'claude',
         name: 'Claude Code CLI',
