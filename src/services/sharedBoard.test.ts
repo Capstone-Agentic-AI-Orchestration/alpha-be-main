@@ -651,6 +651,119 @@ describe('a project the team no longer lists', () => {
   });
 });
 
+/**
+ * Keys and card identifiers are unique across this machine's whole file, as
+ * they are across the cloud. A leftover holding one -- in this workspace or
+ * another -- used to throw mid-pull, so the cursor, the clean-up and every
+ * card after it never landed, on every retry: a developer saw no projects.
+ */
+describe('a team key held by something left on this machine', () => {
+  const inOther = async <T>(fn: () => T): Promise<T> => {
+    const { runWithWorkspace } = await import('./workspaceContext.js');
+    return runWithWorkspace('ws-other', fn);
+  };
+  const otherProjects = (svc: any) => inOther(() => svc.getProjects().map((p: Project) => [p.id, p.key]));
+  const payments = cloudProject({
+    id: 'gh-repo-200', name: 'payments', key: 'PAY', createdBy: 'PM1',
+    resources: [{ id: 'gh-repo-200-repo', type: 'github_repo', name: 'acme/payments', pathOrUrl: 'https://github.com/acme/payments' }]
+  });
+
+  it('moves a teammate’s leftover in another workspace to a free key, and pulls the team’s project', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await inOther(() => svc.createProject({ id: 'proj-stale', name: 'Old checkout', key: 'CHK', resources: [], createdBy: 'PM2' }));
+
+    const report = await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }), 'Dev1');
+
+    expect(report.conflicts).toEqual([]);
+    expect(report.projectsAdded).toBe(1);
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => [p.id, p.key])).toEqual([['gh-repo-100', 'CHK']]);
+    expect(await otherProjects(svc)).toEqual([['proj-stale', 'CHKOLD']]);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id)).toEqual(['gh-issue-9001']);
+  });
+
+  it('removes a teammate’s leftover in this workspace before it blocks the team’s project or its cards', async () => {
+    const { svc, board, inWorkspace } = await load();
+    inWorkspace(() => {
+      svc.createProject({ id: 'proj-stale', name: 'Old checkout', key: 'CHK', resources: [], createdBy: 'PM2' });
+      svc.createIssue({ id: 'stale-card', identifier: 'CHK-7', title: 'Old card', projectId: 'proj-stale', status: 'todo', priority: 'low' });
+    });
+
+    const report = await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }), 'Dev1');
+
+    expect(report.conflicts).toEqual([]);
+    expect(report).toMatchObject({ projectsAdded: 1, projectsRemoved: 1, issuesAdded: 1 });
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id)).toEqual(['gh-repo-100']);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => [i.id, i.identifier])).toEqual([['gh-issue-9001', 'CHK-7']]);
+  });
+
+  it('does not mistake a leftover it just removed for a later project’s same-repository twin', async () => {
+    const { svc, board, inWorkspace } = await load();
+    inWorkspace(() => svc.createProject({
+      id: 'proj-stale', name: 'Old payments', key: 'CHK', createdBy: 'PM2',
+      resources: [{ id: 'r', type: 'github_repo', name: 'acme/payments', pathOrUrl: 'https://github.com/acme/payments' }]
+    }));
+
+    const report = await board.pullSharedBoard(
+      'ws-default',
+      source({ projects: [cloudProject({ createdBy: 'PM1' }), payments], issues: [], comments: [] }),
+      'Dev1'
+    );
+
+    expect(report.conflicts).toEqual([]);
+    expect(report).toMatchObject({ projectsAdded: 2, projectsRemoved: 1 });
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id).sort()).toEqual(['gh-repo-100', 'gh-repo-200']);
+  });
+
+  it('keeps the puller’s own project on its key, says where it is, and still pulls everything else', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await inOther(() => svc.createProject({ id: 'proj-mine', name: 'My checkout', key: 'CHK', resources: [], createdBy: 'dev1' }));
+
+    const report = await board.pullSharedBoard(
+      'ws-default',
+      source({ projects: [cloudProject({ createdBy: 'PM1' }), payments], issues: [], comments: [] }),
+      'Dev1'
+    );
+
+    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'CHK' })]);
+    expect(report.conflicts[0].detail).toMatch(/taken on this machine by My checkout in another workspace/);
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id)).toEqual(['gh-repo-200']);
+    expect(await otherProjects(svc)).toEqual([['proj-mine', 'CHK']]);
+  });
+
+  it('reports a key held in another workspace, rather than failing, when it cannot tell who is pulling', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await inOther(() => svc.createProject({ id: 'proj-stale', name: 'Old checkout', key: 'CHK', resources: [], createdBy: 'PM2' }));
+
+    const report = await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' }), payments], issues: [] }));
+
+    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'CHK' })]);
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id)).toEqual(['gh-repo-200']);
+    expect(await otherProjects(svc)).toEqual([['proj-stale', 'CHK']]);
+  });
+
+  it('reports a card whose identifier another workspace holds, and still pulls the rest', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await inOther(() => {
+      svc.createProject({ id: 'proj-other', name: 'Other', key: 'OTH', resources: [] });
+      svc.createIssue({ id: 'other-card', identifier: 'CHK-7', title: 'Same number', projectId: 'proj-other', status: 'todo', priority: 'low' });
+    });
+
+    const report = await board.pullSharedBoard(
+      'ws-default',
+      source({
+        projects: [cloudProject({ createdBy: 'PM1' })],
+        issues: [cloudIssue(), cloudIssue({ id: 'gh-issue-9002', identifier: 'CHK-8', githubNumber: 8 })],
+        comments: []
+      }),
+      'Dev1'
+    );
+
+    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'CHK-7' })]);
+    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id)).toEqual(['gh-repo-100']);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id)).toEqual(['gh-issue-9002']);
+  });
+});
+
 describe('asSyncReport', () => {
   it('puts clashes where the app shows them one by one', async () => {
     const { board } = await load();
