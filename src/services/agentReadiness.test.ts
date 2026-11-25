@@ -139,6 +139,7 @@ describe('agentReadiness', () => {
   it('keeps a full Claude model name ready when the scan lists only aliases', () => {
     const claude = { ...runtime('Anthropic', 'online', ['sonnet', 'opus', 'haiku', 'fable']), catalogSource: 'cli' as const };
     expect(agentReadiness({ modelProvider: 'Anthropic', modelName: 'claude-sonnet-5' }, [claude]).status).toBe('ready');
+    expect(agentReadiness({ modelProvider: 'Anthropic', modelName: 'opus' }, [claude]).status).toBe('ready');
     expect(agentReadiness({ modelProvider: 'Anthropic', modelName: 'gpt-6-luna' }, [claude]).status).toBe('stale_model');
   });
 

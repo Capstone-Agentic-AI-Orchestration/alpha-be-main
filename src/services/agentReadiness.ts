@@ -91,19 +91,23 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
   }
 };
 
+/** Names Claude Code resolves itself, to the newest model of each family. */
+const CLAUDE_CODE_ALIASES: ReadonlySet<string> = new Set(['default', 'opus', 'sonnet', 'haiku', 'fable', 'opusplan']);
+
 /**
  * Whether a runtime will accept this model name.
  *
  * Usually that means the name is in the scanned list. Claude Code on a
- * subscription login is the exception: Anthropic offers no model list for that
- * login, so the scan lists Claude Code's aliases (sonnet, opus, haiku, fable).
- * Claude Code still accepts full names such as `claude-sonnet-5`, and an alias
- * list is no evidence that one was retired. If it was, Claude Code says so on
+ * subscription login is the exception: its list comes from Claude Code's own
+ * picker (or, failing that, its aliases), and Claude Code accepts both every
+ * alias and full names it does not list, such as `claude-sonnet-5`. A missing
+ * name is no evidence the model was retired. If it was, Claude Code says so on
  * the first turn.
  */
 export function runtimeOffersModel(runtime: RuntimeEngine, modelName: string): boolean {
   if (runtime.models.includes(modelName)) return true;
-  return runtime.provider === 'Anthropic' && runtime.catalogSource === 'cli' && modelName.startsWith('claude-');
+  return runtime.provider === 'Anthropic' && runtime.catalogSource === 'cli' &&
+    (modelName.startsWith('claude-') || CLAUDE_CODE_ALIASES.has(modelName));
 }
 
 /**

@@ -14,12 +14,27 @@ let parseLMStudioModelIds: (payload: unknown) => string[];
 let codexCacheModelIds: (payload: unknown) => string[];
 let codexFetchedModelCache: (payload: unknown) => boolean;
 let claudeCatalogForAuth: (catalog: { models: string[]; source: RuntimeCatalogSource; error?: string }, authMethod: unknown) => { models: string[]; source: RuntimeCatalogSource; error?: string };
+let claudeCodeModelIds: (initializeResponse: unknown) => string[];
 
 beforeAll(async () => {
-  ({ parseOpenCodeModelIds, parseAntigravityModelIds, parseLMStudioModelIds, codexCacheModelIds, codexFetchedModelCache, claudeCatalogForAuth } = await import('./runtimeService.js'));
+  ({ parseOpenCodeModelIds, parseAntigravityModelIds, parseLMStudioModelIds, codexCacheModelIds, codexFetchedModelCache, claudeCatalogForAuth, claudeCodeModelIds } = await import('./runtimeService.js'));
 });
 
 describe('runtime model catalog parsers', () => {
+  it('lists the exact models Claude Code offers a subscription, once each', () => {
+    // Shortened from Claude Code 2.1.289's answer to an initialize control request.
+    expect(claudeCodeModelIds({ models: [
+      { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default (recommended)' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5' },
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5' },
+      { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5' },
+      { value: 'claude-opus-4-8', resolvedModel: 'claude-opus-4-8', displayName: 'Opus 4.8' },
+      { value: 'claude-sonnet-5', displayName: 'Sonnet 5' },
+      { displayName: 'No id' }
+    ] })).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-opus-4-8', 'claude-sonnet-5']);
+    expect(claudeCodeModelIds(null)).toEqual([]);
+  });
+
   it('lists Claude Code model aliases for a subscription login with no API catalog', () => {
     expect(claudeCatalogForAuth({ models: [], source: 'none', error: 'ANTHROPIC_API_KEY is not configured' }, 'claude.ai')).toEqual({
       models: ['sonnet', 'opus', 'haiku', 'fable'],
