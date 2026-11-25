@@ -368,15 +368,13 @@ async function discoverAnthropicCatalog(): Promise<CatalogDiscovery> {
 
 /**
  * Claude Code's Claude.ai subscription login does not provide an Anthropic API
- * key, so `/v1/models` cannot enumerate its account-backed model access. Keep
- * the CLI's supported model IDs available for that auth mode, as earlier
- * runtime scans did. API-key logins continue to use the live API catalog.
+ * key, so `/v1/models` cannot enumerate its account-backed model access. List
+ * Claude Code's model aliases for that auth mode instead: Claude Code maps each
+ * one to the newest model of that family, so the list never names a retired
+ * version. Agents pinned to a full name keep working (see runtimeOffersModel).
+ * API-key logins continue to use the live API catalog.
  */
-const CLAUDE_CODE_SUBSCRIPTION_MODELS = [
-  'claude-sonnet-5',
-  'claude-opus-5',
-  'claude-haiku-4-5'
-];
+const CLAUDE_CODE_SUBSCRIPTION_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 
 export function claudeCatalogForAuth(
   catalog: CatalogDiscovery,
@@ -447,15 +445,18 @@ export class RuntimeService {
       return { ...engine, type: kind, latencyMs: Date.now() - started };
     };
 
-    const detectedRuntimes: RuntimeEngine[] = [
-      await timed('cloud', () => this.detectClaude()),
-      await timed('cloud', () => this.detectCodex()),
-      await timed('cloud', () => this.detectAntigravity()),
-      await timed('cloud', () => this.detectGemini()),
-      await timed('local', () => this.detectOpenCode(options.refreshCatalog === true)),
-      await timed('local', () => this.detectOllama()),
-      await timed('local', () => this.detectLMStudio())
-    ];
+    // The detectors are independent and each has its own time limit, so they
+    // run together: a scan takes as long as its slowest runtime instead of the
+    // sum of all of them. Promise.all keeps the results in this order.
+    const detectedRuntimes: RuntimeEngine[] = await Promise.all([
+      timed('cloud', () => this.detectClaude()),
+      timed('cloud', () => this.detectCodex()),
+      timed('cloud', () => this.detectAntigravity()),
+      timed('cloud', () => this.detectGemini()),
+      timed('local', () => this.detectOpenCode(options.refreshCatalog === true)),
+      timed('local', () => this.detectOllama()),
+      timed('local', () => this.detectLMStudio())
+    ]);
 
     const installedLocalIds = new Set<string>();
     if (findOllama()) installedLocalIds.add('ollama');

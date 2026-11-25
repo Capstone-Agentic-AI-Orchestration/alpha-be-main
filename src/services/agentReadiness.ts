@@ -92,6 +92,21 @@ const PROVIDER_CLI: Partial<Record<ModelProvider, { bin: string; signIn: string;
 };
 
 /**
+ * Whether a runtime will accept this model name.
+ *
+ * Usually that means the name is in the scanned list. Claude Code on a
+ * subscription login is the exception: Anthropic offers no model list for that
+ * login, so the scan lists Claude Code's aliases (sonnet, opus, haiku, fable).
+ * Claude Code still accepts full names such as `claude-sonnet-5`, and an alias
+ * list is no evidence that one was retired. If it was, Claude Code says so on
+ * the first turn.
+ */
+export function runtimeOffersModel(runtime: RuntimeEngine, modelName: string): boolean {
+  if (runtime.models.includes(modelName)) return true;
+  return runtime.provider === 'Anthropic' && runtime.catalogSource === 'cli' && modelName.startsWith('claude-');
+}
+
+/**
  * Is this agent pinned to a model its CLI has since stopped offering?
  *
  * Providers retire model tiers on their own schedule. Antigravity 1.1.25 dropped
@@ -117,7 +132,7 @@ function staleModel(
   const pinned = agent.modelName?.trim();
   if (!pinned) return null;
   if (!runtime.models?.length) return null;
-  if (runtime.models.includes(pinned)) return null;
+  if (runtimeOffersModel(runtime, pinned)) return null;
 
   return {
     status: 'stale_model',

@@ -1,4 +1,5 @@
 import { ReasoningEffort, RuntimeEngine } from '../models/index.js';
+import { runtimeOffersModel } from './agentReadiness.js';
 
 /**
  * Who answers a chat message that names no agent.
@@ -148,7 +149,7 @@ export function defaultAssistantCandidates(
 
   if (preferred) {
     const runtime = usable.find(r => r.provider === preferred.provider);
-    if (runtime && runtime.models.includes(preferred.modelName)) {
+    if (runtime && runtimeOffersModel(runtime, preferred.modelName)) {
       candidates.push({
         provider: runtime.provider,
         modelName: preferred.modelName,

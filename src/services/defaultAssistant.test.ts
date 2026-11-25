@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickDefaultRuntime, DEFAULT_ASSISTANT, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel, assistantPromptFor, CLIENT_ASSISTANT_PROMPT, HOW_TO_EXPLAIN } from './defaultAssistant.js';
+import { pickDefaultRuntime, defaultAssistantCandidates, DEFAULT_ASSISTANT, DEFAULT_ASSISTANT_PROMPT, describeRuntimeModel, assistantPromptFor, CLIENT_ASSISTANT_PROMPT, HOW_TO_EXPLAIN } from './defaultAssistant.js';
 import { chatAudience } from './chatProductContext.js';
 import { RuntimeEngine, ModelProvider } from '../models/index.js';
 
@@ -56,6 +56,12 @@ describe('pickDefaultRuntime', () => {
 
   it('is null when there are no runtimes at all', () => {
     expect(pickDefaultRuntime([])).toBeNull();
+  });
+
+  it('keeps the Orchestrator on its full Claude model name when the scan lists only aliases', () => {
+    const claude = { ...rt('Anthropic', 'online', ['sonnet', 'opus', 'haiku', 'fable'], true), catalogSource: 'cli' as const };
+    const [first] = defaultAssistantCandidates([claude], { provider: 'Anthropic', modelName: 'claude-sonnet-5', agentName: 'Alpha' });
+    expect(first?.modelName).toBe('claude-sonnet-5');
   });
 
   it('picks deterministically when several are usable and none is default', () => {

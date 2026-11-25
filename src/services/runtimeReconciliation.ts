@@ -8,7 +8,10 @@ export function reconcileDetectedRuntimes(detected: RuntimeEngine[], previous: R
     return installedLocalIds.has(runtime.id) || !!runtime.catalogFetchedAt || !!prior.get(runtime.id)?.catalogFetchedAt;
   }).map(runtime => {
     const old = prior.get(runtime.id);
-    const preserve = !runtime.catalogFetchedAt && !!old?.catalogFetchedAt;
+    // Keep the last verified list only when this scan learned nothing. A list
+    // without a fetch time (Codex's built-in catalog) is still newer evidence
+    // than the saved one, and keeping the old list hid it indefinitely.
+    const preserve = !runtime.models.length && !runtime.catalogFetchedAt && !!old?.catalogFetchedAt;
     return { ...runtime, isDefault: old?.isDefault ?? runtime.isDefault,
       ...(preserve ? { models: old!.models, catalogSource: 'cache' as const, catalogFetchedAt: old!.catalogFetchedAt, catalogStale: true } : {}) };
   });

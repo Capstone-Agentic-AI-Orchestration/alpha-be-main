@@ -25,4 +25,14 @@ describe('runtime scan reconciliation', () => {
     const result = reconcileDetectedRuntimes([engine('ollama', { status: 'online', catalogFetchedAt: 'new' })], [engine('ollama', { models: ['removed'], catalogFetchedAt: 'old' })], new Set());
     expect(result[0].models).toEqual([]);
   });
+  it('replaces a saved catalog when the new scan found models without a fetch time', () => {
+    // Codex's built-in catalog carries no fetch time. Keeping the saved list
+    // instead left Codex showing three old models when it offered eight.
+    const result = reconcileDetectedRuntimes(
+      [engine('codex', { status: 'online', models: ['gpt-6-astra', 'gpt-6.1-sol'], catalogSource: 'cli', catalogStale: true })],
+      [engine('codex', { models: ['gpt-5.6-terra'], catalogFetchedAt: '2026-10-15T00:00:00Z' })],
+      new Set()
+    );
+    expect(result[0]).toMatchObject({ models: ['gpt-6-astra', 'gpt-6.1-sol'], catalogSource: 'cli' });
+  });
 });
