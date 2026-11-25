@@ -670,6 +670,8 @@ export class RunnerService extends EventEmitter {
 
     this.advanceStage(runId, 'workspace', 'success');
     this.advanceStage(runId, 'analysis', 'running');
+    // What this run's own changes are measured against when it finishes (see getGitDiffStats).
+    const startCommit = ctx.orchestration?.startingCommit ?? await getHeadCommit(cwd).catch(() => undefined);
 
     // 3. Prepare run directory for per-run configs
     const runDir = path.join(RUNS_DIR, runId);
@@ -960,7 +962,7 @@ export class RunnerService extends EventEmitter {
         });
         continue;
       }
-      await this.handleProcessExit(runId, cwd, branchName, issue, result.code, result.signal, result.terminationReason, ctx.orchestration);
+      await this.handleProcessExit(runId, cwd, branchName, issue, result.code, result.signal, result.terminationReason, ctx.orchestration, startCommit);
       break;
       } finally {
         const status = sqliteService.getPrototypeRuns().find(run => run.id === runId)?.status;
@@ -1130,7 +1132,8 @@ ${instructions}${remoteSection}${hostingSection}`;
     code: number | null,
     signal: string | null,
     terminationReason?: ProcessTerminationReason,
-    orchestration?: StartRunParams['orchestration']
+    orchestration?: StartRunParams['orchestration'],
+    startCommit?: string
   ) {
     // The persona file and any MCP config exist only for the duration of the
     // spawn; leaving them would accumulate a directory per run.
@@ -1264,7 +1267,7 @@ ${instructions}${remoteSection}${hostingSection}`;
       this.advanceStage(runId, 'review', 'running');
 
       // Compute real Git diff
-      const diffStats = await getGitDiffStats(cwd);
+      const diffStats = await getGitDiffStats(cwd, startCommit);
 
       /**
        * Commit, push, and open a pull request — when there is somewhere to push.
