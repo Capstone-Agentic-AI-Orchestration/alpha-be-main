@@ -25,11 +25,20 @@ describe('workspace squad management capabilities', () => {
     expect(workspaceRegistry.can('dev', 'squad.manage')).toBe(true);
   });
 
-  it('lets project managers run and configure agents, squads and MCP servers', () => {
+  it('gives project managers exactly the agent rights a developer has, and no MCP catalog writes', () => {
+    // A workspace MCP server is a command every member's desktop launches: adding one stays admin-only.
+    for (const role of ['dev', 'pm', 'client'] as const) expect(workspaceRegistry.can(role, 'mcp.manage')).toBe(false);
+    expect(workspaceRegistry.can('admin', 'mcp.manage')).toBe(true);
+    for (const capability of ['agent.run', 'agent.manage', 'squad.run', 'squad.manage', 'mcp.read', 'mcp.execute', 'chat.read', 'chat.write'] as const) {
+      expect(workspaceRegistry.can('pm', capability)).toBe(workspaceRegistry.can('dev', capability));
+    }
+  });
+
+  it('lets project managers run and configure agents and squads', () => {
     // The hosted web app hides all of this from a PM, and every route that starts agent work is
     // desktopOnly; the grants are the same in both runtimes because the desktop calls the cloud.
     for (const capability of ['agent.read', 'agent.run', 'agent.manage', 'squad.read', 'squad.run', 'squad.manage',
-      'mcp.read', 'mcp.execute', 'mcp.manage', 'chat.read', 'chat.write'] as const) {
+      'mcp.read', 'mcp.execute', 'chat.read', 'chat.write'] as const) {
       expect(workspaceRegistry.can('pm', capability)).toBe(true);
     }
     expect(workspaceRegistry.can('pm', 'deployment.manage')).toBe(false);

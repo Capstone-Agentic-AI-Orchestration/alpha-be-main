@@ -151,19 +151,21 @@ const CAPABILITIES: Record<WorkspaceRole, readonly WorkspaceCapability[]> = {
     'issue.manage',
     'ticket.manage',
     /*
-     * Project managers work with agents the way developers do: chat with
-     * Alpha, run and steer Orchestrator builds, and configure agents, squads
-     * and MCP servers. None of it runs in the cloud: every route that starts
-     * agent work is `desktopOnly`, and the hosted web app hides these screens
-     * from a PM. The cloud still needs the grants, because the desktop app
-     * calls it for chat sync and for an agent's MCP runtime config.
+     * Project managers work with agents exactly as developers do, and no
+     * further: chat with Alpha, run and steer Orchestrator builds, and
+     * configure agents and squads. None of it runs in the cloud: every route
+     * that starts agent work is `desktopOnly`, and the hosted web app hides
+     * these screens from a PM. The cloud still needs the grants, because the
+     * desktop app calls it for chat sync and for an agent's MCP runtime config.
+     *
+     * No `mcp.manage`, as for developers: a workspace MCP server is a command
+     * every member's desktop launches, so adding one stays an admin's call.
      */
     'agent.read',
     'agent.run',
     'agent.manage',
     'mcp.read',
     'mcp.execute',
-    'mcp.manage',
     'squad.read',
     'squad.run',
     'squad.manage',
