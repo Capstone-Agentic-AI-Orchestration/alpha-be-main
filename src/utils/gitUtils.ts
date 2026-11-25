@@ -311,7 +311,9 @@ export async function createBranchFrom(cwd: string, branchName: string, base: st
 }
 
 export async function getGitDiffStats(
-  cwd: string
+  cwd: string,
+  /** The commit the run started from. Unknown means only uncommitted edits can be counted. */
+  since: string | undefined
 ): Promise<{ changedFiles: number; insertions: number; deletions: number }> {
   const shortstat = async (args: string[]) =>
     (await execFileAsync('git', ['diff', '--shortstat', ...args], { cwd })).stdout;
@@ -341,14 +343,13 @@ export async function getGitDiffStats(
   }
 
   try {
-    const working = await shortstat([]);
-    if (working.trim()) return parseDiffShortStat(working);
-
-    // Nothing uncommitted: the work may already have been committed on this
-    // branch, so compare against its parent.
-    return parseDiffShortStat(await shortstat(['HEAD~1']));
+    // From where the run started, so work the agent committed itself counts
+    // and an earlier commit on the branch does not. Comparing a clean tree
+    // with HEAD~1 instead reported the previous build's merge as this run's
+    // work: a run that changed nothing said "5 file(s) changed".
+    return parseDiffShortStat(await shortstat(since ? [since] : []));
   } catch {
-    // HEAD~1 does not exist on a repository with a single commit.
+    // Not a repository, or the starting commit is gone.
     return { changedFiles: 0, insertions: 0, deletions: 0 };
   }
 }

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { sqliteService } from './sqliteService.js';
 import { Agent, ChatMessage, ChatThread, type Project } from '../models/index.js';
 import { providerResumesSessions, runCliTurn } from './cliRunner.js';
+import { ReplyStream } from './chatReplyStream.js';
 import {
   ensureWorkspacesRoot,
   resolveProjectWorkspace,
@@ -756,7 +757,8 @@ export class ChatService extends EventEmitter {
       turn.currentAgentName = DEFAULT_ASSISTANT.name;
       const routingPrompt = params.routing ? await this.routingPromptFor(params.routing, thread) : undefined;
       const reply = await this.runWithSteering(turn, requestContent, prompt =>
-        this.generateDefaultReply(appendSkillGuidance(prompt, selectedSkills.guidance), threadId, workspaceId, runId, activityCallId, routingPrompt, params.userId, viewer)
+        this.generateDefaultReply(appendSkillGuidance(prompt, selectedSkills.guidance), threadId, workspaceId, runId, activityCallId, routingPrompt, params.userId, viewer,
+          text => this.emit('chat_turn.text', { threadId, messageId: userMessage.id, text }))
       );
       if (!reply || turn.stopRequested) {
         if (activityCallId) agentCallService.cancelChatTurn(activityCallId);
@@ -1821,7 +1823,9 @@ export class ChatService extends EventEmitter {
     routingPrompt?: string,
     ownerId?: string,
     /** Who reads the answer: decides what Alpha is given (see alphaTurnContext). */
-    viewer: ChatViewer = chatViewer(undefined)
+    viewer: ChatViewer = chatViewer(undefined),
+    /** The reply so far, while it is written, for the chat to show live (see chatReplyStream). */
+    onText?: (text: string) => void
   ): Promise<ChatMessage> {
     const now = () => new Date().toISOString();
     const base = {
@@ -1887,6 +1891,8 @@ export class ChatService extends EventEmitter {
 
       logInfo(`Default assistant replying via ${runtime.provider}/${runtime.modelName}: ${runtime.reason}`);
 
+      const structured = Boolean(routingPrompt?.includes('## Structured chat response'));
+      const stream = onText ? new ReplyStream(onText, structured) : null;
       const turn = await runCliTurn({
         usageContext: { threadId, agentId: DEFAULT_ASSISTANT.id, callId: activityCallId },
         runId,
@@ -1894,7 +1900,7 @@ export class ChatService extends EventEmitter {
         provider: runtime.provider,
         mode: 'chat',
         approvalMode: 'ask',
-        responseSchema: routingPrompt?.includes('## Structured chat response') ? alphaChatResponseSchema : undefined,
+        responseSchema: structured ? alphaChatResponseSchema : undefined,
         modelName: runtime.modelName,
         reasoningEffort: runtime.reasoningEffort ?? undefined,
         // The tool policy still applies: a chat inspects, it does not mutate.
@@ -1911,8 +1917,10 @@ export class ChatService extends EventEmitter {
         projectRoots: turnContext.roots,
         // The project's repositories are cloned into its folder on this computer.
         projectFolder: turnContext.projectFolder,
-        onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined
+        onEvent: activityCallId ? event => agentCallService.recordChatTurnCliEvent(activityCallId, event, cwd) : undefined,
+        onTextDelta: stream ? (text, key) => stream.push(text, key) : undefined
       });
+      stream?.stop();
 
       if (turn.sessionId) {
         sqliteService.setThreadSession(threadId, sessionKey, turn.sessionId);

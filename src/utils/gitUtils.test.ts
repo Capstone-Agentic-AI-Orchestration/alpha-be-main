@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { addBranchWorktree, addDetachedWorktree, createBranch, createBranchFrom, getGitChangedPaths, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
+import { addBranchWorktree, addDetachedWorktree, createBranch, createBranchFrom, getGitChangedPaths, getGitDiffStats, getGitFileAtCommit, getGitTrackedPathsAtCommit, getHeadCommit, remoteHasDevBranch, removeDetachedWorktree } from './gitUtils.js';
 
 /**
  * Where an agent's branch starts, against real git: a bare "remote" and a
@@ -44,6 +44,24 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+describe('how much a run changed', () => {
+  it('counts only what changed since the run started', async () => {
+    const { clone } = repoWithRemote(['dev']);
+    git(clone, 'checkout', '-q', 'dev');
+    // The branch tip is an earlier build's commit; the run starts on top of it.
+    const start = await getHeadCommit(clone);
+
+    expect(await getGitDiffStats(clone, start)).toEqual({ changedFiles: 0, insertions: 0, deletions: 0 });
+
+    fs.writeFileSync(path.join(clone, 'page.tsx'), 'one\ntwo\n');
+    git(clone, 'add', '-A');
+    git(clone, 'commit', '-q', '-m', 'agent commit');
+    fs.writeFileSync(path.join(clone, 'new.css'), 'a\n');
+
+    expect(await getGitDiffStats(clone, start)).toEqual({ changedFiles: 2, insertions: 3, deletions: 0 });
+  });
 });
 
 describe('the branch an agent starts from', () => {

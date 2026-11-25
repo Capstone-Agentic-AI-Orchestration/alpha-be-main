@@ -496,6 +496,8 @@ runnerService.on('squad_run_cancelled', (data) => broadcast({ type: 'squad_run_c
 
 // Subscribe chat events to WebSocket broadcast
 chatService.on('chat_message', (data) => broadcast({ type: 'chat_message', payload: data }));
+// Alpha's reply while it is being written; the finished reply follows as a chat_message.
+chatService.on('chat_turn.text', (data) => broadcast({ type: 'chat_turn.text', payload: data }));
 localPreviewService.on('status', record => {
   try { const message = recordPreviewChatStatus(record); if (message) chatService.emit('chat_message', message); }
   catch (error) { console.error('Could not record preview status:', error); }

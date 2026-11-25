@@ -191,6 +191,8 @@ export interface CliTurnOptions {
   autonomyLevel?: AutonomyLevel;
   /** Receives only parsed operational events; callers decide what is safe to persist. */
   onEvent?: (event: ParsedEvent) => void;
+  /** Each piece of reply text as the model writes it, with the message it belongs to (see chatReplyStream). */
+  onTextDelta?: (text: string, messageKey?: string) => void;
 }
 
 export interface CliTurnResult {
@@ -1080,6 +1082,9 @@ async function runCliTurnOnce(options: CliTurnOptions): Promise<CliTurnResult> {
             turn.accept(ev);
             if (options.onEvent && ['tool_call', 'tool_result', 'stage_transition', 'error', 'status'].includes(ev.type)) {
               try { options.onEvent(ev); } catch { /* activity reporting must never stop an agent turn */ }
+            }
+            if (options.onTextDelta && ev.type === 'text_delta' && ev.message) {
+              try { options.onTextDelta(ev.message, ev.streamKey); } catch { /* live text must never stop an agent turn */ }
             }
           }
         });
