@@ -7,7 +7,6 @@ import { createHash } from 'node:crypto';
  */
 
 export type ProjectStage = 'unset' | 'poc' | 'contract' | 'development' | 'completed';
-export type PocStatus = 'draft' | 'published' | 'changes_requested' | 'superseded' | 'approved';
 export type ContractStatus = 'draft' | 'issued' | 'client_signed' | 'countersigned' | 'void';
 export type RoundStatus = 'open' | 'submitted' | 'classified';
 export type RevisionClassification = 'revision' | 'fix' | 'out_of_scope';
@@ -55,7 +54,6 @@ export function roundIsExtra(used: number, limit: number): boolean {
 
 export interface StageState {
   stage: ProjectStage;
-  poc: { status: PocStatus; number: number } | null;
   contract: { status: ContractStatus } | null;
   round: { status: RoundStatus; number: number } | null;
   finalDelivered: boolean;
@@ -63,7 +61,7 @@ export interface StageState {
 }
 
 export type NextActionKind =
-  | 'set_stage' | 'publish_poc' | 'review_poc' | 'issue_contract' | 'sign_contract' | 'countersign_contract'
+  | 'set_stage' | 'complete_poc' | 'issue_contract' | 'sign_contract' | 'countersign_contract'
   | 'answer_request' | 'share_build' | 'submit_round' | 'classify_round' | 'accept_final';
 export interface NextAction { who: 'client' | 'pm'; kind: NextActionKind; label: string }
 
@@ -71,11 +69,8 @@ function requestAction(requests: StageState['requests']): NextAction | null {
   return requests.some(request => request.status === 'open') ? { who: 'pm', kind: 'answer_request', label: 'Answer a change request' } : null;
 }
 
-function pocAction(poc: StageState['poc']): NextAction {
-  if (poc?.status === 'published') return { who: 'client', kind: 'review_poc', label: `Review POC v${poc.number}` };
-  if (poc?.status === 'changes_requested') return { who: 'pm', kind: 'publish_poc', label: `Update the POC after the change request on v${poc.number}` };
-  return { who: 'pm', kind: 'publish_poc', label: 'Share the proof of concept' };
-}
+/** The POC stage is a marker: the PM moves the project to the contract once the client is happy with the concept. */
+const POC_ACTION: NextAction = { who: 'pm', kind: 'complete_poc', label: 'Move to the contract when the client is ready' };
 
 function contractAction(contract: StageState['contract']): NextAction {
   if (contract?.status === 'issued') return { who: 'client', kind: 'sign_contract', label: 'Sign the contract' };
@@ -96,7 +91,7 @@ function developmentAction(state: StageState): NextAction {
 export function nextAction(state: StageState): NextAction | null {
   switch (state.stage) {
     case 'unset': return { who: 'pm', kind: 'set_stage', label: 'Choose this project’s stage' };
-    case 'poc': return pocAction(state.poc);
+    case 'poc': return POC_ACTION;
     case 'contract': return contractAction(state.contract);
     case 'development': return developmentAction(state);
     case 'completed': return requestAction(state.requests);

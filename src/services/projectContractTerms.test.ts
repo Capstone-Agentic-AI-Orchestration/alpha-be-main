@@ -2,21 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { defaultContractTerms } from './projectContractTerms.js';
 import { contentHash } from './projectStageRules.js';
 
-const source = {
-  projectName: 'Project A', clientName: 'Client A', revisionLimit: 3,
-  poc: { number: 2, title: 'Booking site', summary: 'Book a table', features: [{ title: 'Online booking', detail: '' }, { title: 'Email', detail: 'x' }],
-    screens: ['Home'], outOfScope: 'Payments' },
-};
+const source = { projectName: 'Project A', clientName: 'Client A', revisionLimit: 3 };
 
 describe('default contract terms', () => {
-  it('carries the approved POC as scope, its features as deliverables, and the revision limit in the clauses', () => {
+  it('starts from the project name, no deliverables, and the revision limit in the clauses', () => {
     const terms = defaultContractTerms(source);
-    expect(terms.scope).toMatchObject({ pocNumber: 2, title: 'Booking site', outOfScope: 'Payments' });
-    expect(terms.deliverables).toEqual(['Online booking', 'Email']);
+    expect(terms.scope).toEqual({ title: 'Project A', summary: '' });
+    // The features live on the board; the draft does not copy a feature list.
+    expect(terms.deliverables).toEqual([]);
     expect(terms.clauses).toHaveLength(5);
     expect(terms.clauses[2]?.body).toContain('three (3) rounds');
     expect(defaultContractTerms({ ...source, revisionLimit: 1 }).clauses[2]?.body).toContain('one (1) round of');
-    expect(terms.clauses[0]?.body).toContain('POC version 2');
+    expect(terms.clauses.map(clause => clause.body).join(' ')).not.toMatch(/POC version|approved POC/);
   });
 
   it('hashes the same terms the same way', () => {

@@ -4,7 +4,7 @@ import type { Sql, TransactionalSql } from '../store/database.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
 import {
-  loadStageSummary, lockStageRow, type ContractTerms, type PocFeature, type StageSummary, type StageThread,
+  loadStageSummary, lockStageRow, type ContractTerms, type StageSummary, type StageThread,
 } from '../store/clientProjectStageStore.js';
 import { defaultContractTerms, type ContractSource } from './projectContractTerms.js';
 import { canTransition, contentHash, revisionsUsed, roundCounts, roundIsExtra, type ProjectStage } from './projectStageRules.js';
@@ -12,8 +12,12 @@ import type { PostgresClientProjectPortal, ProjectTarget } from './clientProject
 
 /**
  * A project's stages in the PM–client conversation: POC → Contract →
- * Development → Completed (see projectStageRules.ts and the migration
- * 20261125120000_client_project_stages.sql).
+ * Development → Completed (see projectStageRules.ts and the migrations
+ * 20261125120000_client_project_stages.sql and 20261126180000_client_project_poc_marker.sql).
+ *
+ * The POC stage is a marker: nothing is written or approved in it. The
+ * features live as tasks on the project's board; the PM moves the project to
+ * the contract when the client is happy with the concept.
  *
  * Every call authorizes through the project conversation's own rule
  * (`authorizeThread`), so a stage is visible to exactly the people who can read
@@ -27,22 +31,12 @@ const id = z.string().min(1).max(200).refine(v => v.trim() === v);
 const text = (max: number) => z.string().trim().max(max);
 const fullName = z.string().trim().min(2).max(200);
 const command = z.object({ schemaVersion: z.literal(1), operationId: id });
-const feature = z.object({ title: z.string().trim().min(1).max(300), detail: text(2000).default('') }).strict();
-const pocDraftSchema = z.object({
-  title: z.string().trim().min(1).max(300),
-  summary: z.string().trim().min(1).max(8000),
-  features: z.array(feature).min(1).max(100),
-  screens: z.array(z.string().trim().min(1).max(300)).max(100).default([]),
-  outOfScope: text(4000).default(''),
-  note: text(4000).default(''),
-}).strict();
 const startingStageSchema = command.extend({
   stage: z.enum(['poc', 'development', 'completed']),
   revisionsUsed: z.number().int().min(0).max(20).default(0),
   revisionLimit: z.number().int().min(0).max(20).default(3),
 }).strict();
 const plainCommand = command.strict();
-const changesSchema = command.extend({ body: z.string().trim().min(1).max(4000) }).strict();
 const signOffSchema = command.extend({ contentHash: z.string().regex(/^[a-f0-9]{64}$/), fullName, consent: z.literal(true) }).strict();
 const countersignSchema = command.extend({ fullName }).strict();
 const shareBuildSchema = command.extend({ note: text(4000).default('') }).strict();
@@ -57,6 +51,7 @@ const answerRequestSchema = command.extend({ decision: z.enum(['will_do', 'wont_
 const shortTitle = (body: string) => { const line = body.split(/\s+/).join(' '); return line.length > 120 ? line.slice(0, 119) + '…' : line; };
 const clause = z.object({ title: z.string().trim().min(1).max(300), body: z.string().trim().min(1).max(8000) }).strict();
 const contractDraftSchema = z.object({
+  scope: z.object({ title: z.string().trim().min(1).max(300), summary: text(8000) }).strict().optional(),
   deliverables: z.array(z.string().trim().min(1).max(500)).max(50).optional(),
   clauses: z.array(clause).min(1).max(30).optional(),
   notes: text(8000).optional(),
@@ -72,7 +67,7 @@ export function parseStageInput<S extends z.ZodTypeAny>(schema: S, value: unknow
 function stageMismatch(message: string): never { throw new TicketWorkflowError(409, 'stage_mismatch', message); }
 
 export type StageAction =
-  | 'stage_set' | 'poc_published' | 'poc_changes_requested' | 'poc_approved'
+  | 'stage_set' | 'poc_completed'
   | 'contract_issued' | 'contract_voided' | 'contract_signed' | 'contract_countersigned'
   | 'build_shared' | 'round_submitted' | 'round_classified'
   | 'request_made' | 'request_answered'
@@ -122,93 +117,19 @@ export class ClientProjectStages {
     });
   }
 
-  /** PM: create or replace the one POC draft. Not shown to the client until published. */
-  async savePocDraft(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown): Promise<StageSummary> {
-    requireActor(subject, 'pm');
-    const value = parseStageInput(pocDraftSchema, input);
-    return this.db.transaction(async sql => {
-      const client = await this.portal.authorizeThread(sql, target, subject, clientId, true);
-      const thread = { ...target, clientId: client };
-      const row = await lockStageRow(sql, thread, true);
-      if (row.stage !== 'poc') stageMismatch('The proof of concept can only change during the POC stage.');
-      const values = [thread.workspaceId, thread.projectId, thread.clientId, value.title, value.summary,
-        JSON.stringify(value.features), JSON.stringify(value.screens), value.outOfScope, value.note];
-      const { rows: updated } = await sql.query(`update alpha_private.client_project_poc_versions set title=$4,summary=$5,features=$6::jsonb,
-          screens=$7::jsonb,out_of_scope=$8,note=$9,updated_at=now()
-        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and status='draft' returning id`, values);
-      if (!updated.length) {
-        await sql.query(`insert into alpha_private.client_project_poc_versions(workspace_id,project_id,client_user_id,id,number,status,
-            title,summary,features,screens,out_of_scope,note,created_by)
-          select $1,$2,$3,$10,coalesce(max(number),0)+1,'draft',$4,$5,$6::jsonb,$7::jsonb,$8,$9,$11
-          from alpha_private.client_project_poc_versions where workspace_id=$1 and project_id=$2 and client_user_id=$3`,
-        [...values, randomUUID(), subject.userId]);
-      }
-      await bumpVersion(sql, thread);
-      return loadStageSummary(sql, thread, 'pm');
-    });
-  }
-
-  /** PM: publish the draft as the next POC version; earlier versions are superseded. */
-  async publishPoc(target: ProjectTarget, subject: TicketSubject, pocId: unknown, input: unknown, clientId?: unknown) {
-    const poc = parseStageInput(id, pocId);
+  /** PM: the client is happy with the concept; the project moves to the contract stage. */
+  async completePoc(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown) {
     const value = parseStageInput(plainCommand, input);
-    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'poc_published', { poc }, async ({ sql, thread, stage }) => {
-      if (stage !== 'poc') stageMismatch('A proof of concept can only be shared during the POC stage.');
-      const { rows } = await sql.query<{ number: number; title: string; summary: string; features: unknown; screens: unknown; out_of_scope: string; note: string }>(
-        `select number,title,summary,features,screens,out_of_scope,note from alpha_private.client_project_poc_versions
-         where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='draft' for update`, [...threadParams(thread), poc]);
-      const draft = rows[0];
-      if (!draft) stageMismatch('This draft was already shared. Refresh to see the latest version.');
-      await sql.query(`update alpha_private.client_project_poc_versions set status='superseded',updated_at=now()
-        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and status in ('published','changes_requested')`, threadParams(thread));
-      const hash = pocHash(draft);
-      await sql.query(`update alpha_private.client_project_poc_versions set status='published',content_hash=$5,published_at=now(),updated_at=now()
-        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), poc, hash]);
-      return { refId: poc, metadata: { number: draft.number } };
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'poc_completed', {}, async ({ stage }) => {
+      if (stage !== 'poc') stageMismatch('This project is not in the proof-of-concept stage.');
+      return { refId: null, moveTo: 'contract' };
     });
-  }
-
-  /** Client: ask for changes to the shared POC. Unlimited during the POC stage. */
-  async requestPocChanges(target: ProjectTarget, subject: TicketSubject, pocId: unknown, input: unknown) {
-    const poc = parseStageInput(id, pocId);
-    const value = parseStageInput(changesSchema, input);
-    return this.mutate(target, subject, undefined, 'client', value.operationId, 'poc_changes_requested', { poc, body: value.body },
-      async ({ sql, thread, stage }) => {
-        if (stage !== 'poc') stageMismatch('The proof of concept is already approved.');
-        const number = await this.publishedPoc(sql, thread, poc);
-        await sql.query(`update alpha_private.client_project_poc_versions set status='changes_requested',updated_at=now()
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), poc]);
-        return { refId: poc, body: value.body, metadata: { number } };
-      });
-  }
-
-  /** Client: approve exactly the POC version they read. Moves the project to the contract stage. */
-  async approvePoc(target: ProjectTarget, subject: TicketSubject, pocId: unknown, input: unknown) {
-    const poc = parseStageInput(id, pocId);
-    const value = parseStageInput(signOffSchema, input);
-    return this.mutate(target, subject, undefined, 'client', value.operationId, 'poc_approved',
-      { poc, contentHash: value.contentHash, fullName: value.fullName }, async ({ sql, thread, stage }) => {
-        if (stage !== 'poc') stageMismatch('The proof of concept is already approved.');
-        const { rows } = await sql.query<{ number: number; content_hash: string }>(`select number,content_hash
-          from alpha_private.client_project_poc_versions
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='published' for update`, [...threadParams(thread), poc]);
-        if (!rows[0]) stageMismatch('This version is no longer the one waiting for review. Refresh to see the latest.');
-        if (rows[0].content_hash !== value.contentHash) {
-          throw new TicketWorkflowError(409, 'poc_changed', 'The proof of concept changed while you were reading it. Review the latest version.');
-        }
-        await sql.query(`update alpha_private.client_project_poc_versions set status='approved',approved_at=now(),approved_name=$5,
-            approved_hash=content_hash,updated_at=now()
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), poc, value.fullName]);
-        await sql.query(`delete from alpha_private.client_project_poc_versions
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and status='draft'`, threadParams(thread));
-        return { refId: poc, metadata: { number: rows[0].number, name: value.fullName }, moveTo: 'contract' };
-      });
   }
 
   /**
-   * PM: create the contract draft from the approved POC (first call), or edit
-   * its deliverables, clauses and notes. The scope and revision limit always
-   * come from the approved POC and the stage, never from the request.
+   * PM: create the contract draft (first call), or edit its scope,
+   * deliverables, clauses and notes. The revision limit always comes from the
+   * stage, never from the request.
    */
   async saveContractDraft(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown): Promise<StageSummary> {
     requireActor(subject, 'pm');
@@ -223,16 +144,14 @@ export class ClientProjectStages {
       threadParams(thread));
       if (live[0] && live[0].status !== 'draft') stageMismatch('The contract was already issued. Withdraw it first to change it.');
       const base = live[0]?.terms ?? defaultContractTerms(await this.contractSource(sql, thread, row.revision_limit));
-      const terms: ContractTerms = { ...base, deliverables: value.deliverables ?? base.deliverables,
+      const terms: ContractTerms = { ...base, scope: value.scope ? { ...base.scope, ...value.scope } : base.scope, deliverables: value.deliverables ?? base.deliverables,
         clauses: value.clauses ?? base.clauses, notes: value.notes ?? base.notes };
       if (live[0]) {
         await sql.query(`update alpha_private.client_project_contracts set terms=$5::jsonb,updated_at=now()
           where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), live[0].id, JSON.stringify(terms)]);
       } else {
-        await sql.query(`insert into alpha_private.client_project_contracts(workspace_id,project_id,client_user_id,id,poc_version_id,status,terms,created_by)
-          select $1,$2,$3,$4,id,'draft',$5::jsonb,$6 from alpha_private.client_project_poc_versions
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and status='approved'`,
-        [...threadParams(thread), randomUUID(), JSON.stringify(terms), subject.userId]);
+        await sql.query(`insert into alpha_private.client_project_contracts(workspace_id,project_id,client_user_id,id,status,terms,created_by)
+          values ($1,$2,$3,$4,'draft',$5::jsonb,$6)`, [...threadParams(thread), randomUUID(), JSON.stringify(terms), subject.userId]);
       }
       await bumpVersion(sql, thread);
       return loadStageSummary(sql, thread, 'pm');
@@ -252,7 +171,7 @@ export class ClientProjectStages {
     });
   }
 
-  /** PM: withdraw an issued contract the client has not signed, to correct it. A new draft starts from the same POC. */
+  /** PM: withdraw an issued contract the client has not signed, to correct it. The next draft starts fresh. */
   async voidContract(target: ProjectTarget, subject: TicketSubject, contractId: unknown, input: unknown, clientId?: unknown) {
     const contract = parseStageInput(id, contractId);
     const value = parseStageInput(plainCommand, input);
@@ -490,27 +409,14 @@ export class ClientProjectStages {
     return rows[0].terms;
   }
 
-  /** What the first contract draft is made from: the approved POC, the project and the client's names. */
+  /** What the first contract draft is made from: the project's and the client's names. */
   protected async contractSource(sql: Sql, thread: StageThread, revisionLimit: number): Promise<ContractSource> {
-    const { rows } = await sql.query<{ number: number; title: string; summary: string; features: PocFeature[]; screens: string[];
-      out_of_scope: string; project_name: string; client_name: string | null }>(`select v.number,v.title,v.summary,v.features,v.screens,v.out_of_scope,
-        p.name as project_name,sg.display_name as client_name
-      from alpha_private.client_project_poc_versions v
-      join public.projects p on p.workspace_id=v.workspace_id and p.id=v.project_id
-      left join alpha_private.ticket_service_grants sg on sg.workspace_id=v.workspace_id and sg.client_user_id=v.client_user_id
-      where v.workspace_id=$1 and v.project_id=$2 and v.client_user_id=$3 and v.status='approved'`, threadParams(thread));
-    const poc = rows[0];
-    if (!poc) stageMismatch('Approve a proof of concept first.');
-    return { projectName: poc.project_name, clientName: poc.client_name ?? 'Client', revisionLimit,
-      poc: { number: poc.number, title: poc.title, summary: poc.summary, features: poc.features, screens: poc.screens, outOfScope: poc.out_of_scope } };
-  }
-
-  /** The number of the published POC version `poc`, or a stage mismatch. */
-  protected async publishedPoc(sql: Sql, thread: StageThread, poc: string): Promise<number> {
-    const { rows } = await sql.query<{ number: number }>(`select number from alpha_private.client_project_poc_versions
-      where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status='published' for update`, [...threadParams(thread), poc]);
-    if (!rows[0]) stageMismatch('This version is no longer the one waiting for review. Refresh to see the latest.');
-    return rows[0].number;
+    const { rows } = await sql.query<{ project_name: string; client_name: string | null }>(`select p.name as project_name,sg.display_name as client_name
+      from public.projects p
+      left join alpha_private.ticket_service_grants sg on sg.workspace_id=p.workspace_id and sg.client_user_id=$3
+      where p.workspace_id=$1 and p.id=$2`, threadParams(thread));
+    if (!rows[0]) missing();
+    return { projectName: rows[0].project_name, clientName: rows[0].client_name ?? 'Client', revisionLimit };
   }
 
   /**
@@ -565,8 +471,3 @@ export async function bumpVersion(sql: Sql, thread: StageThread) {
     where workspace_id=$1 and project_id=$2 and client_user_id=$3`, threadParams(thread));
 }
 
-/** What a POC approval is a promise about: the version's own words, nothing else. */
-export function pocHash(poc: { number: number; title: string; summary: string; features: unknown; screens: unknown; out_of_scope: string; note: string }) {
-  return contentHash({ number: poc.number, title: poc.title, summary: poc.summary, features: poc.features,
-    screens: poc.screens, outOfScope: poc.out_of_scope, note: poc.note });
-}
