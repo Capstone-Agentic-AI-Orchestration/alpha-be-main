@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { canTransition, canonicalJson, contentHash, nextAction, revisionsUsed, roundCounts, roundIsExtra, type StageState } from './projectStageRules.js';
 
-const base: StageState = { stage: 'poc', contract: null, round: null, finalDelivered: false, requests: [] };
+const base: StageState = { stage: 'poc', round: null, finalDelivered: false, requests: [] };
 
 describe('project stage rules', () => {
   it('moves forward one stage at a time, and lets a legacy project pick where it starts', () => {
-    expect(canTransition('poc', 'contract')).toBe(true);
+    // The contract is signed in person: POC goes straight to development. A project left in the old Contract stage does too.
+    expect(canTransition('poc', 'development')).toBe(true);
+    expect(canTransition('poc', 'contract')).toBe(false);
     expect(canTransition('contract', 'development')).toBe(true);
     expect(canTransition('development', 'completed')).toBe(true);
-    expect(canTransition('poc', 'development')).toBe(false);
     expect(canTransition('development', 'poc')).toBe(false);
     expect(canTransition('completed', 'development')).toBe(false);
     expect(canTransition('unset', 'development')).toBe(true);
@@ -27,11 +28,9 @@ describe('project stage rules', () => {
 
   it('says whose turn it is', () => {
     expect(nextAction({ ...base, stage: 'unset' })).toMatchObject({ who: 'pm', kind: 'set_stage' });
-    // The POC stage is a marker: the PM moves the project on; the client has nothing to do there.
-    expect(nextAction(base)).toMatchObject({ who: 'pm', kind: 'complete_poc' });
-    expect(nextAction({ ...base, stage: 'contract' })).toMatchObject({ who: 'pm', kind: 'issue_contract' });
-    expect(nextAction({ ...base, stage: 'contract', contract: { status: 'issued' } })).toMatchObject({ who: 'client', kind: 'sign_contract' });
-    expect(nextAction({ ...base, stage: 'contract', contract: { status: 'client_signed' } })).toMatchObject({ who: 'pm', kind: 'countersign_contract' });
+    // The POC stage is a marker; once the contract is signed in person, the PM starts development.
+    expect(nextAction(base)).toMatchObject({ who: 'pm', kind: 'start_development' });
+    expect(nextAction({ ...base, stage: 'contract' })).toMatchObject({ who: 'pm', kind: 'start_development' });
     const dev = { ...base, stage: 'development' as const };
     expect(nextAction(dev)).toMatchObject({ who: 'pm', kind: 'share_build' });
     expect(nextAction({ ...dev, round: { status: 'open', number: 1 } })).toMatchObject({ who: 'client', kind: 'submit_round' });

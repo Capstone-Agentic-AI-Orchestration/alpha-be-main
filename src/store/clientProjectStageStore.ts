@@ -87,7 +87,7 @@ export async function lockStageRow(sql: Sql, thread: StageThread, write: boolean
 async function loadContract(sql: Sql, thread: StageThread): Promise<ContractView | null> {
   const { rows } = await sql.query<ContractRow>(`select id,poc_version_id,status,terms,content_hash,created_at,updated_at,issued_at,
       client_signed_name,client_signed_at,pm_signed_name,pm_signed_at
-    from alpha_private.client_project_contracts where ${THREAD} and status<>'void'`, params(thread));
+    from alpha_private.client_project_contracts where ${THREAD} and status='countersigned'`, params(thread));
   const row = rows[0];
   if (!row) return null;
   return {
@@ -122,11 +122,10 @@ async function loadRequests(sql: Sql, thread: StageThread): Promise<RequestView[
   }));
 }
 
-function stageState(row: StageRow, contract: ContractView | null, rounds: RoundView[], requests: RequestView[]): StageState {
+function stageState(row: StageRow, rounds: RoundView[], requests: RequestView[]): StageState {
   const active = rounds.find(round => round.status !== 'classified') ?? null;
   return {
     stage: row.stage,
-    contract: contract ? { status: contract.status } : null,
     round: active ? { status: active.status, number: active.number } : null,
     finalDelivered: row.final_delivered_at !== null && row.final_accepted_at === null,
     requests: requests.map(request => ({ status: request.status })),
@@ -141,12 +140,12 @@ export async function loadStageSummary(sql: Sql, thread: StageThread, audience: 
   const rounds = await loadRounds(sql, thread);
   const requests = await loadRequests(sql, thread);
   const forClient = audience === 'client';
-  const visibleContract = forClient && contract?.status === 'draft' ? null : contract;
   return {
     stage: row.stage, stageLabel: STAGE_LABEL[row.stage], revisionLimit: row.revision_limit,
     revisionsUsed: revisionsUsed(rounds, row.revisions_offset), version: row.version, stageChangedAt: ticketSqlIso(row.stage_changed_at),
-    nextAction: nextAction(stageState(row, contract, rounds, requests)),
-    contract: visibleContract, rounds, requests,
+    nextAction: nextAction(stageState(row, rounds, requests)),
+    // Only a contract countersigned in Alpha, before contracts moved to signing in person; shown read-only.
+    contract, rounds, requests,
     final: row.final_delivered_at ? {
       deliveredAt: ticketSqlIso(row.final_delivered_at), note: row.final_delivered_note ?? '',
       acceptedAt: iso(row.final_accepted_at), acceptedName: row.final_accepted_name,

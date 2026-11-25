@@ -3,21 +3,22 @@ import { z } from 'zod';
 import type { Sql, TransactionalSql } from '../store/database.js';
 import type { TicketSubject } from '../store/ticketCommandStore.js';
 import { TicketWorkflowError } from '../ticketing/workflow.js';
-import {
-  loadStageSummary, lockStageRow, type ContractTerms, type StageSummary, type StageThread,
-} from '../store/clientProjectStageStore.js';
-import { defaultContractTerms, type ContractSource } from './projectContractTerms.js';
+import { loadStageSummary, lockStageRow, type StageSummary, type StageThread } from '../store/clientProjectStageStore.js';
 import { canTransition, contentHash, revisionsUsed, roundCounts, roundIsExtra, type ProjectStage } from './projectStageRules.js';
 import type { PostgresClientProjectPortal, ProjectTarget } from './clientProjectPortal.js';
 
 /**
- * A project's stages in the PM–client conversation: POC → Contract →
- * Development → Completed (see projectStageRules.ts and the migrations
- * 20261125120000_client_project_stages.sql and 20261126180000_client_project_poc_marker.sql).
+ * A project's stages in the PM–client conversation: POC → Development →
+ * Completed (see projectStageRules.ts and the migrations
+ * 20261125120000_client_project_stages.sql, 20261126180000_client_project_poc_marker.sql
+ * and 20261126200000_client_project_contract_in_person.sql).
  *
- * The POC stage is a marker: nothing is written or approved in it. The
- * features live as tasks on the project's board; the PM moves the project to
- * the contract when the client is happy with the concept.
+ * The POC stage is a marker: nothing is written or approved in it, and the
+ * features live as tasks on the project's board. The development contract is
+ * drafted and signed in person, outside Alpha; once it is signed, the PM starts
+ * development and records the revision rounds it includes. Projects that
+ * reached the old in-app Contract stage start development the same way;
+ * contracts already signed in Alpha are kept and shown read-only.
  *
  * Every call authorizes through the project conversation's own rule
  * (`authorizeThread`), so a stage is visible to exactly the people who can read
@@ -36,9 +37,7 @@ const startingStageSchema = command.extend({
   revisionsUsed: z.number().int().min(0).max(20).default(0),
   revisionLimit: z.number().int().min(0).max(20).default(3),
 }).strict();
-const plainCommand = command.strict();
-const signOffSchema = command.extend({ contentHash: z.string().regex(/^[a-f0-9]{64}$/), fullName, consent: z.literal(true) }).strict();
-const countersignSchema = command.extend({ fullName }).strict();
+const startDevelopmentSchema = command.extend({ revisionLimit: z.number().int().min(0).max(20) }).strict();
 const shareBuildSchema = command.extend({ note: text(4000).default('') }).strict();
 const roundItemsSchema = z.object({ items: z.array(z.string().trim().min(1).max(4000)).max(50) }).strict();
 const submitRoundSchema = command.extend({ acknowledgeExtra: z.boolean().default(false) }).strict();
@@ -49,16 +48,11 @@ const acceptFinalSchema = command.extend({ fullName, consent: z.literal(true) })
 const changeRequestSchema = command.extend({ title: z.string().trim().min(1).max(300), description: text(8000).default('') }).strict();
 const answerRequestSchema = command.extend({ decision: z.enum(['will_do', 'wont_do']), reply: text(4000).default('') }).strict();
 const shortTitle = (body: string) => { const line = body.split(/\s+/).join(' '); return line.length > 120 ? line.slice(0, 119) + '…' : line; };
-const clause = z.object({ title: z.string().trim().min(1).max(300), body: z.string().trim().min(1).max(8000) }).strict();
-const contractDraftSchema = z.object({
-  scope: z.object({ title: z.string().trim().min(1).max(300), summary: text(8000) }).strict().optional(),
-  deliverables: z.array(z.string().trim().min(1).max(500)).max(50).optional(),
-  clauses: z.array(clause).min(1).max(30).optional(),
-  notes: text(8000).optional(),
-}).strict();
 
 function invalid(): never { throw new TicketWorkflowError(400, 'invalid_stage_input', 'Check the details and try again.'); }
 function missing(): never { throw new TicketWorkflowError(404, 'client_conversation_unavailable', 'This conversation is unavailable.'); }
+/** The stages a project starts development from: the POC, or the in-app Contract stage some projects reached before it was removed. */
+const BEFORE_DEVELOPMENT: readonly ProjectStage[] = ['poc', 'contract'];
 export function parseStageInput<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
   if (!result.success) invalid();
@@ -67,8 +61,7 @@ export function parseStageInput<S extends z.ZodTypeAny>(schema: S, value: unknow
 function stageMismatch(message: string): never { throw new TicketWorkflowError(409, 'stage_mismatch', message); }
 
 export type StageAction =
-  | 'stage_set' | 'poc_completed'
-  | 'contract_issued' | 'contract_voided' | 'contract_signed' | 'contract_countersigned'
+  | 'stage_set' | 'development_started'
   | 'build_shared' | 'round_submitted' | 'round_classified'
   | 'request_made' | 'request_answered'
   | 'final_delivered' | 'final_accepted';
@@ -117,103 +110,18 @@ export class ClientProjectStages {
     });
   }
 
-  /** PM: the client is happy with the concept; the project moves to the contract stage. */
-  async completePoc(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown) {
-    const value = parseStageInput(plainCommand, input);
-    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'poc_completed', {}, async ({ stage }) => {
-      if (stage !== 'poc') stageMismatch('This project is not in the proof-of-concept stage.');
-      return { refId: null, moveTo: 'contract' };
-    });
-  }
-
   /**
-   * PM: create the contract draft (first call), or edit its scope,
-   * deliverables, clauses and notes. The revision limit always comes from the
-   * stage, never from the request.
+   * PM: the contract was signed in person; development starts. Records the
+   * revision rounds that contract includes, which feedback rounds count against.
    */
-  async saveContractDraft(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown): Promise<StageSummary> {
-    requireActor(subject, 'pm');
-    const value = parseStageInput(contractDraftSchema, input ?? {});
-    return this.db.transaction(async sql => {
-      const client = await this.portal.authorizeThread(sql, target, subject, clientId, true);
-      const thread = { ...target, clientId: client };
-      const row = await lockStageRow(sql, thread, true);
-      if (row.stage !== 'contract') stageMismatch('The contract can only be prepared during the contract stage.');
-      const { rows: live } = await sql.query<{ id: string; status: string; terms: ContractTerms }>(`select id,status,terms
-        from alpha_private.client_project_contracts where workspace_id=$1 and project_id=$2 and client_user_id=$3 and status<>'void' for update`,
-      threadParams(thread));
-      if (live[0] && live[0].status !== 'draft') stageMismatch('The contract was already issued. Withdraw it first to change it.');
-      const base = live[0]?.terms ?? defaultContractTerms(await this.contractSource(sql, thread, row.revision_limit));
-      const terms: ContractTerms = { ...base, scope: value.scope ? { ...base.scope, ...value.scope } : base.scope, deliverables: value.deliverables ?? base.deliverables,
-        clauses: value.clauses ?? base.clauses, notes: value.notes ?? base.notes };
-      if (live[0]) {
-        await sql.query(`update alpha_private.client_project_contracts set terms=$5::jsonb,updated_at=now()
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), live[0].id, JSON.stringify(terms)]);
-      } else {
-        await sql.query(`insert into alpha_private.client_project_contracts(workspace_id,project_id,client_user_id,id,status,terms,created_by)
-          values ($1,$2,$3,$4,'draft',$5::jsonb,$6)`, [...threadParams(thread), randomUUID(), JSON.stringify(terms), subject.userId]);
-      }
-      await bumpVersion(sql, thread);
-      return loadStageSummary(sql, thread, 'pm');
-    });
-  }
-
-  /** PM: issue the draft for signing. Its text is fixed from here on. */
-  async issueContract(target: ProjectTarget, subject: TicketSubject, contractId: unknown, input: unknown, clientId?: unknown) {
-    const contract = parseStageInput(id, contractId);
-    const value = parseStageInput(plainCommand, input);
-    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'contract_issued', { contract }, async ({ sql, thread, stage, subject: pm }) => {
-      if (stage !== 'contract') stageMismatch('The contract can only be issued during the contract stage.');
-      const terms = await this.contractTerms(sql, thread, contract, 'draft', 'This contract was already issued. Refresh to see it.');
-      await sql.query(`update alpha_private.client_project_contracts set status='issued',content_hash=$5,issued_by=$6,issued_at=now(),updated_at=now()
-        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), contract, contentHash(terms), pm.userId]);
-      return { refId: contract };
-    });
-  }
-
-  /** PM: withdraw an issued contract the client has not signed, to correct it. The next draft starts fresh. */
-  async voidContract(target: ProjectTarget, subject: TicketSubject, contractId: unknown, input: unknown, clientId?: unknown) {
-    const contract = parseStageInput(id, contractId);
-    const value = parseStageInput(plainCommand, input);
-    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'contract_voided', { contract }, async ({ sql, thread, stage }) => {
-      if (stage !== 'contract') stageMismatch('Only a contract waiting for signatures can be withdrawn.');
-      await this.contractTerms(sql, thread, contract, 'issued', 'Only an issued contract the client has not signed can be withdrawn.');
-      await sql.query(`update alpha_private.client_project_contracts set status='void',voided_at=now(),updated_at=now()
-        where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), contract]);
-      return { refId: contract };
-    });
-  }
-
-  /** Client: sign exactly the contract text they read. */
-  async signContract(target: ProjectTarget, subject: TicketSubject, contractId: unknown, input: unknown) {
-    const contract = parseStageInput(id, contractId);
-    const value = parseStageInput(signOffSchema, input);
-    return this.mutate(target, subject, undefined, 'client', value.operationId, 'contract_signed',
-      { contract, contentHash: value.contentHash, fullName: value.fullName }, async ({ sql, thread, stage }) => {
-        if (stage !== 'contract') stageMismatch('This contract is no longer waiting for your signature.');
-        const terms = await this.contractTerms(sql, thread, contract, 'issued', 'This contract is no longer waiting for your signature. Refresh to see the latest.');
-        if (contentHash(terms) !== value.contentHash) {
-          throw new TicketWorkflowError(409, 'contract_changed', 'The contract changed while you were reading it. Review the latest version.');
-        }
-        await sql.query(`update alpha_private.client_project_contracts set status='client_signed',client_signed_name=$5,client_signed_at=now(),
-            client_signed_hash=content_hash,updated_at=now()
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), contract, value.fullName]);
-        return { refId: contract, metadata: { name: value.fullName } };
-      });
-  }
-
-  /** PM: countersign the contract the client signed. Development starts. */
-  async countersignContract(target: ProjectTarget, subject: TicketSubject, contractId: unknown, input: unknown, clientId?: unknown) {
-    const contract = parseStageInput(id, contractId);
-    const value = parseStageInput(countersignSchema, input);
-    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'contract_countersigned', { contract, fullName: value.fullName },
-      async ({ sql, thread, stage, subject: pm }) => {
-        if (stage !== 'contract') stageMismatch('This contract is not waiting for your signature.');
-        await this.contractTerms(sql, thread, contract, 'client_signed', 'The client has not signed this contract yet.');
-        await sql.query(`update alpha_private.client_project_contracts set status='countersigned',pm_signed_by=$5,pm_signed_name=$6,
-            pm_signed_at=now(),updated_at=now()
-          where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4`, [...threadParams(thread), contract, pm.userId, value.fullName]);
-        return { refId: contract, metadata: { name: value.fullName }, moveTo: 'development' };
+  async startDevelopment(target: ProjectTarget, subject: TicketSubject, input: unknown, clientId?: unknown) {
+    const value = parseStageInput(startDevelopmentSchema, input);
+    return this.mutate(target, subject, clientId, 'pm', value.operationId, 'development_started', { revisionLimit: value.revisionLimit },
+      async ({ sql, thread, stage }) => {
+        if (!BEFORE_DEVELOPMENT.includes(stage)) stageMismatch('Development has already started for this project.');
+        await sql.query(`update alpha_private.client_project_stages set revision_limit=$4
+          where workspace_id=$1 and project_id=$2 and client_user_id=$3`, [...threadParams(thread), value.revisionLimit]);
+        return { refId: null, metadata: { revisionLimit: value.revisionLimit }, moveTo: 'development' };
       });
   }
 
@@ -399,24 +307,6 @@ export class ClientProjectStages {
       where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 for update`, [...threadParams(thread), round]);
     if (!rows[0] || !statuses.includes(rows[0].status)) stageMismatch(message);
     return rows[0];
-  }
-
-  /** A contract's terms, locked, when it is in `status`; otherwise a stage mismatch with `message`. */
-  protected async contractTerms(sql: Sql, thread: StageThread, contract: string, status: string, message: string): Promise<ContractTerms> {
-    const { rows } = await sql.query<{ terms: ContractTerms }>(`select terms from alpha_private.client_project_contracts
-      where workspace_id=$1 and project_id=$2 and client_user_id=$3 and id=$4 and status=$5 for update`, [...threadParams(thread), contract, status]);
-    if (!rows[0]) stageMismatch(message);
-    return rows[0].terms;
-  }
-
-  /** What the first contract draft is made from: the project's and the client's names. */
-  protected async contractSource(sql: Sql, thread: StageThread, revisionLimit: number): Promise<ContractSource> {
-    const { rows } = await sql.query<{ project_name: string; client_name: string | null }>(`select p.name as project_name,sg.display_name as client_name
-      from public.projects p
-      left join alpha_private.ticket_service_grants sg on sg.workspace_id=p.workspace_id and sg.client_user_id=$3
-      where p.workspace_id=$1 and p.id=$2`, threadParams(thread));
-    if (!rows[0]) missing();
-    return { projectName: rows[0].project_name, clientName: rows[0].client_name ?? 'Client', revisionLimit };
   }
 
   /**
