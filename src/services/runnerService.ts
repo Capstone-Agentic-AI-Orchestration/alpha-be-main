@@ -237,6 +237,7 @@ export function formatOrchestrationTaskPackage(taskPackage: OrchestrationTaskPac
     taskPackage.task.scope.excludePaths.length ? `Forbidden path patterns:\n${taskPackage.task.scope.excludePaths.map(item => `- ${item}`).join('\n')}` : '',
     taskPackage.corrections.length ? `Targeted corrections:\n${taskPackage.corrections.map(item => `- ${item}`).join('\n')}` : '',
     formatEarlierAttemptFiles(taskPackage),
+    formatPlannerReadFiles(taskPackage),
     taskPackage.reviewInputs.length ? [
       'Immutable accepted code changes for this review (diff hashes bind these exact patches):',
       ...taskPackage.reviewInputs.map(input => [
@@ -325,6 +326,14 @@ function formatEarlierAttemptFiles(taskPackage: OrchestrationTaskPackage): strin
   const files = taskPackage.earlierAttemptChangedPaths ?? [];
   return files.length
     ? `Files this task's earlier attempts already changed (saved in your working copy and part of this task's work; list each under deliverables in your report): ${files.join(', ')}`
+    : '';
+}
+
+/** Where the Orchestrator looked while planning, so the specialist starts there instead of searching from nothing. */
+function formatPlannerReadFiles(taskPackage: OrchestrationTaskPackage): string {
+  const files = taskPackage.plannerReadPaths ?? [];
+  return files.length
+    ? `Files the Orchestrator opened in this repository while planning (start your reading here; they do not widen your authorized paths): ${files.join(', ')}`
     : '';
 }
 
@@ -1031,6 +1040,7 @@ Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.le
 Forbidden path patterns: ${orchestration.taskPackage.task.scope.excludePaths.length ? orchestration.taskPackage.task.scope.excludePaths.join(', ') : 'none'}
 Targeted corrections: ${orchestration.taskPackage.corrections.length ? orchestration.taskPackage.corrections.join(' ') : 'none'}
 ${formatEarlierAttemptFiles(orchestration.taskPackage) || 'Files from earlier attempts of this task: none'}
+${formatPlannerReadFiles(orchestration.taskPackage) || 'Files the Orchestrator opened while planning: none recorded'}
 Accepted prerequisite handoffs:
 ${formatAcceptedDependencies(orchestration.taskPackage.acceptedDependencies)}
 

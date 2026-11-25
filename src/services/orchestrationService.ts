@@ -168,6 +168,9 @@ export interface OrchestrationLaunchRequest {
   modelName?: string;
 }
 
+/** Most planner-opened files one task is shown (see plannerReads). */
+const MAX_PLANNER_READ_PATHS_PER_TASK = 60;
+
 export interface OrchestrationTaskPackage {
   /** 7 added repository memory, 8 the product picture; saved older packages run without them. */
   packageVersion: 6 | 7 | 8;
@@ -251,6 +254,11 @@ export interface OrchestrationTaskPackage {
    * continues. They are this task's work too: the report must list them as deliverables.
    */
   earlierAttemptChangedPaths?: string[];
+  /**
+   * Files in this task's repository that the Orchestrator opened while planning, as a place to
+   * start reading. Context only: they do not widen the task's authorized paths.
+   */
+  plannerReadPaths?: string[];
   /** Explicit project-owner clarification for one bounded recovery retry. */
   developerGuidance?: string;
   /** Bounded, read-only retries used only to repair an invalid task report. */
@@ -1882,6 +1890,11 @@ export class OrchestrationService {
     };
     const earlierAttemptChangedPaths = await this.earlierAttemptChangedPaths(snapshot, taskId);
     if (earlierAttemptChangedPaths.length) taskPackage.earlierAttemptChangedPaths = earlierAttemptChangedPaths;
+    const plannerReadPaths = (snapshot.run.plan.plannerReads ?? [])
+      .filter(read => sameRepository(read.repository, taskPackage.task.repository))
+      .map(read => read.path)
+      .slice(0, MAX_PLANNER_READ_PATHS_PER_TASK);
+    if (!reportCorrection && plannerReadPaths.length) taskPackage.plannerReadPaths = plannerReadPaths;
     if (!reportCorrection && developerGuidance?.trim()) {
       taskPackage.developerGuidance = developerGuidance.trim().slice(0, MAX_RECOVERY_GUIDANCE_CHARS);
     }

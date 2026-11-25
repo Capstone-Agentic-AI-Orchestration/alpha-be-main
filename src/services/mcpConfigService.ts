@@ -323,7 +323,9 @@ export function writeRunMcpConfig(
   workspaceCatalog?: Record<string, McpServerSpec>,
   workspaceCatalogAuthoritative = false,
   /** Who the board tools act for and what they may do. Without it `alpha-board` is left out. */
-  board?: BoardRunScope
+  board?: BoardRunScope,
+  /** A planning turn's log of the files it opens, given to `alpha-project-files` only (see plannerReads). */
+  readLogPath?: string
 ): RunMcpConfig {
   const names = (requested ?? []).map(n => n.trim()).filter(Boolean);
 
@@ -429,7 +431,8 @@ export function writeRunMcpConfig(
       }
       if (name === 'alpha-task-files' && !taskScope) continue;
       mcpServers[name] = { ...resolved, env: { ...resolved.env, ALPHA_PROJECT_ROOTS: JSON.stringify(projectRoots),
-        ALPHA_TASK_SCOPE: name === 'alpha-task-files' ? JSON.stringify(taskScope) : '' } };
+        ALPHA_TASK_SCOPE: name === 'alpha-task-files' ? JSON.stringify(taskScope) : '',
+        ...(name === 'alpha-project-files' && readLogPath ? { ALPHA_READ_LOG: readLogPath } : {}) } };
       continue;
     }
 

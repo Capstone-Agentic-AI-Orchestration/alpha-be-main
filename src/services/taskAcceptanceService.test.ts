@@ -702,6 +702,7 @@ describe('task acceptance and targeted correction', () => {
       goal: 'Build the landing page.',
       exclusions: [],
       requirements: [{ id: 'REQ-PAGE', description: 'Show the landing page.' }],
+      plannerReads: [{ repository: 'acme/site', path: 'src/index.ts' }, { repository: 'acme/other', path: 'src/elsewhere.ts' }],
       tasks: [
         {
           id: 'landing-page', title: 'Landing page', description: 'Build the landing page.',
@@ -729,6 +730,8 @@ describe('task acceptance and targeted correction', () => {
       eligibleAgents, plan, baseRef: 'main', baseCommit
     });
     expect(launches[0].taskPackage.earlierAttemptChangedPaths).toBeUndefined();
+    // The specialist starts from the files the Orchestrator opened in its own repository.
+    expect(launches[0].taskPackage.plannerReadPaths).toEqual(['src/index.ts']);
 
     // Attempt 1 writes the page, but its check fails: rejected, and its checkpoint stays for the retry.
     fs.writeFileSync(path.join(repository, 'src', 'landing.ts'), 'export const landing = () => "<h1>Resort</h1>";\n');
