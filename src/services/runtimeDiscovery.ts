@@ -128,6 +128,13 @@ export function findClaude(): string {
   if (onPath) return onPath;
 
   if (isWin) {
+    // fnm (a Node version manager) puts global npm tools on PATH only inside a
+    // terminal, through a temporary per-shell folder. Alpha started from the
+    // Start menu has no such folder, but fnm keeps the default Node version at
+    // a fixed path.
+    const fnmDefault = path.join(process.env.FNM_DIR || path.join(process.env.APPDATA || '', 'fnm'), 'aliases', 'default', 'claude.cmd');
+    if (fs.existsSync(fnmDefault)) return fnmDefault;
+
     const versioned = findInVersionedDirectories(
       path.join(process.env.LOCALAPPDATA || '', 'fnm_multishells'),
       'claude.cmd'

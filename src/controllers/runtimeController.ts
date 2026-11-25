@@ -7,6 +7,8 @@ import { desktopOnly } from './desktopOnly.js';
 import { workspaceRegistry } from '../services/workspaceRegistry.js';
 import { withRuntimeIsolation } from '../services/runtimeIsolation.js';
 import { codexAlphaSignIn } from '../services/codexAlphaSignIn.js';
+import { claudeSignIn } from '../services/claudeSignIn.js';
+import { openSignInWindow, SignInWindowError } from '../services/runtimeSignInWindow.js';
 
 export const runtimeRouter = Router();
 
@@ -71,4 +73,44 @@ runtimeRouter.post('/runtimes/codex/alpha-sign-out', desktopOnly, async (req: Re
   const state = await codexAlphaSignIn.signOut();
   void runtimeRefreshService.refreshOne('codex').catch(() => undefined);
   res.json(state);
+});
+
+/*
+ * Claude Code sign-in with a Claude subscription, started from Alpha instead
+ * of a terminal. Claude Code keeps the credentials.
+ */
+runtimeRouter.get('/runtimes/claude/sign-in', desktopOnly, async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
+  res.json(await claudeSignIn.current());
+});
+
+runtimeRouter.post('/runtimes/claude/sign-in', desktopOnly, async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
+  const state = await claudeSignIn.start(() => { void runtimeRefreshService.refreshOne('claude').catch(() => undefined); });
+  res.status(state.status === 'failed' ? 502 : 200).json(state);
+});
+
+runtimeRouter.post('/runtimes/claude/sign-in/code', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
+  try {
+    res.json(claudeSignIn.submitCode(typeof req.body?.code === 'string' ? req.body.code : ''));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+runtimeRouter.delete('/runtimes/claude/sign-in', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
+  res.json(claudeSignIn.cancel());
+});
+
+/** Open an interactive sign-in (Antigravity, OpenCode) in a terminal window on this desktop. */
+runtimeRouter.post('/runtimes/:id/sign-in-window', desktopOnly, (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'agent.run')) return;
+  try {
+    openSignInWindow(req.params.id);
+    res.json({ opened: true });
+  } catch (err: any) {
+    res.status(err instanceof SignInWindowError ? err.status : 500).json({ error: err.message });
+  }
 });
