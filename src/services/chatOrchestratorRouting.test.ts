@@ -176,7 +176,9 @@ describe('specialist analysis handoffs', () => {
     await send(chatService, 'Explain the API', { projectId: 'project-1', targetAgentId: 'backend-specialist', approvalMode });
     expect(turnInputs).toHaveLength(1);
     expect(turnInputs[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', skills: [], priorSession: null,
-      autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github'] });
+      autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github', 'alpha-board'] });
+    // An admin's specialist may read the board, as a developer's may; only the Manager Agent writes.
+    expect(turnInputs[0].boardScope).toMatchObject({ access: 'read' });
     expect(turnInputs[0].systemPrompt).toContain('approved scoped build flow');
     // The specialist is told its runtime, so "which model are you" gets a true answer.
     expect(turnInputs[0].systemPrompt).toContain('## Your runtime');
@@ -212,7 +214,8 @@ describe('specialist analysis handoffs', () => {
     expect(turnInputs).toHaveLength(4);
     expect(turnInputs[0]).toMatchObject({ mode: 'chat', approvalMode: 'ask', personaChanged: true });
     for (const input of turnInputs.slice(1, 3)) {
-      expect(input).toMatchObject({ mode: 'chat', approvalMode: 'ask', priorSession: null, skills: [], autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github'] });
+      expect(input).toMatchObject({ mode: 'chat', approvalMode: 'ask', priorSession: null, skills: [], autonomyLevel: 'Supervised', mcpServers: ['alpha-project-files', 'alpha-github', 'alpha-board'] });
+      expect(input.boardScope).toMatchObject({ access: 'read' });
       expect(input.systemPrompt).toContain('No edits, shell commands');
     }
     expect(turnInputs[0].systemPrompt).toContain('Expert in Backend Agent');
@@ -910,11 +913,11 @@ describe('The Manager Agent keeps the board for a developer', () => {
     expect(result.agentMessage.content).toMatch(/do not have access to run the Manager Agent/);
   });
 
-  it.each(['admin', 'pm'])('is for developers only: a %s gets no agent and no model call', async role => {
+  it('is not for a client: refused before any agent or model call', async () => {
     const { ask, issue } = await askFixture();
-    const result = await ask('Move this to Todo', { routing: { context: { ...context, role }, canBuild: true, answerOnly: true, scopeIssueIds: [issue.id] } });
+    await expect(ask('Move this to Todo', { routing: { context: { ...context, role: 'client' }, canBuild: true, answerOnly: true, scopeIssueIds: [issue.id] } }))
+      .rejects.toThrow(/internal project team/);
     expect(turnInputs).toHaveLength(0);
-    expect(result.agentMessage.content).toMatch(/only for developers/);
   });
 
   it('answers without board tools, and says why, when the assistant is turned off', async () => {

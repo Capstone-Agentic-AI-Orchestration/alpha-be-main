@@ -113,8 +113,8 @@ export function orderRunTasks(issues: Issue[], allIssues: Issue[]): Array<{ issu
 }
 
 function canRunBuilds(context: WorkspaceContext, projectId: string): boolean {
-  return context.role === 'dev' && workspaceRegistry.can(context.role, 'agent.run') && workspaceRegistry.can(context.role, 'squad.run')
-    && workspaceRegistry.can(context.role, 'chat.write') && workspaceRegistry.canAccessProjectBuilds(context, projectId);
+  return workspaceRegistry.canOperateAgents(context.role) && workspaceRegistry.can(context.role, 'squad.run')
+    && workspaceRegistry.canAccessProjectBuilds(context, projectId);
 }
 
 function positiveOrNull(value: unknown, name: string): number | null {
@@ -154,7 +154,7 @@ export interface StartBoardRunInput {
 /** Start a run the developer asked for, after checking every task and limit. */
 export async function startBoardRun(input: StartBoardRunInput, deps: BoardRunDeps = defaultDeps): Promise<BoardRun> {
   const { context, projectId } = input;
-  if (!canRunBuilds(context, projectId)) throw new Error('Only a developer who can run builds in this project can start a board run.');
+  if (!canRunBuilds(context, projectId)) throw new Error('Only someone who can run builds in this project can start a board run.');
   if (!Number.isInteger(input.maxTasks) || input.maxTasks < 1 || input.maxTasks > BOARD_RUN_MAX_TASKS) {
     throw new Error(`Choose between 1 and ${BOARD_RUN_MAX_TASKS} tasks for one run.`);
   }

@@ -39,7 +39,7 @@ orchestrationRouter.get('/projects/:projectId/orchestrations/:runId/recovery-can
   const { listSavedArchives } = await import('../services/orchestrationSavedArchives.js');
   res.json({ runRevision: snapshot.run.revision, taskId: task.id, taskRevision: task.revision,
     candidateHash: await worktreeChangesHash(workspace.worktreePath), changes, archives: listSavedArchives(snapshot, task),
-    restartAvailable: req.workspace!.role === 'dev' && snapshot.run.status === 'blocked' && (workAttemptCount(snapshot, task.id) >= MAX_REPAIR_ATTEMPTS_PER_EPISODE || reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) &&
+    restartAvailable: workspaceRegistry.canOperateAgents(req.workspace!.role) && snapshot.run.status === 'blocked' && (workAttemptCount(snapshot, task.id) >= MAX_REPAIR_ATTEMPTS_PER_EPISODE || reportFormatCorrectionCount(snapshot, task.id) >= MAX_REPORT_FORMAT_CORRECTIONS) &&
       (snapshot.recoveryAuthorizations ?? []).filter(item => item.taskId === task.id).length < 2 });
 }));
 
@@ -48,7 +48,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/restore-arc
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   const { expectedRevision, taskId, archiveId, archiveHash, candidateHash } = req.body ?? {};
-  if (req.workspace!.role !== 'dev' || !Number.isSafeInteger(expectedRevision) || typeof taskId !== 'string' || typeof archiveId !== 'string' || archiveId.length > 200 ||
+  if (!workspaceRegistry.canOperateAgents(req.workspace!.role) || !Number.isSafeInteger(expectedRevision) || typeof taskId !== 'string' || typeof archiveId !== 'string' || archiveId.length > 200 ||
       typeof archiveHash !== 'string' || !/^[a-f0-9]{64}$/.test(archiveHash) || typeof candidateHash !== 'string' || !/^[a-f0-9]{64}$/.test(candidateHash)) return res.status(400).json({ error: 'Inspect the archive and current candidate before restoring.' });
   const task = snapshot.tasks.find(item => item.id === taskId);
   if (!task || !await workspaceRegistry.canAccessProjectAgentRun(req.workspace!, req.params.projectId, task.ownerAgentId)) return res.status(404).json({ error: 'Task not found in this project.' });
@@ -63,7 +63,7 @@ orchestrationRouter.post('/projects/:projectId/orchestrations/:runId/restart-rec
   const snapshot = scopedSnapshot(req, res);
   if (!snapshot) return;
   const { expectedRevision, taskId, taskRevision, candidateHash, guidance } = req.body ?? {};
-  if (req.workspace!.role !== 'dev' || !Number.isSafeInteger(expectedRevision) || !Number.isSafeInteger(taskRevision) || typeof taskId !== 'string' ||
+  if (!workspaceRegistry.canOperateAgents(req.workspace!.role) || !Number.isSafeInteger(expectedRevision) || !Number.isSafeInteger(taskRevision) || typeof taskId !== 'string' ||
       typeof candidateHash !== 'string' || !/^[a-f0-9]{64}$/.test(candidateHash) || typeof guidance !== 'string' || guidance.trim().length < 20 || guidance.length > 2000) {
     return res.status(400).json({ error: 'Review the candidate and describe the changed condition in 20–2,000 characters.' });
   }
@@ -205,7 +205,7 @@ orchestrationRouter.get('/issues/build-status', desktopOnly, route(async (req: R
 
 orchestrationRouter.post('/projects/:projectId/issues/:issueId/build-request', desktopOnly, route(async (req: Request, res: Response) => {
   if (!authorizedProject(req, res, 'agent.run') || !requireWorkspaceCapability(req, res, 'chat.write')) return;
-  if (req.workspace!.role !== 'dev') return res.status(403).json({ error: 'Only developers can request AI builds.' });
+  if (!workspaceRegistry.canOperateAgents(req.workspace!.role)) return res.status(403).json({ error: 'Your workspace role cannot request AI builds.' });
   const [project, issue] = await Promise.all([projectStore().get(req.workspace!.workspaceId, req.params.projectId), issueStore().get(req.workspace!.workspaceId, req.params.issueId)]);
   if (!project || !issue || issue.projectId !== project.id) return res.status(404).json({ error: 'Task not found in this project.' });
   const { requestId, instructions = '', queue = false } = req.body ?? {};

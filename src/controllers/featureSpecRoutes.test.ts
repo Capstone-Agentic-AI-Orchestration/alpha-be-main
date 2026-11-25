@@ -144,7 +144,7 @@ async function seedTask(svc: any) {
 }
 
 describe('feature spec routes', () => {
-  it.each(['pm', 'admin', 'client'])('refuses %s AI drafting and suggestions', async role => {
+  it.each(['client'])('refuses %s AI drafting and suggestions', async role => {
     const { app, svc } = await startApi(role);
     const { project, base } = await seedTask(svc);
     expect((await call(app, 'POST', base + '/draft', { expectedVersion: 0, request: 'Write requirements.' })).status).toBe(403);

@@ -214,7 +214,8 @@ describe('the cloud, without SQLite', () => {
 
     for (const url of STARTUP_READS) {
       const res = await call(app, 'GET', url);
-      expect({ url, status: res.status }).toEqual({ url, status: url === '/api/chat/threads' ? 403 : 200 });
+      // A PM's own chat threads are readable in the cloud too: the desktop app syncs them there.
+      expect({ url, status: res.status }).toEqual({ url, status: 200 });
     }
   });
 

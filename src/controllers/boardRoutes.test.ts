@@ -553,8 +553,8 @@ describe('the cloud roster routes', () => {
     expect(restored.body.find((agent: any) => agent.id === orchestrator.id).isArchived).toBe(false);
   });
 
-  it('keeps agent staffing out of the PM review role', async () => {
-    session = { login: 'PM1', role: 'pm' };
+  it('keeps agent staffing away from clients', async () => {
+    session = { login: 'PM1', role: 'client' };
     const app = await startCloudApi();
 
     const created = await call(app, 'POST', '/api/agents', {

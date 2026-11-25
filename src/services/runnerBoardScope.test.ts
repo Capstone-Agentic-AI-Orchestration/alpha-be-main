@@ -30,8 +30,8 @@ describe('a specialist\'s board access in a build', () => {
     });
   });
 
-  it('gets nothing when the build was not started by a developer, or the run is unknown', async () => {
-    state.role = 'admin';
+  it('gets nothing when the build\'s starter can no longer operate agents, or the run is unknown', async () => {
+    state.role = 'client';
     expect(await specialistBoardScope('run-1', 'agent-backend', 'Backend Agent')).toBeUndefined();
     state.role = 'dev';
     state.run = null;

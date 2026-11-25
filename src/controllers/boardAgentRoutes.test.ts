@@ -104,7 +104,7 @@ describe('the board bridge and decisions, on a desktop', () => {
     expect((await call(app, 'PUT', '/api/board/assistant-settings', { projectId: 'project-1', enabled: false })).status).toBe(403);
     person = projectManager;
     const settings = await call(app, 'GET', '/api/board/assistant-settings?projectId=project-1');
-    expect(settings.body).toMatchObject({ enabled: true, canUse: false, canChange: true });
+    expect(settings.body).toMatchObject({ enabled: true, canUse: true, canChange: true });
     expect((await call(app, 'PUT', '/api/board/assistant-settings', { projectId: 'project-1', enabled: false })).body).toEqual({ projectId: 'project-1', enabled: false });
     const refused = await call(app, 'POST', '/api/agent-bridge/board/create', { title: 'Too late' }, { 'X-Alpha-Run-Token': token });
     expect(refused).toMatchObject({ status: 403, body: { error: 'The board assistant is turned off for this project.' } });

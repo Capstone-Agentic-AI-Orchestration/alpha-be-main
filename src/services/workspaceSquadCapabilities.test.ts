@@ -3,17 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { workspaceRegistry } from './workspaceRegistry.js';
 
 describe('workspace squad management capabilities', () => {
-  it('gives publication and UAT delivery authority to internal roles without granting chat to non-developers', () => {
+  it('gives publication, UAT delivery and chat to every internal role, and none of it to clients', () => {
     for (const role of ['dev', 'pm', 'admin'] as const) {
       expect(workspaceRegistry.can(role, 'build.publish')).toBe(true);
       expect(workspaceRegistry.can(role, 'project.promote_uat')).toBe(true);
+      expect(workspaceRegistry.can(role, 'chat.read')).toBe(true);
+      expect(workspaceRegistry.can(role, 'chat.write')).toBe(true);
     }
-    expect(workspaceRegistry.can('dev', 'chat.read')).toBe(true);
-    expect(workspaceRegistry.can('dev', 'chat.write')).toBe(true);
-    for (const role of ['client', 'pm', 'admin'] as const) {
-      expect(workspaceRegistry.can(role, 'chat.read')).toBe(false);
-      expect(workspaceRegistry.can(role, 'chat.write')).toBe(false);
-    }
+    expect(workspaceRegistry.can('client', 'chat.read')).toBe(false);
+    expect(workspaceRegistry.can('client', 'chat.write')).toBe(false);
     expect(workspaceRegistry.can('client', 'build.publish')).toBe(false);
   });
 
@@ -27,18 +25,20 @@ describe('workspace squad management capabilities', () => {
     expect(workspaceRegistry.can('dev', 'squad.manage')).toBe(true);
   });
 
-  it('keeps squad management restricted from project managers', () => {
-    expect(workspaceRegistry.can('pm', 'squad.manage')).toBe(false);
+  it('lets project managers run and configure agents, squads and MCP servers', () => {
+    // The hosted web app hides all of this from a PM, and every route that starts agent work is
+    // desktopOnly; the grants are the same in both runtimes because the desktop calls the cloud.
+    for (const capability of ['agent.read', 'agent.run', 'agent.manage', 'squad.read', 'squad.run', 'squad.manage',
+      'mcp.read', 'mcp.execute', 'mcp.manage', 'chat.read', 'chat.write'] as const) {
+      expect(workspaceRegistry.can('pm', capability)).toBe(true);
+    }
+    expect(workspaceRegistry.can('pm', 'deployment.manage')).toBe(false);
+    expect(workspaceRegistry.can('pm', 'operations.manage')).toBe(false);
   });
 
-  it('keeps PMs in review mode for agents and Orchestrator runs', () => {
-    expect(workspaceRegistry.can('pm', 'agent.read')).toBe(true);
-    expect(workspaceRegistry.can('pm', 'squad.read')).toBe(true);
-    expect(workspaceRegistry.can('pm', 'agent.manage')).toBe(false);
-    expect(workspaceRegistry.can('pm', 'agent.run')).toBe(false);
-    expect(workspaceRegistry.can('pm', 'mcp.execute')).toBe(false);
-    expect(workspaceRegistry.can('pm', 'squad.run')).toBe(false);
-    expect(workspaceRegistry.can('pm', 'deployment.manage')).toBe(false);
+  it('lets developers, project managers and admins operate agents, and never clients', () => {
+    for (const role of ['dev', 'pm', 'admin'] as const) expect(workspaceRegistry.canOperateAgents(role)).toBe(true);
+    expect(workspaceRegistry.canOperateAgents('client')).toBe(false);
   });
 
   it('allows workspace administrators to manage squads', () => {
