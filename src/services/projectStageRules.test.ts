@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { canTransition, canonicalJson, contentHash, nextAction, revisionsUsed, roundCounts, roundIsExtra, type StageState } from './projectStageRules.js';
 
-const base: StageState = { stage: 'poc', poc: null, contract: null, round: null, finalDelivered: false, requests: [] };
+const base: StageState = { stage: 'poc', contract: null, round: null, finalDelivered: false, requests: [] };
 
 describe('project stage rules', () => {
   it('moves forward one stage at a time, and lets a legacy project pick where it starts', () => {
@@ -27,9 +27,8 @@ describe('project stage rules', () => {
 
   it('says whose turn it is', () => {
     expect(nextAction({ ...base, stage: 'unset' })).toMatchObject({ who: 'pm', kind: 'set_stage' });
-    expect(nextAction(base)).toMatchObject({ who: 'pm', kind: 'publish_poc' });
-    expect(nextAction({ ...base, poc: { status: 'published', number: 2 } })).toMatchObject({ who: 'client', kind: 'review_poc', label: 'Review POC v2' });
-    expect(nextAction({ ...base, poc: { status: 'changes_requested', number: 2 } })).toMatchObject({ who: 'pm', kind: 'publish_poc' });
+    // The POC stage is a marker: the PM moves the project on; the client has nothing to do there.
+    expect(nextAction(base)).toMatchObject({ who: 'pm', kind: 'complete_poc' });
     expect(nextAction({ ...base, stage: 'contract' })).toMatchObject({ who: 'pm', kind: 'issue_contract' });
     expect(nextAction({ ...base, stage: 'contract', contract: { status: 'issued' } })).toMatchObject({ who: 'client', kind: 'sign_contract' });
     expect(nextAction({ ...base, stage: 'contract', contract: { status: 'client_signed' } })).toMatchObject({ who: 'pm', kind: 'countersign_contract' });

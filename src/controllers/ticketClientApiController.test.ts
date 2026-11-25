@@ -209,8 +209,7 @@ describe('client project stage routes', () => {
     const stages = {
       summary: vi.fn(async () => ({ stage: 'poc' })),
       operation: vi.fn(async () => ({ receipt: { operationId: 'op' } })),
-      requestPocChanges: vi.fn(async () => ({ receipt: { action: 'poc_changes_requested' } })),
-      approvePoc: vi.fn(async () => ({ receipt: { action: 'poc_approved' } })),
+      signContract: vi.fn(async () => ({ receipt: { action: 'contract_signed' } })),
     };
     const projectPortal = { projects: vi.fn(), requests: vi.fn(), messages: vi.fn(), reply: vi.fn(), operation: vi.fn() };
     return { ...(await setup(false, { projectPortal, projectStages: stages })), stages };
@@ -224,16 +223,16 @@ describe('client project stage routes', () => {
     expect(f.stages.summary).toHaveBeenCalledWith({ workspaceId: 'workspace-a', projectId: 'project-a' }, subject);
   });
 
-  it('approves a POC only with the CSRF check passed', async () => {
+  it('signs a contract only with the CSRF check passed', async () => {
     const f = await stageSetup();
     const body = { schemaVersion: 1, operationId: 'op', contentHash: 'a'.repeat(64), fullName: 'Juan', consent: true };
-    const refused = await f.invoke('POST', '/projects/:workspaceId/:projectId/stage/poc/:pocId/approve',
-      { params: { ...params, pocId: 'poc-1' }, body, headers: { 'x-csrf-token': 'wrong' } });
+    const refused = await f.invoke('POST', '/projects/:workspaceId/:projectId/stage/contract/:contractId/sign',
+      { params: { ...params, contractId: 'contract-1' }, body, headers: { 'x-csrf-token': 'wrong' } });
     expect(refused.status).toBeGreaterThanOrEqual(400);
-    expect(f.stages.approvePoc).not.toHaveBeenCalled();
-    const accepted = await f.invoke('POST', '/projects/:workspaceId/:projectId/stage/poc/:pocId/approve',
-      { params: { ...params, pocId: 'poc-1' }, body });
-    expect(accepted.body).toEqual({ receipt: { action: 'poc_approved' } });
-    expect(f.stages.approvePoc).toHaveBeenCalledWith({ workspaceId: 'workspace-a', projectId: 'project-a' }, subject, 'poc-1', body);
+    expect(f.stages.signContract).not.toHaveBeenCalled();
+    const accepted = await f.invoke('POST', '/projects/:workspaceId/:projectId/stage/contract/:contractId/sign',
+      { params: { ...params, contractId: 'contract-1' }, body });
+    expect(accepted.body).toEqual({ receipt: { action: 'contract_signed' } });
+    expect(f.stages.signContract).toHaveBeenCalledWith({ workspaceId: 'workspace-a', projectId: 'project-a' }, subject, 'contract-1', body);
   });
 });

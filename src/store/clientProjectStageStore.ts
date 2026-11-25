@@ -2,7 +2,7 @@ import type { Sql } from './database.js';
 import { ticketSqlIso } from './ticketPostgresCodec.js';
 import {
   nextAction, revisionsUsed, STAGE_LABEL,
-  type ContractStatus, type NextAction, type PocStatus, type ProjectStage, type RequestStatus,
+  type ContractStatus, type NextAction, type ProjectStage, type RequestStatus,
   type RevisionClassification, type RoundStatus, type StageState,
 } from '../services/projectStageRules.js';
 
@@ -12,20 +12,21 @@ import {
  */
 
 export interface StageThread { workspaceId: string; projectId: string; clientId: string }
+/** A feature as contracts issued before the POC became a stage marker list it in their scope. */
 export interface PocFeature { title: string; detail: string }
-export interface PocVersionView {
-  id: string; number: number; status: PocStatus; title: string; summary: string; features: PocFeature[]; screens: string[];
-  outOfScope: string; note: string; contentHash: string | null; createdAt: string; updatedAt: string; publishedAt: string | null;
-  approvedAt: string | null; approvedName: string | null; changeRequest: { body: string; createdAt: string } | null;
-}
 export interface ContractClause { title: string; body: string }
 export interface ContractTerms {
   projectName: string; clientName: string;
-  scope: { pocNumber: number; title: string; summary: string; features: PocFeature[]; screens: string[]; outOfScope: string };
+  /**
+   * What the contract covers, written by the PM. Contracts issued before the POC
+   * became a stage marker also carry the approved POC's number, features,
+   * screens and exclusions; their text (and hash) stays exactly as signed.
+   */
+  scope: { title: string; summary: string; pocNumber?: number; features?: PocFeature[]; screens?: string[]; outOfScope?: string };
   deliverables: string[]; revisionLimit: number; clauses: ContractClause[]; notes: string;
 }
 export interface ContractView {
-  id: string; pocVersionId: string; status: ContractStatus; terms: ContractTerms; contentHash: string | null;
+  id: string; pocVersionId: string | null; status: ContractStatus; terms: ContractTerms; contentHash: string | null;
   createdAt: string; updatedAt: string; issuedAt: string | null;
   clientSignedName: string | null; clientSignedAt: string | null; pmSignedName: string | null; pmSignedAt: string | null;
 }
@@ -43,8 +44,6 @@ export interface RequestView {
 export interface StageSummary {
   stage: ProjectStage; stageLabel: string; revisionLimit: number; revisionsUsed: number; version: number; stageChangedAt: string;
   nextAction: NextAction | null;
-  poc: PocVersionView | null; pocDraft: PocVersionView | null;
-  pocHistory: Array<{ id: string; number: number; status: PocStatus; publishedAt: string | null }>;
   contract: ContractView | null; rounds: RoundView[]; requests: RequestView[];
   final: { deliveredAt: string; note: string; acceptedAt: string | null; acceptedName: string | null } | null;
   clientId?: string;
@@ -57,13 +56,8 @@ interface StageRow {
   stage: ProjectStage; revision_limit: number; revisions_offset: number; version: number; stage_changed_at: Time;
   final_delivered_at: Time | null; final_delivered_note: string | null; final_accepted_at: Time | null; final_accepted_name: string | null;
 }
-interface PocRow {
-  id: string; number: number; status: PocStatus; title: string; summary: string; features: PocFeature[]; screens: string[];
-  out_of_scope: string; note: string; content_hash: string | null; created_at: Time; updated_at: Time; published_at: Time | null;
-  approved_at: Time | null; approved_name: string | null; change_body: string | null; change_at: Time | null;
-}
 interface ContractRow {
-  id: string; poc_version_id: string; status: ContractStatus; terms: ContractTerms; content_hash: string | null;
+  id: string; poc_version_id: string | null; status: ContractStatus; terms: ContractTerms; content_hash: string | null;
   created_at: Time; updated_at: Time; issued_at: Time | null; client_signed_name: string | null; client_signed_at: Time | null;
   pm_signed_name: string | null; pm_signed_at: Time | null;
 }
@@ -88,27 +82,6 @@ export async function lockStageRow(sql: Sql, thread: StageThread, write: boolean
       final_delivered_at,final_delivered_note,final_accepted_at,final_accepted_name
     from alpha_private.client_project_stages where ${THREAD} for ${write ? 'update' : 'share'}`, params(thread));
   return rows[0]!;
-}
-
-function pocView(row: PocRow): PocVersionView {
-  return {
-    id: row.id, number: row.number, status: row.status, title: row.title, summary: row.summary,
-    features: row.features, screens: row.screens, outOfScope: row.out_of_scope, note: row.note, contentHash: row.content_hash,
-    createdAt: ticketSqlIso(row.created_at), updatedAt: ticketSqlIso(row.updated_at), publishedAt: iso(row.published_at),
-    approvedAt: iso(row.approved_at), approvedName: row.approved_name,
-    changeRequest: row.change_body && row.change_at ? { body: row.change_body, createdAt: ticketSqlIso(row.change_at) } : null,
-  };
-}
-
-async function loadPocs(sql: Sql, thread: StageThread): Promise<PocRow[]> {
-  const { rows } = await sql.query<PocRow>(`select v.id,v.number,v.status,v.title,v.summary,v.features,v.screens,v.out_of_scope,v.note,
-      v.content_hash,v.created_at,v.updated_at,v.published_at,v.approved_at,v.approved_name,c.body as change_body,c.created_at as change_at
-    from alpha_private.client_project_poc_versions v
-    left join lateral (select e.body,e.created_at from alpha_private.client_project_stage_events e
-      where e.workspace_id=v.workspace_id and e.project_id=v.project_id and e.client_user_id=v.client_user_id
-        and e.action='poc_changes_requested' and e.ref_id=v.id order by e.created_at desc limit 1) c on true
-    where v.workspace_id=$1 and v.project_id=$2 and v.client_user_id=$3 order by v.number desc`, params(thread));
-  return rows;
 }
 
 async function loadContract(sql: Sql, thread: StageThread): Promise<ContractView | null> {
@@ -149,12 +122,10 @@ async function loadRequests(sql: Sql, thread: StageThread): Promise<RequestView[
   }));
 }
 
-function stageState(row: StageRow, pocs: PocVersionView[], contract: ContractView | null, rounds: RoundView[], requests: RequestView[]): StageState {
-  const latest = pocs.find(poc => poc.status !== 'draft') ?? null;
+function stageState(row: StageRow, contract: ContractView | null, rounds: RoundView[], requests: RequestView[]): StageState {
   const active = rounds.find(round => round.status !== 'classified') ?? null;
   return {
     stage: row.stage,
-    poc: latest ? { status: latest.status, number: latest.number } : null,
     contract: contract ? { status: contract.status } : null,
     round: active ? { status: active.status, number: active.number } : null,
     finalDelivered: row.final_delivered_at !== null && row.final_accepted_at === null,
@@ -166,21 +137,15 @@ function stageState(row: StageRow, pocs: PocVersionView[], contract: ContractVie
 export async function loadStageSummary(sql: Sql, thread: StageThread, audience: 'client' | 'pm'): Promise<StageSummary> {
   const row = await lockStageRow(sql, thread, false);
   // One connection per transaction: read in turn.
-  const pocRows = await loadPocs(sql, thread);
   const contract = await loadContract(sql, thread);
   const rounds = await loadRounds(sql, thread);
   const requests = await loadRequests(sql, thread);
-  const pocs = pocRows.map(pocView);
-  const published = pocs.filter(poc => poc.status !== 'draft');
   const forClient = audience === 'client';
   const visibleContract = forClient && contract?.status === 'draft' ? null : contract;
   return {
     stage: row.stage, stageLabel: STAGE_LABEL[row.stage], revisionLimit: row.revision_limit,
     revisionsUsed: revisionsUsed(rounds, row.revisions_offset), version: row.version, stageChangedAt: ticketSqlIso(row.stage_changed_at),
-    nextAction: nextAction(stageState(row, pocs, contract, rounds, requests)),
-    poc: published[0] ?? null,
-    pocDraft: forClient ? null : pocs.find(poc => poc.status === 'draft') ?? null,
-    pocHistory: published.map(poc => ({ id: poc.id, number: poc.number, status: poc.status, publishedAt: poc.publishedAt })),
+    nextAction: nextAction(stageState(row, contract, rounds, requests)),
     contract: visibleContract, rounds, requests,
     final: row.final_delivered_at ? {
       deliveredAt: ticketSqlIso(row.final_delivered_at), note: row.final_delivered_note ?? '',
