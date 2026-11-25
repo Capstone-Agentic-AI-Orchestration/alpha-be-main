@@ -372,8 +372,6 @@ export function createTicketClientApiRouter(
       });
       router.get(stagePath, read((req, subject) => stages.summary(target(req), subject)));
       router.get(stagePath + '/operations/:operationId', read((req, subject) => stages.operation(target(req), subject, req.params.operationId)));
-      router.post(stagePath + '/contract/:contractId/sign', write((req, subject) =>
-        stages.signContract(target(req), subject, req.params.contractId, req.body)));
       router.put(stagePath + '/rounds/:roundId/items', write((req, subject) =>
         stages.saveRoundItems(target(req), subject, req.params.roundId, req.body)));
       router.post(stagePath + '/rounds/:roundId/submit', write((req, subject) =>

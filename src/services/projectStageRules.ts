@@ -13,13 +13,18 @@ export type RevisionClassification = 'revision' | 'fix' | 'out_of_scope';
 /** A change request outside the contract. Alpha takes no payments: the client is reminded it costs extra, and the PM answers. */
 export type RequestStatus = 'open' | 'will_do' | 'wont_do';
 
+/**
+ * `contract` is the in-app contract stage some projects reached before the
+ * contract moved offline. It reads as the end of the POC: the next step for
+ * both is starting development.
+ */
 export const STAGE_LABEL: Record<ProjectStage, string> = {
-  unset: 'Stage not set', poc: 'Proof of concept', contract: 'Contract', development: 'Development', completed: 'Completed',
+  unset: 'Stage not set', poc: 'Proof of concept', contract: 'Proof of concept', development: 'Development', completed: 'Completed',
 };
 
 const MOVES: Record<ProjectStage, readonly ProjectStage[]> = {
   unset: ['poc', 'development', 'completed'],
-  poc: ['contract'],
+  poc: ['development'],
   contract: ['development'],
   development: ['completed'],
   completed: [],
@@ -54,14 +59,13 @@ export function roundIsExtra(used: number, limit: number): boolean {
 
 export interface StageState {
   stage: ProjectStage;
-  contract: { status: ContractStatus } | null;
   round: { status: RoundStatus; number: number } | null;
   finalDelivered: boolean;
   requests: ReadonlyArray<{ status: RequestStatus }>;
 }
 
 export type NextActionKind =
-  | 'set_stage' | 'complete_poc' | 'issue_contract' | 'sign_contract' | 'countersign_contract'
+  | 'set_stage' | 'start_development'
   | 'answer_request' | 'share_build' | 'submit_round' | 'classify_round' | 'accept_final';
 export interface NextAction { who: 'client' | 'pm'; kind: NextActionKind; label: string }
 
@@ -69,14 +73,8 @@ function requestAction(requests: StageState['requests']): NextAction | null {
   return requests.some(request => request.status === 'open') ? { who: 'pm', kind: 'answer_request', label: 'Answer a change request' } : null;
 }
 
-/** The POC stage is a marker: the PM moves the project to the contract once the client is happy with the concept. */
-const POC_ACTION: NextAction = { who: 'pm', kind: 'complete_poc', label: 'Move to the contract when the client is ready' };
-
-function contractAction(contract: StageState['contract']): NextAction {
-  if (contract?.status === 'issued') return { who: 'client', kind: 'sign_contract', label: 'Sign the contract' };
-  if (contract?.status === 'client_signed') return { who: 'pm', kind: 'countersign_contract', label: 'Countersign the contract' };
-  return { who: 'pm', kind: 'issue_contract', label: 'Issue the contract' };
-}
+/** The POC stage is a marker; the contract is signed in person, then the PM starts development. */
+const START_ACTION: NextAction = { who: 'pm', kind: 'start_development', label: 'Start development once the contract is signed' };
 
 function developmentAction(state: StageState): NextAction {
   if (state.round?.status === 'open') return { who: 'client', kind: 'submit_round', label: `Send your feedback on build ${state.round.number}` };
@@ -91,8 +89,8 @@ function developmentAction(state: StageState): NextAction {
 export function nextAction(state: StageState): NextAction | null {
   switch (state.stage) {
     case 'unset': return { who: 'pm', kind: 'set_stage', label: 'Choose this project’s stage' };
-    case 'poc': return POC_ACTION;
-    case 'contract': return contractAction(state.contract);
+    case 'poc': return START_ACTION;
+    case 'contract': return START_ACTION;
     case 'development': return developmentAction(state);
     case 'completed': return requestAction(state.requests);
   }
