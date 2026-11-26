@@ -213,7 +213,8 @@ describe('task acceptance and targeted correction', () => {
 
   describe('an Orchestrator fix is held to what it was cleared to change', () => {
     /** A build whose only task is being retried under an Orchestrator resolution; the retry changes `files`. */
-    async function retryUnderResolution(files: Record<string, string>, resolution: Record<string, unknown> = {}, addedByOrchestrator = false) {
+    async function retryUnderResolution(files: Record<string, string>, resolution: Record<string, unknown> = {}, addedByOrchestrator = false,
+      initialFiles: Record<string, string> = {}) {
       const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
       fs.mkdirSync(tempRoot, { recursive: true });
       directory = fs.mkdtempSync(path.join(tempRoot, 'alpha-fix-bounds-'));
@@ -222,6 +223,7 @@ describe('task acceptance and targeted correction', () => {
       git(directory, ['init', '-b', 'main', repository]);
       fs.writeFileSync(path.join(repository, 'src', 'cart.ts'), 'export const total = (items: number[]) => items.reduce((a, b) => a + b, 0);\n');
       fs.writeFileSync(path.join(repository, 'src', 'auth', 'session.ts'), 'export const SESSION_COOKIE = "sid";\n');
+      for (const [file, content] of Object.entries(initialFiles)) fs.writeFileSync(path.join(repository, file), content);
       commit(repository, 'Initial fixture');
       store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
       runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'fix bounds fixture'));
@@ -306,6 +308,35 @@ describe('task acceptance and targeted correction', () => {
       const personAdded = await retryUnderResolution({ 'src/cart.ts': discounted, 'src/auth/session.ts': 'export const SESSION_COOKIE = "session";\n' },
         { appliedBy: 'pm-1' }, true);
       expect(personAdded.attempt.status).toBe('accepted');
+    });
+
+    describe('a fix cleared to put weakened tests back', () => {
+      const cartTest = 'import { total } from "./cart";\nit("adds items", () => { expect(total([1, 2])).toBe(3); });\n';
+      const restoring = {
+        restoreTests: ['src/cart.test.ts'], priorChangedPaths: ['src/cart.test.ts'],
+        proposedFix: { instructions: 'Put the cart test back.', expectedFiles: [{ repository: 'acme/cart', path: 'src/cart.ts' }, { repository: 'acme/cart', path: 'src/cart.test.ts' }] }
+      };
+
+      it('accepts a retry that has every original test back word for word, plus its own', async () => {
+        const { attempt } = await retryUnderResolution({
+          'src/cart.ts': discounted,
+          'src/cart.test.ts': `${cartTest}it("applies a discount", () => { expect(total([10], 0.5)).toBe(5); });\n`
+        }, restoring, false, { 'src/cart.test.ts': cartTest });
+        expect(attempt.status).toBe('accepted');
+      });
+
+      it('holds a retry whose test kept its title and assertion count but checks something else', async () => {
+        // The ordinary test guard counts assertions and would let this through; the fix was cleared only to restore.
+        const { outcome, launches, attempt } = await retryUnderResolution({
+          'src/cart.ts': discounted,
+          'src/cart.test.ts': cartTest.replace('toBe(3)', 'toBeGreaterThan(0)')
+        }, restoring, false, { 'src/cart.test.ts': cartTest });
+        expect(attempt.status).toBe('rejected');
+        expect(attempt.failureReason).toContain('not back word for word');
+        expect(outcome.snapshot.findings).toContainEqual(expect.objectContaining({ evidence: expect.objectContaining({
+          check: 'orchestrator_fix_review', unrestoredTests: [{ path: 'src/cart.test.ts', titles: ['adds items'] }] }) }));
+        expect(launches).toHaveLength(1);
+      });
     });
 
     it('accepts a fix the person applied, even in a sensitive area', async () => {

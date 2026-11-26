@@ -98,7 +98,10 @@ function fix(overrides: Record<string, unknown> = {}) {
   });
 }
 
-function harness(initial: OrchestrationSnapshot, answers: string[], setting: Partial<ProjectOrchestrationSetting> = {}): Harness {
+/** Files that differ between commits (`dir@commit:path`, read before FILES) and what the task changed. */
+interface Workspace { files?: Record<string, string>; changedPaths?: string[] }
+
+function harness(initial: OrchestrationSnapshot, answers: string[], setting: Partial<ProjectOrchestrationSetting> = {}, workspace: Workspace = {}): Harness {
   const state = { snapshot: initial, setting: { enabled: true, autonomy: 'standard', sensitivePaths: [], ...setting } as ProjectOrchestrationSetting };
   const episodes = new Map<string, OrchestrationRecoveryEpisode>();
   const milestones: Harness['milestones'] = [];
@@ -161,9 +164,9 @@ function harness(initial: OrchestrationSnapshot, answers: string[], setting: Par
     },
     git: {
       head: async dir => dir === '/work/be' ? API_COMMIT : FE_COMMIT,
-      changedPaths: async () => ['src/BookingList.tsx'],
-      fileAtCommit: async (dir, _commit, filePath) => {
-        const content = FILES[`${dir}:${filePath}`];
+      changedPaths: async () => workspace.changedPaths ?? ['src/BookingList.tsx'],
+      fileAtCommit: async (dir, commit, filePath) => {
+        const content = workspace.files?.[`${dir}@${commit}:${filePath}`] ?? FILES[`${dir}:${filePath}`];
         if (content === undefined) throw new Error('missing');
         return content;
       }
@@ -487,5 +490,58 @@ describe('blocker resolution', () => {
     expect(await stuck(h)).toMatchObject({ outcome: 'escalated', escalation: 'unavailable', diagnosis: expect.stringContaining('invalid after one format repair') });
     expect(h.turn).toHaveBeenCalledTimes(2);
     expect(h.retries).toEqual([]);
+  });
+
+  it('reads an answer wrapped under its own name, and shows the three answers apart in the prompt', async () => {
+    // What a real Orchestrator sent back, twice: the right answer inside {"fix": {...}}.
+    const h = harness(snapshot({ reason: LINT_FAILURE, attempts: 3 }), [JSON.stringify({ fix: JSON.parse(fix()) })]);
+    expect(await stuck(h)).toMatchObject({ outcome: 'retrying', answer: 'fix' });
+    expect(h.turn).toHaveBeenCalledTimes(1);
+    expect(h.retries).toHaveLength(1);
+    const prompt = String((h.turn.mock.calls[0] as unknown as [{ prompt: string }])[0].prompt);
+    expect(prompt).toContain('never wrap the object in another one');
+    expect(prompt).not.toContain('"needs_owner": {');
+  });
+
+  it('does not unwrap an answer whose name and outcome disagree', async () => {
+    const h = harness(snapshot({ reason: LINT_FAILURE, attempts: 3 }), [
+      JSON.stringify({ fix: { ...JSON.parse(fix()), outcome: 'needs_owner' } }), JSON.stringify({ fix: JSON.parse(fix()), extra: true })
+    ]);
+    expect(await stuck(h)).toMatchObject({ outcome: 'escalated', escalation: 'unavailable' });
+    expect(h.retries).toEqual([]);
+  });
+
+  describe('a task that stopped because it replaced tests', () => {
+    const TEST_FILE = 'tests/BookingList.test.tsx';
+    const original = 'it("lists bookings", () => { expect(render()).toContain("li"); });\n';
+    const WEAKENED = `This task replaced test cases (“lists bookings”) in ${TEST_FILE}. A task may add and update tests but not delete, skip or replace them or remove assertions. Restore what was removed and keep the update.`;
+    const workspace: Workspace = {
+      changedPaths: ['src/BookingList.tsx', TEST_FILE],
+      files: {
+        [`/work/fe@${BASE}:${TEST_FILE}`]: original,
+        [`/work/fe@${FE_COMMIT}:${TEST_FILE}`]: 'it("lists the bookings", () => { expect(render()).toContain("<li"); });\n'
+      }
+    };
+    const restore = fix({
+      diagnosis: 'The retry renamed and narrowed the original bookings test.',
+      instructions: `Put the original test “lists bookings” back in ${TEST_FILE} exactly as it was, and keep the new rendering.`,
+      citations: [{ source: 'repository', repository: 'acme/shop-fe', path: TEST_FILE, quote: 'it("lists the bookings", () => {' }],
+      expectedFiles: [{ repository: 'acme/shop-fe', path: TEST_FILE }]
+    });
+
+    it('sends a fix that puts them back to the specialist, held to restoring them word for word', async () => {
+      const h = harness(snapshot({ reason: WEAKENED, attempts: 3 }), [restore], {}, workspace);
+      const record = await stuck(h);
+
+      expect(record).toMatchObject({ outcome: 'retrying', tier: 1, restoreTests: [TEST_FILE] });
+      expect(record?.reasons).toEqual([expect.stringContaining('Alpha checks they return word for word')]);
+      expect(String(h.retries[0].developerGuidance)).toContain(`Put back every test these files had when the task started, with the same title and the same code, and keep the tests you added: ${TEST_FILE} (replaced test cases (“lists bookings”))`);
+    });
+
+    it('in strict mode holds the fix for the person, ready to apply', async () => {
+      const h = harness(snapshot({ reason: WEAKENED, attempts: 3 }), [restore], { autonomy: 'strict' }, workspace);
+      expect(await stuck(h)).toMatchObject({ outcome: 'escalated', escalation: 'strict', tier: 1, proposedFix: expect.anything() });
+      expect(h.retries).toEqual([]);
+    });
   });
 });

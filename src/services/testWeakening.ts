@@ -180,8 +180,16 @@ function parserPlugins(filePath: string): ParserPlugin[] {
   return ['jsx', 'decorators-legacy'];
 }
 
+/** An active test's title and what it does: its callee and every argument after the title. */
+interface ActiveTest { title: string; body: string }
+
+/** A node as text without positions or comments, so the same code written again compares equal. */
+function fingerprint(value: unknown): string {
+  return JSON.stringify(value, (key, item: unknown) => (IGNORED_KEYS.has(key) ? undefined : item));
+}
+
 /** Adds one call to the counts: an assertion, a test with its state, or a suite that does not run normally. */
-function countCall(strength: TestStrength, node: AstNode): void {
+function countCall(strength: TestStrength, active: ActiveTest[], node: AstNode): void {
   const call = callKind(node);
   if (!call) return;
   if (call.kind === 'assertion') {
@@ -190,16 +198,22 @@ function countCall(strength: TestStrength, node: AstNode): void {
   }
   if (call.state !== 'active') strength.inactive += 1;
   if (call.kind === 'suite') return;
-  const testTitle = title((node.arguments as unknown[])[0]);
+  const [titleArgument, ...rest] = node.arguments as unknown[];
+  const testTitle = title(titleArgument);
   strength.tests.push({ title: testTitle, state: call.state });
   if (call.state === 'active') {
     strength.active += 1;
     strength.titles.push(testTitle);
+    active.push({ title: testTitle, body: fingerprint({ callee: node.callee, rest }) });
   }
 }
 
 /** Counts from the syntax tree. Throws when the source does not parse. */
 export function testStrength(source: string, filePath = 'test.ts'): TestStrength {
+  return countTests(source, filePath).strength;
+}
+
+function countTests(source: string, filePath: string): { strength: TestStrength; active: ActiveTest[] } {
   const ast = parse(source, {
     sourceType: 'unambiguous',
     allowImportExportEverywhere: true,
@@ -210,28 +224,46 @@ export function testStrength(source: string, filePath = 'test.ts'): TestStrength
     plugins: parserPlugins(filePath)
   }) as unknown as AstNode;
   const strength: TestStrength = { active: 0, inactive: 0, assertions: 0, titles: [], tests: [] };
+  const active: ActiveTest[] = [];
   const stack: AstNode[] = [ast];
   while (stack.length) {
     const node = stack.pop()!;
-    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') countCall(strength, node);
+    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') countCall(strength, active, node);
     // Reversed, so nodes come off the stack in source order and titles read top to bottom.
     stack.push(...childNodes(node).reverse());
   }
-  return strength;
+  return { strength, active };
 }
 
-/** Titles `before` had that `after` lost (each occurrence counts); computed titles are not compared. */
-function missingTitles(before: readonly string[], after: readonly string[]): string[] {
+/**
+ * Titles `before` had that `after` lost (each occurrence counts); computed titles are not compared.
+ * A test renamed with exactly the same code is kept, not lost: one new title per old test, so a
+ * single test cannot stand in for two.
+ */
+function missingTitles(before: readonly ActiveTest[], after: readonly ActiveTest[]): string[] {
   const remaining = new Map<string, number>();
-  for (const item of after) remaining.set(item, (remaining.get(item) ?? 0) + 1);
-  const missing: string[] = [];
+  for (const item of after) remaining.set(item.title, (remaining.get(item.title) ?? 0) + 1);
+  const lost: ActiveTest[] = [];
   for (const item of before) {
-    if (item === '<dynamic>') continue;
-    const left = remaining.get(item) ?? 0;
-    if (left > 0) remaining.set(item, left - 1);
-    else missing.push(item);
+    if (item.title === '<dynamic>') continue;
+    const left = remaining.get(item.title) ?? 0;
+    if (left > 0) remaining.set(item.title, left - 1);
+    else lost.push(item);
   }
-  return missing;
+  // The titles `after` has that `before` did not, each usable once.
+  const beforeCount = new Map<string, number>();
+  for (const item of before) beforeCount.set(item.title, (beforeCount.get(item.title) ?? 0) + 1);
+  const added = after.filter(item => {
+    const left = beforeCount.get(item.title) ?? 0;
+    if (left > 0) beforeCount.set(item.title, left - 1);
+    return left === 0 && item.title !== '<dynamic>';
+  });
+  return lost.filter(item => {
+    const index = added.findIndex(candidate => candidate.body === item.body);
+    if (index === -1) return true;
+    added.splice(index, 1);
+    return false;
+  }).map(item => item.title);
 }
 
 /** The reason with up to three of the missing titles: removed test cases (“a”, “b”, …). */
@@ -253,9 +285,9 @@ const STATE_WEAKENING: Record<Exclude<TestState, 'active'>, string> = {
 };
 
 export function testWeakening(before: string, after: string, filePath = 'test.ts'): string | undefined {
-  const was = testStrength(before, filePath);
-  const now = testStrength(after, filePath);
-  const missing = missingTitles(was.titles, now.titles);
+  const { strength: was, active: wasActive } = countTests(before, filePath);
+  const { strength: now, active: nowActive } = countTests(after, filePath);
+  const missing = missingTitles(wasActive, nowActive);
   // Per title first: a test that is still there but no longer runs normally.
   for (const state of ['inverted', 'conditional', 'disabled'] as const) {
     const changed = missing.filter(item => now.tests.some(test => test.title === item && test.state === state));
@@ -266,6 +298,22 @@ export function testWeakening(before: string, after: string, filePath = 'test.ts
   if (missing.length) return named('replaced test cases', missing);
   if (now.assertions < was.assertions) return 'removed assertions';
   return undefined;
+}
+
+/**
+ * The titles of `before`'s active tests that `after` does not have word for word: same title and
+ * same code (formatting and comments aside). Stricter than testWeakening, which counts assertions
+ * but does not read them: an Orchestrator fix that restores tests is held to this. Computed titles
+ * cannot be matched, so they count as not kept. Throws when either version does not parse.
+ */
+export function testsNotKeptExactly(before: string, after: string, filePath = 'test.ts'): string[] {
+  const remaining = countTests(after, filePath).active.map(item => `${item.title}\n${item.body}`);
+  return countTests(before, filePath).active.filter(item => {
+    const index = item.title === '<dynamic>' ? -1 : remaining.indexOf(`${item.title}\n${item.body}`);
+    if (index === -1) return true;
+    remaining.splice(index, 1);
+    return false;
+  }).map(item => item.title);
 }
 
 function isTestSource(filePath: string, content: string): boolean {

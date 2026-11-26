@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTestFile, testFileWeakening, testStrength, testWeakening } from './testWeakening.js';
+import { isTestFile, testFileWeakening, testStrength, testWeakening, testsNotKeptExactly } from './testWeakening.js';
 
 const accepted = [
   'import { accounts } from "../src/accounts";',
@@ -47,8 +47,36 @@ describe('test weakening', () => {
     expect(testWeakening(accepted, `${accepted}\ndescribe.skip("later", () => {});`)).toBe('skipped or disabled tests');
     expect(testWeakening(accepted, `${accepted}\nxit("later", () => {});`)).toBe('skipped or disabled tests');
     expect(testWeakening(accepted, accepted.replace('expect(accounts.size).toBe(0);', ''))).toBe('removed assertions');
-    expect(testWeakening(accepted, accepted.replace('"stores accounts"', '"something easier"'))).toBe('replaced test cases (“stores accounts”)');
+    expect(testWeakening(accepted, accepted.replace('it("stores accounts", () => { expect(accounts.size).toBe(0); });',
+      'it("something easier", () => { expect(accounts).toBeDefined(); });'))).toBe('replaced test cases (“stores accounts”)');
     expect(testWeakening(accepted, `${accepted}\nimport { signIn } from "../src/auth";\nit("signs in", () => { expect(signIn).toBeDefined(); });`)).toBeUndefined();
+  });
+
+  it('keeps a test renamed with exactly the same code, and nothing looser', () => {
+    // Only the title changed: the same test still runs, so nothing was weakened.
+    expect(testWeakening(accepted, accepted.replace('"stores accounts"', '"stores the accounts"'))).toBeUndefined();
+    // Formatting and comments do not make it a different test.
+    expect(testWeakening(accepted, accepted.replace('it("stores accounts", () => { expect(accounts.size).toBe(0); });',
+      'it("stores the accounts", () => {\n    // empty at start\n    expect(accounts.size).toBe(0);\n  });'))).toBeUndefined();
+    // A rename that also changes what the test checks is still a replacement.
+    expect(testWeakening(accepted, accepted.replace('it("stores accounts", () => { expect(accounts.size).toBe(0); });',
+      'it("stores the accounts", () => { expect(accounts.size).toBe(1); });'))).toBe('replaced test cases (“stores accounts”)');
+    // One new test cannot stand in for two old ones with the same code.
+    const twins = 'it("a", () => { expect(1).toBe(1); });\nit("b", () => { expect(1).toBe(1); });';
+    expect(testWeakening(twins, 'it("c", () => { expect(1).toBe(1); });\nit("d", () => { expect(2).toBe(2); });')).toBe('replaced test cases (“b”)');
+    // Switching `it` to `test.each` is not the same test.
+    expect(testWeakening(accepted, accepted.replace('it("stores accounts", () => { expect(accounts.size).toBe(0); });',
+      'test.each([1])("stores the accounts", () => { expect(accounts.size).toBe(0); });'))).toBe('replaced test cases (“stores accounts”)');
+  });
+
+  it('names the tests that are not back word for word, for a fix that must restore them', () => {
+    expect(testsNotKeptExactly(accepted, `${accepted}\nit("adds", () => { expect(1).toBe(1); });`)).toEqual([]);
+    // Same title, same number of assertions, different check: testWeakening lets it pass, this does not.
+    const loosened = accepted.replace('expect(accounts.size).toBe(0)', 'expect(accounts).toBeDefined()');
+    expect(testWeakening(accepted, loosened)).toBeUndefined();
+    expect(testsNotKeptExactly(accepted, loosened)).toEqual(['stores accounts']);
+    expect(testsNotKeptExactly(accepted, accepted.replace('"stores accounts"', '"stores the accounts"'))).toEqual(['stores accounts']);
+    expect(() => testsNotKeptExactly(accepted, 'it("broken", () => {')).toThrow();
   });
 
   it('treats a test that passes only when the code is broken as weakened', () => {

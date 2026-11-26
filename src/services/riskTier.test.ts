@@ -63,6 +63,18 @@ describe('risk tiers', () => {
     expect(result.reasons).toContainEqual(expect.objectContaining({ category: 'tests_weakened', source: 'diff' }));
   });
 
+  it('makes weakened tests structural (tier 1) when the fix is held to putting them back word for word', () => {
+    const weakenedTests = [{ ...at('tests/cart.test.ts'), detail: 'replaced test cases (“adds an item”)' }];
+    const texts = ['This task replaced test cases. A task may add and update tests but not delete, skip or replace them or remove assertions.',
+      'Restore the removed tests exactly.'];
+    const restoring = classifyRisk({ paths: [at('tests/cart.test.ts')], texts, weakenedTests, restoresWeakenedTests: true });
+    expect(restoring.tier).toBe(1);
+    expect(restoring.reasons).toEqual([expect.objectContaining({ tier: 1, category: 'tests_weakened', source: 'diff' })]);
+    // The same texts without that hold stay with the person, and other sensitive words still count.
+    expect(classifyRisk({ paths: [at('tests/cart.test.ts')], texts, weakenedTests }).tier).toBe(2);
+    expect(classifyRisk({ paths: [at('tests/cart.test.ts')], texts: [...texts, 'Also store the session cookie.'], weakenedTests, restoresWeakenedTests: true }).tier).toBe(2);
+  });
+
   it('reads the blocker, the failing check and the proposed fix for sensitive decisions', () => {
     expect(sensitiveTextCategories('Should the session cookie be httpOnly?')).toContain('security');
     expect(sensitiveTextCategories('Skip the failing test so lint passes')).toContain('tests_weakened');
