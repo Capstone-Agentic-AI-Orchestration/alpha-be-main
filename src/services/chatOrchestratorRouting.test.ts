@@ -638,7 +638,7 @@ describe('the Orchestrator decides about a build waiting in the chat', () => {
     cliReply = route({ route: 'start_plan', evidence: 'summarize the README' });
     const result = await send(chatService, 'summarize the README', { projectId: 'project-1', buildDecision: decision });
     expect(startPlannedWork).not.toHaveBeenCalled();
-    expect(result.agentMessage.content).toContain('Plan v2 is ready');
+    expect(result.agentMessage.content).toContain('The plan is ready');
     // The second look had no tools, repository, attachments or history.
     const check = turnInputs.find(input => input.responseSchema?.properties?.consent);
     expect(check).toMatchObject({ toolFree: true, mcpServers: [], projectRoots: [], skills: [], priorSession: null });
@@ -651,7 +651,7 @@ describe('the Orchestrator decides about a build waiting in the chat', () => {
     const result = await send(chatService, 'do not start', { projectId: 'project-1', buildDecision: decision });
     expect(startPlannedWork).not.toHaveBeenCalled();
     // It asks, specifically, instead of repeating a canned refusal.
-    expect(result.agentMessage.content).toContain('Plan v2 is ready');
+    expect(result.agentMessage.content).toContain('The plan is ready');
   });
 
   it.each(['Do not start', 'Should I approve?', 'start if the tests pass', "don't start yet"])('answers instead of acting when the Orchestrator reads no request: %s', async content => {
@@ -672,7 +672,7 @@ describe('the Orchestrator decides about a build waiting in the chat', () => {
     const later = await send(chatService, 'start the plan', options);
     expect(later.agentMessage.id).toBe(first.agentMessage.id);
     expect(startPlannedWork).toHaveBeenCalledTimes(1);
-    expect(sqlite.getChatMessages('thread-1').filter((message: any) => message.content.includes('Plan v2 started'))).toHaveLength(1);
+    expect(sqlite.getChatMessages('thread-1').filter((message: any) => message.content.includes('Starting now.'))).toHaveLength(1);
   });
 
   it('revises the plan in place for the same work organised differently', async () => {

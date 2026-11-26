@@ -16,6 +16,7 @@ import { agentReadiness } from './agentReadiness.js';
 import { buildEnv, reportIgnoredProjectEnv } from './customCliArgs.js';
 import { mergeUsage, hasUsage } from './runUsage.js';
 import { writeRunMcpConfig, cleanupRunMcpConfig, hostingScopeFor, type BoardRunScope } from './mcpConfigService.js';
+import { submittedReportPath } from './taskReportFile.js';
 import { workspaceRegistry } from './workspaceRegistry.js';
 import { redactToolInput } from './toolInputRedaction.js';
 import { agentCredentialEnv } from './gitCredentialIsolation.js';
@@ -163,7 +164,7 @@ export function appendOrchestrationTaskPolicy(
       ? 'This retry retains the same task\'s unfinished candidate edits. Inspect and continue the existing work rather than rebuilding it from scratch. These edits are not accepted evidence: verify their correctness, keep the original file scope, and rerun the required checks before submitting your report.'
       : '',
     `Acceptance criteria:\n${task.acceptanceCriteria.map(item => `- ${item}`).join('\n')}`,
-    `Return the exact shared Alpha task-report schema version ${orchestration.taskPackage.reportSchemaVersion}.`,
+    `Hand in the shared Alpha task report (schema version ${orchestration.taskPackage.reportSchemaVersion}) with project_submit_work when you finish.`,
     task.dependencyAudit && !orchestration.taskPackage.reportCorrection
       ? 'This approved task requires dependency audit evidence. Invoke project_audit_dependencies for the assigned repository without asking the user whether to run npm audit. Reference its returned evidence IDs in auditEvidenceIds; findings are assessment results, while tool/registry failures are concrete setup blockers. Do not request unrestricted terminal permissions or another agent’s scope.'
       : '',
@@ -193,7 +194,7 @@ export function appendOrchestrationTaskPolicy(
       ? `For every targeted finding ID below, include one findingCoverage entry with concrete evidence that it is fixed. A correction is not complete merely because its checks pass.\n${orchestration.taskPackage.findingIds.map(id => `- ${id}`).join('\n')}`
       : '',
     'For reportedChecks, use objects with script, result and evidence; result must be passed, failed, or not_run. Use not_run when a check did not execute, including when your sandbox blocked it, and explain why in evidence; a check that cannot run is not a task blocker, because Alpha runs the required checks itself. Put only problems that stop the task itself, such as a missing requirement or file, in blockers so Alpha can escalate them clearly.',
-    'Use alpha-task-files for all source reads and scoped edits: project_list_files, project_read_file, project_search, project_write_file, project_edit_file and project_delete_file. Native file tools and terminal commands are disabled. A refused file tool call is not a blocker: re-read the file and retry with project_edit_file and a longer, unique old_text, or replace the file with its current content as expected_content (line endings do not matter). project_generate_lockfile performs the bounded npm lockfile operation when that path is approved. project_run_check runs only an assigned requiredChecks name in a disposable source copy. Alpha also runs required verification after the report. Analysis/review/delivery output belongs in report deliverables, never repository edits.',
+    'Use alpha-task-files for all source reads and scoped edits: project_list_files, project_read_file, project_search, project_write_file, project_edit_file and project_delete_file. Native file tools and terminal commands are disabled. A refused file tool call is not a blocker: re-read the file and retry with project_edit_file and a longer, unique old_text, or replace the file with its current content as expected_content (line endings do not matter). project_generate_lockfile performs the bounded npm lockfile operation when that path is approved. project_run_check runs only an assigned requiredChecks name in a disposable source copy. project_submit_work hands in your task report at the end. Alpha also runs required verification after the report. Analysis/review/delivery output belongs in report deliverables, never repository edits.',
     'Follow your persona and role boundaries. Do not implement another planned task, broaden the scope, or rework an accepted dependency. If the assigned work conflicts with your role or cannot be completed safely, explain the conflict and stop.',
     orchestration.taskPackage.reportCorrection || task.kind === 'review'
       ? ''
@@ -309,13 +310,13 @@ export function formatOrchestrationReportContract(taskPackage: OrchestrationTask
     }));
   }
   return [
-    'Required final response format:',
+    'How to hand in your work:',
     taskPackage.task.kind === 'review'
       ? 'For each reviewFindings item, use exactly these fields: targetTaskId, severity, title, requirementId (optional), path (optional), evidence, instruction. severity must be exactly warning, blocking, or critical. Use a repository-relative path with forward slashes. Use an empty array only when no findings were found.'
       : '',
     taskPackage.reportCorrection
-      ? 'Return exactly one JSON object matching this template, with taskId, requirement IDs, and acceptance criteria unchanged. This correction is format-only: use no new facts, files, or checks. Do not claim that review passed if the previous response does not contain evidence for that conclusion; report missing review evidence as a blocker.'
-      : 'Return exactly one JSON object matching this template. Do not add prose or markdown around it. Keep taskId, requirement IDs, and acceptance criteria exactly as shown. Include every changed repository path under a deliverable using forward slashes. Do not claim Alpha verification results; those are collected independently after your process exits.',
+      ? 'Call project_submit_work with report set to one object matching this template, with taskId, requirement IDs, and acceptance criteria unchanged. If it says something is missing, fix that and call it again. If project_submit_work is not available, make that object your entire final response instead. This correction is format-only: use no new facts, files, or checks. Do not claim that review passed if the previous response does not contain evidence for that conclusion; report missing review evidence as a blocker.'
+      : 'When the task is done, call project_submit_work with report set to one object matching this template. If it says something is missing, fix that and call it again; once it accepts, end with one or two plain sentences about what you did. If project_submit_work is not available, make that object your entire final response instead, with no prose or markdown around it. Keep taskId, requirement IDs, and acceptance criteria exactly as shown. Include every changed repository path under a deliverable using forward slashes. Do not claim Alpha verification results; those are collected independently after your process exits.',
     'Each blocker is one plain sentence of at most 240 characters. Use blockers only for something that stops this task; anything else belongs in the summary or evidence.',
     JSON.stringify(template, null, 2)
   ].join('\n\n');
@@ -765,7 +766,8 @@ export class RunnerService extends EventEmitter {
       task ? { taskId: task.id, repository: taskRepository, kind: task.kind,
         includePaths: task.scope.includePaths, excludePaths: task.scope.excludePaths,
         requiredChecks: task.requiredChecks, reportOnly: Boolean(ctx.orchestration?.taskPackage.reportCorrection),
-        dependencyAudit: task.dependencyAudit, role: persona.role, auditDirectory: path.join(runDir, 'audits') } : undefined,
+        dependencyAudit: task.dependencyAudit, role: persona.role, auditDirectory: path.join(runDir, 'audits'),
+        reportFile: submittedReportPath(runId), reportSchemaVersion: ctx.orchestration?.taskPackage.reportSchemaVersion } : undefined,
       workspaceMcpRuntime?.servers,
       Boolean(!ctx.orchestration && agent.id && supabaseService.sharesBoard()),
       boardScope

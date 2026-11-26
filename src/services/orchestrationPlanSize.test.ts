@@ -33,7 +33,7 @@ describe('decisions the Orchestrator made instead of stopping', () => {
 
   it('are listed in the plan-ready reply with how to change them', () => {
     const text = describePlanDecisions(decisions)!;
-    expect(text).toContain('**What the Orchestrator decided**');
+    expect(text).toContain('**Choices I made**');
     expect(text).toContain('- **project-a-be:** No changes: the tasks keep expenses in browser storage. _Ask for backend storage to add API tasks._');
     expect(describePlanDecisions([])).toBeUndefined();
   });

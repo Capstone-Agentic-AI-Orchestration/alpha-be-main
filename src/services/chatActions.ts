@@ -165,7 +165,7 @@ function askForConsent(input: ChatActionInput, deps: ChatActionDeps): ChatAction
   const plan = deps.pending(input.projectId, input.threadId).find(item => item.run.status === 'awaiting_plan_approval');
   switch (input.route) {
     case 'start_plan': return reply(plan
-      ? `Plan v${plan.run.planVersion} is ready on the right. I'll start it as soon as you tell me to, or use Start plan on the card.`
+      ? 'The plan is ready. I\'ll start it as soon as you tell me to, or press Start plan.'
       : 'There is no plan waiting to start in this conversation.');
     case 'publish': return reply('The reviewed changes are ready. Tell me to push them and open the pull request when you want that.');
     case 'retry_publication': return reply('Publishing stopped. Tell me to retry it when you want to.');

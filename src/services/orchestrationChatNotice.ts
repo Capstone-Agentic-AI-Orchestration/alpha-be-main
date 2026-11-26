@@ -55,8 +55,9 @@ export function publishedNotice(publications: OrchestrationPublicationRecord[]):
  */
 export async function postStartedNotice(store: NoticeStore, snapshot: OrchestrationSnapshot): Promise<void> {
   const required = snapshot.tasks.filter(task => task.required).length || snapshot.tasks.length;
+  const steps = required === 1 ? 'the step' : 'the ' + required + ' steps';
   await post(store, snapshot, `${snapshot.run.id}-started-v${snapshot.run.planVersion}`,
-    `**Plan v${snapshot.run.planVersion} started.** The agents are working on ${required} ${required === 1 ? 'task' : 'tasks'}; their progress follows here. You can stop the build at any time; work already on the build branch stays available.`,
+    `Starting now. The agents are working through ${steps}, and you can follow along below. You can stop anytime; finished work is kept.`,
     'build').catch(() => undefined);
 }
 
@@ -66,7 +67,7 @@ export async function postPlanCorrectedNotice(store: NoticeStore, snapshot: Orch
     `**The plan needed a fix before it could start.** ${reason}`,
     `I made plan v${snapshot.run.planVersion}:`,
     ...changes.map(line => `- ${line}`),
-    'Read it on the right, then press Start plan when you are happy with it.'
+    'Open the plan to read it, then press Start plan when you are happy with it.'
   ].join('\n'), 'build').catch(() => undefined);
 }
 

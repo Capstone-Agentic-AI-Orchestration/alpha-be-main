@@ -359,7 +359,7 @@ describe('only a decision the person can act on surfaces a conflict', () => {
     expect(text).toContain('**Where this plan goes against the product**');
     for (const subject of [...EXPENSE_KEYS, 'expenses']) expect(text).toContain(`- **${subject}:**`);
     expect(text).toContain(`(see: ${CONFLICT_DECISION})`);
-    expect(text.indexOf('goes against the product')).toBeLessThan(text.indexOf('What the Orchestrator decided'));
+    expect(text.indexOf('goes against the product')).toBeLessThan(text.indexOf('Choices I made'));
     expect(describePlanDecisions(undefined, fitCheckConflicts(plan))).toContain('PRO-102');
   });
 });

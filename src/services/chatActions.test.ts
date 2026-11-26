@@ -59,7 +59,7 @@ describe('an action that changes code or reaches GitHub needs more than the main
     const value = deps(undefined, { confirmConsent: vi.fn(async () => false) });
     const outcome = await run('start_plan', 'summarize the README', { evidence: 'summarize the README' }, value);
     expect(value.decide).not.toHaveBeenCalled();
-    expect(outcome).toEqual({ kind: 'reply', message: expect.stringContaining('Plan v2 is ready') });
+    expect(outcome).toEqual({ kind: 'reply', message: expect.stringContaining('The plan is ready') });
   });
 
   it('treats a failing isolated check as no', async () => {
@@ -146,7 +146,7 @@ describe('chat actions check their own rules', () => {
 
   it('asks for a go-ahead instead of starting without one, and starts with one', async () => {
     const value = deps();
-    expect(await run('start_plan', 'maybe later', { evidence: 'later' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('Plan v2 is ready') });
+    expect(await run('start_plan', 'maybe later', { evidence: 'later' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('The plan is ready') });
     expect(value.decide).not.toHaveBeenCalled();
     expect(await run('start_plan', 'yes start it', { evidence: 'yes start it' }, value)).toEqual({ kind: 'reply', message: expect.stringContaining('Started plan v2') });
     expect(value.decide).toHaveBeenCalledWith(expect.objectContaining({ action: 'start', runId: 'run-1', expectedRevision: 3, planVersion: 2, threadId: 'thread-1' }));
