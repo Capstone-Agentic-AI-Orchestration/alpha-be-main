@@ -16,7 +16,7 @@ import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTa
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
-import { isTestFile, testFileWeakening } from './testWeakening.js';
+import { isTestFile, testFileWeakening, testsNotKeptExactly } from './testWeakening.js';
 import { classifyRisk } from './riskTier.js';
 import { ORCHESTRATOR_FIX_REVIEW_CHECK, unapprovedOrchestratorFix, unapprovedOrchestratorTask } from './blockerResolutionRecord.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
@@ -774,10 +774,50 @@ export class TaskAcceptanceService {
     }
     // Last, so ordinary failures still get their automatic repair first: only work that would
     // otherwise be accepted is held here, and its check is not an automatic one.
+    const unrestored = await this.orchestratorFixUnrestoredTests(snapshot, task, worktreePath, diffStartingCommit, attempt.resultCommit);
+    if (unrestored) return fail(unrestored.reason, unrestored.evidence, unrestored.evidence.unrestoredTests[0]?.path);
     const overreach = this.orchestratorFixOverreach(snapshot, task, changedPaths,
       [...acceptedPathOwners].filter(([, owner]) => owner.taskId !== task.id).map(([filePath]) => filePath));
     if (overreach) return fail(overreach.reason, overreach.evidence, overreach.evidence.sensitivePaths[0] ?? overreach.evidence.outsidePaths[0]);
     return null;
+  }
+
+  /**
+   * An Orchestrator fix for a task that stopped on weakened tests is cleared only to put them back:
+   * every test those files had at the task's start must be back with the same title and code
+   * (testsNotKeptExactly), not just the same count of assertions. Anything else is held for the
+   * person. A file too large to read or that does not parse cannot show it, so it is held too.
+   */
+  private async orchestratorFixUnrestoredTests(
+    snapshot: OrchestrationSnapshot,
+    task: OrchestrationTaskRecord,
+    worktreePath: string,
+    baselineCommit: string,
+    resultCommit: string
+  ): Promise<{ reason: string; evidence: { check: string; sensitivePaths: string[]; outsidePaths: string[]; unrestoredTests: Array<{ path: string; titles: string[] }> } } | undefined> {
+    const resolution = unapprovedOrchestratorFix(this.store.getOpenOrchestrationRecoveryEpisode(snapshot.run.id), task.id);
+    if (!resolution?.restoreTests?.length) return undefined;
+    const unrestoredTests: Array<{ path: string; titles: string[] }> = [];
+    for (const filePath of resolution.restoreTests) {
+      const before = await this.readForWeakening(worktreePath, filePath, baselineCommit);
+      if (before === undefined) continue;
+      const after = await this.readForWeakening(worktreePath, filePath, resultCommit);
+      let titles: string[];
+      try {
+        if (after === undefined) titles = ['(the file was deleted)'];
+        else if (before === null || after === null) titles = ['(the file is too large to compare)'];
+        else titles = testsNotKeptExactly(before, after, filePath);
+      } catch {
+        titles = ['(could not parse the file)'];
+      }
+      if (titles.length) unrestoredTests.push({ path: filePath, titles: titles.slice(0, 10) });
+    }
+    if (!unrestoredTests.length) return undefined;
+    const named = unrestoredTests.map(item => `${item.path} (${item.titles.slice(0, 3).map(title => `“${title}”`).join(', ')})`).join('; ');
+    return {
+      reason: `The Orchestrator's fix for this task was cleared to put its tests back, but these are not back word for word: ${named}. The work is kept and waits for the person to approve it.`,
+      evidence: { check: ORCHESTRATOR_FIX_REVIEW_CHECK, sensitivePaths: [], outsidePaths: [], unrestoredTests }
+    };
   }
 
   /**

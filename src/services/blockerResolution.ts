@@ -197,7 +197,12 @@ function heldForReview(snapshot: OrchestrationSnapshot, taskId: string | undefin
   const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
   const sensitive = list(finding.evidence.sensitivePaths).map(filePath => `${filePath} is a sensitive area`);
   const outside = list(finding.evidence.outsidePaths).map(filePath => `${filePath} was not part of the fix`);
-  return [...sensitive, ...outside].slice(0, 20);
+  const unrestored = (Array.isArray(finding.evidence.unrestoredTests) ? finding.evidence.unrestoredTests : [])
+    .flatMap(item => {
+      const entry = item as { path?: unknown; titles?: unknown };
+      return typeof entry.path === 'string' ? [`${entry.path} did not get back ${list(entry.titles).map(title => `“${title}”`).join(', ') || 'its tests'} word for word`] : [];
+    });
+  return [...sensitive, ...outside, ...unrestored].slice(0, 20);
 }
 
 /** Milestone text for each way a resolution ends, posted to the build's chat (team only). */
@@ -243,7 +248,7 @@ function milestoneText(taskTitle: string, record: ResolutionRecord): { key: stri
     budget: `Alpha has resolved ${MAX_RESOLUTIONS_PER_BUILD} problems in this build already, so ${subject} waits for you.`,
     unavailable: `Alpha could not look into why ${subject} stopped, so it waits for you.${diagnosis}`,
     retry_refused: `Alpha could not start the fix for ${subject}, so it waits for you.${diagnosis}`,
-    out_of_bounds: `Alpha's fix for ${subject} changed files it was not cleared to change on its own (${(record.reasons ?? []).join('; ')}). The work is kept and waits for you: apply the proposed fix as yours, or give other direction.`
+    out_of_bounds: `Alpha's fix for ${subject} went beyond what it was cleared to do on its own (${(record.reasons ?? []).join('; ')}). The work is kept and waits for you: apply the proposed fix as yours, or give other direction.`
   };
   return { key: `orchestrator_escalation_${record.escalation ?? 'other'}`, content: reasons[record.escalation ?? 'unavailable'] };
 }
@@ -455,11 +460,17 @@ export class BlockerResolutionService {
     }
     const outside = this.outsideTask(answer, gathered, stuck.task);
     if (outside) return escalation(base, 'outside_scope', { ...evidence, reasons: [outside] });
+    // The task stopped because it weakened tests: a fix puts them back, and its retry is held to
+    // having every one of them back word for word (taskAcceptanceService), so the weakening it
+    // repairs is not a risk it adds. A test file too large to compare cannot be held to that.
+    const restoreTests = gathered.weakenedTests.every(item => !item.detail.includes('too large'))
+      ? gathered.weakenedTests : [];
     const risk: RiskClassification = classifyRisk({
       paths: [...gathered.changedPaths.map(filePath => ({ repository: gathered.repository, path: filePath })), ...answer.expectedFiles],
       acceptedPaths: gathered.acceptedPaths,
       texts: [gathered.input.failure.summary, gathered.input.failure.blocker ?? '', ...gathered.input.failure.findings, answer.instructions],
       weakenedTests: gathered.weakenedTests,
+      restoresWeakenedTests: restoreTests.length > 0,
       projectPatterns: setting.sensitivePaths
     });
     const proposedFix = { instructions: safeRecoveryGuidance(answer.instructions), expectedFiles: answer.expectedFiles };
@@ -468,8 +479,11 @@ export class BlockerResolutionService {
     if (risk.tier === 1 && setting.autonomy === 'strict') return escalation(base, 'strict', { ...classified, proposedFix });
     return {
       act: 'retry',
-      resolution: { ...base, ...classified, proposedFix, priorChangedPaths: gathered.changedPaths.slice(0, 200), outcome: 'retrying' },
-      guidance: safeRecoveryGuidance(fixGuidance(diagnosis, proposedFix, check.verified))
+      resolution: {
+        ...base, ...classified, proposedFix, priorChangedPaths: gathered.changedPaths.slice(0, 200), outcome: 'retrying',
+        ...(restoreTests.length ? { restoreTests: restoreTests.map(item => item.path) } : {})
+      },
+      guidance: safeRecoveryGuidance(fixGuidance(diagnosis, proposedFix, check.verified, restoreTests))
     };
   }
 

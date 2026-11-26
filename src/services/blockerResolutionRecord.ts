@@ -22,7 +22,8 @@ export type ResolutionOutcome =
   | 'resolving' | 'retrying' | 'retry_accepted' | 'retry_failed' | 'prerequisite_added' | 'escalated' | 'interrupted' | 'superseded';
 
 /**
- * `out_of_bounds`: the Orchestrator's retry changed files it was not cleared for (a sensitive area,
+ * `out_of_bounds`: the Orchestrator's retry went beyond what it was cleared for (a sensitive area,
+ * tests it was to put back that are not back word for word,
  * or beyond its expected files), so acceptance held the work for the person.
  * For missing work (prerequisiteTasks.ts): `too_large` over the task or dependency limits,
  * `fit_conflict` the work conflicts with the product, `plan_check` the amended plan failed the run's
@@ -82,6 +83,11 @@ export interface ResolutionRecord {
    * only files its retry may change before acceptance holds the work for the person.
    */
   priorChangedPaths?: string[];
+  /**
+   * Test files the stopped task weakened, which the fix must put back: acceptance holds its retry
+   * for the person unless every test they had at the task's start is back word for word.
+   */
+  restoreTests?: string[];
   reasons?: string[];
   plannerAgentId?: string;
   appliedBy?: string;
@@ -138,12 +144,19 @@ export function unapprovedOrchestratorTask(episodes: readonly OrchestrationRecov
 }
 
 /** The guidance a specialist receives for an Orchestrator fix, within the guidance limit. */
-export function fixGuidance(diagnosis: string | undefined, fix: ProposedFix, citations: readonly VerifiedCitation[] = []): string {
+export function fixGuidance(
+  diagnosis: string | undefined,
+  fix: ProposedFix,
+  citations: readonly VerifiedCitation[] = [],
+  restoreTests: ReadonlyArray<{ path: string; detail: string }> = []
+): string {
   const evidence = citations.map(citation => citation.source === 'repository'
     ? `${citation.repository}:${citation.path}` : 'the project\'s product records');
+  const restore = restoreTests.map(item => `${item.path} (${item.detail})`).join('; ');
   return [
     diagnosis ? `The Orchestrator looked into why this task stopped: ${diagnosis}` : 'The Orchestrator looked into why this task stopped.',
     `Do this: ${fix.instructions}`,
+    restore ? `Put back every test these files had when the task started, with the same title and the same code, and keep the tests you added: ${restore}.` : '',
     evidence.length ? `Evidence: ${[...new Set(evidence)].join(', ')}.` : '',
     'Keep every test, assertion and check as it is and stay within the task scope.'
   ].filter(Boolean).join('\n');

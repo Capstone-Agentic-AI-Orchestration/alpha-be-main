@@ -8,7 +8,8 @@ import { sameRepository } from '../utils/repositoryName.js';
  * 0 mechanical: the Orchestrator may fix it.
  * 1 structural: it touches work an earlier task delivered; the Orchestrator may fix it, flagged.
  * 2 sensitive: security, data, money, privacy, dependencies or licences, secrets or env, CI or
- *   build config, deployment or hosting config, or weakened tests. The person decides.
+ *   build config, deployment or hosting config, or weakened tests (tier 1 instead when the fix must
+ *   put them back word for word: restoresWeakenedTests). The person decides.
  * 3 product: what is being built. Only the Orchestrator's `needs_owner` answer reaches it, and the
  *   person decides; paths cannot tell scope apart, so this classifier never returns it.
  */
@@ -36,8 +37,15 @@ export interface RiskInput {
   acceptedPaths?: readonly RepositoryPath[];
   /** The blocker text, the failing check, findings and the proposed instructions. */
   texts?: readonly string[];
-  /** Test files the task's diff weakened (testWeakening), whatever happened before: always tier 2. */
+  /** Test files the task's diff weakened (testWeakening), whatever happened before: tier 2. */
   weakenedTests?: ReadonlyArray<RepositoryPath & { detail: string }>;
+  /**
+   * A fix whose retry acceptance holds to putting the weakened tests back word for word
+   * (testsNotKeptExactly). The weakening is then the problem being fixed, not a risk the fix adds:
+   * it is structural (tier 1), and texts that talk about removed tests are not a reason, since
+   * whatever they say, the tests must come back exactly.
+   */
+  restoresWeakenedTests?: boolean;
   /** Extra sensitive path globs a project added to the defaults. */
   projectPatterns?: readonly string[];
 }
@@ -331,11 +339,14 @@ export function classifyRisk(input: RiskInput): RiskClassification {
     reasons.push(...result.reasons);
     classifiedPaths.push(result.classified);
   }
+  const restoring = Boolean(input.restoresWeakenedTests);
   for (const weakened of input.weakenedTests ?? []) {
-    reasons.push({ tier: 2, category: 'tests_weakened', source: 'diff', repository: weakened.repository, path: weakened.path,
-      detail: `${weakened.path}: ${weakened.detail}` });
+    reasons.push({ tier: restoring ? 1 : 2, category: 'tests_weakened', source: 'diff', repository: weakened.repository, path: weakened.path,
+      detail: restoring
+        ? `${weakened.path}: ${weakened.detail}; the fix puts them back, and Alpha checks they return word for word`
+        : `${weakened.path}: ${weakened.detail}` });
   }
-  reasons.push(...textReasons(input.texts ?? []));
+  reasons.push(...textReasons(input.texts ?? []).filter(reason => !(restoring && reason.category === 'tests_weakened')));
   const tier = reasons.reduce<RiskTier>((highest, reason) => Math.max(highest, reason.tier) as RiskTier, 0);
   return { tier, reasons, classifiedPaths };
 }
