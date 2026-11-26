@@ -209,6 +209,21 @@ describe('task acceptance and targeted correction', () => {
     }));
     expect(launches).toHaveLength(2);
     expect(launches[1].taskPackage.corrections.join(' ')).toContain('replaced test cases (“handles an empty cart”)');
+    // The finding lists every test it names, for the person to retire.
+    expect(outcome.snapshot.findings).toContainEqual(expect.objectContaining({
+      evidence: expect.objectContaining({ check: 'test_weakened', testTitles: ['handles an empty cart'] })
+    }));
+
+    // The person retires that test as obsolete: the same change now passes, and the other tests stay held.
+    runWithWorkspace(workspaceId, () => (store as unknown as { appendOrchestrationEvent: (...args: unknown[]) => void }).appendOrchestrationEvent(
+      snapshot.run.id, 'tests_retired', { tests: [{ taskId: 'cart-discounts', repository: 'acme/cart', path: 'tests/cart.test.ts',
+        titles: ['handles an empty cart'], actorId: 'user-test', retiredAt: '2026-11-26T00:00:00.000Z' }] }, 'user-test'));
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(repository, 'src', 'cart.ts'), 'export const total = (items: number[], discount = 0) => items.reduce((a, b) => a + b, 0) * (1 - discount);\n');
+    const retryCommit = commit(repository, 'Discounts, again');
+    snapshot = (await orchestration.handleRunnerCompleted(completedRun(launches[1], retryCommit, ['tests/cart.test.ts', 'src/cart.ts'])))!;
+    const retried = await acceptance.evaluateAndAccept({ workspaceId, runId: snapshot.run.id, taskId: 'cart-discounts', attemptId: launches[1].attemptId, acceptedBy: 'orchestrator' });
+    expect(retried.snapshot.attempts.find(item => item.id === launches[1].attemptId)?.status).toBe('accepted');
   });
 
   describe('an Orchestrator fix is held to what it was cleared to change', () => {

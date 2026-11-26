@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isImplementationTask } from './agentRoleContracts.js';
+import { sameRepository } from '../utils/repositoryName.js';
 import type { OrchestrationRecoveryActionName, OrchestrationRecoveryCategory } from '../models/index.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 
@@ -126,6 +127,52 @@ export function isContentFreeDirection(guidance: string | undefined): boolean {
 export function specialistBlockerDirectionMessage(reason: string): string {
   const blocker = reason.trim().slice(SPECIALIST_BLOCKER_PREFIX.length).trim();
   return `The specialist needs information it does not have: ${blocker} Sending the same task again will stop at the same point. Reply with the missing detail, or stop this build and ask again so the Orchestrator plans with it in mind.`;
+}
+
+/** The acceptance checks that name tests a task removed, skipped or replaced (taskAcceptanceService). */
+const TEST_GUARD_CHECKS: ReadonlySet<string> = new Set(['test_weakened', 'accepted_artifact_weakened']);
+
+/** The tests a person retired in this build in one file of one repository: the guard leaves them out. */
+export function retiredTestTitles(snapshot: OrchestrationSnapshot, repository: string, filePath: string): string[] {
+  return (snapshot.retiredTests ?? [])
+    .filter(item => item.path === filePath && sameRepository(item.repository, repository))
+    .flatMap(item => item.titles);
+}
+
+/**
+ * The titles a guard sentence names (`… replaced test cases (“a”, “b”) in path …`), for findings
+ * saved before acceptance recorded them as a list. Undefined when the sentence shortened the list.
+ */
+function titlesFromGuardSentence(sentence: string, filePath: string): string[] | undefined {
+  const head = sentence.split(` in ${filePath}`)[0] ?? '';
+  const list = /\(([^()]*)\)\s*$/.exec(head)?.[1];
+  if (!list || list.includes('…')) return undefined;
+  const titles = [...list.matchAll(/“([^”]*)”/g)].map(match => match[1]);
+  return titles.length ? titles : undefined;
+}
+
+/**
+ * The tests the latest stop of this task is about, per file, which the person may retire: the
+ * open test-guard findings of its latest failed attempt that name tests. Empty when that stop was
+ * not the test guard, or the guard named no tests (removed assertions, a skipped suite).
+ */
+export function retirableTests(snapshot: OrchestrationSnapshot, taskId: string): Array<{ path: string; titles: string[] }> {
+  const latest = [...snapshot.attempts].reverse().find(attempt => attempt.taskId === taskId &&
+    ['failed', 'rejected', 'recovery_required'].includes(attempt.status));
+  if (!latest?.failureReason || !latest.resultCommit) return [];
+  const byPath = new Map<string, string[]>();
+  for (const finding of snapshot.findings) {
+    const evidence = finding.evidence;
+    if (finding.taskId !== taskId || finding.status !== 'open' || !TEST_GUARD_CHECKS.has(String(evidence.check)) ||
+        evidence.instruction !== latest.failureReason) continue;
+    const filePath = typeof evidence.changedPath === 'string' ? evidence.changedPath : finding.path;
+    if (!filePath) continue;
+    const listed = Array.isArray(evidence.testTitles) ? evidence.testTitles.filter((item): item is string => typeof item === 'string') : undefined;
+    const titles = listed ?? titlesFromGuardSentence(latest.failureReason, filePath) ?? [];
+    // One entry per test, repeats kept: two tests with one title are two tests to retire.
+    if (titles.length && !byPath.has(filePath)) byPath.set(filePath, titles);
+  }
+  return [...byPath].map(([path, titles]) => ({ path, titles: titles.slice(0, 50) }));
 }
 
 export function workAttemptCount(snapshot: OrchestrationSnapshot, taskId: string): number {
@@ -279,6 +326,13 @@ export function recoveryAvailableActions(input: {
   if (proposedFixReady && canAct && task && ['failed', 'blocked'].includes(task.status)) {
     if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('apply_proposed_fix');
     else actionReasons.apply_proposed_fix = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
+  }
+  // The test guard stopped the task over named tests: the person, and only the person, may decide
+  // they are obsolete. The same specialist then retries with them left out of the guard.
+  if (canAct && task && snapshot.run.status === 'blocked' && ['failed', 'blocked'].includes(task.status) &&
+      retirableTests(snapshot, task.id).length) {
+    if (attempts < MAX_REPAIR_ATTEMPTS_PER_EPISODE) availableActions.push('retire_tests');
+    else actionReasons.retire_tests = 'This build has used its four work attempts for this recovery. Review saved work on this task to inspect a bounded recovery restart. Overall budgets still apply.';
   }
   if (canAct && snapshot.run.status === 'recovery_required' && !snapshot.run.currentTaskId) {
     availableActions.push('resume_checkpoint');

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTestFile, testFileWeakening, testStrength, testWeakening, testsNotKeptExactly } from './testWeakening.js';
+import { isTestFile, testFileWeakening, testFileWeakeningDetail, testStrength, testWeakening, testsNotKeptExactly } from './testWeakening.js';
 
 const accepted = [
   'import { accounts } from "../src/accounts";',
@@ -77,6 +77,33 @@ describe('test weakening', () => {
     expect(testsNotKeptExactly(accepted, loosened)).toEqual(['stores accounts']);
     expect(testsNotKeptExactly(accepted, accepted.replace('"stores accounts"', '"stores the accounts"'))).toEqual(['stores accounts']);
     expect(() => testsNotKeptExactly(accepted, 'it("broken", () => {')).toThrow();
+  });
+
+  it('leaves the tests a person retired out of the guard, and holds every other test as before', () => {
+    const removed = accepted.replace('  it("stores accounts", () => { expect(accounts.size).toBe(0); });\n', '');
+    expect(testWeakening(accepted, removed)).toBe('removed test cases (“stores accounts”)');
+    // Removed, renamed, skipped or rewritten: once retired, it is the person's decision.
+    expect(testWeakening(accepted, removed, 'test.ts', ['stores accounts'])).toBeUndefined();
+    expect(testWeakening(accepted, accepted.replace('"stores accounts"', '"stores the accounts"').replace('toBe(0)', 'toBe(1)'), 'test.ts', ['stores accounts'])).toBeUndefined();
+    expect(testWeakening(accepted, accepted.replace('it("stores', 'it.skip("stores'), 'test.ts', ['stores accounts'])).toBeUndefined();
+    // Retiring one test does not cover another, or the assertions of a test that stays.
+    expect(testWeakening(accepted, removed.replace('test.each', 'test.skip.each'), 'test.ts', ['stores accounts'])).toBe('skipped or disabled tests (“finds %s”)');
+    expect(testWeakening(accepted, accepted.replace('expect(value).toBeGreaterThan(0);', ''), 'test.ts', ['stores accounts'])).toBe('removed assertions');
+    // One retired entry covers one of two tests with the same title.
+    const twins = 'it("x", () => { expect(1).toBe(1); });\nit("x", () => { expect(2).toBe(2); });';
+    expect(testWeakening(twins, '', 'test.ts', ['x'])).toBe('removed test cases (“x”)');
+    expect(testWeakening(twins, '', 'test.ts', ['x', 'x'])).toBeUndefined();
+  });
+
+  it('names every test it flags, for the person to retire, and lets a file go once all its tests are retired', () => {
+    const many = ['a', 'b', 'c', 'd'].map(name => `it("${name}", () => { expect(1).toBe(1); });`).join('\n');
+    expect(testFileWeakeningDetail('tests/many.test.ts', many, 'it("a", () => { expect(1).toBe(1); });'))
+      .toEqual({ reason: 'removed test cases (“b”, “c”, “d”)', titles: ['b', 'c', 'd'] });
+    expect(testFileWeakeningDetail('tests/many.test.ts', many, undefined)).toEqual({ reason: 'deleted a test file', titles: ['a', 'b', 'c', 'd'] });
+    expect(testFileWeakening('tests/many.test.ts', many, undefined, ['a', 'b', 'c'])).toBe('deleted a test file');
+    expect(testFileWeakening('tests/many.test.ts', many, undefined, ['a', 'b', 'c', 'd'])).toBeUndefined();
+    // Nothing to retire when the weakening is not about named tests.
+    expect(testFileWeakeningDetail('tests/many.test.ts', many, many.replace('expect(1).toBe(1);', ''))).toEqual({ reason: 'removed assertions', titles: [] });
   });
 
   it('treats a test that passes only when the code is broken as weakened', () => {

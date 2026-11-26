@@ -188,16 +188,27 @@ function fingerprint(value: unknown): string {
   return JSON.stringify(value, (key, item: unknown) => (IGNORED_KEYS.has(key) ? undefined : item));
 }
 
-/** Adds one call to the counts: an assertion, a test with its state, or a suite that does not run normally. */
-function countCall(strength: TestStrength, active: ActiveTest[], node: AstNode): void {
+/**
+ * Adds one call to the counts: an assertion, a test with its state, or a suite that does not run
+ * normally. A test whose title is still in `retired` uses up that entry and is left out with
+ * everything inside it; the return value says so, so its assertions are not counted either.
+ */
+function countCall(strength: TestStrength, active: ActiveTest[], node: AstNode, retired: string[]): boolean {
   const call = callKind(node);
-  if (!call) return;
+  if (!call) return false;
   if (call.kind === 'assertion') {
     strength.assertions += 1;
-    return;
+    return false;
+  }
+  if (call.kind === 'test') {
+    const index = retired.indexOf(title((node.arguments as unknown[])[0]));
+    if (index !== -1) {
+      retired.splice(index, 1);
+      return true;
+    }
   }
   if (call.state !== 'active') strength.inactive += 1;
-  if (call.kind === 'suite') return;
+  if (call.kind === 'suite') return false;
   const [titleArgument, ...rest] = node.arguments as unknown[];
   const testTitle = title(titleArgument);
   strength.tests.push({ title: testTitle, state: call.state });
@@ -206,6 +217,7 @@ function countCall(strength: TestStrength, active: ActiveTest[], node: AstNode):
     strength.titles.push(testTitle);
     active.push({ title: testTitle, body: fingerprint({ callee: node.callee, rest }) });
   }
+  return false;
 }
 
 /** Counts from the syntax tree. Throws when the source does not parse. */
@@ -213,7 +225,12 @@ export function testStrength(source: string, filePath = 'test.ts'): TestStrength
   return countTests(source, filePath).strength;
 }
 
-function countTests(source: string, filePath: string): { strength: TestStrength; active: ActiveTest[] } {
+/**
+ * The counts, without the tests the person retired (`retired`, one entry per test). A retired
+ * title is left out of both versions of a file, so removing, renaming, skipping or keeping that
+ * test are all the same to the guard, and every other test is held as before.
+ */
+function countTests(source: string, filePath: string, retired: readonly string[] = []): { strength: TestStrength; active: ActiveTest[] } {
   const ast = parse(source, {
     sourceType: 'unambiguous',
     allowImportExportEverywhere: true,
@@ -225,10 +242,11 @@ function countTests(source: string, filePath: string): { strength: TestStrength;
   }) as unknown as AstNode;
   const strength: TestStrength = { active: 0, inactive: 0, assertions: 0, titles: [], tests: [] };
   const active: ActiveTest[] = [];
+  const unused = retired.filter(item => item !== '<dynamic>');
   const stack: AstNode[] = [ast];
   while (stack.length) {
     const node = stack.pop()!;
-    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') countCall(strength, active, node);
+    if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression') && countCall(strength, active, node, unused)) continue;
     // Reversed, so nodes come off the stack in source order and titles read top to bottom.
     stack.push(...childNodes(node).reverse());
   }
@@ -284,19 +302,24 @@ const STATE_WEAKENING: Record<Exclude<TestState, 'active'>, string> = {
   disabled: 'skipped or disabled tests'
 };
 
-export function testWeakening(before: string, after: string, filePath = 'test.ts'): string | undefined {
-  const { strength: was, active: wasActive } = countTests(before, filePath);
-  const { strength: now, active: nowActive } = countTests(after, filePath);
+export function testWeakening(before: string, after: string, filePath = 'test.ts', retired: readonly string[] = []): string | undefined {
+  return weakeningDetail(before, after, filePath, retired)?.reason;
+}
+
+/** How `after` weakened `before`, and every test title it names (all of them, not only three). */
+function weakeningDetail(before: string, after: string, filePath: string, retired: readonly string[]): { reason: string; titles: string[] } | undefined {
+  const { strength: was, active: wasActive } = countTests(before, filePath, retired);
+  const { strength: now, active: nowActive } = countTests(after, filePath, retired);
   const missing = missingTitles(wasActive, nowActive);
   // Per title first: a test that is still there but no longer runs normally.
   for (const state of ['inverted', 'conditional', 'disabled'] as const) {
     const changed = missing.filter(item => now.tests.some(test => test.title === item && test.state === state));
-    if (changed.length) return named(STATE_WEAKENING[state], changed);
+    if (changed.length) return { reason: named(STATE_WEAKENING[state], changed), titles: changed };
   }
-  if (now.active < was.active) return named('removed test cases', missing);
-  if (now.inactive > was.inactive) return 'skipped or disabled tests';
-  if (missing.length) return named('replaced test cases', missing);
-  if (now.assertions < was.assertions) return 'removed assertions';
+  if (now.active < was.active) return { reason: named('removed test cases', missing), titles: missing };
+  if (now.inactive > was.inactive) return { reason: 'skipped or disabled tests', titles: [] };
+  if (missing.length) return { reason: named('replaced test cases', missing), titles: missing };
+  if (now.assertions < was.assertions) return { reason: 'removed assertions', titles: [] };
   return undefined;
 }
 
@@ -306,9 +329,9 @@ export function testWeakening(before: string, after: string, filePath = 'test.ts
  * but does not read them: an Orchestrator fix that restores tests is held to this. Computed titles
  * cannot be matched, so they count as not kept. Throws when either version does not parse.
  */
-export function testsNotKeptExactly(before: string, after: string, filePath = 'test.ts'): string[] {
-  const remaining = countTests(after, filePath).active.map(item => `${item.title}\n${item.body}`);
-  return countTests(before, filePath).active.filter(item => {
+export function testsNotKeptExactly(before: string, after: string, filePath = 'test.ts', retired: readonly string[] = []): string[] {
+  const remaining = countTests(after, filePath, retired).active.map(item => `${item.title}\n${item.body}`);
+  return countTests(before, filePath, retired).active.filter(item => {
     const index = item.title === '<dynamic>' ? -1 : remaining.indexOf(`${item.title}\n${item.body}`);
     if (index === -1) return true;
     remaining.splice(index, 1);
@@ -316,13 +339,24 @@ export function testsNotKeptExactly(before: string, after: string, filePath = 't
   }).map(item => item.title);
 }
 
-function isTestSource(filePath: string, content: string): boolean {
+/** Whether a file still holds tests once the retired ones are left out (a file that does not parse does). */
+function isTestSource(filePath: string, content: string, retired: readonly string[]): boolean {
   if (!JS_SOURCE.test(filePath)) return isOtherLanguageTest(filePath);
   try {
-    const strength = testStrength(content, filePath);
+    const { strength } = countTests(content, filePath, retired);
     return strength.active + strength.inactive + strength.assertions > 0;
   } catch {
     return true;
+  }
+}
+
+/** Every test title in a file, for a deleted file: the tests the person would retire with it. */
+function allTestTitles(filePath: string, content: string): string[] {
+  if (!JS_SOURCE.test(filePath)) return [];
+  try {
+    return countTests(content, filePath).strength.tests.map(test => test.title).filter(item => item !== '<dynamic>');
+  } catch {
+    return [];
   }
 }
 
@@ -330,14 +364,31 @@ function isTestSource(filePath: string, content: string): boolean {
  * How a change weakened one test file, or undefined when it did not. `before` is undefined when the
  * file is new, `after` when the change deleted it. A JavaScript or TypeScript version that does not
  * parse fails closed: Alpha cannot show the tests were kept, so it does not assume they were.
+ * `retired` are tests the person retired in this file: removing or changing them is not weakening.
  */
-export function testFileWeakening(filePath: string, before: string | undefined, after: string | undefined): string | undefined {
+export function testFileWeakening(filePath: string, before: string | undefined, after: string | undefined, retired: readonly string[] = []): string | undefined {
+  return testFileWeakeningDetail(filePath, before, after, retired)?.reason;
+}
+
+/**
+ * testFileWeakening with the titles of the tests it names, in full: what the person may retire.
+ * No titles when the weakening is not about named tests (removed assertions, a skipped suite, a
+ * file that does not parse), which retiring tests cannot answer.
+ */
+export function testFileWeakeningDetail(
+  filePath: string,
+  before: string | undefined,
+  after: string | undefined,
+  retired: readonly string[] = []
+): { reason: string; titles: string[] } | undefined {
   if (before === undefined || !isTestFile(filePath)) return undefined;
-  if (after === undefined) return isTestSource(filePath, before) ? 'deleted a test file' : undefined;
+  if (after === undefined) {
+    return isTestSource(filePath, before, retired) ? { reason: 'deleted a test file', titles: allTestTitles(filePath, before) } : undefined;
+  }
   if (!JS_SOURCE.test(filePath)) return undefined;
   try {
-    return testWeakening(before, after, filePath);
+    return weakeningDetail(before, after, filePath, retired);
   } catch {
-    return 'changed a test file Alpha could not parse, so it could not confirm the tests were kept';
+    return { reason: 'changed a test file Alpha could not parse, so it could not confirm the tests were kept', titles: [] };
   }
 }

@@ -16,7 +16,7 @@ import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTa
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
-import { isTestFile, testFileWeakening, testsNotKeptExactly } from './testWeakening.js';
+import { isTestFile, testFileWeakeningDetail, testsNotKeptExactly } from './testWeakening.js';
 import { classifyRisk } from './riskTier.js';
 import { ORCHESTRATOR_FIX_REVIEW_CHECK, unapprovedOrchestratorFix, unapprovedOrchestratorTask } from './blockerResolutionRecord.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
@@ -30,6 +30,7 @@ import {
   REPORT_FORMAT_CHECKS,
   TOOL_BLOCKER_PREFIX,
   reportFormatCorrectionCount,
+  retiredTestTitles,
   safeRecoverySummary,
   safeRecoveryGuidance,
   workAttemptCount
@@ -711,29 +712,32 @@ export class TaskAcceptanceService {
         acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
       }, modifiedAcceptedPath);
     }
+    const repository = task.repository ?? snapshot.run.repository;
     // Every route that may change another task's accepted file (building on it, a later milestone, a
     // review correction) may update it, never delete it or weaken its tests: fail closed here rather
     // than trusting the reviewer to notice. A change here already passed the ownership guard above.
     for (const filePath of changedPaths) {
       const owner = acceptedPathOwners.get(filePath);
       if (!owner || owner.taskId === task.id || restoredAcceptedPaths.has(filePath)) continue;
-      const weakened = await this.acceptedFileWeakening(worktreePath, filePath, owner.commit, attempt.resultCommit);
+      const weakened = await this.acceptedFileWeakening(worktreePath, filePath, owner.commit, attempt.resultCommit,
+        retiredTestTitles(snapshot, repository, filePath));
       if (weakened) {
-        return fail(`This task ${weakened} in ${filePath}, which accepted task ${owner.taskId} delivered. Work that builds on ${owner.taskId} may update its files but not delete them or remove their tests or assertions. Restore what was removed and keep the update.`, {
+        return fail(`This task ${weakened.reason} in ${filePath}, which accepted task ${owner.taskId} delivered. Work that builds on ${owner.taskId} may update its files but not delete them or remove their tests or assertions. Restore what was removed and keep the update.`, {
           check: 'accepted_artifact_weakened', changedPath: filePath,
-          acceptedTaskId: owner.taskId, acceptedCommit: owner.commit
+          acceptedTaskId: owner.taskId, acceptedCommit: owner.commit, testTitles: weakened.titles
         }, filePath);
       }
     }
     // Every task's own diff, not only changes to accepted work: tests that existed before the task
-    // keep their cases, titles and assertions.
+    // keep their cases, titles and assertions, except tests the person retired as obsolete.
     for (const filePath of changedPaths) {
       const owner = acceptedPathOwners.get(filePath);
       if (owner && owner.taskId !== task.id && !restoredAcceptedPaths.has(filePath)) continue;
-      const weakened = await this.ownTestWeakening(worktreePath, filePath, diffStartingCommit, attempt.resultCommit);
+      const weakened = await this.ownTestWeakening(worktreePath, filePath, diffStartingCommit, attempt.resultCommit,
+        retiredTestTitles(snapshot, repository, filePath));
       if (weakened) {
-        return fail(`This task ${weakened} in ${filePath}. A task may add and update tests but not delete, skip or replace them or remove assertions. Restore what was removed and keep the update.`, {
-          check: 'test_weakened', changedPath: filePath, baselineCommit: diffStartingCommit
+        return fail(`This task ${weakened.reason} in ${filePath}. A task may add and update tests but not delete, skip or replace them or remove assertions. Restore what was removed and keep the update.`, {
+          check: 'test_weakened', changedPath: filePath, baselineCommit: diffStartingCommit, testTitles: weakened.titles
         }, filePath);
       }
     }
@@ -806,7 +810,7 @@ export class TaskAcceptanceService {
       try {
         if (after === undefined) titles = ['(the file was deleted)'];
         else if (before === null || after === null) titles = ['(the file is too large to compare)'];
-        else titles = testsNotKeptExactly(before, after, filePath);
+        else titles = testsNotKeptExactly(before, after, filePath, retiredTestTitles(snapshot, task.repository ?? snapshot.run.repository, filePath));
       } catch {
         titles = ['(could not parse the file)'];
       }
@@ -924,27 +928,34 @@ export class TaskAcceptanceService {
    * file) removed, skipped or replaced tests or removed assertions (testFileWeakening, parsed). A file
    * too large to read or that does not parse is treated as weakened (fail closed).
    */
-  private async acceptedFileWeakening(worktreePath: string, filePath: string, acceptedCommit: string, resultCommit: string): Promise<string | undefined> {
+  private async acceptedFileWeakening(
+    worktreePath: string, filePath: string, acceptedCommit: string, resultCommit: string, retired: readonly string[]
+  ): Promise<{ reason: string; titles: string[] } | undefined> {
     const after = await this.readForWeakening(worktreePath, filePath, resultCommit);
-    if (after === undefined) return 'deleted a file';
+    if (after === undefined && !isTestFile(filePath)) return { reason: 'deleted a file', titles: [] };
     if (!isTestFile(filePath)) return undefined;
     const before = await this.readForWeakening(worktreePath, filePath, acceptedCommit);
-    if (before === null || after === null) return 'changed a test file too large to compare';
-    return testFileWeakening(filePath, before, after);
+    if (before === undefined) return after === undefined ? { reason: 'deleted a file', titles: [] } : undefined;
+    if (before === null || after === null) return { reason: 'changed a test file too large to compare', titles: [] };
+    // A deleted test file whose every test the person retired is no longer held to them.
+    return testFileWeakeningDetail(filePath, before, after, retired);
   }
 
   /**
    * How this task's own diff weakened a test file that existed before it started, or undefined. The
    * rule for accepted files, applied to every test the task found in place: whatever happened
-   * before, deleting, skipping or replacing tests or removing assertions does not pass.
+   * before, deleting, skipping or replacing tests or removing assertions does not pass. Tests the
+   * person retired (`retired`) are left out.
    */
-  private async ownTestWeakening(worktreePath: string, filePath: string, baselineCommit: string, resultCommit: string): Promise<string | undefined> {
+  private async ownTestWeakening(
+    worktreePath: string, filePath: string, baselineCommit: string, resultCommit: string, retired: readonly string[]
+  ): Promise<{ reason: string; titles: string[] } | undefined> {
     if (!isTestFile(filePath)) return undefined;
     const before = await this.readForWeakening(worktreePath, filePath, baselineCommit);
     if (before === undefined) return undefined;
     const after = await this.readForWeakening(worktreePath, filePath, resultCommit);
-    if (before === null || after === null) return 'changed a test file too large to compare';
-    return testFileWeakening(filePath, before, after);
+    if (before === null || after === null) return { reason: 'changed a test file too large to compare', titles: [] };
+    return testFileWeakeningDetail(filePath, before, after, retired);
   }
 
   /**

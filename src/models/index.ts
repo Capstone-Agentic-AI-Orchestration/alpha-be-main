@@ -820,6 +820,8 @@ export type OrchestrationRecoveryActionName =
   | 'provide_guidance'
   /** Apply the Orchestrator's verified fix that a sensitive area held back for the person. */
   | 'apply_proposed_fix'
+  /** Retire the tests the guard asked for back, as obsolete, and retry the task without them. */
+  | 'retire_tests'
   | 'recheck_prerequisite'
   | 'plan_final_validation_corrections'
   | 'resume_checkpoint'
@@ -875,6 +877,8 @@ export interface OrchestrationRecoveryProjection {
   updatedAt: string;
   availableActions: OrchestrationRecoveryActionName[];
   actionReasons: Partial<Record<OrchestrationRecoveryActionName, string>>;
+  /** The tests the task stopped over, per file, which `retire_tests` retires (when it is offered). */
+  retirableTests?: Array<{ path: string; titles: string[] }>;
   /** True while the Orchestrator is resolving this on its own ("Alpha is resolving this"). */
   resolving?: boolean;
   /** What the Orchestrator found, when it looked into this recovery. Team only, like the whole projection. */
