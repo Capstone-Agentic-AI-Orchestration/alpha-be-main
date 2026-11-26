@@ -129,9 +129,29 @@ export function describePlanDecisions(decisions: ProjectBuildStartResult['decisi
   return [
     ...(conflicts?.length ? ['**Where this plan goes against the product**',
       ...conflicts.map(item => '- **' + item.subject + ':** ' + item.reason + (item.surfacedIn ? ' (see: ' + item.surfacedIn + ')' : ''))] : []),
-    ...(decisions?.length ? ['**What the Orchestrator decided**',
+    ...(decisions?.length ? ['**Choices I made**',
       ...decisions.map(item => '- **' + item.about + ':** ' + item.decision + (item.toChange ? ' _' + item.toChange + '_' : ''))] : []),
-    'Tell Alpha in your own words to change any of these before you start the plan.'].join('\n');
+    'Tell me if you would like any of these different.'].join('\n');
+}
+
+/** How Alpha opens its reply about a build it planned or is running, by status. */
+const ORCHESTRATION_OPENINGS: Partial<Record<ProjectBuildStartResult['status'], string>> = {
+  completed: 'The build is done.',
+  awaiting_review: 'The build is finished and ready for your review.',
+  blocked: 'The build is paused.'
+};
+
+/**
+ * Alpha's reply about a build it planned or is running, in its own words: the plan and the question,
+ * or where the build is. Branches, repositories and plan versions stay in the build report.
+ */
+export function orchestrationBuildReply(build: Pick<ProjectBuildStartResult, 'status' | 'orchestrationTaskCount' | 'decisions' | 'fitConflicts' | 'reason'>): string {
+  const count = build.orchestrationTaskCount;
+  const steps = count ? `${count} ${count === 1 ? 'step' : 'steps'}` : 'a few steps';
+  const opening = build.status === 'plan_ready'
+    ? `**Here's the plan:** ${steps}. No code has changed yet. Want me to start? You can also tell me what to change first.`
+    : ORCHESTRATION_OPENINGS[build.status] ?? `The agents are working on it: ${steps}. You can follow along below.`;
+  return [opening, describePlanDecisions(build.decisions, build.fitConflicts), build.reason].filter(Boolean).join('\n\n');
 }
 
 export const MAX_CHAT_SKILLS = 5;
@@ -1122,17 +1142,16 @@ export class ChatService extends EventEmitter {
       ? [
           '**Build not started for any repository.**',
           ...builds.map(result => `**${result.repository ?? 'Repository'}:** ${result.reason ?? 'The repository build could not be prepared.'}`),
-          'No specialist was started, so no files were changed in this run. Open the Build review tab to review each reason, then retry when the required correction is clear.'
+          'Nothing was started, so no files changed. Fix what each reason says, then ask again.'
         ].join('\n\n')
       : builds.length > 1
       ? [
           `**Build requested for ${builds.length} repositories**`,
           ...builds.map(result => [
             `**${result.repository ?? 'Repository'} · ${statusText(result)}**`,
-            result.reason,
-            result.branchName ? `Working branch: ${result.branchName}` : undefined
+            result.reason
           ].filter(Boolean).join(' · ')),
-          'Use the Build review tab beside this conversation to inspect the saved builds, agents, changes and checks.'
+          'Their progress follows here.'
         ].join('\n\n')
       : build.decision
         ? [
@@ -1144,25 +1163,11 @@ export class ChatService extends EventEmitter {
       : build.status === 'blocked'
         ? `**Build not started.** ${build.reason ?? 'The project needs setup before Alpha can write to its repository.'}`
         : build.orchestrationRunId
-          ? [
-              `**${statusText(build)}**`,
-              build.repositories && build.repositories.length > 1 ? `**One shared build across:** ${build.repositories.join(', ')}` : undefined,
-              build.status === 'plan_ready'
-                ? `The Orchestrator prepared ${build.orchestrationTaskCount ?? 'several'} planned task(s) and assigned a specialist to each. No one has started changing code yet. Review each assignment and why the specialist was chosen in the Build review tab, then tell Alpha in the main chat whether to start the plan. You can use your own words.`
-                : `The Orchestrator is tracking ${build.orchestrationTaskCount ?? 'several'} task(s).${build.orchestrationCurrentTask ? `\n\nCurrent task: **${build.orchestrationCurrentTask.title}** (owner: ${build.orchestrationCurrentTask.ownerAgentId}).` : ''}`,
-              describePlanDecisions(build.decisions, build.fitConflicts),
-              build.reason,
-              build.repository ? `**Repository:** ${build.repository}` : undefined,
-              build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-              build.status === 'plan_ready' ? undefined : 'The next specialist starts only after the current result passes its checks. Open the Build review tab to review task evidence and findings.'
-            ].filter(Boolean).join('\n\n')
+          ? orchestrationBuildReply(build)
         : [
             `**${statusText(build)}**`,
             build.reason,
-            build.projectName ? `**Project:** ${build.projectName}` : undefined,
-            build.repository ? `**Repository:** ${build.repository}` : undefined,
-            build.branchName ? `**Working branch:** ${build.branchName}` : undefined,
-            'Open the Build review tab to follow each agent, handoff, changed file, and verification result.'
+            'You can follow it on its task on the board.'
           ].filter(Boolean).join('\n\n');
     // Only one question is open at a time: a new one, or a new build, retires the earlier ones.
     this.retireOpenDecisions(threadId);

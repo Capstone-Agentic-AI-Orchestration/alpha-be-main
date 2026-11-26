@@ -99,7 +99,8 @@ describe('orchestration recovery chat milestones', () => {
     expect(store.saveOrchestrationRecoveryEpisode).toHaveBeenCalledTimes(1);
   });
 
-  it('posts the exact report error as retries start and escalates after the bounded corrections', () => {
+  // Alpha's own report corrections stay out of the chat; the person hears once it needs them.
+  it('keeps report corrections out of the chat and posts the exact report error when it needs the person', () => {
     let episode: OrchestrationRecoveryEpisode | undefined;
     const milestones: Array<{ key: string; content: string } | undefined> = [];
     const store = {
@@ -126,21 +127,17 @@ describe('orchestration recovery chat milestones', () => {
 
     const first = recovery.reconcileSnapshot(snapshot({ status: 'executing', taskStatus: 'running', correctionAttempts: 1 }))!;
     expect(first.phase).toBe('repairing');
-    expect(milestones.at(-1)?.key).toBe('report_correction_1');
-    expect(milestones.at(-1)?.content).toContain(reportError);
-    expect(milestones.at(-1)?.content).toContain('correction 1 of 2');
+    expect(milestones.at(-1)).toBeUndefined();
 
     const second = recovery.reconcileSnapshot(snapshot({ status: 'executing', taskStatus: 'running', correctionAttempts: 2 }))!;
     expect(second.phase).toBe('repairing');
-    expect(milestones.at(-1)?.key).toBe('report_correction_2');
-    expect(milestones.at(-1)?.content).toContain(reportError);
-    expect(milestones.at(-1)?.content).toContain('correction 2 of 2');
+    expect(milestones.filter(Boolean)).toEqual([]);
 
     const escalated = recovery.reconcileSnapshot(snapshot({ status: 'blocked', taskStatus: 'failed', correctionAttempts: 2 }))!;
     expect(escalated.phase).toBe('waiting_for_user');
     expect(milestones.at(-1)?.key).toContain('developer_action_needed');
     expect(milestones.at(-1)?.content).toContain(reportError);
-    expect(milestones.at(-1)?.content).toContain('one more bounded, read-only correction');
+    expect(milestones.at(-1)?.content).toContain('ask it once more for the summary');
   });
 
   it('explains the final failed implementation attempt after both automatic repairs', () => {
@@ -203,13 +200,13 @@ describe('orchestration recovery chat milestones', () => {
 
     const repairing = recovery.reconcileSnapshot(makeSnapshot(1, true))!;
     expect(repairing.phase).toBe('repairing');
-    expect(milestones.at(-1)?.content).toContain('TypeScript failed at src/repair-one.ts');
+    expect(milestones.at(-1)).toBeUndefined();
 
     const escalated = recovery.reconcileSnapshot(makeSnapshot(3, false))!;
     expect(escalated.phase).toBe('waiting_for_user');
     expect(milestones.at(-1)?.key).toContain('developer_action_needed');
     expect(milestones.at(-1)?.content).toContain('TypeScript failed at src/repair-three.ts');
-    expect(milestones.at(-1)?.content).toContain('original attempt and both automatic repairs');
+    expect(milestones.at(-1)?.content).toContain('after the first try and two fixes');
 
     const firstEscalationKey = milestones.at(-1)?.key;
     const retryFailure = recovery.reconcileSnapshot(makeSnapshot(4, false, 5))!;

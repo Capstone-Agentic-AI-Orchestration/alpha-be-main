@@ -194,7 +194,7 @@ function personActionMilestone(input: {
   if (input.action === 'provide_guidance' || input.guidance) {
     return { key: 'guidance_received', content: `Direction received for ${subject}: ${safeRecoverySummary(input.guidance ?? '')} Alpha will keep the approved task and repository boundaries.` };
   }
-  return milestoneFor('repairing', input.summary, input.taskTitle);
+  return { key: 'repair_started', content: `Trying ${subject} again. I will check the result before moving on.` };
 }
 
 function publicProjection(
@@ -258,38 +258,29 @@ function milestoneFor(
   repeatedFailure = false
 ): { key: string; content: string } | undefined {
   const subject = taskTitle ? `“${taskTitle}”` : 'the final build checks';
-  if (phase === 'repairing') {
-    const reportCorrection = reportCorrectionsUsed !== undefined
-      ? reportCorrectionsUsed <= MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS
-        ? ` Alpha sent the same specialist read-only report correction ${reportCorrectionsUsed} of ${MAX_AUTOMATIC_REPORT_FORMAT_CORRECTIONS}.`
-        : ` Alpha sent the same specialist your authorized read-only report correction ${reportCorrectionsUsed} of ${MAX_REPORT_FORMAT_CORRECTIONS}.`
-      : '';
-    return {
-      key: reportCorrectionsUsed !== undefined ? `report_correction_${reportCorrectionsUsed}` : 'repair_started',
-      content: `Alpha started a bounded recovery step for ${subject}.${reportCorrection} The issue detected was: ${summary} It will check the new result before handing work to another specialist.`
-    };
-  }
-  if (phase === 'ready_to_continue') return { key: 'failure_captured', content: `The build stopped at ${subject}. Alpha saved the work and failure details. ${summary}` };
+  // Alpha's own retries, and their passing, are housekeeping: the chat hears about a problem only
+  // when it needs the person. The recovery history still records every step.
+  if (phase === 'repairing' || phase === 'resolved') return undefined;
+  if (phase === 'ready_to_continue') return { key: 'failure_captured', content: `The build stopped at ${subject}, and the work so far is saved. ${summary}` };
   if (phase === 'waiting_for_user') {
     const nextStep = recoveryCategory === 'project_code' && repeatedFailure
-      ? 'The same failure returned after a focused repair, so Alpha stopped early. Review the saved changes and direct the next step in this chat.'
+      ? 'The same problem came back after a fix, so I stopped. Look at the saved changes and tell me what to do next.'
       : recoveryCategory === 'project_code' && (workAttemptsUsed ?? 0) >= AUTO_REPAIR_ATTEMPT_LIMIT
-        ? 'Alpha used the original attempt and both automatic repairs. It preserved the latest work and will wait for your direction before another attempt.'
+        ? 'It still fails after the first try and two fixes. The latest work is saved; tell me how you would like to continue.'
       : reportCorrectionsUsed === undefined
-      ? 'Alpha preserved the current work and will not start another repair without your direction.'
+      ? 'The work is saved. I will not try again until you tell me how to continue.'
       : reportCorrectionAvailable
-        ? 'Alpha preserved the code work. Review this exact report error and choose whether to send one more bounded, read-only correction from this chat.'
-        : 'Alpha preserved the code work. The bounded report-correction limit is exhausted; review the saved response and decide whether to keep the build paused or start a fresh request.';
+        ? 'The code work is saved, but the agent\'s summary of it did not come through. I can ask it once more for the summary, or you can tell me what to do.'
+        : 'The code work is saved, but the agent\'s summary still did not come through. You can keep the build paused, or start a fresh request.';
     const planningNote = finalValidationCorrectionError
-      ? ` Alpha could not safely assign an automatic correction: ${safeRecoverySummary(finalValidationCorrectionError)}.`
+      ? ` I could not safely pick an automatic fix: ${safeRecoverySummary(finalValidationCorrectionError)}.`
       : '';
     return {
       key: 'developer_action_needed',
-      content: `The build is waiting for your decision at ${subject}. The issue is: ${summary} ${nextStep}${planningNote}`
+      content: `The build needs you at ${subject}. ${summary} ${nextStep}${planningNote}`
     };
   }
-  if (phase === 'resolved') return { key: 'recovery_resolved', content: `The recovery at ${subject} passed its acceptance checks. The build has continued from the saved checkpoint.` };
-  if (phase === 'cancelled') return { key: 'build_cancelled', content: 'The build was stopped at your request. Alpha kept the saved work and recovery history.' };
+  if (phase === 'cancelled') return { key: 'build_cancelled', content: 'You stopped the build. The work so far is saved.' };
   return undefined;
 }
 

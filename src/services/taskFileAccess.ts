@@ -19,7 +19,9 @@ const scopeSchema = z.object({
   taskId: z.string().min(1), repository: z.string().min(1), kind: orchestrationTaskKindSchema,
   includePaths: z.array(z.string()), excludePaths: z.array(z.string()),
   requiredChecks: z.array(orchestrationRequiredCheckSchema), reportOnly: z.boolean().default(false),
-  dependencyAudit: dependencyAuditSpecSchema.optional(), role: z.string().optional(), auditDirectory: z.string().optional()
+  dependencyAudit: dependencyAuditSpecSchema.optional(), role: z.string().optional(), auditDirectory: z.string().optional(),
+  // Where project_submit_work saves the checked report, and the report version it expects.
+  reportFile: z.string().optional(), reportSchemaVersion: z.number().int().optional()
 }).strict();
 export type TaskFileScope = z.infer<typeof scopeSchema>;
 export function parseTaskFileScope(raw: string | undefined): TaskFileScope | undefined {

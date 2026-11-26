@@ -15,6 +15,7 @@ import {
   type OrchestrationTaskKind
 } from './orchestrationContract.js';
 import { parseAgentReport } from './orchestrationAgentReport.js';
+import { readSubmittedReport } from './taskReportFile.js';
 export { parseAgentReport } from './orchestrationAgentReport.js';
 import { initialTaskRecords, selectNextReadyTask, allRequiredTasksAccepted, type OrchestrationPublicationRecord, type OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { SQLiteService } from './sqliteService.js';
@@ -1180,7 +1181,9 @@ export class OrchestrationService {
         return this.failActiveAttempt(snapshot, task.id, attempt.id,
           'The runner reported completion without a verifiable checkpoint commit. Preserve the worktree and reconcile it before retrying.');
       }
-      const rawSummary = [...(run.activities ?? [])].reverse()
+      // The report the specialist handed in with project_submit_work, already checked; otherwise
+      // its final message, from agents that could not call the tool.
+      const rawSummary = readSubmittedReport(run.id) ?? [...(run.activities ?? [])].reverse()
         .find(activity => activity.kind === 'assistant' && !activity.isStreaming)?.message
         ?? [...(run.activities ?? [])].reverse().find(activity => activity.kind === 'summary')?.message
         ?? 'The runner completed without a structured specialist summary.';

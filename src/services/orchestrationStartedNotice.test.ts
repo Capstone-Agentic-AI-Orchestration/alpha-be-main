@@ -23,7 +23,7 @@ describe('the started-plan notice in chat', () => {
     await postStartedNotice(store, snapshot('thread-1'));
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ id: 'run-1-started-v2', threadId: 'thread-1', messageType: 'build', orchestrationRunId: 'run-1' });
-    expect(saved[0].content).toContain('**Plan v2 started.** The agents are working on 2 tasks');
+    expect(saved[0].content).toContain('Starting now. The agents are working through the 2 steps');
   });
 
   it('says nothing for a build that did not start from a conversation', async () => {

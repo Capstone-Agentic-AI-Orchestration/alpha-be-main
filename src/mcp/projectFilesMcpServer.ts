@@ -13,7 +13,8 @@ import { createInterface } from 'node:readline';
 import fs from 'node:fs';
 import { isImplementationTask } from '../services/agentRoleContracts.js';
 import { recordPlannerRead } from '../services/plannerReads.js';
-import { auditTaskDependencies, taskCanAudit, deleteTaskFile, editTaskFile, generateTaskLockfile, parseTaskFileScope, runTaskCheck, stopTaskOperations, writeTaskFile } from '../services/taskFileAccess.js';
+import { auditTaskDependencies, taskCanAudit, deleteTaskFile, editTaskFile, generateTaskLockfile, parseTaskFileScope, runTaskCheck, stopTaskOperations, writeTaskFile, type TaskFileScope } from '../services/taskFileAccess.js';
+import { normalizeAndValidateAgentReport } from '../services/orchestrationAgentReport.js';
 
 import {
   listFiles,
@@ -145,6 +146,38 @@ if (TASK) {
       run: args => runTaskCheck(ROOTS, TASK, args.script)
     };
   }
+}
+
+if (TASK?.reportFile) {
+  const reportFile = TASK.reportFile;
+  const task = TASK;
+  TOOLS.project_submit_work = {
+    description: 'Hand in your finished task to Alpha. Call it once at the end with report set to the task report described in your instructions. If something is missing it says what, so fix that and call it again. After it accepts, finish with one or two plain sentences about what you did.',
+    inputSchema: schema({ report: { type: 'object', description: 'The task report, with the fields shown in your task instructions.' } }, ['report']),
+    run: args => submitWork(task, reportFile, args)
+  };
+}
+
+/**
+ * A specialist handing in its work: the task report, checked as it arrives. A report Alpha cannot
+ * accept comes back as a tool error that says what to fix, so the agent fixes it in the same turn
+ * instead of a separate correction run. An accepted report is saved for the build to read.
+ */
+function submitWork(task: TaskFileScope, reportFile: string, args: Record<string, unknown>): string {
+  let report: unknown = args.report;
+  // Some models send the object as a JSON string.
+  if (typeof report === 'string') {
+    try { report = JSON.parse(report); } catch { report = undefined; }
+  }
+  if (!report || typeof report !== 'object' || Array.isArray(report)) {
+    throw new Error('report must be an object with the fields from your task instructions.');
+  }
+  const filled = { schemaVersion: task.reportSchemaVersion, taskId: task.taskId, ...(report as Record<string, unknown>) };
+  if (filled.taskId !== task.taskId) throw new Error('taskId must be ' + task.taskId + '.');
+  const checked = normalizeAndValidateAgentReport(filled, task.reportSchemaVersion);
+  if (!checked.success) throw new Error('Not accepted yet: ' + checked.error + ' Fix that and call project_submit_work again.');
+  fs.writeFileSync(reportFile, JSON.stringify(checked.report));
+  return 'Received. Alpha will check the work now. Finish with one or two plain sentences about what you did.';
 }
 
 type Id = string | number | null;
