@@ -3,7 +3,7 @@ import { sameRepository } from '../utils/repositoryName.js';
 import { manualChecklistRequirements } from './issueChecklist.js';
 import { boardCardSpec, isBuildRecord, selectBoardCards, type BoardCardSelection } from './boardCardBuild.js';
 import { isBoardThreadId } from './boardThreads.js';
-import { roleCanPlan } from './agentRoleContracts.js';
+import { roleCanOwnTask, roleCanPlan } from './agentRoleContracts.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,7 +26,7 @@ import { shareCard } from './boardShareQueue.js';
 import { resolveAgent } from './personaService.js';
 import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
-import { OrchestrationPlanner, OrchestrationPlanningError, type PlannerAgentIdentity, type PlanningDecision } from './orchestrationPlanner.js';
+import { OrchestrationPlanner, OrchestrationPlanningError, type AgreedChecklistStep, type PlannerAgentIdentity, type PlanningDecision } from './orchestrationPlanner.js';
 import { composeProjectContext } from './projectPlaybook.js';
 import { MAX_PROJECT_CONTEXT_CHARS, orchestrationRequiredCheckSchema, type OrchestrationPlan } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
@@ -86,6 +86,8 @@ interface StartProjectBuildInput {
   boardCards?: readonly string[];
   /** A plan set aside from the chat, restored exactly as it was instead of planned again. The build still validates it. */
   presetPlan?: OrchestrationPlan;
+  /** The checklist Alpha agreed with the person in the chat; the plan follows it (see agreedChecklistFor). */
+  agreedChecklist?: readonly AgreedChecklistStep[];
 }
 
 /**
@@ -333,6 +335,14 @@ function orchestrationStartResult(snapshot: OrchestrationSnapshot, project: Proj
   };
 }
 
+/**
+ * The steps of Alpha's chat checklist the plan can keep: each needs a specialist eligible for this
+ * build whose role may own that kind of task. A step it cannot keep is left to the planner.
+ */
+export function agreedChecklistFor(steps: readonly AgreedChecklistStep[], agents: ReadonlyArray<{ id: string; role: string }>): AgreedChecklistStep[] {
+  return steps.filter(step => agents.some(agent => agent.id === step.agentId && roleCanOwnTask(step.kind, agent.role)));
+}
+
 async function startOrchestratedProjectBuild(input: {
   deliveryRepair?: StartProjectBuildInput['deliveryRepair'];
   context: WorkspaceContext;
@@ -350,6 +360,7 @@ async function startOrchestratedProjectBuild(input: {
   boardCards?: readonly string[];
   /** A plan set aside from the chat, restored exactly as it was instead of planned again. The build still validates it. */
   presetPlan?: OrchestrationPlan;
+  agreedChecklist?: readonly AgreedChecklistStep[];
 }): Promise<ProjectBuildStartResult> {
   const { context, project, members, buildSteps } = input;
   const fromBoard = isBoardThreadId(input.threadId);
@@ -639,6 +650,8 @@ async function startOrchestratedProjectBuild(input: {
         ...(namedRepository(repositories, item.repository) && mentionsRepository(cleanGoal, item.repository) ? {} : { optional: true })
       })),
       eligibleAgents: availableAgents,
+      // The project's own configured steps decide the shape of a plan when it has them.
+      agreedChecklist: orderedSteps.length ? undefined : agreedChecklistFor(input.agreedChecklist ?? [], availableAgents),
       planner: plannerIdentity,
       approvedSpec,
       buildSteps: orderedSteps.map(step => ({
@@ -883,6 +896,7 @@ async function startProjectBuildOnce(input: StartProjectBuildInput): Promise<Pro
       settledDecisions: input.settledDecisions,
       boardCards: input.boardCards,
       presetPlan: input.presetPlan,
+      agreedChecklist: input.agreedChecklist,
       deliveryRepair: input.deliveryRepair
     });
     return skippedRepositories.length ? { ...started, skippedRepositories } : started;
