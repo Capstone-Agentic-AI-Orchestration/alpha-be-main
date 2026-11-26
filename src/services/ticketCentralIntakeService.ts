@@ -113,8 +113,7 @@ export function createTicketCentralIntakeService(input: {
       try {
         const result = await input.store.accept({ organizationKey: input.organizationKey, intakeId, workspaceId,
           subject, operationId: parsed.data.operationId, ticketId: nextId(),
-          reference: `TKT-${nextId().replaceAll('-', '').toUpperCase()}`, occurredAt,
-          ...(discoverySummary === undefined ? {} : { discoverySummary }) });
+          reference: `TKT-${nextId().replaceAll('-', '').toUpperCase()}`, occurredAt, discoverySummary });
         if (result === 'not_found') throw new TicketWorkflowError(404, 'central_intake_not_found', 'This inquiry is no longer available.');
         if (result === 'already_handled') throw new TicketWorkflowError(409, 'central_intake_already_handled', 'Another PM has already handled this inquiry. Refresh the inbox.');
         if (result === 'operation_conflict') throw new TicketWorkflowError(409, 'central_intake_operation_conflict', 'This acceptance already recorded a different discovery summary. Retry with the original summary.');
