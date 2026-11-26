@@ -76,6 +76,7 @@ import {
   type OrchestrationTaskRecord,
   type OrchestrationTaskStatus,
   type OrchestrationSnapshot,
+  type RetiredTests,
   type OrchestrationAttemptRecord,
   type OrchestrationEventRecord,
   type OrchestrationOutboxDeliveryRecord,
@@ -3946,6 +3947,8 @@ export class SQLiteService {
       run,
       recoveryAuthorizations: (this.db.prepare("SELECT payload_json FROM orchestration_events WHERE workspace_id = ? AND run_id = ? AND event_type = 'recovery_restart_authorized' ORDER BY run_sequence")
         .all(workspaceId, runId) as Array<{ payload_json: string }>).map(row => JSON.parse(row.payload_json)),
+      retiredTests: (this.db.prepare("SELECT payload_json FROM orchestration_events WHERE workspace_id = ? AND run_id = ? AND event_type = 'tests_retired' ORDER BY run_sequence")
+        .all(workspaceId, runId) as Array<{ payload_json: string }>).flatMap(row => (JSON.parse(row.payload_json) as { tests?: RetiredTests[] }).tests ?? []),
       tasks: tasks.map(row => orchestrationTaskFromRow(row, plan.tasks.find(task => task.id === row.task_id))),
       attempts: attempts.map(orchestrationAttemptFromRow),
       artifacts: artifacts.map(orchestrationArtifactFromRow),
@@ -4368,6 +4371,25 @@ export class SQLiteService {
           current.attempts.some(item => ['starting', 'running', 'submitted', 'recovery_required'].includes(item.status)) ||
           (current.recoveryAuthorizations ?? []).filter(item => item.taskId === input.taskId).length >= 2) throw new Error('The recovery changed, still has active work, or reached its reviewed-restart limit.');
       this.appendOrchestrationEvent(input.runId, 'recovery_restart_authorized', input, input.actorId);
+      this.db.prepare('UPDATE orchestration_runs SET revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ?')
+        .run(new Date().toISOString(), this.workspaceId(), input.runId);
+    })();
+    return this.getOrchestrationSnapshot(input.runId)!;
+  }
+
+  /**
+   * A person retires tests the guard asked for back (obsolete for what the build is making). Saved
+   * as one `tests_retired` event with the run's revision bumped, only while the build is blocked
+   * at the revision the person saw and no attempt is running.
+   */
+  retireTests(input: { runId: string; expectedRevision: number; actorId: string; tests: RetiredTests[] }): OrchestrationSnapshot {
+    this.db.transaction(() => {
+      const current = this.getOrchestrationSnapshot(input.runId);
+      if (!current || current.run.status !== 'blocked' || current.run.revision !== input.expectedRevision ||
+          current.attempts.some(item => ['starting', 'running', 'submitted', 'recovery_required'].includes(item.status))) {
+        throw new Error('The build changed or has work running. Refresh before retiring tests.');
+      }
+      this.appendOrchestrationEvent(input.runId, 'tests_retired', { tests: input.tests }, input.actorId);
       this.db.prepare('UPDATE orchestration_runs SET revision = revision + 1, updated_at = ? WHERE workspace_id = ? AND id = ?')
         .run(new Date().toISOString(), this.workspaceId(), input.runId);
     })();

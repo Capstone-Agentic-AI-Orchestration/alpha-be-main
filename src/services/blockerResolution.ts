@@ -22,6 +22,7 @@ import {
   MAX_REPAIR_ATTEMPTS_PER_EPISODE,
   SPECIALIST_BLOCKER_PREFIX,
   isSpecialistBlocker,
+  retiredTestTitles,
   safeRecoveryGuidance,
   safeRecoverySummary,
   workAttemptCount
@@ -368,7 +369,7 @@ export class BlockerResolutionService {
         const before = await read(baseline, filePath);
         const after = await read(attempt.resultCommit, filePath);
         const detail = before === null || after === null ? 'changed a test file too large to compare'
-          : testFileWeakening(filePath, before, after);
+          : testFileWeakening(filePath, before, after, retiredTestTitles(snapshot, repository, filePath));
         if (detail) weakenedTests.push({ repository, path: filePath, detail });
       }
     }

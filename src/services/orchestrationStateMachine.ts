@@ -122,8 +122,21 @@ export interface OrchestrationFindingRecord {
   resolvedAt?: string;
 }
 
+/** Tests a person retired in one file: the guard no longer asks for them back. */
+export interface RetiredTests {
+  taskId: string;
+  attemptId?: string;
+  repository: string;
+  path: string;
+  titles: string[];
+  actorId: string;
+  retiredAt: string;
+}
+
 export interface OrchestrationSnapshot {
   recoveryAuthorizations?: Array<{ taskId: string; afterWorkAttempts: number; actorId: string; reason: string; candidateHash: string }>;
+  /** Tests a person retired in this build (`tests_retired` events): the test guard leaves them out. */
+  retiredTests?: RetiredTests[];
   run: OrchestrationRunRecord;
   tasks: OrchestrationTaskRecord[];
   attempts: OrchestrationAttemptRecord[];

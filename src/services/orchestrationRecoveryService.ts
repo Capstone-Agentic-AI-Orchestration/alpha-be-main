@@ -27,6 +27,7 @@ import {
   recoveryAvailableActions,
   recoveryErrorCode,
   reportFormatCorrectionCount,
+  retirableTests,
   safeRecoveryGuidance,
   safeRecoverySummary,
   specialistBlockerDirectionMessage,
@@ -167,11 +168,26 @@ function resolutionAfterPersonAction(episode: OrchestrationRecoveryEpisode, held
   return undefined;
 }
 
-/** The chat milestone for a person's retry: an applied fix, their direction, or a plain repair. */
+/** Retired tests in a sentence: `tests/a.spec.ts (“one”, “two”)`, file by file. */
+function retiredTestList(tests: ReadonlyArray<{ path: string; titles: string[] }>): string {
+  return tests.map(item => `${item.path} (${item.titles.map(title => `“${title}”`).join(', ')})`).join('; ');
+}
+
+/** What the specialist is told when the person retired tests: which ones, and that the rest stay. */
+function retiredTestsDirection(tests: ReadonlyArray<{ path: string; titles: string[] }>): string {
+  return `The person retired these tests as obsolete, so they may be removed or replaced: ${retiredTestList(tests)}. Keep every other test as it was when the task started, and keep the work you already saved.`;
+}
+
+/** The chat milestone for a person's retry: an applied fix, retired tests, their direction, or a plain repair. */
 function personActionMilestone(input: {
   action: OrchestrationRecoveryActionName; heldBack: boolean; guidance?: string; summary: string; taskTitle?: string;
+  retired?: ReadonlyArray<{ path: string; titles: string[] }>;
 }): { key: string; content: string } | undefined {
   const subject = input.taskTitle ? '“' + input.taskTitle + '”' : 'this build';
+  if (input.retired?.length) {
+    const count = input.retired.reduce((total, item) => total + item.titles.length, 0);
+    return { key: 'tests_retired', content: safeRecoverySummary(`You retired ${count === 1 ? 'an obsolete test' : `${count} obsolete tests`} for ${subject}: ${retiredTestList(input.retired)}. The same specialist is retrying; every other test is still held to the test guard.`) };
+  }
   if (input.heldBack) {
     return { key: 'proposed_fix_applied', content: `You applied the Orchestrator's proposed fix for ${subject}. The same specialist is retrying with it; the result goes through the same checks and review.` };
   }
@@ -222,6 +238,9 @@ function publicProjection(
     updatedAt: episode.updatedAt,
     availableActions: actionState.availableActions,
     actionReasons: actionState.actionReasons,
+    ...(task && actionState.availableActions.includes('retire_tests') ? {
+      retirableTests: retirableTests(snapshot, task.id).map(item => ({ path: safeRecoverySummary(item.path), titles: item.titles.map(safeRecoverySummary) }))
+    } : {}),
     ...(resolution?.outcome === 'resolving' ? { resolving: true } : {}),
     ...(resolution ? { orchestratorResolution: resolutionProjection(resolution) } : {})
   };
@@ -664,7 +683,11 @@ export class OrchestrationRecoveryService {
         if (heldBack?.proposedPrerequisite) {
           return await this.addHeldBackPrerequisite({ input, snapshot, episode, heldBack, actionId: created.action.id });
         }
-        const retryDirection = heldBack ? safeRecoveryGuidance(fixGuidance(heldBack.diagnosis, heldBack.proposedFix!, heldBack.citations)) : guidance;
+        // Retiring tests is the person's call on exactly the tests this stop named, read again now.
+        const retiring = input.action === 'retire_tests' && actionTask ? retirableTests(snapshot, actionTask.id) : [];
+        if (input.action === 'retire_tests' && !retiring.length) throw new Error('This stop names no tests to retire. Refresh the build.');
+        const retryDirection = heldBack ? safeRecoveryGuidance(fixGuidance(heldBack.diagnosis, heldBack.proposedFix!, heldBack.citations))
+          : retiring.length ? safeRecoveryGuidance(retiredTestsDirection(retiring)) : guidance;
         const resolutionAfterAction = resolutionAfterPersonAction(episode, heldBack, input.actorId);
         const actedEpisode = resolutionAfterAction ? withResolution(episode, resolutionAfterAction) : episode;
         const startedEpisode = this.store.saveOrchestrationRecoveryEpisode({
@@ -677,7 +700,7 @@ export class OrchestrationRecoveryService {
             resolvedAt: undefined
           },
           expectedRevision: episode.revision,
-          milestone: personActionMilestone({ action: input.action, heldBack: Boolean(heldBack), guidance, summary: episode.summary, taskTitle: actionTask?.title }),
+          milestone: personActionMilestone({ action: input.action, heldBack: Boolean(heldBack), guidance, summary: episode.summary, taskTitle: actionTask?.title, retired: retiring }),
           actorId: input.actorId
         }).episode;
         const { orchestrationService, taskAcceptanceService } = await import('./orchestrationRuntime.js');
@@ -781,12 +804,24 @@ export class OrchestrationRecoveryService {
               ? 'Repair the saved failure evidence and continue within the already approved task scope.'
               : undefined
           );
+          let expectedRunRevision = input.expectedRunRevision;
+          if (retiring.length) {
+            const retiredAt = new Date().toISOString();
+            const latest = [...snapshot.attempts].reverse().find(attempt => attempt.taskId === actionTask.id &&
+              ['failed', 'rejected', 'recovery_required'].includes(attempt.status));
+            const repository = actionTask.repository ?? snapshot.run.repository;
+            expectedRunRevision = this.store.retireTests({
+              runId: input.runId, expectedRevision: input.expectedRunRevision, actorId: input.actorId,
+              tests: retiring.map(item => ({ taskId: actionTask.id, attemptId: latest?.id, repository, path: item.path,
+                titles: item.titles, actorId: input.actorId, retiredAt }))
+            }).run.revision;
+          }
           updated = await orchestrationService.retryTask({
             workspaceId: input.workspaceId,
             runId: input.runId,
             taskId: actionTask.id,
             expectedTaskRevision: actionTask.revision,
-            expectedRunRevision: input.expectedRunRevision,
+            expectedRunRevision,
             actorId: input.actorId,
             developerGuidance: retryGuidance
           });
