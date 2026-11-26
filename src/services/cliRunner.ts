@@ -286,8 +286,11 @@ interface TurnInvocation {
    * text and logged nothing), `--setting-sources ''` (so the operator's own
    * CLAUDE.md leaked back in), and `--model`. Measured, then fixed here.
    *
-   * `agy` is a real executable rather than a shim and is unaffected, so it
-   * keeps its prompt in argv where its persona has been verified to apply.
+   * `agy` is a real executable rather than a shim, but Windows still caps a
+   * command line at about 32,000 characters: a planning prompt with its project
+   * context failed with "spawn ENAMETOOLONG" before any model ran. So `agy`
+   * reads its prompt from stdin too, as one stream-json message (see
+   * antigravityStdinMessage).
    */
   stdin?: string;
   /**
@@ -300,6 +303,14 @@ interface TurnInvocation {
 }
 
 /** Translate the stored effort into the flag syntax of the selected CLI. */
+/**
+ * A whole prompt as the one stdin message `agy --input-format stream-json` reads: one JSON line,
+ * `{"event":"user","message":{"content":…}}` (measured against agy; any other shape is refused).
+ */
+export function antigravityStdinMessage(prompt: string): string {
+  return JSON.stringify({ event: 'user', message: { content: prompt } }) + '\n';
+}
+
 function reasoningArgs(provider: string, effort?: ReasoningEffort): string[] {
   if (!effort) return [];
 
@@ -621,8 +632,11 @@ export function buildTurnInvocation(
           ? { GEMINI_CLI_SYSTEM_SETTINGS_PATH: mcp.antigravitySettingsPath }
           : {})
       },
+      // The prompt, persona included, arrives on stdin; `-p=` only selects print mode.
+      stdin: antigravityStdinMessage(withPersona(prompt)),
       args: [
-        '-p', withPersona(prompt),
+        '-p=',
+        '--input-format', 'stream-json',
         '--output-format', 'stream-json',
         // A chat message that happens to start with '/' is a message, not a
         // command. Without this agy expands it as a slash command or skill.

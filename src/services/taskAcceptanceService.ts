@@ -57,7 +57,9 @@ interface AcceptanceDependencies {
 
 const REPORT_ONLY_CORRECTION_CHECKS = REPORT_FORMAT_CHECKS;
 const AUTOMATIC_CODE_REPAIR_CHECKS = new Set([
-  'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'test_weakened', 'required_check', 'verification_failed', 'tool_blocker'
+  'scope_violation', 'accepted_artifact_mutation', 'accepted_artifact_weakened', 'test_weakened', 'required_check', 'verification_failed', 'tool_blocker',
+  // The code does not back the report: nothing changed, or a claimed file did not.
+  'no_changes', 'deliverable_unchanged'
 ]);
 
 const MAX_WEAKENING_CHECK_BYTES = 1024 * 1024;
@@ -665,6 +667,25 @@ export class TaskAcceptanceService {
         check: 'deliverable_traceability', changedPath: undeclaredChangedPath
       }, undeclaredChangedPath);
     }
+    // Files an open finding sent back to this task to fix; putting one back as it was is a real change.
+    const correctionPaths = new Set(snapshot.findings
+      .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id && finding.path)
+      .map(finding => finding.path!));
+    // The code is the evidence, not the report: a building task must have changed something, and
+    // may only claim files it changed. Its retries count, since the diff runs from where the task began.
+    if (isImplementationTask(task.kind)) {
+      if (!changedPaths.length && !correctionPaths.size) {
+        return fail('This task changed no files. Make the change it asks for. If the code already does what the task asks, report that as a blocker naming the files that already do it, so the person can decide.', {
+          check: 'no_changes', baselineCommit: diffStartingCommit
+        });
+      }
+      const claimedUnchanged = [...declaredDeliverablePaths].find(filePath => !changedPaths.includes(filePath) && !correctionPaths.has(filePath));
+      if (claimedUnchanged) {
+        return fail(`The report lists ${claimedUnchanged} as a deliverable, but this task did not change it. List only files the task changed.`, {
+          check: 'deliverable_unchanged', claimedPath: claimedUnchanged, changedPaths
+        }, claimedUnchanged);
+      }
+    }
     if (!authorizedWorkspace.baseCommit) {
       return fail('The orchestration has no recorded base commit, so cumulative change scope cannot be verified.', { check: 'base_commit' });
     }
@@ -680,9 +701,6 @@ export class TaskAcceptanceService {
         check: 'scope_unconfigured', changedPaths
       }, changedPaths[0]);
     }
-    const correctionPaths = new Set(snapshot.findings
-      .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id && finding.path)
-      .map(finding => finding.path!));
     const correctionLineageTaskIds = new Set(task.correctionOfTaskId
       ? [task.correctionOfTaskId, ...snapshot.tasks.filter(candidate => candidate.correctionOfTaskId === task.correctionOfTaskId).map(candidate => candidate.id)]
       : [task.id]);

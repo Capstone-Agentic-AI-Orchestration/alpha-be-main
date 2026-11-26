@@ -115,7 +115,8 @@ describe('task acceptance and targeted correction', () => {
   afterEach(() => {
     store?.close();
     store = undefined;
-    if (directory) fs.rmSync(directory, { recursive: true, force: true });
+    // Windows can hold a folder for a moment after git or SQLite let go of it.
+    if (directory) fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     directory = '';
   });
 
@@ -160,6 +161,63 @@ describe('task acceptance and targeted correction', () => {
     expect(outcome.snapshot.run.status).toBe('executing');
     expect(launches).toHaveLength(2);
     expect(launches[1].taskPackage.corrections.join(' ')).toContain('This is not a product blocker. Re-read the file and retry');
+  });
+
+  /** Your "hello" build: a building task that changed nothing, or claims a file it never touched, is sent back. */
+  describe('accepting a building task on the evidence of its code', () => {
+    const setUp = async (name: string) => {
+      const tempRoot = path.resolve(process.cwd(), '..', '.tmp-tests');
+      fs.mkdirSync(tempRoot, { recursive: true });
+      directory = fs.mkdtempSync(path.join(tempRoot, name));
+      const repository = path.join(directory, 'repository');
+      fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+      git(directory, ['init', '-b', 'main', repository]);
+      fs.writeFileSync(path.join(repository, 'src', 'App.tsx'), 'export const App = () => null;\n');
+      commit(repository, 'Initial fixture');
+      store = new SQLiteService({ dbPath: path.join(directory, 'alpha.db'), seedDefaults: false });
+      runWithWorkspace(workspaceId, () => store!.addAllowedPath(directory, 'evidence fixture'));
+      const launches: OrchestrationLaunchRequest[] = [];
+      let branchName = '';
+      const orchestration = new OrchestrationService(store, {
+        async prepare(request) {
+          branchName ||= `alpha/orchestration/${request.runId.replace(/[^a-zA-Z0-9]/g, '').slice(-20).toLowerCase()}`;
+          if (git(repository, ['branch', '--show-current']) !== branchName) git(repository, ['checkout', '-b', branchName]);
+          return { startingCommit: await getHeadCommit(repository), branchName, baseRef: 'HEAD', workingDir: repository };
+        },
+        async launch(request) { launches.push(request); return { prototypeRunId: `prototype-${request.attemptId}` }; }
+      });
+      const plan = parseOrchestrationPlan({ schemaVersion: 1, goal: 'Build the homepage.', exclusions: [],
+        requirements: [{ id: 'REQ-HOME', description: 'Show the homepage.' }],
+        tasks: [{ id: 'homepage', title: 'Build the homepage', description: 'Replace the App component.', kind: 'frontend', ownerAgentId: 'frontend-agent',
+          dependsOn: [], requirementIds: ['REQ-HOME'], acceptanceCriteria: ['The homepage renders.'], requiredChecks: ['test'], scope: { includePaths: ['src/**'], excludePaths: [] } }] });
+      const snapshot = await startAndApprove(orchestration, { workspaceId, projectId, issueId, repository: 'acme/site', requestKey: 'request-' + name,
+        requestFingerprint: 'fingerprint-' + name, createdBy: 'user-test', executorId: 'desktop-test',
+        eligibleAgents: [{ id: 'frontend-agent', role: 'Frontend Agent' }] as const, plan });
+      const acceptance = new TaskAcceptanceService(store, orchestration, { worktreePathFor: () => repository,
+        runVerification: async () => ({ status: 'passed', missingScripts: [], summary: 'Verification passed: npm test.',
+          commands: [{ command: { script: 'test', bin: 'npm', args: ['test'], display: 'npm test' }, exitCode: 0, signal: null, output: '' }] }) });
+      return { repository, launches, orchestration, acceptance, runId: snapshot.run.id };
+    };
+
+    it('sends back a building task that changed no files, however good its report sounds', async () => {
+      const { repository, launches, orchestration, acceptance, runId } = await setUp('alpha-no-changes-');
+      const first = launches[0];
+      await orchestration.handleRunnerCompleted(completedRun(first, await getHeadCommit(repository), [], { summary: 'Run finished: 5 file(s) changed.' }));
+      const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId, taskId: 'homepage', attemptId: first.attemptId, acceptedBy: 'orchestrator' });
+      expect(outcome.decision).toBe('retrying');
+      expect(launches[1].taskPackage.corrections.join(' ')).toContain('This task changed no files.');
+    });
+
+    it('sends back a report that claims a file the task did not change', async () => {
+      const { repository, launches, orchestration, acceptance, runId } = await setUp('alpha-claimed-unchanged-');
+      const first = launches[0];
+      fs.writeFileSync(path.join(repository, 'src', 'App.tsx'), 'export const App = () => "Home";\n');
+      const resultCommit = commit(repository, 'Homepage');
+      await orchestration.handleRunnerCompleted(completedRun(first, resultCommit, ['src/App.tsx', 'src/App.css']));
+      const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId, taskId: 'homepage', attemptId: first.attemptId, acceptedBy: 'orchestrator' });
+      expect(outcome.decision).toBe('retrying');
+      expect(launches[1].taskPackage.corrections.join(' ')).toContain('The report lists src/App.css as a deliverable, but this task did not change it.');
+    });
   });
 
   it('sends back a task whose own diff removes a test that was there before it started', async () => {

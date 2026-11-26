@@ -39,6 +39,10 @@ const options = (over: Partial<CliTurnOptions> = {}): CliTurnOptions => ({
 });
 
 /** Value that follows a flag, or undefined when the flag is absent. */
+/** The prompt Antigravity reads from its stdin message (see antigravityStdinMessage). */
+const antigravityPrompt = (stdin: string | undefined): string | undefined =>
+  stdin === undefined ? undefined : (JSON.parse(stdin) as { message: { content: string } }).message.content;
+
 const valueOf = (args: string[], flag: string) => {
   const i = args.indexOf(flag);
   return i === -1 ? undefined : args[i + 1];
@@ -184,14 +188,18 @@ describe('nothing multi-line may travel in argv', () => {
     }
   );
 
-  it('still gives Antigravity its prompt in argv, since it is not a shim', () => {
+  // A long planning prompt in argv failed on Windows with "spawn ENAMETOOLONG" before any model ran.
+  it('gives Antigravity its prompt on stdin as one stream-json message, with nothing after -p', () => {
     const { args, stdin } = buildTurnInvocation(
       options({ provider: 'Antigravity', systemPrompt: multiline }),
       noMcp
     );
 
-    expect(stdin).toBeUndefined();
-    expect(valueOf(args, '-p')).toContain('What does this service do?');
+    expect(args).toContain('-p=');
+    expect(valueOf(args, '--input-format')).toBe('stream-json');
+    expect(args.join(' ')).not.toContain('What does this service do?');
+    expect(stdin!.endsWith('\n')).toBe(true);
+    expect(JSON.parse(stdin!)).toMatchObject({ event: 'user', message: { content: expect.stringContaining('What does this service do?') } });
   });
 
   it('sends the Claude prompt on stdin, not after -p', () => {
@@ -335,8 +343,8 @@ describe('persona re-injection mid-session', () => {
   // Antigravity continues its saved conversation, so it is the family where
   // "the persona is already in the transcript" is actually true.
   const codex = (over: Partial<CliTurnOptions> = {}) => {
-    const { args } = buildTurnInvocation(options({ provider: 'Antigravity', ...over }), noMcp);
-    return { stdin: valueOf(args, '-p') };
+    const { stdin } = buildTurnInvocation(options({ provider: 'Antigravity', ...over }), noMcp);
+    return { stdin: antigravityPrompt(stdin) };
   };
 
   it('omits the persona on a continuing session when nothing changed', () => {
@@ -377,12 +385,12 @@ describe('persona re-injection mid-session', () => {
   });
 
   it('applies to Antigravity too', () => {
-    const { args } = buildTurnInvocation(
+    const { stdin } = buildTurnInvocation(
       options({ provider: 'Antigravity', priorSession: 'conv-1', personaChanged: true }),
       noMcp
     );
 
-    expect(valueOf(args, '-p')).toContain('Your instructions have been updated');
+    expect(antigravityPrompt(stdin)).toContain('Your instructions have been updated');
   });
 
   it('is irrelevant to Claude, which resends the persona by flag every turn', () => {
@@ -469,8 +477,8 @@ describe('buildTurnInvocation — Antigravity', () => {
   });
 
   it('prepends the persona to the prompt', () => {
-    const { args } = agy();
-    expect(valueOf(args, '-p')).toContain('You are Ada.');
+    const { stdin } = agy();
+    expect(antigravityPrompt(stdin)).toContain('You are Ada.');
   });
 
   it('passes the model and resumes with --conversation', () => {
