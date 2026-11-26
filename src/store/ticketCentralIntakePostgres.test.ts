@@ -373,9 +373,10 @@ it('serializes competing PM decisions and rolls back all acceptance writes on a 
 });
 
 describe('starting a project from an inquiry', () => {
- const starter = () => createIntakeProjectStarter({
-  accept: (intakeId, workspaceId, subject, raw) => app.accept(intakeId, workspaceId, subject, raw),
-  link: createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)),
+ const starter = (link: Parameters<typeof createIntakeProjectStarter>[0]['link'] =
+  createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db))) => createIntakeProjectStarter({
+  accept: app.accept,
+  link,
   projects: new PostgresProjectStore(db),
   bindProject: () => undefined,
  });
@@ -424,6 +425,23 @@ describe('starting a project from an inquiry', () => {
   const first = await starter().startProject(receipt.id, workspaceA, pmA, start());
   const again = await starter().startProject(receipt.id, workspaceA, pmA, start());
   expect(again).toEqual({ ...first, created: false });
+  expect((await db.query('select id from public.projects')).rows).toHaveLength(1);
+  expect((await db.query('select id from alpha_private.tickets')).rows).toHaveLength(1);
+ });
+
+ it('keeps the shared discovery summary when project linking fails and is retried', async () => {
+  const { receipt } = await submitProposal();
+  const discoverySummary = 'Give mobile shoppers a checkout with local payments.';
+  const command = start({ discoverySummary });
+  const interrupted = starter({ linkProjectAtCurrentVersion: async () => { throw new Error('link failed'); } });
+  await expect(interrupted.startProject(receipt.id, workspaceA, pmA, command)).rejects.toThrow('link failed');
+  await expect(starter().startProject(receipt.id, workspaceA, pmA, { ...command, discoverySummary: 'Different summary' }))
+   .rejects.toMatchObject({ status: 409, code: 'central_intake_operation_conflict' });
+  const resumed = await starter().startProject(receipt.id, workspaceA, pmA, command);
+  expect(resumed).toMatchObject({ created: false, clientVisible: true });
+  expect((await db.query(`select metadata->>'discoverySummary' as summary
+    from alpha_private.ticket_central_intake_events where event_type='inquiry_accepted' and ticket_id=$1`, [resumed.ticketId])).rows)
+   .toEqual([{ summary: discoverySummary }]);
   expect((await db.query('select id from public.projects')).rows).toHaveLength(1);
   expect((await db.query('select id from alpha_private.tickets')).rows).toHaveLength(1);
  });

@@ -101,7 +101,7 @@ export function createTicketCentralIntakeService(input: {
       return { items: page.items, nextCursor: page.nextCursor ? encodeCursor(page.nextCursor) : null };
     },
 
-    async accept(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown) {
+    async accept(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown, discoverySummary?: string) {
       if (!configured) throw new TicketWorkflowError(503, 'central_intake_unavailable', 'The shared inquiry inbox is unavailable.');
       const parsed = z.object({ schemaVersion: z.literal(1), operationId: operationSchema }).strict().safeParse(raw);
       if (!parsed.success || !opaque(intakeId) || !opaque(workspaceId) || subject.kind !== 'internal' || !opaque(subject.userId)) {
@@ -113,9 +113,12 @@ export function createTicketCentralIntakeService(input: {
       try {
         const result = await input.store.accept({ organizationKey: input.organizationKey, intakeId, workspaceId,
           subject, operationId: parsed.data.operationId, ticketId: nextId(),
-          reference: `TKT-${nextId().replaceAll('-', '').toUpperCase()}`, occurredAt });
+          reference: `TKT-${nextId().replaceAll('-', '').toUpperCase()}`, occurredAt,
+          ...(discoverySummary === undefined ? {} : { discoverySummary }) });
         if (result === 'not_found') throw new TicketWorkflowError(404, 'central_intake_not_found', 'This inquiry is no longer available.');
         if (result === 'already_handled') throw new TicketWorkflowError(409, 'central_intake_already_handled', 'Another PM has already handled this inquiry. Refresh the inbox.');
+        if (result === 'operation_conflict') throw new TicketWorkflowError(409, 'central_intake_operation_conflict', 'This acceptance already recorded a different discovery summary. Retry with the original summary.');
+        if (result === 'invalid_discovery_summary') throw new TicketWorkflowError(400, 'central_intake_accept_invalid', 'Only signed-in project proposals can have a discovery summary.');
         if (result === 'workspace_unavailable') throw new TicketWorkflowError(503, 'ticket_writes_disabled', 'Ticket creation is unavailable in the selected workspace.');
         if (result === 'client_access_unavailable') throw new TicketWorkflowError(409, 'client_access_unavailable', 'Client access is suspended or unavailable in this workspace.');
         if (result === 'forbidden') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'You cannot accept inquiries in this workspace.');

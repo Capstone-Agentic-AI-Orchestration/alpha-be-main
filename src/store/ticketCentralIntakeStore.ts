@@ -26,6 +26,8 @@ export interface CentralIntakeFingerprint { keyId: string; fingerprint: string }
 export interface CentralIntakeAcceptance {
   ticketId: string; workspaceId: string; reference: string; operationId: string;
 }
+export type CentralIntakeAcceptOutcome = CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable'
+  | 'client_access_unavailable' | 'forbidden' | 'operation_conflict' | 'invalid_discovery_summary';
 export interface CentralIntakeDeclineReceipt { intakeId: string; operationId: string; status: 'declined' }
 export interface CentralIntakeClarifyReceipt { intakeId: string; operationId: string; status: 'awaiting_client' }
 
@@ -43,8 +45,8 @@ export interface TicketCentralIntakeStore {
   }): Promise<CentralIntakeClarifyReceipt | 'not_found' | 'already_handled' | 'operation_conflict' | 'forbidden'>;
   accept(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
-    operationId: string; ticketId: string; reference: string; occurredAt: string;
-  }): Promise<CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable' | 'client_access_unavailable' | 'forbidden'>;
+    operationId: string; ticketId: string; reference: string; occurredAt: string; discoverySummary?: string;
+  }): Promise<CentralIntakeAcceptOutcome>;
   decline(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
     operationId: string; reason: string | null; occurredAt: string;

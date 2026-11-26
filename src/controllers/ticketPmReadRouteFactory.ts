@@ -139,7 +139,7 @@ export function createTicketPmReadRouteBoundary(
     });
     // Start a project from an inquiry: the same accept, project and link steps a PM did by hand, in one action.
     const intakeProjects = createIntakeProjectStarter({
-      accept: (intakeId, workspaceId, subject, raw) => centralIntake.accept(intakeId, workspaceId, subject, raw),
+      accept: centralIntake.accept,
       link: createTicketProjectManagementService(new PostgresTicketProjectManagementStore(db)),
       projects: new PostgresProjectStore(db),
       bindProject: (projectId, workspaceId) => workspaceRegistry.bind('projects', projectId, workspaceId),

@@ -74,7 +74,7 @@ function requestAction(requests: StageState['requests']): NextAction | null {
 }
 
 /** The POC stage is a marker; the contract is signed in person, then the PM starts development. */
-const START_ACTION: NextAction = { who: 'pm', kind: 'start_development', label: 'Start development once the contract is signed' };
+const START_ACTION: NextAction = { who: 'pm', kind: 'start_development', label: 'Start development after signing in person' };
 
 function developmentAction(state: StageState): NextAction {
   if (state.round?.status === 'open') return { who: 'client', kind: 'submit_round', label: `Send your feedback on build ${state.round.number}` };

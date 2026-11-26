@@ -128,7 +128,7 @@ export class ClientProjectConversation {
   constructor(private readonly db: TransactionalSql, private readonly portal: PostgresClientProjectPortal) {}
 
   /** The whole conversation, oldest first (the latest 400 entries). */
-  async timeline(target: ProjectTarget, subject: TicketSubject, clientId?: unknown): Promise<{ items: ConversationItem[]; clientId?: string }> {
+  async timeline(target: ProjectTarget, subject: TicketSubject, clientId?: unknown) {
     return this.db.transaction(async sql => {
       const client = await this.portal.authorizeThread(sql, target, subject, clientId, false);
       const pm = subject.kind === 'internal';
@@ -179,7 +179,18 @@ export class ClientProjectConversation {
         task: row.issue_id && row.identifier ? { issueId: row.issue_id, identifier: row.identifier, title: row.issue_title ?? '' } : null,
         ...(row.kind === 'stage_event' && row.stage ? { stage: stageEvent(row.stage) } : {}),
       })).filter(item => item.kind !== 'task_linked' || item.task !== null);
-      return pm ? { items, clientId: client } : { items };
+      const summaries = await sql.query<{ ticket_id: string; title: string; body: string }>(`
+        with visible as (${VISIBLE_REQUESTS_SQL})
+        select v.id as ticket_id,v.title,e.metadata->>'discoverySummary' as body
+          from visible v
+          join alpha_private.ticket_central_intakes i on i.accepted_workspace_id=v.workspace_id
+            and i.accepted_ticket_id=v.id and i.kind='project_proposal' and i.client_user_id=$3
+          join alpha_private.ticket_central_intake_events e on e.organization_key=i.organization_key
+            and e.intake_id=i.id and e.workspace_id=v.workspace_id and e.ticket_id=v.id and e.event_type='inquiry_accepted'
+          where jsonb_typeof(e.metadata->'discoverySummary')='string' and btrim(e.metadata->>'discoverySummary')<>''
+          order by e.occurred_at desc,e.id`, [target.workspaceId, target.projectId, client]);
+      const discoverySummaries = summaries.rows.map(row => ({ ticketId: row.ticket_id, title: row.title, body: row.body }));
+      return { items, ...(pm ? { clientId: client } : {}), ...(discoverySummaries.length ? { discoverySummaries } : {}) };
     });
   }
 
