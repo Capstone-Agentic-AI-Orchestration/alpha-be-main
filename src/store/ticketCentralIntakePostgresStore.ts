@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Sql, TransactionalSql } from './database.js';
 import type { TicketSubject } from './ticketCommandStore.js';
 import type {
-  CentralIntakeAcceptance, CentralIntakeClarificationMessage, CentralIntakeClarifyReceipt,
+  CentralIntakeAcceptOutcome, CentralIntakeClarificationMessage, CentralIntakeClarifyReceipt,
   CentralIntakeCursor, CentralIntakeDeclineReceipt, CentralIntakeFingerprint, CentralIntakeItem,
   CentralIntakePage, CentralIntakeRatePolicy, TicketCentralIntakeStore,
 } from './ticketCentralIntakeStore.js';
@@ -244,8 +244,8 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
 
   async accept(input: {
     organizationKey: string; intakeId: string; workspaceId: string; subject: TicketSubject;
-    operationId: string; ticketId: string; reference: string; occurredAt: string;
-  }): Promise<CentralIntakeAcceptance | 'not_found' | 'already_handled' | 'workspace_unavailable' | 'client_access_unavailable' | 'forbidden'> {
+    operationId: string; ticketId: string; reference: string; occurredAt: string; discoverySummary?: string;
+  }): Promise<CentralIntakeAcceptOutcome> {
     return this.db.transaction(async tx => {
       const authorization = new PostgresTicketAuthorization(tx);
       const scope = await authorization.lockQueueScope(input.workspaceId, input.subject);
@@ -261,10 +261,16 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
         [input.organizationKey, input.intakeId]);
       const existing = rows[0];
       if (!existing) return 'not_found';
+      if (input.discoverySummary !== undefined && existing.kind !== 'project_proposal') return 'invalid_discovery_summary';
       if (existing.status === 'accepted') {
         if (existing.accepted_by === input.subject.userId && existing.accepted_workspace_id === input.workspaceId
           && existing.acceptance_operation_id === input.operationId && text(existing.accepted_ticket_id)
           && text(existing.reference)) {
+          const event = await tx.query<{ discovery_summary: string | null }>(
+            `select metadata->>'discoverySummary' as discovery_summary from alpha_private.ticket_central_intake_events
+             where organization_key=$1 and intake_id=$2 and event_type='inquiry_accepted' and ticket_id=$3`,
+            [input.organizationKey, input.intakeId, existing.accepted_ticket_id]);
+          if ((event.rows[0]?.discovery_summary ?? undefined) !== input.discoverySummary) return 'operation_conflict';
           return { ticketId: existing.accepted_ticket_id, workspaceId: input.workspaceId,
             reference: existing.reference, operationId: input.operationId };
         }
@@ -382,7 +388,7 @@ export class PostgresTicketCentralIntakeStore implements TicketCentralIntakeStor
            (id,organization_key,intake_id,event_type,actor_kind,actor_id,workspace_id,ticket_id,occurred_at,metadata)
          values ($1,$2,$3,'inquiry_accepted','pm',$4,$5,$6,$7,$8::jsonb)`,
         [randomUUID(), input.organizationKey, input.intakeId, input.subject.userId, input.workspaceId,
-          state.id, input.occurredAt, JSON.stringify({ operationId: input.operationId })]);
+          state.id, input.occurredAt, JSON.stringify({ operationId: input.operationId, discoverySummary: input.discoverySummary })]);
       return { ticketId: state.id, workspaceId: input.workspaceId, reference: input.reference, operationId: input.operationId };
     });
   }

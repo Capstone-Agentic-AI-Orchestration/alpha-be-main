@@ -21,7 +21,7 @@ import { TicketWorkflowError } from '../ticketing/workflow.js';
  */
 
 export interface IntakeProjectStartDeps {
-  accept(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown): Promise<{ ticketId: string; workspaceId: string; reference: string }>;
+  accept(intakeId: string, workspaceId: string, subject: TicketSubject, raw: unknown, discoverySummary?: string): Promise<{ ticketId: string; workspaceId: string; reference: string }>;
   link: {
     linkProjectAtCurrentVersion(target: TicketTarget, subject: TicketSubject,
       input: { operationId: string; projectId: string; clientVisible: boolean }): Promise<{ projectId: string | null; projectName: string | null; clientVisible: boolean }>;
@@ -45,6 +45,7 @@ const schema = z.object({
   schemaVersion: z.literal(1),
   operationId: z.string().uuid(),
   clientVisible: z.boolean(),
+  discoverySummary: z.string().trim().min(1).max(1500).optional(),
   project: z.union([
     z.object({ existingProjectId: z.string().min(1).max(200).refine(value => value.trim() === value) }).strict(),
     z.object({
@@ -116,7 +117,10 @@ export function createIntakeProjectStarter(deps: IntakeProjectStartDeps) {
       if (subject.kind !== 'internal') throw new TicketWorkflowError(403, 'ticket_action_forbidden', 'Only a project manager can start a project from an inquiry.');
       const parsed = schema.safeParse(raw);
       if (!parsed.success) throw new TicketWorkflowError(400, 'intake_project_invalid', 'Give the project a name, or choose an existing project.');
-      const { operationId, clientVisible, project: requested } = parsed.data;
+      const { operationId, clientVisible, discoverySummary, project: requested } = parsed.data;
+      if (discoverySummary !== undefined && ('existingProjectId' in requested || !clientVisible)) {
+        throw new TicketWorkflowError(400, 'intake_project_invalid', 'A discovery summary belongs to a new shared project.');
+      }
 
       // A wrong existing project is refused before anything changes: the inquiry stays open.
       const existing = 'existingProjectId' in requested ? await deps.projects.get(workspaceId, requested.existingProjectId) : null;
@@ -124,7 +128,10 @@ export function createIntakeProjectStarter(deps: IntakeProjectStartDeps) {
         throw new TicketWorkflowError(404, 'ticket_project_not_found', 'Project not found in this workspace.');
       }
 
-      const accepted = await deps.accept(intakeId, workspaceId, subject, { schemaVersion: 1, operationId });
+      const command = { schemaVersion: 1, operationId };
+      const accepted = discoverySummary === undefined
+        ? await deps.accept(intakeId, workspaceId, subject, command)
+        : await deps.accept(intakeId, workspaceId, subject, command, discoverySummary);
       if (accepted.workspaceId !== workspaceId) throw new TicketWorkflowError(409, 'central_intake_already_handled', 'This inquiry was accepted into a different workspace.');
 
       let project: Project; let created = false;

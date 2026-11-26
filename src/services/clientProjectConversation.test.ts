@@ -84,7 +84,8 @@ describe('one conversation per client and project', () => {
     await db.query(`insert into alpha_private.ticket_central_intake_events(id,organization_key,intake_id,event_type,actor_kind,actor_id,
         workspace_id,ticket_id,occurred_at,metadata) values
       ('e-1','org','intake-1','proposal_clarification_requested','pm','pm','workspace-a',null,'2026-10-31T09:00:00Z','{"body":"Which pages?"}'),
-      ('e-2','org','intake-1','proposal_clarification_replied','client','client-a',null,null,'2026-10-31T10:00:00Z','{"body":"Home and About."}')`);
+      ('e-2','org','intake-1','proposal_clarification_replied','client','client-a',null,null,'2026-10-31T10:00:00Z','{"body":"Home and About."}'),
+      ('e-3','org','intake-1','inquiry_accepted','pm','pm','workspace-a','t-1','2026-11-01T10:00:00Z','{"discoverySummary":"Start with Home and About."}')`);
 
     const forClient = await app.timeline(target, client);
     const bodies = forClient.items.map(item => item.body);
@@ -98,8 +99,11 @@ describe('one conversation per client and project', () => {
     const clarifications = forClient.items.filter(item => item.kind === 'clarification');
     expect(clarifications.map(item => [item.author, item.body])).toEqual([['pm', 'Which pages?'], ['client', 'Home and About.']]);
     expect(forClient.items[0]?.body).toBe('Which pages?');
+    expect(forClient.discoverySummaries).toEqual([{ ticketId: 't-1', title: 'Request t-1', body: 'Start with Home and About.' }]);
+    expect((await app.timeline(target, other)).discoverySummaries).toBeUndefined();
 
     const forPm = await app.timeline(target, pm, 'client-a');
+    expect(forPm.discoverySummaries).toEqual(forClient.discoverySummaries);
     expect(forPm.clientId).toBe('client-a');
     expect(forPm.items.find(item => item.body === 'PM only note')?.kind).toBe('note');
     await expect(app.timeline(target, pm)).rejects.toMatchObject({ code: 'project_thread_client_required' });
