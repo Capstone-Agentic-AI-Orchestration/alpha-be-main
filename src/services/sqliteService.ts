@@ -2648,12 +2648,51 @@ export class SQLiteService {
     const row = this.db.prepare('SELECT key FROM projects WHERE id = ?').get(id) as { key: string } | undefined;
     if (!row) return null;
     const taken = this.db.prepare('SELECT 1 FROM projects WHERE upper(key) = upper(?)');
+    let candidate = '';
     for (let n = 1; ; n += 1) {
-      const candidate = `${row.key}OLD${n === 1 ? '' : n}`;
-      if (taken.get(candidate)) continue;
-      this.db.prepare('UPDATE projects SET key = ? WHERE id = ?').run(candidate, id);
-      return candidate;
+      candidate = `${row.key}OLD${n === 1 ? '' : n}`;
+      if (!taken.get(candidate)) break;
     }
+    // Its cards follow the key: left as ECO-101 they would still refuse the team's ECO-101.
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE projects SET key = ? WHERE id = ?').run(candidate, id);
+      const cards = this.db.prepare('SELECT id FROM issues WHERE project_id = ?').all(id) as Array<{ id: string }>;
+      for (const card of cards) this.moveIssueIdentifierAside(card.id);
+    })();
+    return candidate;
+  }
+
+  /**
+   * The card holding an identifier on this machine, in any workspace.
+   *
+   * Identifiers are unique across the whole file, so a check scoped to one
+   * workspace misses the card that will actually refuse the insert.
+   */
+  findIssueByIdentifier(identifier: string): { id: string; workspaceId: string; identifier: string } | null {
+    const row = this.db
+      .prepare('SELECT id, workspace_id, identifier FROM issues WHERE identifier = ? LIMIT 1')
+      .get(identifier) as { id: string; workspace_id: string; identifier: string } | undefined;
+    return row ? { id: row.id, workspaceId: row.workspace_id, identifier: row.identifier } : null;
+  }
+
+  /**
+   * Renumber a card that still carries a key its project gave up, under the
+   * project's current key: ECO-101 in a project now keyed ECOOLD becomes
+   * ECOOLD-101 (or the next free ECOOLD number). Returns the new identifier,
+   * or null when the card already matches its project's key or has no project.
+   */
+  moveIssueIdentifierAside(id: string): string | null {
+    const row = this.db
+      .prepare('SELECT i.identifier, p.key FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.id = ?')
+      .get(id) as { identifier: string; key: string | null } | undefined;
+    if (!row?.key) return null;
+    const dash = row.identifier.lastIndexOf('-');
+    if (dash < 1 || row.identifier.slice(0, dash).toUpperCase() === row.key.toUpperCase()) return null;
+    const taken = this.db.prepare('SELECT 1 FROM issues WHERE identifier = ?');
+    let candidate = `${row.key}-${row.identifier.slice(dash + 1)}`;
+    for (let n = 1; taken.get(candidate); n += 1) candidate = `${row.key}-${n}`;
+    this.db.prepare('UPDATE issues SET identifier = ? WHERE id = ?').run(candidate, id);
+    return candidate;
   }
 
   // --- Project build data ---

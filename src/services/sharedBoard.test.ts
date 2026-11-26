@@ -741,11 +741,28 @@ describe('a team key held by something left on this machine', () => {
     expect(await otherProjects(svc)).toEqual([['proj-stale', 'CHK']]);
   });
 
-  it('reports a card whose identifier another workspace holds, and still pulls the rest', async () => {
+  /** The leftover's project gives up CHK; its CHK-7 would otherwise still refuse the team's CHK-7. */
+  it('renumbers a moved leftover’s cards under its new key, so the team’s same-numbered cards arrive', async () => {
     const { svc, board, inWorkspace } = await load();
     await inOther(() => {
-      svc.createProject({ id: 'proj-other', name: 'Other', key: 'OTH', resources: [] });
-      svc.createIssue({ id: 'other-card', identifier: 'CHK-7', title: 'Same number', projectId: 'proj-other', status: 'todo', priority: 'low' });
+      svc.createProject({ id: 'proj-stale', name: 'Old checkout', key: 'CHK', resources: [], createdBy: 'PM2' });
+      svc.createIssue({ id: 'stale-card', identifier: 'CHK-7', title: 'Old card', projectId: 'proj-stale', status: 'todo', priority: 'low' });
+    });
+
+    const report = await board.pullSharedBoard('ws-default', source({ projects: [cloudProject({ createdBy: 'PM1' })] }), 'Dev1');
+
+    expect(report.conflicts).toEqual([]);
+    expect(await otherProjects(svc)).toEqual([['proj-stale', 'CHKOLD']]);
+    expect(await inOther(() => svc.getIssues().map((i: Issue) => [i.id, i.identifier]))).toEqual([['stale-card', 'CHKOLD-7']]);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => [i.id, i.identifier])).toEqual([['gh-issue-9001', 'CHK-7']]);
+  });
+
+  /** A desktop whose leftover was moved to CHKOLD before its cards followed: the next pull mends it. */
+  it('renumbers a card still holding a key its project gave up, and pulls the team’s card and the rest', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await inOther(() => {
+      svc.createProject({ id: 'proj-stale', name: 'Old checkout', key: 'CHKOLD', resources: [], createdBy: 'PM2' });
+      svc.createIssue({ id: 'stale-card', identifier: 'CHK-7', title: 'Same number', projectId: 'proj-stale', status: 'todo', priority: 'low' });
     });
 
     const report = await board.pullSharedBoard(
@@ -758,9 +775,32 @@ describe('a team key held by something left on this machine', () => {
       'Dev1'
     );
 
-    expect(report.conflicts).toEqual([expect.objectContaining({ project: 'CHK-7' })]);
-    expect(inWorkspace(() => svc.getProjects()).map((p: Project) => p.id)).toEqual(['gh-repo-100']);
-    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id)).toEqual(['gh-issue-9002']);
+    expect(report.conflicts).toEqual([]);
+    expect(report.issuesAdded).toBe(2);
+    expect(await inOther(() => svc.getIssues().map((i: Issue) => i.identifier))).toEqual(['CHKOLD-7']);
+    expect(inWorkspace(() => svc.getIssues()).map((i: Issue) => i.id).sort()).toEqual(['gh-issue-9001', 'gh-issue-9002']);
+  });
+
+  it('still reports a card that holds the team’s number under its own project’s key', async () => {
+    const { svc, board, inWorkspace } = await load();
+    await inOther(() => {
+      svc.createProject({ id: 'proj-mine', name: 'My checkout', key: 'CHKX', resources: [], createdBy: 'dev1' });
+      svc.createIssue({ id: 'my-card', identifier: 'CHKX-7', title: 'Mine', projectId: 'proj-mine', status: 'todo', priority: 'low' });
+    });
+
+    const report = await board.pullSharedBoard(
+      'ws-default',
+      source({
+        projects: [cloudProject({ key: 'CHKX', createdBy: 'PM1' })],
+        issues: [cloudIssue({ identifier: 'CHKX-7' })],
+        comments: []
+      }),
+      'Dev1'
+    );
+
+    expect(report.conflicts.map(conflict => conflict.project)).toContain('CHKX');
+    expect(await inOther(() => svc.getIssues().map((i: Issue) => i.identifier))).toEqual(['CHKX-7']);
+    expect(inWorkspace(() => svc.getIssues())).toEqual([]);
   });
 });
 
