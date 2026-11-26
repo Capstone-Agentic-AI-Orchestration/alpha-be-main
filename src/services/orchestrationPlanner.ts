@@ -115,6 +115,14 @@ export interface PlannerBuildStep {
   dependsOn?: readonly string[];
 }
 
+/** One step of the checklist Alpha agreed with the person in the chat (see chatRouter). */
+export interface AgreedChecklistStep {
+  agentId: string;
+  kind: OrchestrationTaskKind;
+  instruction: string;
+  reason: string;
+}
+
 export interface OrchestrationPlanningInput {
   runId?: string;
   usageContext?: CliTurnOptions['usageContext'];
@@ -172,6 +180,11 @@ export interface OrchestrationPlanningInput {
   }[];
   planner: PlannerAgentIdentity;
   buildSteps?: readonly PlannerBuildStep[];
+  /**
+   * The checklist Alpha, as the Orchestrator, agreed with the person in the chat: each step becomes a
+   * task owned by its specialist, in this order. Only steps an eligible specialist may own reach here.
+   */
+  agreedChecklist?: readonly AgreedChecklistStep[];
   /** Continuations must return a direct plan for precisely these approved requirements. */
   approvedRequirements?: OrchestrationPlan['requirements'];
   /**
@@ -398,6 +411,7 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
       repositoryContext: repository.repositoryContext.slice(0, MAX_REPOSITORY_CONTEXT_CHARS)
     })),
     configuredBuildSteps: enabledSteps,
+    ...(input.agreedChecklist?.length ? { agreedChecklist: input.agreedChecklist } : {}),
     approvedSpec: input.approvedSpec,
     ...(input.settledDecisions?.length ? { settledDecisions: input.settledDecisions } : {}),
     milestone: input.milestoneContext,
@@ -413,6 +427,9 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
       : 'For a small localized request use the v1 direct plan shown below. For a larger project whose later work depends on contracts yet to be implemented, use schemaVersion 2 with milestones: [{id,title,objective,requirementIds,repositories}]. Use 2 to 6 outcome milestones selected from the request and available roles, not a fixed technology sequence. Include all requirements and repository coverage in the roadmap, but detail tasks ONLY for the first milestone. Every task must include milestoneId and repository. Each milestone must be independently verifiable and include its own necessary review/checks. Later milestones will be planned from actual accepted files; do not guess future API fields or file names in the roadmap.',
     input.approvedSpec
       ? 'A person approved approvedSpec in the task\'s feature spec or acceptance checklist. Use exactly approvedSpec.requirements as the plan requirements, with the same IDs and descriptions in the same order, and cover every one. Include every approvedSpec exclusion in exclusions. The requirements are already clear, so do not add a requirements task unless a configured build step asks for one. Use approvedSpec.brief (personas and user journeys when supplied) to write acceptance criteria that prove the requested behavior.'
+      : '',
+    input.agreedChecklist?.length
+      ? 'agreedChecklist is the plan you already agreed with the person in the chat, in order. Make one task for each step, owned by that step\'s agentId and in the same order, with the step\'s instruction as its title and description and its reason as assignmentReason. Keep the step\'s kind unless the owner\'s roleContract does not allow it. Add other tasks only where Alpha\'s rules require them (an independent review, validation, a lockfile or audit task) and record each addition in decisions.'
       : '',
     'For code tasks, include narrow `scope.includePaths` and any relevant `excludePaths`. Include task IDs, requirement IDs, acceptance criteria, requiredChecks, required flag, kind, and a role-qualified owner.',
     'For every task, use the repository name shown in the supplied repository list.',
@@ -643,6 +660,25 @@ function buildStepIssues(plan: OrchestrationPlan, steps: readonly PlannerBuildSt
   return issues;
 }
 
+/**
+ * Steps of the agreed checklist the plan left out: each step needs a task owned by its specialist,
+ * after the task of the step before it. Extra tasks between steps (review, checks) are allowed.
+ */
+export function checklistIssues(plan: Pick<OrchestrationPlan, 'tasks'>, steps: readonly AgreedChecklistStep[]): string[] {
+  const issues: string[] = [];
+  let next = 0;
+  for (const [index, step] of steps.entries()) {
+    const found = plan.tasks.findIndex((task, position) => position >= next && task.ownerAgentId === step.agentId);
+    if (found < 0) {
+      const after = index ? `, after the task for step ${index}` : '';
+      issues.push(`Step ${index + 1} of the checklist agreed with the person ("${step.instruction.slice(0, 160)}") needs its own task owned by ${step.agentId}${after}.`);
+      continue;
+    }
+    next = found + 1;
+  }
+  return issues;
+}
+
 function validatePlan(
   plan: OrchestrationPlan,
   input: OrchestrationPlanningInput
@@ -712,6 +748,8 @@ function validatePlan(
   }
   const stepIssues = buildStepIssues(plan, input.buildSteps ?? []);
   if (stepIssues.length) throw new OrchestrationPlanningError(stepIssues.join(' '), 'invalid_build_steps');
+  const checklistProblems = plan.milestones?.length ? [] : checklistIssues(plan, input.agreedChecklist ?? []);
+  if (checklistProblems.length) throw new OrchestrationPlanningError(checklistProblems.join(' '), 'invalid_plan');
 }
 
 export class OrchestrationPlanner {

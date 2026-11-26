@@ -14,6 +14,9 @@ import { agentRoleContract } from './agentRoleContracts.js';
 import { z } from 'zod';
 import { CHAT_ACTION_ROUTES, type ChatActionRoute } from './chatActions.js';
 
+/** The most steps Alpha's checklist for a build may have; a specialist question uses at most four. */
+export const MAX_CHECKLIST_STEPS = 8;
+
 const structuredDecisionSchema = z.object({
   route: z.enum(['build', 'confirm_build', 'need_project', 'delegate', 'preview', 'stop_preview', 'board', ...CHAT_ACTION_ROUTES]),
   goal: z.string().max(4000), repositories: z.array(z.string().min(1).max(300)).max(30),
@@ -23,7 +26,8 @@ const structuredDecisionSchema = z.object({
   instruction: z.string().max(4000).optional(),
   cards: z.array(z.string().min(1).max(40)).max(20).optional(),
   assignments: z.array(z.object({ agentId: z.string().min(1).max(200), kind: orchestrationTaskKindSchema,
-    instruction: z.string().min(1).max(4000), reason: z.string().min(1).max(500) }).strict()).max(4)
+    // Generous here so a long checklist drops only itself (readAssignments), never the whole reply.
+    instruction: z.string().min(1).max(4000), reason: z.string().min(1).max(500) }).strict()).max(20)
 }).strict();
 const structuredReplySchema = z.object({ contract: z.literal('alpha_chat_v1'), message: z.string().max(32000),
   decision: structuredDecisionSchema.nullable() }).strict();
@@ -77,6 +81,11 @@ export interface AlphaRouteDecision {
    * against the board by the server.
    */
   cards?: string[];
+  /**
+   * For delegate, the specialists asked to look into something. For build, Alpha's checklist: the
+   * steps it agreed with the person, in order, each with the specialist who does it. The planner
+   * turns each step into a task with that owner.
+   */
   assignments?: SpecialistHandoff[];
   /** The words of the current message this decision acts on; the server checks they are really there. */
   evidence?: string;
@@ -155,25 +164,33 @@ function readDecision(payload: string): AlphaRouteDecision | undefined {
       .filter(Boolean))].slice(0, 30)
     : [];
   if (record.route === 'delegate') {
-    if (!Array.isArray(record.assignments) || !record.assignments.length || record.assignments.length > 4) return undefined;
-    const assignments: SpecialistHandoff[] = [];
-    for (const item of record.assignments) {
-      if (!item || typeof item !== 'object' ||
-          typeof item.agentId !== 'string' || !item.agentId.trim() || item.agentId.length > 200 ||
-          !orchestrationTaskKindSchema.safeParse(item.kind).success ||
-          typeof item.instruction !== 'string' || !item.instruction.trim() || item.instruction.length > MAX_GOAL_CHARS ||
-          typeof item.reason !== 'string' || !item.reason.trim() || item.reason.length > 500) return undefined;
-      assignments.push({ agentId: item.agentId.trim(), kind: item.kind, instruction: item.instruction.trim(), reason: item.reason.trim() });
-    }
-    if (new Set(assignments.map(item => item.agentId)).size !== assignments.length) return undefined;
+    const assignments = readAssignments(record.assignments, 4);
+    if (!assignments?.length || new Set(assignments.map(item => item.agentId)).size !== assignments.length) return undefined;
     return { route: 'delegate', goal, repositories, assignments };
   }
+  // A build's checklist may give one specialist several steps. A malformed one is dropped, not the build.
+  const checklist = record.route === 'build' ? readAssignments(record.assignments, MAX_CHECKLIST_STEPS) : undefined;
   const cards = readCards(record.cards);
   const text = (value: unknown, max: number) => typeof value === 'string' ? value.trim().slice(0, max) : '';
   const evidence = text(record.evidence, MAX_GOAL_CHARS);
   const instruction = text(record.instruction, MAX_GOAL_CHARS);
   return { route: record.route as AlphaRoute, goal, repositories, ...(cards.length ? { cards } : {}),
-    ...(evidence ? { evidence } : {}), ...(instruction ? { instruction } : {}) };
+    ...(evidence ? { evidence } : {}), ...(instruction ? { instruction } : {}), ...(checklist?.length ? { assignments: checklist } : {}) };
+}
+
+/** Specialist steps from a decision, or undefined when any is malformed or there are too many. */
+function readAssignments(raw: unknown, max: number): SpecialistHandoff[] | undefined {
+  if (!Array.isArray(raw) || raw.length > max) return undefined;
+  const assignments: SpecialistHandoff[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' ||
+        typeof item.agentId !== 'string' || !item.agentId.trim() || item.agentId.length > 200 ||
+        !orchestrationTaskKindSchema.safeParse(item.kind).success ||
+        typeof item.instruction !== 'string' || !item.instruction.trim() || item.instruction.length > MAX_GOAL_CHARS ||
+        typeof item.reason !== 'string' || !item.reason.trim() || item.reason.length > 500) return undefined;
+    assignments.push({ agentId: item.agentId.trim(), kind: item.kind, instruction: item.instruction.trim(), reason: item.reason.trim() });
+  }
+  return assignments;
 }
 
 const CARD_KEY_SHAPE = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
@@ -279,6 +296,7 @@ export function orchestratorRoutingPrompt(context: OrchestratorPromptContext): s
     '1. A question about the product itself (what this project is, does or is for, who it is for, or what is planned, done or still undecided): answer it yourself from the product picture, following "How to explain". Look at the code only to say what a user can actually see and do. Use specialists for it only when the person asks for technical detail, a code walkthrough or a review. "Explain this project in simple terms" is this kind of question. Questions about particular board cards, their columns or the schedule follow the board rule below.',
     '   A simple explanation, short example, summary of supplied information, status already in context, or ordinary conversation: answer it yourself. "Show me an example" is a question. When the answer needs repository investigation, debugging, research, architecture, database analysis, security review, or validation expertise, hand it to the relevant specialists using route 5. Decide before calling any tools: do not inspect code, CLI transcripts, sessions, or Alpha internal files yourself to avoid handing off the task.',
     '2. A request to change this product\'s code (build a feature, add or remove behaviour, fix a bug, change the UI, refactor): use a build decision with the change as a self-contained goal. In repositories, name the codebases you expect the work to touch, as a hint only: the plan always sees every codebase in the project ([] when unsure).',
+    '   With a build decision, give your checklist in assignments: the steps in order (one to eight), each with the eligible specialist who does it (agentId), its kind, the step in plain words (instruction: what changes and how the person will see it is done), and why that specialist fits (reason). One specialist may have several steps. You lead the build: the plan turns each step into one task for that specialist, in this order, and adds only the review and checks Alpha requires. Leave assignments empty when you cannot tell yet who should do the work.',
     '3. Probably a code change, but you cannot tell what to change or whether they only want an answer: use confirm_build with your best reading as goal and one short clarifying question in message.',
     '4. A code change while no project is selected: use need_project with the change as goal and one sentence asking which project it is for in message.',
     '5. Specialist analysis or an explicit request to use agents for checking/review/research: choose only the necessary ready specialists by their expertise, role and description, and return a delegate decision:',

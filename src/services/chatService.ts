@@ -1081,6 +1081,8 @@ export class ChatService extends EventEmitter {
     presetPlan?: OrchestrationPlan;
     /** Codebases the model expects the work to touch: told to the planner, never a limit. */
     repositoryHint?: string[];
+    /** Alpha's checklist for the build, from its decision: the plan follows it. */
+    checklist?: SpecialistHandoff[];
   }): Promise<SendMessageResult> {
     const { threadId, thread, userMessage } = input;
     const messageId = userMessage.id;
@@ -1123,7 +1125,8 @@ export class ChatService extends EventEmitter {
       issueId: input.issueId,
       settledDecisions: input.settledDecisions,
       boardCards: input.cards,
-      presetPlan: input.presetPlan
+      presetPlan: input.presetPlan,
+      agreedChecklist: input.checklist
     });
     const build = builds[0];
     const statusText = (result: ProjectBuildStartResult) => result.orchestrationRunId
@@ -1650,7 +1653,8 @@ export class ChatService extends EventEmitter {
         threadId: thread.id, thread, userMessage, context: routing.context,
         request: goal, originalRequest: request, repositories, repositoryHint, attachmentIds: input.attachmentIds,
         issueId: routing.issueId,
-        cards: decision.cards
+        cards: decision.cards,
+        checklist: decision.assignments
       });
     }
 
