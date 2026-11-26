@@ -411,7 +411,9 @@ async function startOrchestratedProjectBuild(input: {
     ? await issueStore().get(workspaceId, linkedIssueId)
     : (await issueStore().list(workspaceId)).find(item => item.projectId === project.id && item.labels.includes(idempotencyLabel));
   if (linkedIssueId) {
-    if (!issue || issue.projectId !== project.id) return blocked('That issue is not part of this project. Open it from the project board and try again.', project, repository);
+    // Builds read this desktop's copy of the board: a task the team made may not be in it yet.
+    if (!issue) return blocked('That task is not on this desktop yet. Refresh the board, then try again.', project, repository);
+    if (issue.projectId !== project.id) return blocked('That issue is not part of this project. Open it from the project board and try again.', project, repository);
     if (issue.status === 'done') return blocked(`${issue.identifier} is already done. Reopen it before starting another build.`, project, repository);
     if (issue.archivedAt) return blocked(`${issue.identifier} is archived. Restore it to the board before starting a build.`, project, repository);
   }

@@ -1165,6 +1165,21 @@ function removeDroppedProjects(cloudProjects: Project[], syncingLogin: string, r
   }
 }
 
+/**
+ * Free the team card's identifier when a card here, in any workspace, still
+ * holds it under a key its project gave up (`moveProjectKeyAside`): that card
+ * is renumbered under its project's key. A card whose number matches its
+ * project's key keeps it and is reported by the caller, as before.
+ */
+function freeStaleIdentifier(cloud: Issue, identifiers: Map<string, Issue>): void {
+  const holder = sqliteService.findIssueByIdentifier(cloud.identifier);
+  if (!holder || holder.id === cloud.id) return;
+  const moved = sqliteService.moveIssueIdentifierAside(holder.id);
+  if (!moved) return;
+  identifiers.delete(cloud.identifier);
+  logInfo(`Team board: renumbered ${cloud.identifier} in workspace ${holder.workspaceId} to ${moved}: its project's key changed, and ${cloud.identifier} is the team's.`);
+}
+
 function applyIssues(issues: Issue[], report: PullReport, propagateWriteErrors = false): void {
   const projects = new Set(sqliteService.getProjects().map(project => project.id));
   const local = sqliteService.getIssues();
@@ -1208,6 +1223,7 @@ function applyIssues(issues: Issue[], report: PullReport, propagateWriteErrors =
       report.issuesAdopted += 1;
       continue;
     }
+    if (!twin) freeStaleIdentifier(cloud, identifiers);
     const holder = twin ?? identifiers.get(cloud.identifier);
     if (holder) {
       report.conflicts.push({

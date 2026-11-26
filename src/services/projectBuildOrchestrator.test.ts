@@ -602,10 +602,11 @@ describe('project builds triggered from chat', () => {
 
   it.each([
     ['belongs to another project', { projectId: 'project-other', status: 'todo' }, /not part of this project/],
+    ['has not reached this desktop', null, /not on this desktop yet\. Refresh the board/],
     ['is already done', { projectId: project.id, status: 'done' }, /already done/]
   ])('refuses to build an issue that %s before planning', async (_label, issue, reason) => {
     const service = await load();
-    issueRows.push({ id: 'issue-8', identifier: 'CALC-8', title: 'Other', labels: [], ...issue });
+    if (issue) issueRows.push({ id: 'issue-8', identifier: 'CALC-8', title: 'Other', labels: [], ...issue });
     const [result] = await service.startProjectBuildBatch({
       context: { workspaceId: 'workspace-1', userId: 'user-1', role: 'pm' } as any,
       projectId: project.id,
