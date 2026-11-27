@@ -1,4 +1,7 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,10 +22,10 @@ const project = {
   ]
 };
 
-async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; actionsAnswer?: (path: string) => unknown; readiness?: unknown; memoryAnswer?: unknown[] } = {}) {
+async function startApi(options: { role?: string; canSeeProject?: boolean; promoteAnswer?: unknown; githubFails?: number; architectureAnswer?: unknown; githubAnswer?: (path: string) => unknown; readiness?: unknown; memoryAnswer?: unknown[] } = {}) {
   vi.resetModules();
   const calls: string[] = [];
-  vi.doMock('../services/repositoryMemory.js', async () => {
+  if (options.memoryAnswer) vi.doMock('../services/repositoryMemory.js', async () => {
     const actual = await vi.importActual<typeof import('../services/repositoryMemory.js')>('../services/repositoryMemory.js');
     return {
       ...actual,
@@ -89,9 +92,9 @@ async function startApi(options: { role?: string; canSeeProject?: boolean; promo
   });
 
   const { projectRepoRouter } = await import('./projectRepoController.js');
-  if (options.actionsAnswer) {
+  if (options.githubAnswer) {
     const { useGitHubApi } = await import('../services/githubApi.js');
-    useGitHubApi({ get: async (path: string) => { calls.push(path); return options.actionsAnswer!(path); } } as any);
+    useGitHubApi({ get: async (path: string) => { calls.push(path); return options.githubAnswer!(path); } } as any);
   }
   const app = express();
   app.use(express.json());
@@ -120,6 +123,7 @@ async function call(app: express.Express, method: string, url: string, body?: un
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.doUnmock('../store/stores.js');
   vi.doUnmock('./workspaceContext.js');
   vi.doUnmock('../services/githubRepoWorkspace.js');
@@ -154,11 +158,39 @@ describe('a project’s repository memory', () => {
     expect(res.status).toBe(403);
     expect(calls).not.toContain('memory cached');
   });
+
+  it('reads GitHub in cloud mode even when a repository has no memory file', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-project-memory-route-'));
+    vi.stubEnv('ALPHA_MODE', 'cloud');
+    vi.stubEnv('ALPHA_HOME', home);
+    try {
+      const { app, calls } = await startApi({
+        role: 'pm',
+        githubAnswer: requestPath => {
+          if (requestPath === '/repos/acme/shop-be/contents/AGENTS.md') {
+            return { type: 'file', sha: 'blob-1', content: Buffer.from('Run npm test.').toString('base64') };
+          }
+          throw new GitHubApiError('Not Found', 404);
+        }
+      });
+      const { GitHubApiError } = await import('../services/githubApi.js');
+      const res = await call(app, 'GET', '/api/projects/p1/memory?refresh=1');
+      expect(res.status).toBe(200);
+      expect(res.body.repositories).toEqual([
+        expect.objectContaining({ repository: 'acme/shop-be', file: 'AGENTS.md', text: 'Run npm test.', origin: 'github' }),
+        expect.objectContaining({ repository: 'acme/shop-fe', text: '', origin: 'github' })
+      ]);
+      expect(res.body.repositories[1]).not.toHaveProperty('stale');
+      expect(calls).toContain('/repos/acme/shop-fe/contents/CLAUDE.md');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('a project’s repositories', () => {
   it('reads paginated Actions without requiring a local checkout', async () => {
-    const { app, calls } = await startApi({ actionsAnswer: () => ({ total_count: 65, workflow_runs: [] }) });
+    const { app, calls } = await startApi({ githubAnswer: () => ({ total_count: 65, workflow_runs: [] }) });
     const res = await call(app, 'GET', '/api/projects/p1/repos/acme/shop-be/runs?page=2&status=failure');
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ page: 2, totalCount: 65, runs: [] });
@@ -177,7 +209,7 @@ describe('a project’s repositories', () => {
       expect(calls).toEqual([]);
     });
   it('rejects repeated or object-shaped Actions filters without asking GitHub', async () => {
-    const { app, calls } = await startApi({ actionsAnswer: () => ({}) });
+    const { app, calls } = await startApi({ githubAnswer: () => ({}) });
     expect((await call(app, 'GET', '/api/projects/p1/repos/acme/shop-be/runs?page[]=1')).status).toBe(400);
     expect(calls).toEqual([]);
   });

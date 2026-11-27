@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { ALPHA_DIR } from '../config/env.js';
+import { ALPHA_DIR, IS_CLOUD } from '../config/env.js';
 import { REPOSITORY_MEMORY_LIMITS } from '../config/constants.js';
 import type { Project } from '../models/index.js';
 import { githubApi, GitHubApiError, tokenForThisRequest, type GitHubApi } from './githubApi.js';
@@ -193,13 +193,19 @@ export async function fetchMemoryFromGitHub(repository: string, options: GitHubM
   return job;
 }
 
+function memoryCheckoutDirs(project: Project): Map<string, string> {
+  // Checkout locations belong to the desktop's SQLite store.
+  if (IS_CLOUD) return new Map();
+  return new Map(projectReadRoots(project).roots.map(root => [root.repo.toLowerCase(), root.dir]));
+}
+
 /**
  * The memory of every repository in a project, as this computer sees it now:
  * the local checkout when there is one, otherwise GitHub (or its cached copy).
  * A repository GitHub cannot answer for is returned empty rather than failing the rest.
  */
 export async function projectMemory(project: Project, options: GitHubMemoryOptions = {}): Promise<RepositoryMemory[]> {
-  const roots = new Map(projectReadRoots(project).roots.map(root => [root.repo.toLowerCase(), root.dir]));
+  const roots = memoryCheckoutDirs(project);
   return Promise.all(reposForProject(project).map(async repository => {
     const dir = roots.get(repository.toLowerCase());
     if (dir) return readMemoryFromDir(repository, dir);
@@ -233,7 +239,7 @@ export async function projectMemoryBlock(project: Project): Promise<string> {
 export async function refreshProjectMemories(projects: readonly Project[], options: GitHubMemoryOptions = {}): Promise<number> {
   let refreshed = 0;
   for (const project of projects) {
-    const local = new Set(projectReadRoots(project).roots.map(root => root.repo.toLowerCase()));
+    const local = memoryCheckoutDirs(project);
     for (const repository of reposForProject(project)) {
       if (local.has(repository.toLowerCase())) continue;
       try {
