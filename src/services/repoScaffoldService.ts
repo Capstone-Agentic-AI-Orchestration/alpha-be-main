@@ -7,10 +7,17 @@ import { logInfo, logError } from '../utils/logger.js';
 import { githubService } from './githubService.js';
 import { githubApi } from './githubApi.js';
 import { provisionRepository } from './githubRepoProvisioning.js';
-import { buildCiWorkflows, type CiWorkflowPlan, type DeployTarget } from './ciWorkflows.js';
-import { buildProjectScaffold, normalizeProjectStack, type CanonicalStack, type ScaffoldFile } from './scaffoldBuilder.js';
+import { buildCiWorkflows, buildMonorepoCiWorkflows, type CiWorkflowPlan, type DeployTarget } from './ciWorkflows.js';
+import {
+  buildMonorepoScaffold,
+  buildProjectScaffold,
+  normalizeProjectStack,
+  type CanonicalStack,
+  type ScaffoldFile
+} from './scaffoldBuilder.js';
 import { cloudRequest } from './cloudWorkspaces.js';
 import { platformForStack, roleForStack, setUpHosting, unavailableHostingStatus, type HostingStatus } from './hosting/hostingService.js';
+import { MONOREPO_APP_IDS, MONOREPO_APPS, type MonorepoAppId } from './monorepoApps.js';
 
 export interface CreateScaffoldedRepoInput {
   /** Project key, used as the workspace folder name. */
@@ -129,10 +136,11 @@ async function runHostingSetup(
   nameWithOwner: string,
   stack: CanonicalStack,
   partner?: string,
-  workspaceId?: string
+  workspaceId?: string,
+  app?: MonorepoAppId
 ): Promise<HostingStatus> {
   if (IS_CLOUD) {
-    return setUpHosting({ repo: nameWithOwner, stackHint: stack, ...(partner ? { partnerHint: partner } : {}) });
+    return setUpHosting({ repo: nameWithOwner, stackHint: stack, ...(partner ? { partnerHint: partner } : {}), ...(app ? { app } : {}) });
   }
 
   if (!ALPHA_CLOUD_API) {
@@ -148,7 +156,7 @@ async function runHostingSetup(
   const [owner, name] = nameWithOwner.split('/');
   const answer = await cloudRequest<HostingStatus>(`/hosting/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
     method: 'POST',
-    body: { stack, ...(partner ? { partner } : {}) },
+    body: { stack, ...(partner ? { partner } : {}), ...(app ? { app } : {}) },
     ...(workspaceId ? { workspaceId } : {}),
     // Creating services waits on both platforms; the default timeout is for quick reads.
     timeoutMs: 180_000
@@ -247,18 +255,14 @@ async function isEmptyOrMissing(dir: string): Promise<boolean> {
  * Everything that can fail cheaply (names, stack, shape, an occupied
  * workspace) is checked before GitHub is touched.
  */
-export async function createScaffoldedRepository(
-  input: CreateScaffoldedRepoInput
-): Promise<CreateScaffoldedRepoResult> {
-  const {
-    projectKey,
-    org,
-    visibility = 'private',
-    stack,
-    repoShape = 'standalone',
-    includeDocker = false,
-    description
-  } = input;
+/** The checks every scaffold makes before GitHub is touched, and where a desktop will clone it. */
+async function prepareRepository(input: {
+  projectKey: string;
+  org: string;
+  repoName: string;
+  serviceName?: string;
+}): Promise<{ repoName: string; org: string; serviceName: string; workspaceDir?: string }> {
+  const { projectKey, org } = input;
   const repoName = normalizeRepoName(input.repoName);
 
   if (!org?.trim()) {
@@ -279,31 +283,30 @@ export async function createScaffoldedRepository(
       `A workspace already exists at ${workspaceDir}. Move or delete it before creating this repository.`
     );
   }
+  return { repoName, org: org.trim(), serviceName, ...(workspaceDir ? { workspaceDir } : {}) };
+}
 
-  // Build before touching GitHub, so an unsupported stack or shape fails
-  // without creating anything.
-  const canonicalStack = normalizeProjectStack(stack);
-  const scaffold = buildProjectScaffold({
-    serviceName,
-    stack: canonicalStack,
-    repoShape,
-    includeDocker,
-    ...(description ? { description } : {})
-  });
-  // Also before GitHub: a repository that cannot get its CI is not created.
-  const ci = await buildCiWorkflows({ stack: canonicalStack });
-  const hostingRequested = input.deploy !== false;
-  const files = withCi(scaffold, ci, hostingRequested);
-
+/** Push the scaffold as one commit on dev, uat and main, then clone it on a desktop. */
+async function provisionAndClone(input: {
+  org: string;
+  repoName: string;
+  serviceName: string;
+  visibility: 'private' | 'public';
+  description?: string;
+  files: ScaffoldFile[];
+  requiredChecks: string[];
+  workspaceDir?: string;
+}) {
+  const { org, repoName, serviceName, visibility, description, files, requiredChecks, workspaceDir } = input;
   let repo;
   try {
     repo = await provisionRepository({
-      org: org.trim(),
+      org,
       name: repoName,
       visibility,
       files,
       message: `chore: scaffold ${serviceName}`,
-      requiredChecks: ci.requiredChecks,
+      requiredChecks,
       ...(description ? { description } : {})
     });
   } catch (err: any) {
@@ -323,26 +326,65 @@ export async function createScaffoldedRepository(
   }
 
   logInfo(`Scaffolded ${repo.nameWithOwner} (${files.length} files)${localPath ? ` at ${localPath}` : ''}`);
+  return { repo, ...(localPath ? { localPath } : {}), ...(cloneError ? { cloneError } : {}) };
+}
 
-  let hosting: HostingStatus | undefined;
-  if (hostingRequested) {
-    try {
-      hosting = await runHostingSetup(repo.nameWithOwner, canonicalStack, input.partnerNameWithOwner, input.workspaceId);
-    } catch (err: any) {
-      // Hosting is best-effort at scaffold time: the repository above is
-      // real and already pushed. A hosting failure is reported, not thrown --
-      // throwing here would read as "the scaffold failed" for a repository
-      // that in fact exists and can have hosting retried on its project page.
-      logError(`Hosting setup failed for ${repo.nameWithOwner}:`, err?.message ?? err);
-      hosting = unavailableHostingStatus(
-        repo.nameWithOwner,
-        roleForStack(canonicalStack),
-        platformForStack(canonicalStack),
-        err?.message ?? String(err),
-        input.partnerNameWithOwner ?? null
-      );
-    }
+/**
+ * Hosting at scaffold time is best-effort: the repository is real and already
+ * pushed, so a failure is reported, not thrown -- throwing would read as "the
+ * scaffold failed" for a repository that exists and can have hosting retried
+ * on its project page.
+ */
+async function hostingOrUnavailable(
+  nameWithOwner: string,
+  stack: CanonicalStack,
+  partner: string | undefined,
+  workspaceId: string | undefined,
+  app?: MonorepoAppId
+): Promise<HostingStatus> {
+  try {
+    return await runHostingSetup(nameWithOwner, stack, partner, workspaceId, app);
+  } catch (err: any) {
+    logError(`Hosting setup failed for ${nameWithOwner}${app ? ` (${app})` : ''}:`, err?.message ?? err);
+    return unavailableHostingStatus(nameWithOwner, roleForStack(stack), platformForStack(stack), err?.message ?? String(err), partner ?? null);
   }
+}
+
+export async function createScaffoldedRepository(
+  input: CreateScaffoldedRepoInput
+): Promise<CreateScaffoldedRepoResult> {
+  const { visibility = 'private', stack, repoShape = 'standalone', includeDocker = false, description } = input;
+  const { repoName, org, serviceName, workspaceDir } = await prepareRepository(input);
+
+  // Build before touching GitHub, so an unsupported stack or shape fails
+  // without creating anything.
+  const canonicalStack = normalizeProjectStack(stack);
+  const scaffold = buildProjectScaffold({
+    serviceName,
+    stack: canonicalStack,
+    repoShape,
+    includeDocker,
+    ...(description ? { description } : {})
+  });
+  // Also before GitHub: a repository that cannot get its CI is not created.
+  const ci = await buildCiWorkflows({ stack: canonicalStack });
+  const hostingRequested = input.deploy !== false;
+  const files = withCi(scaffold, ci, hostingRequested);
+
+  const { repo, localPath, cloneError } = await provisionAndClone({
+    org,
+    repoName,
+    serviceName,
+    visibility,
+    ...(description ? { description } : {}),
+    files,
+    requiredChecks: ci.requiredChecks,
+    ...(workspaceDir ? { workspaceDir } : {})
+  });
+
+  const hosting = hostingRequested
+    ? await hostingOrUnavailable(repo.nameWithOwner, canonicalStack, input.partnerNameWithOwner, input.workspaceId)
+    : undefined;
 
   return {
     url: repo.url,
@@ -419,4 +461,137 @@ export async function createPairedProject(input: CreatePairedProjectInput): Prom
     }
     throw err;
   }
+}
+
+// ─── Monorepo ───────────────────────────────────────────────────────────────
+
+export interface CreateMonorepoInput
+  extends Omit<CreateScaffoldedRepoInput, 'stack' | 'repoShape' | 'partnerNameWithOwner' | 'serviceName'> {
+  /** One of MONOREPO_FRONTEND_STACKS (react), for `apps/web`. */
+  frontendStack: string;
+  /** One of MONOREPO_BACKEND_STACKS (nodejs), for `apps/api`. */
+  backendStack: string;
+}
+
+/** One app of a created monorepo: where it is, what it is, and its hosting. */
+export interface CreateMonorepoAppResult {
+  id: MonorepoAppId;
+  role: 'frontend' | 'backend';
+  stack: CanonicalStack;
+  path: string;
+  deployTarget: DeployTarget;
+  /** Absent when `deploy: false`. */
+  hosting?: HostingStatus;
+}
+
+export interface CreateMonorepoResult extends Omit<CreateScaffoldedRepoResult, 'deployTarget' | 'hosting'> {
+  shape: 'monorepo';
+  /** null: each app deploys to its own platform -- see `apps`. */
+  deployTarget: null;
+  /** Backend first, the order hosting was set up in. */
+  apps: CreateMonorepoAppResult[];
+}
+
+/** The monorepo README's CI section: two workflows, two platforms, one branch flow. */
+function monorepoCiReadmeSection(sources: { web: string; api: string }, hostingRequested: boolean): string {
+  const code = (text: string) => '`' + text + '`';
+  return [
+    '',
+    '## CI/CD',
+    '',
+    `${code('.github/workflows/ci-api.yml')} (API CI, from ${code(sources.api)}) and ${code('.github/workflows/ci-web.yml')} ` +
+      `(Web CI, from ${code(sources.web)}) run each app's unit tests with coverage, lint and security scan, in its own ` +
+      `folder, on every push and pull request to ${code('dev')}, ${code('uat')} and ${code('main')}. Both run on every ` +
+      'change, so a pull request is always checked against both apps.',
+    '',
+    `Work lands on ${code('dev')}, is promoted to ${code('uat')}, then to ${code('main')}, by pull request only.`,
+    '',
+    hostingRequested
+      ? `Hosting is set up automatically by Alpha: the API on **Render** from ${code(MONOREPO_APPS.api.path)}, the frontend ` +
+        `on **Vercel** from ${code(MONOREPO_APPS.web.path)}, each pointed at the other. See status, URLs and deploys from ` +
+        'this repository’s project in Alpha.'
+      : 'Hosting was not set up for this repository. Alpha can set it up from this repository’s project page.',
+    ''
+  ].join('\n');
+}
+
+/**
+ * One repository holding a frontend in `apps/web` and a backend in `apps/api`.
+ *
+ * The same steps as a single repository -- everything that can fail cheaply
+ * first, then one commit on dev/uat/main, a desktop clone, and hosting -- with
+ * two apps where a single repository has one. Hosting runs backend first, so
+ * the frontend's setup can read the API's URLs, and each app's setup points
+ * the other at itself: the API URL into the frontend, the frontend's origins
+ * into the API's CORS.
+ */
+export async function createMonorepoRepository(input: CreateMonorepoInput): Promise<CreateMonorepoResult> {
+  const { visibility = 'private', includeDocker = false, description } = input;
+  const { repoName, org, serviceName, workspaceDir } = await prepareRepository(input);
+
+  // Validates both stacks, so a wrong pair fails before GitHub is touched.
+  const scaffold = buildMonorepoScaffold({
+    serviceName,
+    frontendStack: input.frontendStack,
+    backendStack: input.backendStack,
+    includeDocker,
+    ...(description ? { description } : {})
+  });
+  const stacks: Record<MonorepoAppId, CanonicalStack> = {
+    web: input.frontendStack as CanonicalStack,
+    api: input.backendStack as CanonicalStack
+  };
+  const ci = await buildMonorepoCiWorkflows({ frontendStack: stacks.web, backendStack: stacks.api });
+  const hostingRequested = input.deploy !== false;
+  const files = [
+    ...scaffold.map(file =>
+      file.path === 'README.md' ? { ...file, content: file.content + monorepoCiReadmeSection(ci.sources, hostingRequested) } : file
+    ),
+    ...ci.files
+  ];
+
+  const { repo, localPath, cloneError } = await provisionAndClone({
+    org,
+    repoName,
+    serviceName,
+    visibility,
+    ...(description ? { description } : {}),
+    files,
+    requiredChecks: ci.requiredChecks,
+    ...(workspaceDir ? { workspaceDir } : {})
+  });
+
+  const apps: CreateMonorepoAppResult[] = [];
+  for (const id of MONOREPO_APP_IDS) {
+    const stack = stacks[id];
+    const hosting = hostingRequested
+      ? await hostingOrUnavailable(repo.nameWithOwner, stack, undefined, input.workspaceId, id)
+      : undefined;
+    apps.push({
+      id,
+      role: MONOREPO_APPS[id].role,
+      stack,
+      path: MONOREPO_APPS[id].path,
+      deployTarget: platformForStack(stack),
+      ...(hosting ? { hosting } : {})
+    });
+  }
+
+  return {
+    shape: 'monorepo',
+    url: repo.url,
+    nameWithOwner: repo.nameWithOwner,
+    ...(localPath ? { localPath } : {}),
+    files: files.map(f => f.path),
+    commitSha: repo.commitSha,
+    branches: repo.branches,
+    protectedBranches: repo.protectedBranches,
+    ...(repo.protectionUnavailable ? { protectionUnavailable: repo.protectionUnavailable } : {}),
+    ...(cloneError ? { cloneError } : {}),
+    deployTarget: null,
+    requiredSecrets: [],
+    deployVariable: null,
+    ciSource: ci.sources.web,
+    apps
+  };
 }

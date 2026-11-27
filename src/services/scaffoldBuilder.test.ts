@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { CI_CHECKS } from './orchestrationContract.js';
 import {
+  buildMonorepoScaffold,
   buildProjectScaffold,
   normalizeProjectStack,
   normalizeRepoShape,
@@ -54,7 +55,7 @@ describe('buildProjectScaffold', () => {
     // Silently downgrading would hand back a single-package repo to someone who
     // asked for a monorepo, and they would only find out after the push.
     expect(() => buildProjectScaffold({ serviceName: 'x', stack: 'nodejs', repoShape: 'mono' }))
-      .toThrow(/not supported yet/i);
+      .toThrow(/buildMonorepoScaffold/);
     expect(() => buildProjectScaffold({ serviceName: 'x', stack: 'nodejs', repoShape: 'multi' }))
       .toThrow(/not supported yet/i);
   });
@@ -319,5 +320,46 @@ describe('buildProjectScaffold', () => {
       expect(env).toContain('PORT=3000');
       expect(env).toContain('CORS_ORIGINS=http://localhost:5173,http://localhost:3001');
     });
+  });
+});
+
+describe('buildMonorepoScaffold', () => {
+  const files = buildMonorepoScaffold({ serviceName: 'shop', frontendStack: 'react', backendStack: 'nodejs' });
+
+  it('puts each app, exactly as a single repository of its stack gets it, in its own folder', () => {
+    const app = (dir: string, serviceName: string, stack: string) =>
+      buildProjectScaffold({ serviceName, stack }).map(file => ({ path: dir + '/' + file.path, content: file.content }));
+    const inside = (dir: string) => files.filter(file => file.path.startsWith(dir + '/'));
+
+    expect(inside('apps/web')).toEqual(app('apps/web', 'shop-web', 'react'));
+    expect(inside('apps/api')).toEqual(app('apps/api', 'shop-api', 'nodejs'));
+    expect(paths(files).filter(p => !p.startsWith('apps/')).sort()).toEqual(['.gitignore', 'README.md', 'package.json']);
+  });
+
+  it('gives the root scripts over both apps and no workspaces, so each app keeps its own lockfile', () => {
+    const pkg = JSON.parse(read(files, 'package.json'));
+    expect(pkg).not.toHaveProperty('workspaces');
+    expect(pkg.scripts.postinstall).toBe('npm install --prefix apps/api && npm install --prefix apps/web');
+    expect(pkg.scripts.test).toBe('npm run test --prefix apps/api && npm run test --prefix apps/web');
+    expect(pkg.scripts.dev).toContain('concurrently');
+    expect(Object.keys(pkg.devDependencies)).toEqual(['concurrently']);
+  });
+
+  it('points the two apps at each other locally', () => {
+    expect(read(files, 'apps/web/.env.example')).toContain('VITE_API_URL=http://localhost:3000');
+    expect(read(files, 'apps/api/.env.example')).toContain('http://localhost:5173');
+    expect(read(files, 'README.md')).toContain('apps/web');
+  });
+
+  it('gives only the API a Dockerfile', () => {
+    const docker = paths(buildMonorepoScaffold({ serviceName: 'shop', frontendStack: 'react', backendStack: 'nodejs', includeDocker: true }));
+    expect(docker).toContain('apps/api/Dockerfile');
+    expect(docker).not.toContain('apps/web/Dockerfile');
+  });
+
+  it('builds React with the Node.js API only, and refuses any other pair before anything is created', () => {
+    expect(() => buildMonorepoScaffold({ serviceName: 'x', frontendStack: 'nextjs', backendStack: 'nodejs' })).toThrow(/^Invalid frontend stack/);
+    expect(() => buildMonorepoScaffold({ serviceName: 'x', frontendStack: 'react', backendStack: 'nestjs' })).toThrow(/^Invalid backend stack/);
+    expect(() => buildMonorepoScaffold({ serviceName: 'x', frontendStack: 'nodejs', backendStack: 'react' })).toThrow(/^Invalid frontend stack/);
   });
 });

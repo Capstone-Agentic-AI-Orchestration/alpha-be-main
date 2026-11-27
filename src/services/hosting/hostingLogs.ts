@@ -1,5 +1,6 @@
 import type { DeploymentLogsQuery, DeploymentLogsResponse, LogFilterKey } from './deploymentLogs.js';
 import {
+  hostedNameFor,
   isAlphaManagedKey,
   platformForStack,
   renderClient,
@@ -41,7 +42,8 @@ export async function getHostingLogs(
   }
   const stack = resolveStack(ctx);
   if (!stack) return unavailable(`Could not tell whether ${ctx.repo} is a backend or a frontend.`);
-  const repoName = ctx.repo.split('/')[1];
+  // The name the app is hosted under: the repository's, or `name-web`/`name-api` for a monorepo app.
+  const repoName = hostedNameFor(ctx);
 
   if (platformForStack(stack) === 'render') {
     if (!PIPELINE_BRANCHES.includes(branch as HostingBranch)) {

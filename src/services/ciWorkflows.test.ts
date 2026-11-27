@@ -157,3 +157,44 @@ describe('the CI a new repository gets', () => {
     }
   );
 });
+
+describe('the CI a monorepo gets', () => {
+  it('reads one caller per app from the library and requires both apps’ checks under their own names', async () => {
+    const ci = await load();
+    const { impl, urls } = fakeFetch();
+
+    const plan = await ci.buildMonorepoCiWorkflows({ frontendStack: 'react', backendStack: 'nodejs' }, impl);
+
+    expect(urls.sort()).toEqual([
+      'https://raw.githubusercontent.com/example-org/ci-library/v1/workflow-templates/product/monorepo/api-nodejs.yml',
+      'https://raw.githubusercontent.com/example-org/ci-library/v1/workflow-templates/product/monorepo/web-react.yml',
+      'https://raw.githubusercontent.com/example-org/ci-library/v1/workflow-templates/product/post-deploy-verify.yml'
+    ]);
+    expect(plan.files.map(file => file.path)).toEqual([
+      '.github/workflows/ci-web.yml',
+      '.github/workflows/ci-api.yml',
+      '.github/workflows/post-deploy-verify.yml'
+    ]);
+    expect(plan.requiredChecks).toEqual([
+      'api-unit-tests / Backend Unit Tests',
+      'api-lint / Lint & Style Check',
+      'api-security / Dependency Audit',
+      'api-security / License Compliance',
+      'web-unit-tests / Frontend Unit Tests',
+      'web-lint / Lint & Style Check',
+      'web-security / Dependency Audit',
+      'web-security / License Compliance',
+      'web-build'
+    ]);
+    // Library calls point back at the configured library, as for a single repository.
+    expect(plan.files[0].content).toContain('uses: example-org/ci-library/.github/workflows/frontend-tests.yml@v1');
+  });
+
+  it('refuses, before anything is created, when the library has no monorepo callers', async () => {
+    const ci = await load();
+    const { impl } = fakeFetch(404);
+    await expect(ci.buildMonorepoCiWorkflows({ frontendStack: 'react', backendStack: 'nodejs' }, impl)).rejects.toThrow(
+      /Could not read the CI template/
+    );
+  });
+});

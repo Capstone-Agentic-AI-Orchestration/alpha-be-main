@@ -13,6 +13,13 @@ import { githubApi, GitHubApiError } from '../githubApi.js';
 import { logError, logInfo } from '../../utils/logger.js';
 import { assertSafeBranchName } from '../../utils/gitUtils.js';
 import {
+  hostedName,
+  MONOREPO_APPS,
+  otherMonorepoApp,
+  resourceApps,
+  type MonorepoAppId
+} from '../monorepoApps.js';
+import {
   createRenderClient,
   RenderApiError,
   type RenderClient,
@@ -33,6 +40,12 @@ import { createVercelClient, VercelApiError, type VercelClient, type VercelProje
  * what to look for. Where a `Project` *is* available, its `github_repo`
  * resource's cached `hosting` field is only a shortcut past the name search;
  * every write path re-confirms against Render/Vercel before trusting it.
+ *
+ * A monorepo hosts two apps from one repository, so its names carry the app:
+ * Render services `name-api` and `name-api-uat` built from `apps/api`, and a
+ * Vercel project `name-web` built from `apps/web`. Each app's partner is the
+ * other app of the same repository. A repository without apps keeps the names
+ * above, unchanged.
  */
 
 export type HostingPlatform = 'render' | 'vercel';
@@ -41,6 +54,8 @@ export type HostingBranch = 'main' | 'uat' | 'dev';
 
 export interface HostingStatus {
   repo: string;
+  /** Which app of a monorepo this is; absent for a single-app repository. */
+  app?: MonorepoAppId;
   role: HostingRole | null;
   platform: HostingPlatform | null;
   /** Whether the server holds credentials for this repo's platform. */
@@ -109,6 +124,46 @@ export interface HostingContext {
   stackHint?: string;
   /** `owner/name` of the paired repo, when it is not derivable from `project`. */
   partnerHint?: string;
+  /**
+   * Which app of a monorepo to act on. Required for a monorepo, which has no
+   * single stack; absent for every other repository.
+   */
+  app?: MonorepoAppId;
+}
+
+/** One hosted thing: a repository, or one app of a monorepo. */
+export interface HostingTarget {
+  repo: string;
+  app?: MonorepoAppId;
+}
+
+/** The name `ctx`'s app is hosted under on Render (plus `-uat`) and Vercel. */
+export function hostedNameFor(target: HostingTarget): string {
+  return hostedName(target.repo, target.app);
+}
+
+/** The folder a monorepo app builds from; undefined for a single-app repository, which builds from its root. */
+function rootDirFor(target: HostingTarget): string | undefined {
+  return target.app ? MONOREPO_APPS[target.app].path : undefined;
+}
+
+/** The partner as a target: a monorepo app's is the other app of the same repository. */
+function partnerTargetOf(ctx: HostingContext, partner: string | null): HostingTarget | null {
+  if (!partner) return null;
+  return { repo: partner, ...(ctx.app ? { app: otherMonorepoApp(ctx.app) } : {}) };
+}
+
+/** `status` labelled with the app it is for, when it is for one. */
+function tagged<T extends { app?: MonorepoAppId }>(value: T, app: MonorepoAppId | undefined): T {
+  return app ? { ...value, app } : value;
+}
+
+/** Why a stack could not be resolved -- a monorepo asked about without an app gets told to name one. */
+function unknownStackMessage(ctx: HostingContext): string {
+  if (!ctx.app && resourceApps(resourceForRepo(ctx.project, ctx.repo)).length) {
+    return `${ctx.repo} holds a frontend and a backend. Say which app: web or api.`;
+  }
+  return `Could not tell whether ${ctx.repo} is a backend or a frontend.`;
 }
 
 /** Which platforms this server holds credentials for. Booleans only -- never the values themselves. */
@@ -190,6 +245,16 @@ function resourceForRepo(project: Project | null | undefined, repo: string): Pro
  */
 export function resolveStack(ctx: HostingContext): CanonicalStack | null {
   const resource = resourceForRepo(ctx.project, ctx.repo);
+  if (ctx.app) {
+    const fromProject = resourceApps(resource).find(app => app.id === ctx.app)?.stack;
+    const raw = fromProject ?? ctx.stackHint;
+    if (!raw) return null;
+    const stack = normalizeProjectStack(raw);
+    // An app is a frontend or a backend by where it lives; a stack of the other kind is not this app's.
+    return roleForStack(stack) === MONOREPO_APPS[ctx.app].role ? stack : null;
+  }
+  // A monorepo has a stack per app and none for the repository.
+  if (resourceApps(resource).length) return null;
   if (resource?.stack) return normalizeProjectStack(resource.stack);
   if (ctx.stackHint) return normalizeProjectStack(ctx.stackHint);
   return null;
@@ -214,6 +279,8 @@ export function resolveStack(ctx: HostingContext): CanonicalStack | null {
  * just because hosting itself is unconfigured.
  */
 function resolvePartnerFromHint(ctx: HostingContext): string | null {
+  // A monorepo app's partner is the other app, in this same repository.
+  if (ctx.app) return ctx.repo;
   const [, name] = ctx.repo.split('/');
   if (ctx.project) {
     const siblings = reposForProject(ctx.project).filter(r => r.toLowerCase() !== ctx.repo.toLowerCase());
@@ -232,9 +299,11 @@ function resolvePartnerFromHint(ctx: HostingContext): string | null {
  * hosting, as the hints a repo-keyed request carries -- for when the project
  * itself cannot travel (a desktop's project id means nothing to the cloud).
  */
-export function hostingHintsFor(project: Project, repo: string): { stack?: string; partner?: string } {
-  const stack = resourceForRepo(project, repo)?.stack;
-  const partner = resolvePartnerFromHint({ repo, project });
+export function hostingHintsFor(project: Project, repo: string, app?: MonorepoAppId): { stack?: string; partner?: string } {
+  const resource = resourceForRepo(project, repo);
+  const stack = app ? resourceApps(resource).find(entry => entry.id === app)?.stack : resource?.stack;
+  // A monorepo app's partner is implied by the app, so it is never sent as a hint.
+  const partner = app ? null : resolvePartnerFromHint({ repo, project });
   return { ...(stack ? { stack } : {}), ...(partner ? { partner } : {}) };
 }
 
@@ -341,10 +410,10 @@ function httpsUrl(host: string | null | undefined): string | null {
 }
 
 /** The partner's current URLs, read live from the platform -- never from a cache that could be stale. */
-async function readPartnerBackendUrls(repo: string): Promise<BackendUrls> {
+async function readPartnerBackendUrls(target: HostingTarget): Promise<BackendUrls> {
   const client = renderClient();
   if (!client) return { main: null, uat: null };
-  const names = renderServiceNames(repo.split('/')[1]);
+  const names = renderServiceNames(hostedNameFor(target));
   const [main, uat] = await Promise.all([client.findServiceByName(names.main), client.findServiceByName(names.uat)]);
   return { main: httpsUrl(main?.serviceDetails?.url), uat: httpsUrl(uat?.serviceDetails?.url) };
 }
@@ -384,10 +453,10 @@ async function stableFrontendUrls(client: VercelClient, projectId: string): Prom
   return { production: httpsUrl(production), uat, dev };
 }
 
-async function readPartnerFrontendUrls(repo: string): Promise<FrontendUrls> {
+async function readPartnerFrontendUrls(target: HostingTarget): Promise<FrontendUrls> {
   const client = vercelClient();
   if (!client) return { production: null, uat: null, dev: null };
-  const project = await client.findProjectByName(repo.split('/')[1]);
+  const project = await client.findProjectByName(hostedNameFor(target));
   if (!project) return { production: null, uat: null, dev: null };
   return stableFrontendUrls(client, project.id);
 }
@@ -474,7 +543,8 @@ async function findOrCreateRenderService(
   branch: string,
   healthCheckPath: string,
   environmentId: string | undefined,
-  created: Array<() => Promise<void>>
+  created: Array<() => Promise<void>>,
+  rootDir?: string
 ): Promise<RenderServiceRecord> {
   const existing = await client.findServiceByName(name);
   if (existing) {
@@ -499,6 +569,9 @@ async function findOrCreateRenderService(
       ...(environmentId ? { environmentId } : {}),
       ...(RENDER_REGION ? { region: RENDER_REGION } : {}),
       healthCheckPath,
+      // A monorepo's API builds from its folder. No build filter: every push redeploys it, so the
+      // deployed commit is always the branch's head -- what delivery verification checks for.
+      ...(rootDir ? { rootDir } : {}),
       ...RENDER_SETTINGS
     });
   } catch (err) {
@@ -525,11 +598,12 @@ async function setRenderEnvAndDeploy(
 
 async function setUpBackend(
   ctx: HostingContext,
-  partner: string | null
+  partner: HostingTarget | null
 ): Promise<{ status: HostingStatus; record: ProjectResourceHosting }> {
   const client = renderClient()!;
   const [owner, name] = ctx.repo.split('/');
-  const names = renderServiceNames(name);
+  const names = renderServiceNames(hostedNameFor(ctx));
+  const rootDir = rootDirFor(ctx);
   const repoUrl = `https://github.com/${owner}/${name}`;
   const created: Array<() => Promise<void>> = [];
 
@@ -542,8 +616,8 @@ async function setUpBackend(
   const environments = await ensureRenderProject(client, ownerId, name);
 
   try {
-    const main = await findOrCreateRenderService(client, ownerId, names.main, repoUrl, 'main', '/health', environments.main, created);
-    const uat = await findOrCreateRenderService(client, ownerId, names.uat, repoUrl, 'uat', '/health', environments.uat, created);
+    const main = await findOrCreateRenderService(client, ownerId, names.main, repoUrl, 'main', '/health', environments.main, created, rootDir);
+    const uat = await findOrCreateRenderService(client, ownerId, names.uat, repoUrl, 'uat', '/health', environments.uat, created, rootDir);
 
     const corsForMain = partnerUrls.production ? [partnerUrls.production] : [];
     const corsForUat = [partnerUrls.uat, partnerUrls.dev].filter((v): v is string => Boolean(v));
@@ -565,7 +639,7 @@ async function setUpBackend(
       }
     };
 
-    const status = await statusFromRenderRecord(ctx.repo, 'backend', record, partner, client);
+    const status = await statusFromRenderRecord(ctx.repo, 'backend', record, partner?.repo ?? null, client);
     return { status, record };
   } catch (err) {
     await rollback(created, `setting up Render hosting for ${ctx.repo}`);
@@ -645,7 +719,8 @@ async function findOrCreateVercelProject(
   org: string,
   repo: string,
   framework: 'vite' | 'nextjs',
-  created: Array<() => Promise<void>>
+  created: Array<() => Promise<void>>,
+  rootDirectory?: string
 ): Promise<VercelProject> {
   const existing = await client.findProjectByName(name);
   if (existing) {
@@ -661,7 +736,7 @@ async function findOrCreateVercelProject(
   }
 
   try {
-    const project = await client.createProject({ name, framework, org, repo });
+    const project = await client.createProject({ name, framework, org, repo, ...(rootDirectory ? { rootDirectory } : {}) });
     created.push(async () => {
       await client.deleteProject(project.id);
     });
@@ -679,10 +754,12 @@ async function findOrCreateVercelProject(
 async function setUpFrontend(
   ctx: HostingContext,
   stack: CanonicalStack,
-  partner: string | null
+  partner: HostingTarget | null
 ): Promise<{ status: HostingStatus; record: ProjectResourceHosting }> {
   const client = vercelClient()!;
   const [owner, name] = ctx.repo.split('/');
+  // The Vercel project's own name: the repository's, or `name-web` for a monorepo's frontend.
+  const projectName = hostedNameFor(ctx);
   const created: Array<() => Promise<void>> = [];
   const apiUrlKey = apiUrlKeyFor(stack);
 
@@ -690,7 +767,7 @@ async function setUpFrontend(
   const partnerUrls = partner ? await readPartnerBackendUrls(partner).catch(() => ({ main: null, uat: null })) : { main: null, uat: null };
 
   try {
-    const project = await findOrCreateVercelProject(client, name, owner, name, vercelFrameworkFor(stack), created);
+    const project = await findOrCreateVercelProject(client, projectName, owner, name, vercelFrameworkFor(stack), created, rootDirFor(ctx));
     await client.disableSsoProtection(project.id);
 
     const envVars = [];
@@ -699,18 +776,18 @@ async function setUpFrontend(
     if (envVars.length) await client.upsertEnvVars(project.id, envVars);
 
     for (const branch of ['uat', 'dev']) {
-      await client.addBranchDomain(project.id, `${name}-${branch}.vercel.app`, branch);
+      await client.addBranchDomain(project.id, `${projectName}-${branch}.vercel.app`, branch);
     }
 
     // Linking a repository does not deploy its existing branches -- each one
     // needs an explicit deployment, or `main` would sit un-hosted until the
     // next push even though the project now exists.
-    await client.createDeployment({ name, projectId: project.id, org: owner, repo: name, ref: 'main', target: 'production' });
-    await client.createDeployment({ name, projectId: project.id, org: owner, repo: name, ref: 'uat' });
-    await client.createDeployment({ name, projectId: project.id, org: owner, repo: name, ref: 'dev' });
+    await client.createDeployment({ name: projectName, projectId: project.id, org: owner, repo: name, ref: 'main', target: 'production' });
+    await client.createDeployment({ name: projectName, projectId: project.id, org: owner, repo: name, ref: 'uat' });
+    await client.createDeployment({ name: projectName, projectId: project.id, org: owner, repo: name, ref: 'dev' });
 
     const record: ProjectResourceHosting = { platform: 'vercel', vercel: { projectId: project.id } };
-    const status = await statusFromVercelRecord(ctx.repo, record, partner, client, name);
+    const status = await statusFromVercelRecord(ctx.repo, record, partner?.repo ?? null, client, projectName);
     return { status, record };
   } catch (err) {
     await rollback(created, `setting up Vercel hosting for ${ctx.repo}`);
@@ -791,6 +868,11 @@ async function rollback(created: Array<() => Promise<void>>, action: string): Pr
 /** The GitHub Actions variable that holds each environment's stable URL. */
 const URL_VARIABLES: Record<HostingBranch, string> = { main: 'ALPHA_URL_MAIN', uat: 'ALPHA_URL_UAT', dev: 'ALPHA_URL_DEV' };
 
+/** A monorepo's two apps share one repository's variables, so each app's names carry it: `ALPHA_URL_API_MAIN`. */
+export function urlVariableName(branch: HostingBranch, app?: MonorepoAppId): string {
+  return app ? URL_VARIABLES[branch].replace('ALPHA_URL_', `ALPHA_URL_${app.toUpperCase()}_`) : URL_VARIABLES[branch];
+}
+
 /**
  * Put each environment's stable URL on the repository as a GitHub Actions
  * variable (not a secret: these are public URLs), for workflows that need an
@@ -800,11 +882,11 @@ const URL_VARIABLES: Record<HostingBranch, string> = { main: 'ALPHA_URL_MAIN', u
  * written, so a failure (the caller lacks access to the repository's
  * variables) is said rather than thrown.
  */
-async function writeUrlVariables(repo: string, status: HostingStatus): Promise<{ ok: boolean; error?: string }> {
+async function writeUrlVariables(repo: string, status: HostingStatus, app?: MonorepoAppId): Promise<{ ok: boolean; error?: string }> {
   const failures: string[] = [];
   for (const env of status.environments) {
     if (!env.url) continue;
-    const name = URL_VARIABLES[env.branch];
+    const name = urlVariableName(env.branch, app);
     try {
       await githubApi().patch(`/repos/${repo}/actions/variables/${name}`, { name, value: env.url });
     } catch (err) {
@@ -839,15 +921,17 @@ export interface PartnerWiring {
  * Awaited, not fired and forgotten -- a partner left unwired is the one
  * failure a person would otherwise only discover from a browser's CORS error.
  */
-async function refreshPartner(partner: string, role: HostingRole, ownRepo: string): Promise<PartnerWiring> {
-  const [partnerOwner, partnerName] = partner.split('/');
+async function refreshPartner(partner: HostingTarget, role: HostingRole, own: HostingTarget): Promise<PartnerWiring> {
+  const [partnerOwner, partnerRepoName] = partner.repo.split('/');
+  const partnerHosted = hostedNameFor(partner);
+  const partnerLabel = partner.app ? `${partner.repo} (${MONOREPO_APPS[partner.app].path})` : partner.repo;
   try {
     if (role === 'frontend') {
       // We are the frontend; the partner is a backend whose CORS needs us.
       const client = renderClient();
       if (!client) return { ok: false, error: 'Render is not configured on this server.' };
-      const names = renderServiceNames(partnerName);
-      const urls = await readPartnerFrontendUrls(ownRepo);
+      const names = renderServiceNames(partnerHosted);
+      const urls = await readPartnerFrontendUrls(own);
       const [main, uat] = await Promise.all([client.findServiceByName(names.main), client.findServiceByName(names.uat)]);
       if (main && urls.production) {
         await setRenderEnvAndDeploy(client, main.id, { CORS_ORIGINS: urls.production, FRONTEND_URL: urls.production });
@@ -862,10 +946,10 @@ async function refreshPartner(partner: string, role: HostingRole, ownRepo: strin
     // We are the backend; the partner is a frontend whose API URL needs us.
     const client = vercelClient();
     if (!client) return { ok: false, error: 'Vercel is not configured on this server.' };
-    const project = await client.findProjectByName(partnerName);
+    const project = await client.findProjectByName(partnerHosted);
     if (!project) return { ok: true };
     const apiUrlKey = apiUrlKeyFor(project.framework === 'nextjs' ? 'nextjs' : 'react');
-    const urls = await readPartnerBackendUrls(ownRepo);
+    const urls = await readPartnerBackendUrls(own);
     const envVars = [];
     if (urls.main) envVars.push({ key: apiUrlKey, value: urls.main, target: ['production' as const] });
     if (urls.uat) envVars.push({ key: apiUrlKey, value: urls.uat, target: ['preview' as const] });
@@ -873,15 +957,15 @@ async function refreshPartner(partner: string, role: HostingRole, ownRepo: strin
       await client.upsertEnvVars(project.id, envVars);
       // The API URL is compiled into a frontend build, so every branch that
       // reads it needs a new build -- not just production.
-      await client.createDeployment({ name: partnerName, projectId: project.id, org: partnerOwner, repo: partnerName, ref: 'main', target: 'production' });
+      await client.createDeployment({ name: partnerHosted, projectId: project.id, org: partnerOwner, repo: partnerRepoName, ref: 'main', target: 'production' });
       for (const ref of ['uat', 'dev']) {
-        await client.createDeployment({ name: partnerName, projectId: project.id, org: partnerOwner, repo: partnerName, ref });
+        await client.createDeployment({ name: partnerHosted, projectId: project.id, org: partnerOwner, repo: partnerRepoName, ref });
       }
     }
     return { ok: true };
   } catch (err) {
-    logError(`Could not refresh hosting for ${partner} after ${ownRepo} changed:`, (err as Error).message);
-    return { ok: false, error: `Could not update ${partner}: ${(err as Error).message}` };
+    logError(`Could not refresh hosting for ${partnerLabel} after ${hostedNameFor(own)} changed:`, (err as Error).message);
+    return { ok: false, error: `Could not update ${partnerLabel}: ${(err as Error).message}` };
   }
 }
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -907,9 +991,13 @@ const unavailable = unavailableHostingStatus;
 
 /** Read-only status: never creates or changes anything. */
 export async function getHostingStatus(ctx: HostingContext): Promise<HostingStatus> {
+  return tagged(await readHostingStatus(ctx), ctx.app);
+}
+
+async function readHostingStatus(ctx: HostingContext): Promise<HostingStatus> {
   const stack = resolveStack(ctx);
   if (!stack) {
-    return unavailable(ctx.repo, null, null, `Could not tell whether ${ctx.repo} is a backend or a frontend.`);
+    return unavailable(ctx.repo, null, null, unknownStackMessage(ctx));
   }
   const role = roleForStack(stack);
   const platform = platformForStack(stack);
@@ -930,7 +1018,7 @@ export async function getHostingStatus(ctx: HostingContext): Promise<HostingStat
   try {
     if (platform === 'render') {
       const client = renderClient()!;
-      const names = renderServiceNames(ctx.repo.split('/')[1]);
+      const names = renderServiceNames(hostedNameFor(ctx));
       const [main, uat] = await Promise.all([client.findServiceByName(names.main), client.findServiceByName(names.uat)]);
       if (!main && !uat) {
         const github = await readGithubSecretsAndVariables(ctx.repo);
@@ -947,12 +1035,12 @@ export async function getHostingStatus(ctx: HostingContext): Promise<HostingStat
     }
 
     const client = vercelClient()!;
-    const project = await client.findProjectByName(ctx.repo.split('/')[1]);
+    const project = await client.findProjectByName(hostedNameFor(ctx));
     if (!project) {
       const github = await readGithubSecretsAndVariables(ctx.repo);
       return { repo: ctx.repo, role, platform, configured: true, state: 'not_set_up', partner, environments: [], envVars: [], github };
     }
-    return statusFromVercelRecord(ctx.repo, { platform: 'vercel', vercel: { projectId: project.id } }, partner, client, ctx.repo.split('/')[1]);
+    return statusFromVercelRecord(ctx.repo, { platform: 'vercel', vercel: { projectId: project.id } }, partner, client, hostedNameFor(ctx));
   } catch (err: any) {
     return { repo: ctx.repo, role, platform, configured: true, state: 'failed', error: err?.message ?? String(err), partner, environments: [], envVars: [], github: { secrets: [], variables: [] } };
   }
@@ -1071,7 +1159,7 @@ export async function getBuildBranchPreview(ctx: HostingContext, branch: string)
   }
   ci = await branchCiStatus(ctx.repo, branch);
   const stack = resolveStack(ctx);
-  if (!stack) return unavailable('unavailable', `Could not identify the hosting provider for ${ctx.repo}.`);
+  if (!stack) return unavailable('unavailable', unknownStackMessage(ctx));
   platform = platformForStack(stack);
   if (platform !== 'vercel') {
     return unavailable('unsupported', 'Run-branch previews are not available for this hosting provider yet.');
@@ -1083,7 +1171,7 @@ export async function getBuildBranchPreview(ctx: HostingContext, branch: string)
   try {
     const client = vercelClient();
     if (!client) return unavailable('unavailable', 'Vercel is not configured on the Alpha server.');
-    const project = await client.findProjectByName(ctx.repo.split('/')[1]);
+    const project = await client.findProjectByName(hostedNameFor(ctx));
     if (!project) {
       return unavailable('waiting', 'Set up preview hosting for this repository to publish a build preview.');
     }
@@ -1118,9 +1206,13 @@ export async function getBuildBranchPreview(ctx: HostingContext, branch: string)
  * -- a failure here rolls back only what this call created on Render/Vercel.
  */
 export async function setUpHosting(ctx: HostingContext): Promise<HostingStatus> {
+  return tagged(await setUpHostingFor(ctx), ctx.app);
+}
+
+async function setUpHostingFor(ctx: HostingContext): Promise<HostingStatus> {
   const stack = resolveStack(ctx);
   if (!stack) {
-    return unavailable(ctx.repo, null, null, `Could not tell whether ${ctx.repo} is a backend or a frontend. Pass its stack.`);
+    return unavailable(ctx.repo, null, null, `${unknownStackMessage(ctx)} Pass its stack.`);
   }
   const role = roleForStack(stack);
   const platform = platformForStack(stack);
@@ -1134,14 +1226,16 @@ export async function setUpHosting(ctx: HostingContext): Promise<HostingStatus> 
   }
 
   const partner = await resolvePartner(ctx);
+  const partnerTarget = partnerTargetOf(ctx, partner);
 
   try {
-    const { status } = role === 'backend' ? await setUpBackend(ctx, partner) : await setUpFrontend(ctx, stack, partner);
+    const { status } =
+      role === 'backend' ? await setUpBackend(ctx, partnerTarget) : await setUpFrontend(ctx, stack, partnerTarget);
 
-    const partnerWiring = partner ? await refreshPartner(partner, role, ctx.repo) : undefined;
-    const urlVariables = await writeUrlVariables(ctx.repo, status);
+    const partnerWiring = partnerTarget ? await refreshPartner(partnerTarget, role, ctx) : undefined;
+    const urlVariables = await writeUrlVariables(ctx.repo, status, ctx.app);
 
-    logInfo(`Hosting set up for ${ctx.repo} on ${platform} (${status.state}).`);
+    logInfo(`Hosting set up for ${hostedNameFor(ctx)} (${ctx.repo}) on ${platform} (${status.state}).`);
     return { ...status, ...(partnerWiring ? { partnerWiring } : {}), urlVariables };
   } catch (err: any) {
     logError(`Hosting setup failed for ${ctx.repo}:`, err?.message ?? err);
@@ -1179,15 +1273,20 @@ function sameRepoUrl(url: string | undefined, repo: string): boolean {
  *
  * Idempotent: anything already gone is simply not listed, so a teardown
  * that failed half-way is finished by running it again.
+ *
+ * A monorepo's apps are hosted as `name-api` and `name-web`; those names are
+ * looked for too, under the same linked-to-this-repository rule, so the
+ * caller never has to know which shape the repository was.
  */
 export async function tearDownHosting(repo: string): Promise<HostingTeardown> {
   const name = repo.split('/')[1];
   const result: HostingTeardown = { repo, removed: [], kept: [], failed: [] };
+  const hostedNames = [name, hostedName(repo, 'api'), hostedName(repo, 'web')];
 
   const render = renderClient();
   if (render) {
     const deletedIds: string[] = [];
-    for (const serviceName of Object.values(renderServiceNames(name))) {
+    for (const serviceName of hostedNames.flatMap(hosted => Object.values(renderServiceNames(hosted)))) {
       try {
         const service = await render.findServiceByName(serviceName);
         if (!service) continue;
@@ -1229,18 +1328,19 @@ export async function tearDownHosting(repo: string): Promise<HostingTeardown> {
 
   const vercel = vercelClient();
   if (vercel) {
-    try {
-      const project = await vercel.findProjectByName(name);
-      if (project) {
+    for (const projectName of hostedNames) {
+      try {
+        const project = await vercel.findProjectByName(projectName);
+        if (!project) continue;
         if (project.link?.repo && linkedRepo(project).toLowerCase() === repo.toLowerCase()) {
           await vercel.deleteProject(project.id);
-          result.removed.push(`Vercel project ${name}`);
+          result.removed.push(`Vercel project ${projectName}`);
         } else {
-          result.kept.push(`Vercel project ${name} (linked to ${project.link?.repo ? linkedRepo(project) : 'no repository'})`);
+          result.kept.push(`Vercel project ${projectName} (linked to ${project.link?.repo ? linkedRepo(project) : 'no repository'})`);
         }
+      } catch (err) {
+        result.failed.push(`Vercel project ${projectName}: ${(err as Error).message}`);
       }
-    } catch (err) {
-      result.failed.push(`Vercel project ${name}: ${(err as Error).message}`);
     }
   }
 

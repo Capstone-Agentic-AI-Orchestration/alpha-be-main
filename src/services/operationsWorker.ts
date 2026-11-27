@@ -4,6 +4,7 @@ import type { Project } from '../models/index.js';
 import { database } from '../store/database.js';
 import { projectStore } from '../store/stores.js';
 import { getHostingStatus, renderClient, vercelClient } from './hosting/hostingService.js';
+import { hostedName, hostedTargetsFor } from './monorepoApps.js';
 import { parseRepoRef } from './githubIssueMapping.js';
 import { logError, logInfo } from '../utils/logger.js';
 import { IS_CLOUD } from '../config/env.js';
@@ -58,8 +59,12 @@ async function discoverWorkspace(workspaceId: string, projects: Project[]): Prom
       const parsed = parseRepoRef(resource.pathOrUrl);
       if (!parsed) continue;
       const repository = `${parsed.owner}/${parsed.repo}`;
+      // One hosted target per app: a single-app repository has one, a monorepo two.
+      for (const target of hostedTargetsFor(project, repository)) {
       try {
-      const status = await getHostingStatus({ repo: repository, project, stackHint: resource.stack });
+      const status = await getHostingStatus({
+        repo: repository, project, ...(target.stack ? { stackHint: target.stack } : {}), ...(target.app ? { app: target.app } : {})
+      });
       if (status.state !== 'ready' && status.state !== 'partial') continue;
       const platform = status.platform;
       if (!platform) continue;
@@ -80,7 +85,7 @@ async function discoverWorkspace(workspaceId: string, projects: Project[]): Prom
       // project copy is never made a check target; z.com appears only here.
       if (platform === 'vercel') {
         const client = vercelClient();
-        const vercelProject = await client?.findProjectByName(repository.split('/')[1]);
+        const vercelProject = await client?.findProjectByName(hostedName(repository, target.app));
         if (!client || !vercelProject) continue;
         const [domains, productionDomain] = await Promise.all([
           client.listDomains(vercelProject.id), client.productionDomain(vercelProject.id)
@@ -100,6 +105,7 @@ async function discoverWorkspace(workspaceId: string, projects: Project[]): Prom
       }
       } catch (error) {
         logError(`Operations target discovery failed for ${repository} (${workspaceId}):`, error);
+      }
       }
     }
   }
@@ -126,8 +132,11 @@ async function importDeployments(workspaceId: string, projects: Project[]): Prom
       const parsed = parseRepoRef(resource.pathOrUrl);
       if (!parsed) continue;
       const repo = `${parsed.owner}/${parsed.repo}`;
+      for (const target of hostedTargetsFor(project, repo)) {
       try {
-      const status = await getHostingStatus({ repo, project, stackHint: resource.stack });
+      const status = await getHostingStatus({
+        repo, project, ...(target.stack ? { stackHint: target.stack } : {}), ...(target.app ? { app: target.app } : {})
+      });
       if (status.state !== 'ready' && status.state !== 'partial') {
         if (status.state === 'failed' || status.state === 'unavailable') importComplete = false;
         continue;
@@ -136,7 +145,7 @@ async function importDeployments(workspaceId: string, projects: Project[]): Prom
       if (status.platform === 'render') {
         const client = renderClient();
         if (!client) continue;
-        const name = repo.split('/')[1];
+        const name = hostedName(repo, target.app);
         for (const [environment, serviceName] of [['production', name], ['staging', `${name}-uat`]] as const) {
           const service = await client.findServiceByName(serviceName);
           if (!service) continue;
@@ -151,7 +160,7 @@ async function importDeployments(workspaceId: string, projects: Project[]): Prom
         }
       } else if (status.platform === 'vercel') {
         const client = vercelClient();
-        const hostedProject = await client?.findProjectByName(repo.split('/')[1]);
+        const hostedProject = await client?.findProjectByName(hostedName(repo, target.app));
         if (!client || !hostedProject) continue;
         for (const [environment, scope] of [['production', { production: true }], ['staging', { branch: 'uat' }]] as const) {
           const deployments = await client.listDeployments(hostedProject.id, scope, 100);
@@ -168,6 +177,7 @@ async function importDeployments(workspaceId: string, projects: Project[]): Prom
       } catch (error) {
         importComplete = false;
         logError(`Operations deployment import failed for ${repo} (${workspaceId}):`, error);
+      }
       }
     }
   }

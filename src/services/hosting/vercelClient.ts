@@ -66,6 +66,8 @@ export interface CreateVercelProjectInput {
   framework: 'vite' | 'nextjs';
   org: string;
   repo: string;
+  /** Build from this folder of the repository -- a monorepo's `apps/web`. Root when absent. */
+  rootDirectory?: string;
 }
 
 export type VercelEnvTarget = 'production' | 'preview' | 'development';
@@ -279,6 +281,7 @@ export function createVercelClient(token: string, teamId: string, fetchImpl: typ
       return (await call<VercelProject>('POST', '/v11/projects', {
         name: input.name,
         framework: input.framework,
+        ...(input.rootDirectory ? { rootDirectory: input.rootDirectory } : {}),
         gitRepository: { type: 'github', repo: `${input.org}/${input.repo}` },
         // Applied here too so a project with none created is never briefly
         // gated before `disableSsoProtection` gets to it.

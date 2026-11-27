@@ -11,6 +11,7 @@ import { sqliteService } from './sqliteService.js';
 import { chatStore, projectStore } from '../store/stores.js';
 import { workspaceRegistry, type WorkspaceContext } from './workspaceRegistry.js';
 import { reposForProject } from './githubIssueMapping.js';
+import { monorepoApp } from './monorepoApps.js';
 import { resolveProjectWorkspace, ensureWorkspacesRoot, allowAttachedWorkspace } from './workspaceService.js';
 import { repositoryWorkspaceForRun } from './orchestrationWorkspace.js';
 import { runWithWorkspace } from './workspaceContext.js';
@@ -42,7 +43,8 @@ export interface LocalPreview {
   messageId?: string; capability: string;
   browserDiagnostics?: Array<{ kind: 'console' | 'request' | 'blocked' | 'load'; message: string; timestamp: string }>;
 }
-type Owned = { record: LocalPreview; notificationKey?: string; checkpoint?: PreviewCheckpoint; child?: ReturnType<typeof spawn>; cancelled: boolean; touched: number; dir: string; job?: Promise<void>; stopping?: Promise<void> };
+/** `appDir`: the web app's folder inside the clone (a monorepo's `apps/web`); the clone's root when absent. */
+type Owned = { record: LocalPreview; notificationKey?: string; checkpoint?: PreviewCheckpoint; child?: ReturnType<typeof spawn>; cancelled: boolean; touched: number; dir: string; appDir?: string; job?: Promise<void>; stopping?: Promise<void> };
 export interface PreviewCheckpoint { runId: string; taskId: string; commit: string }
 
 /** Kept outside the project script: loss of the engine's pipe also stops the server after a crash. */
@@ -62,11 +64,11 @@ child.on('error',error=>{process.stderr.write(error.message);process.exit(1);});
 child.on('close',code=>process.exit(code??1));
 `;
 
-function spawnPreview(item: Owned, bin: string, args: string[], port: number) {
+function spawnPreview(item: Owned, bin: string, args: string[], port: number, cwd: string = item.dir) {
   const supervisor = path.join(item.dir, '.alpha-preview-' + item.record.id + '.cjs');
   if (!fs.existsSync(supervisor)) fs.writeFileSync(supervisor, PREVIEW_SUPERVISOR, { flag: 'wx' });
   // Only enum-selected package managers and fixed adapter flags reach the supervisor's Windows shell.
-  return spawn('node', [supervisor, bin, ...args], { cwd: item.dir, env: previewEnvironment(process.env, port), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  return spawn('node', [supervisor, bin, ...args], { cwd, env: previewEnvironment(process.env, port), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 /** Do not pass the engine's provider tokens, cloud administration or Electron runtime into project scripts. */
@@ -203,7 +205,7 @@ export class LocalPreviewService extends EventEmitter {
     const project = await this.authorize(context, threadId);
     const repos = reposForProject(project);
     if (repository && !repos.some(repo => repo.toLowerCase() === repository.toLowerCase())) throw new Error('Preview repository is outside this project.');
-    const candidates: Array<{ repo: string; dir: string; branch: string; commit: string; source: LocalPreview['source'] }> = [];
+    const candidates: Array<{ repo: string; dir: string; appDir?: string; branch: string; commit: string; source: LocalPreview['source'] }> = [];
     const snapshot = runWithWorkspace(context.workspaceId, () => checkpoint
       ? sqliteService.getOrchestrationSnapshot(checkpoint.runId)
       : sqliteService.getLatestOrchestrationSnapshot(project.id, threadId));
@@ -234,10 +236,20 @@ export class LocalPreviewService extends EventEmitter {
       if (checkpoint && commit !== checkpoint.commit) throw new Error('The saved preview checkpoint is unavailable.');
       if (!/^[a-f0-9]{40,64}$/.test(commit)) throw new Error('Repository has no saved commit.');
       let manifest;
-      try { manifest = JSON.parse(await git('show', `${commit}:package.json`)); } catch { continue; }
+      let appDir: string | undefined;
+      try { manifest = JSON.parse(await git('show', `${commit}:package.json`)); } catch { manifest = undefined; }
+      // A monorepo's root only runs both apps together; the website is its `apps/web`.
+      const web = previewAdapter(manifest) ? undefined : monorepoApp(project, repo, 'web');
+      if (web) {
+        try {
+          const appManifest = JSON.parse(await git('show', `${commit}:${web.path}/package.json`));
+          if (previewAdapter(appManifest) || checkpoint) { manifest = appManifest; appDir = web.path; }
+        } catch { /* no web app at this commit: the root decides, below */ }
+      }
+      if (!manifest) continue;
       if (!previewAdapter(manifest) && !checkpoint) continue;
       // Saved commit is reproducible even if specialists are now working beyond it.
-      candidates.push({ repo, dir, commit, branch: saved?.branchName ?? await git('branch', '--show-current'), source: saved ? 'saved-build' : 'checkout' });
+      candidates.push({ repo, dir, ...(appDir ? { appDir } : {}), commit, branch: saved?.branchName ?? await git('branch', '--show-current'), source: saved ? 'saved-build' : 'checkout' });
     }
     if (!candidates.length) throw new Error('No supported web app found at a saved commit. Supported scripts: vite, next dev, astro dev. Connect a checkout and save its preview setup first.');
     if (candidates.length > 1) throw new Error('Choose the codebase to preview; this project contains multiple web apps.');
@@ -249,7 +261,7 @@ export class LocalPreviewService extends EventEmitter {
     const id = randomUUID();
     const now = new Date().toISOString();
     const record: LocalPreview = { id, workspaceId: context.workspaceId, ownerId: context.userId, threadId, projectId: project.id, repository: source.repo, commit: source.commit, branch: source.branch, source: source.source, state: 'starting', logs: '', createdAt: now, updatedAt: now, messageId, capability: randomUUID() };
-    const item: Owned = { record, checkpoint, cancelled: false, touched: Date.now(), dir: path.join(ensureWorkspacesRoot(), '_previews', id) };
+    const item: Owned = { record, checkpoint, cancelled: false, touched: Date.now(), dir: path.join(ensureWorkspacesRoot(), '_previews', id), ...(source.appDir ? { appDir: source.appDir } : {}) };
     this.owned.set(id, item); this.save(item);
     item.job = this.launch(item, source.dir).catch(async error => {
       if (!item.cancelled) { item.record.error = redactPreviewLog(error instanceof Error ? error.message : String(error)); item.record.state = 'failed'; try { await this.kill(item); } catch { item.record.error += ' The owned server could not be stopped; use Stop to retry.'; } this.save(item); }
@@ -265,10 +277,10 @@ export class LocalPreviewService extends EventEmitter {
     }
   }
   private log(item: Owned, chunk: unknown) { item.record.logs = (item.record.logs + redactPreviewLog(String(chunk))).slice(-8000); this.save(item); }
-  private async command(item: Owned, bin: string, args: string[], port: number, timeout: number): Promise<void> {
+  private async command(item: Owned, bin: string, args: string[], port: number, timeout: number, cwd: string = item.dir): Promise<void> {
     if (item.cancelled) throw new Error('Preview stopped.');
     await new Promise<void>((resolve, reject) => {
-      const child = spawnPreview(item, bin, args, port);
+      const child = spawnPreview(item, bin, args, port, cwd);
       item.child = child;
       const timer = setTimeout(() => { void this.kill(item).then(() => reject(new Error('Preview dependency preparation timed out.')), reject); }, timeout);
       child.stdout?.on('data', chunk => this.log(item, chunk)); child.stderr?.on('data', chunk => this.log(item, chunk));
@@ -283,22 +295,24 @@ export class LocalPreviewService extends EventEmitter {
     await exec('git', ['clone', '--shared', '--no-checkout', '--', source, item.dir], { windowsHide: true, timeout: 30_000 });
     if (item.cancelled) return;
     await exec('git', ['-c', 'core.hooksPath=', 'checkout', '--detach', item.record.commit], { cwd: item.dir, windowsHide: true, timeout: 30_000 });
-    const manifest = JSON.parse(fs.readFileSync(path.join(item.dir, 'package.json'), 'utf8'));
+    // The app's own folder: the clone itself, or a monorepo's `apps/web` inside it.
+    const appRoot = item.appDir ? path.join(item.dir, item.appDir) : item.dir;
+    const manifest = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
     const adapter = previewAdapter(manifest);
     if (!adapter) throw new Error('Saved preview script is unsupported.');
     const declared = String(manifest.packageManager ?? '').split('@')[0];
-    const manager = declared || (fs.existsSync(path.join(item.dir, 'pnpm-lock.yaml')) ? 'pnpm' : fs.existsSync(path.join(item.dir, 'yarn.lock')) ? 'yarn' : 'npm');
+    const manager = declared || (fs.existsSync(path.join(appRoot, 'pnpm-lock.yaml')) ? 'pnpm' : fs.existsSync(path.join(appRoot, 'yarn.lock')) ? 'yarn' : 'npm');
     if (!['npm', 'pnpm', 'yarn', 'bun'].includes(manager)) throw new Error('Unsupported package manager.');
     const bin = process.platform === 'win32' ? `${manager}.cmd` : manager;
     const port = await availablePreviewPort();
     if (Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).length) {
-      const npmLocked = fs.existsSync(path.join(item.dir, 'package-lock.json')) || fs.existsSync(path.join(item.dir, 'npm-shrinkwrap.json'));
+      const npmLocked = fs.existsSync(path.join(appRoot, 'package-lock.json')) || fs.existsSync(path.join(appRoot, 'npm-shrinkwrap.json'));
       const install = manager === 'npm' ? [npmLocked ? 'ci' : 'install', ...(!npmLocked ? ['--package-lock=false'] : []), '--ignore-scripts', '--no-audit', '--no-fund'] : ['install', '--ignore-scripts', ...(manager === 'yarn' ? ['--frozen-lockfile'] : ['--frozen-lockfile'])];
-      await this.command(item, bin, install, port, 180_000);
+      await this.command(item, bin, install, port, 180_000, appRoot);
     }
     if (item.cancelled) return;
     this.assertCheckpointActive(item);
-    const child = spawnPreview(item, bin, ['run', adapter.script, ...(manager === 'yarn' ? [] : ['--']), ...adapter.flags(port)], port);
+    const child = spawnPreview(item, bin, ['run', adapter.script, ...(manager === 'yarn' ? [] : ['--']), ...adapter.flags(port)], port, appRoot);
     item.child = child;
     child.stdout?.on('data', chunk => this.log(item, chunk)); child.stderr?.on('data', chunk => this.log(item, chunk));
     child.once('error', error => { if (!item.cancelled) { item.record.state = 'failed'; item.record.error = redactPreviewLog(error.message); this.save(item); } });

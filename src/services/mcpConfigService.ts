@@ -10,6 +10,7 @@ import { mintRunGrant, revokeRunGrant, type RunGrant } from './runBridge.js';
 import { BoardGrantRefused, mintBoardGrant, revokeBoardGrant, type BoardGrant } from './boardGrant.js';
 import { reposForProject } from './githubIssueMapping.js';
 import { hostingHintsFor } from './hosting/hostingService.js';
+import { resourceApps, repoResource } from './monorepoApps.js';
 import type { Project } from '../models/index.js';
 import type { ProjectRoot as ProjectFolderRoot } from './projectFiles.js';
 import type { TaskFileScope } from './taskFileAccess.js';
@@ -242,7 +243,14 @@ export type BoardRunScope = Omit<BoardGrant, 'runId' | 'touched' | 'writes'>;
 export function hostingScopeFor(project: Project | null | undefined, agentId: string | null, workspaceId: string | null): HostingRunScope | undefined {
   if (!project) return undefined;
   const repos: RunGrant['repos'] = {};
-  for (const repo of reposForProject(project)) repos[repo.toLowerCase()] = { repo, ...hostingHintsFor(project, repo) };
+  for (const repo of reposForProject(project)) {
+    const apps = resourceApps(repoResource(project, repo));
+    repos[repo.toLowerCase()] = {
+      repo,
+      ...hostingHintsFor(project, repo),
+      ...(apps.length ? { apps: Object.fromEntries(apps.map(app => [app.id, app.stack])) } : {})
+    };
+  }
   return Object.keys(repos).length ? { agentId, workspaceId, repos } : undefined;
 }
 

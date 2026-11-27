@@ -16,6 +16,7 @@ import {
   type HostingTeardown
 } from '../services/hosting/hostingService.js';
 import { normalizeProjectStack } from '../services/scaffoldBuilder.js';
+import { parseMonorepoApp, type MonorepoAppId } from '../services/monorepoApps.js';
 import { previewsFor } from '../services/hosting/hostingPreviews.js';
 import { checkHealth } from '../services/hosting/healthCheck.js';
 import { getHostingLogs } from '../services/hosting/hostingLogs.js';
@@ -47,6 +48,9 @@ import { requireProjectWorkspace, requireWorkspaceCapability } from './workspace
  * Every operation is served both ways -- status, set-up, previews, and a
  * backend's health -- from one table, so the rules above are written once.
  * Reading needs `deployment.read`; setting up needs `deployment.manage`.
+ *
+ * A monorepo hosts two apps, so its requests name one: `?app=web` or
+ * `?app=api` (or `app` in a body). Removing hosting needs no app; it removes both.
  */
 export const hostingRouter = Router();
 
@@ -137,7 +141,7 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
   };
 }
 
-type Hints = { stack?: string; partner?: string };
+type Hints = { stack?: string; partner?: string; app?: MonorepoAppId };
 
 /** A DELETE carries its arguments in the query: the relay sends no body on one. */
 function hasBody(op: { method: string }): boolean {
@@ -348,13 +352,19 @@ function logsQuery(req: Request) {
 function hintsFrom(source: Record<string, unknown>): Hints {
   const stack = text(source.stack);
   const partner = text(source.partner);
-  return { ...(stack ? { stack } : {}), ...(partner ? { partner } : {}) };
+  const app = parseMonorepoApp(text(source.app));
+  return { ...(stack ? { stack } : {}), ...(partner ? { partner } : {}), ...(app ? { app } : {}) };
+}
+
+/** Which app of a monorepo a project-scoped request is for: the query, or a PUT/POST body. */
+function appFrom(req: Request, op: Operation): MonorepoAppId | undefined {
+  return parseMonorepoApp(text(req.query.app)) ?? (hasBody(op) ? parseMonorepoApp(text(req.body?.app)) : undefined);
 }
 
 /** Query parameters an operation passes through unchanged: the branch, and a log query's filters and window. */
 function passThroughQuery(req: Request): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const key of ['branch', 'environment', 'key', 'redeploy', ...LOG_QUERY_KEYS]) {
+  for (const key of ['branch', 'environment', 'key', 'redeploy', 'app', ...LOG_QUERY_KEYS]) {
     const value = text(req.query[key]);
     if (value) out[key] = value;
   }
@@ -380,7 +390,13 @@ function repoKeyed(op: Operation) {
     const project = await projectForRepo(req.workspace!.workspaceId, repo);
     res.json(
       await op.run(
-        { repo, project, ...(hints.stack ? { stackHint: hints.stack } : {}), ...(hints.partner ? { partnerHint: hints.partner } : {}) },
+        {
+          repo,
+          project,
+          ...(hints.stack ? { stackHint: hints.stack } : {}),
+          ...(hints.partner ? { partnerHint: hints.partner } : {}),
+          ...(hints.app ? { app: hints.app } : {})
+        },
         req
       )
     );
@@ -406,14 +422,15 @@ function projectScoped(op: Operation) {
       return;
     }
 
+    const app = appFrom(req, op);
     if (IS_CLOUD) {
       if (!(await authorizeRepo(res, owner, name, op.access))) return;
-      res.json(await op.run({ repo, project }, req));
+      res.json(await op.run({ repo, project, ...(app ? { app } : {}) }, req));
       return;
     }
 
     // A desktop: hand the cloud what this project knows, on the repo-keyed route.
-    const hints = hostingHintsFor(project, repo);
+    const hints: Hints = { ...hostingHintsFor(project, repo, app), ...(app ? { app } : {}) };
     if (!usesCloudDirectory()) {
       res.json(await op.offline(repo, hints, req));
       return;
