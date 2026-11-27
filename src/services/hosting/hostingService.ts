@@ -922,51 +922,54 @@ export interface PartnerWiring {
  * failure a person would otherwise only discover from a browser's CORS error.
  */
 async function refreshPartner(partner: HostingTarget, role: HostingRole, own: HostingTarget): Promise<PartnerWiring> {
-  const [partnerOwner, partnerRepoName] = partner.repo.split('/');
-  const partnerHosted = hostedNameFor(partner);
   const partnerLabel = partner.app ? `${partner.repo} (${MONOREPO_APPS[partner.app].path})` : partner.repo;
   try {
-    if (role === 'frontend') {
-      // We are the frontend; the partner is a backend whose CORS needs us.
-      const client = renderClient();
-      if (!client) return { ok: false, error: 'Render is not configured on this server.' };
-      const names = renderServiceNames(partnerHosted);
-      const urls = await readPartnerFrontendUrls(own);
-      const [main, uat] = await Promise.all([client.findServiceByName(names.main), client.findServiceByName(names.uat)]);
-      if (main && urls.production) {
-        await setRenderEnvAndDeploy(client, main.id, { CORS_ORIGINS: urls.production, FRONTEND_URL: urls.production });
-      }
-      const uatOrigins = [urls.uat, urls.dev].filter((v): v is string => Boolean(v));
-      if (uat && uatOrigins.length) {
-        await setRenderEnvAndDeploy(client, uat.id, { CORS_ORIGINS: uatOrigins.join(','), FRONTEND_URL: uatOrigins[0] });
-      }
-      return { ok: true };
-    }
-
-    // We are the backend; the partner is a frontend whose API URL needs us.
-    const client = vercelClient();
-    if (!client) return { ok: false, error: 'Vercel is not configured on this server.' };
-    const project = await client.findProjectByName(partnerHosted);
-    if (!project) return { ok: true };
-    const apiUrlKey = apiUrlKeyFor(project.framework === 'nextjs' ? 'nextjs' : 'react');
-    const urls = await readPartnerBackendUrls(own);
-    const envVars = [];
-    if (urls.main) envVars.push({ key: apiUrlKey, value: urls.main, target: ['production' as const] });
-    if (urls.uat) envVars.push({ key: apiUrlKey, value: urls.uat, target: ['preview' as const] });
-    if (envVars.length) {
-      await client.upsertEnvVars(project.id, envVars);
-      // The API URL is compiled into a frontend build, so every branch that
-      // reads it needs a new build -- not just production.
-      await client.createDeployment({ name: partnerHosted, projectId: project.id, org: partnerOwner, repo: partnerRepoName, ref: 'main', target: 'production' });
-      for (const ref of ['uat', 'dev']) {
-        await client.createDeployment({ name: partnerHosted, projectId: project.id, org: partnerOwner, repo: partnerRepoName, ref });
-      }
-    }
-    return { ok: true };
+    return role === 'frontend' ? await allowFrontendOnBackend(partner, own) : await pointFrontendAtBackend(partner, own);
   } catch (err) {
     logError(`Could not refresh hosting for ${partnerLabel} after ${hostedNameFor(own)} changed:`, (err as Error).message);
     return { ok: false, error: `Could not update ${partnerLabel}: ${(err as Error).message}` };
   }
+}
+
+/** We are the frontend `own`; the partner is a backend whose CORS needs our stable addresses. */
+async function allowFrontendOnBackend(backend: HostingTarget, own: HostingTarget): Promise<PartnerWiring> {
+  const client = renderClient();
+  if (!client) return { ok: false, error: 'Render is not configured on this server.' };
+  const names = renderServiceNames(hostedNameFor(backend));
+  const urls = await readPartnerFrontendUrls(own);
+  const [main, uat] = await Promise.all([client.findServiceByName(names.main), client.findServiceByName(names.uat)]);
+  if (main && urls.production) {
+    await setRenderEnvAndDeploy(client, main.id, { CORS_ORIGINS: urls.production, FRONTEND_URL: urls.production });
+  }
+  const uatOrigins = [urls.uat, urls.dev].filter((v): v is string => Boolean(v));
+  if (uat && uatOrigins.length) {
+    await setRenderEnvAndDeploy(client, uat.id, { CORS_ORIGINS: uatOrigins.join(','), FRONTEND_URL: uatOrigins[0] });
+  }
+  return { ok: true };
+}
+
+/** We are the backend `own`; the partner is a frontend whose API URL needs ours. */
+async function pointFrontendAtBackend(frontend: HostingTarget, own: HostingTarget): Promise<PartnerWiring> {
+  const client = vercelClient();
+  if (!client) return { ok: false, error: 'Vercel is not configured on this server.' };
+  const projectName = hostedNameFor(frontend);
+  const project = await client.findProjectByName(projectName);
+  if (!project) return { ok: true };
+  const apiUrlKey = apiUrlKeyFor(project.framework === 'nextjs' ? 'nextjs' : 'react');
+  const urls = await readPartnerBackendUrls(own);
+  const envVars = [];
+  if (urls.main) envVars.push({ key: apiUrlKey, value: urls.main, target: ['production' as const] });
+  if (urls.uat) envVars.push({ key: apiUrlKey, value: urls.uat, target: ['preview' as const] });
+  if (!envVars.length) return { ok: true };
+  await client.upsertEnvVars(project.id, envVars);
+  // The API URL is compiled into a frontend build, so every branch that
+  // reads it needs a new build -- not just production.
+  const [org, repo] = frontend.repo.split('/');
+  await client.createDeployment({ name: projectName, projectId: project.id, org, repo, ref: 'main', target: 'production' });
+  for (const ref of ['uat', 'dev']) {
+    await client.createDeployment({ name: projectName, projectId: project.id, org, repo, ref });
+  }
+  return { ok: true };
 }
 // ─── Public API ─────────────────────────────────────────────────────────────
 

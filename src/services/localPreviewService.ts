@@ -71,6 +71,13 @@ function spawnPreview(item: Owned, bin: string, args: string[], port: number, cw
   return spawn('node', [supervisor, bin, ...args], { cwd, env: previewEnvironment(process.env, port), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
+/** The package manager a folder's lockfile names, npm when it names none. */
+function lockfileManager(dir: string): string {
+  if (fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (fs.existsSync(path.join(dir, 'yarn.lock'))) return 'yarn';
+  return 'npm';
+}
+
 /** Do not pass the engine's provider tokens, cloud administration or Electron runtime into project scripts. */
 export function previewEnvironment(source: NodeJS.ProcessEnv, port: number): NodeJS.ProcessEnv {
   const names = /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMFILES|PROGRAMFILES\(X86\)|SYSTEMDRIVE|NUMBER_OF_PROCESSORS|LANG|LC_ALL)$/i;
@@ -301,7 +308,7 @@ export class LocalPreviewService extends EventEmitter {
     const adapter = previewAdapter(manifest);
     if (!adapter) throw new Error('Saved preview script is unsupported.');
     const declared = String(manifest.packageManager ?? '').split('@')[0];
-    const manager = declared || (fs.existsSync(path.join(appRoot, 'pnpm-lock.yaml')) ? 'pnpm' : fs.existsSync(path.join(appRoot, 'yarn.lock')) ? 'yarn' : 'npm');
+    const manager = declared || lockfileManager(appRoot);
     if (!['npm', 'pnpm', 'yarn', 'bun'].includes(manager)) throw new Error('Unsupported package manager.');
     const bin = process.platform === 'win32' ? `${manager}.cmd` : manager;
     const port = await availablePreviewPort();

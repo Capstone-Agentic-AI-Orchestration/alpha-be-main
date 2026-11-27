@@ -40,6 +40,15 @@ function option(id: CanonicalStack): StackOption {
   return { id, label: STACK_LABELS[id], role: FRONTEND_STACKS.includes(id) ? 'frontend' : 'backend' };
 }
 
+/** Why less than usual is offered: no templates read at all, or none for a monorepo. */
+function optionsError(source: string, found: number, monorepo: ScaffoldOptions['monorepo']): string | undefined {
+  if (found === 0) return `Could not read the CI templates from ${source}.`;
+  if (!monorepo.frontend.length || !monorepo.backend.length) {
+    return `${source} has no monorepo CI templates yet, so monorepos cannot be created.`;
+  }
+  return undefined;
+}
+
 export async function getScaffoldOptions(fetchImpl: typeof fetch = fetch, now = Date.now()): Promise<ScaffoldOptions> {
   if (cached && now - cached.at < CACHE_MS) return cached.value;
 
@@ -53,16 +62,13 @@ export async function getScaffoldOptions(fetchImpl: typeof fetch = fetch, now = 
     const has = (templates: Map<CanonicalStack, string>, stacks: CanonicalStack[]) =>
       stacks.filter(stack => found.has(templates.get(stack)!)).map(option);
     const monorepo = { frontend: has(mono, MONOREPO_FRONTEND_STACKS), backend: has(mono, MONOREPO_BACKEND_STACKS) };
+    const error = optionsError(source, found.size, monorepo);
     value = {
       source,
       standalone: has(single, SUPPORTED_STACKS),
       paired: { frontend: has(single, FRONTEND_STACKS), backend: has(single, BACKEND_STACKS) },
       monorepo,
-      ...(found.size === 0
-        ? { error: `Could not read the CI templates from ${source}.` }
-        : !monorepo.frontend.length || !monorepo.backend.length
-          ? { error: `${source} has no monorepo CI templates yet, so monorepos cannot be created.` }
-          : {})
+      ...(error ? { error } : {})
     };
   } catch (err) {
     value = {

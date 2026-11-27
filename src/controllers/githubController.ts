@@ -520,11 +520,10 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
       ...(deploy === undefined ? {} : { deploy })
     };
     // Standalone and monorepo answer the repository itself, as before; paired answers both.
-    const result = paired
-      ? { shape: 'paired', repositories: await createPairedProject({ ...common, frontendStack, backendStack }) }
-      : monorepo
-        ? await createMonorepoRepository({ ...common, frontendStack, backendStack })
-        : await createScaffoldedRepository({ ...common, stack, repoShape: shape ?? 'standalone' });
+    let result;
+    if (paired) result = { shape: 'paired', repositories: await createPairedProject({ ...common, frontendStack, backendStack }) };
+    else if (monorepo) result = await createMonorepoRepository({ ...common, frontendStack, backendStack });
+    else result = await createScaffoldedRepository({ ...common, stack, repoShape: shape ?? 'standalone' });
 
     // Record the repositories on the project here, in the same request, and remember the
     // organization on first use so later repositories cannot land somewhere else. The form
@@ -532,7 +531,9 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
     // a slow scaffold), the repositories existed on GitHub with nothing in Alpha pointing at them.
     const created = 'repositories' in result ? result.repositories : [result];
     const stacks = paired ? [backendStack, frontendStack] : [stack];
-    const shapeOf = paired ? 'paired' as const : monorepo ? 'monorepo' as const : 'standalone' as const;
+    let shapeOf: 'paired' | 'monorepo' | 'standalone' = 'standalone';
+    if (paired) shapeOf = 'paired';
+    if (monorepo) shapeOf = 'monorepo';
     const known = new Set((project.resources ?? []).map(resource => resource.pathOrUrl.toLowerCase()));
     const stamp = Date.now();
     const added = created.filter(repo => !known.has(repo.url.toLowerCase())).map((repo, index) => ({

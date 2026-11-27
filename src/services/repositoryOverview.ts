@@ -47,8 +47,10 @@ export function repositoryFileOverview(repositoryDir: string): string {
   const monorepoNote = monorepo
     ? `\n\nThis repository is a monorepo: the frontend (the website) is the app in ${MONOREPO_APPS.web.path}/ and the backend (the API) is the app in ${MONOREPO_APPS.api.path}/, each with its own package.json, tests and lockfile. Scope frontend tasks to ${MONOREPO_APPS.web.path}/ and backend tasks to ${MONOREPO_APPS.api.path}/; one task may cover both when a change needs both. Put a dependency in the package.json of the app that uses it, never the root. The root scripts run each script in both apps.`
     : '';
-  const scaffoldNote = sourceFiles.length <= SCAFFOLD_SOURCE_FILES_PER_APP * (monorepo ? 2 : 1)
-    ? `\n\nThis repository looks like a starter scaffold: it has ${sourceFiles.length} application source file${sourceFiles.length === 1 ? '' : 's'} (${sourceFiles.join(', ') || 'none'}). Plan to create the requested features. Do not assume existing screens, endpoints, API clients, data models, or workflows.`
+  const scaffoldLimit = SCAFFOLD_SOURCE_FILES_PER_APP * (monorepo ? 2 : 1);
+  const sourceFileWord = sourceFiles.length === 1 ? 'file' : 'files';
+  const scaffoldNote = sourceFiles.length <= scaffoldLimit
+    ? `\n\nThis repository looks like a starter scaffold: it has ${sourceFiles.length} application source ${sourceFileWord} (${sourceFiles.join(', ') || 'none'}). Plan to create the requested features. Do not assume existing screens, endpoints, API clients, data models, or workflows.`
     : '';
   return `Repository files (${total} total, ${sourceFiles.length} application source files):\n${listed.join('\n')}${more}${monorepoNote}${scaffoldNote}`;
 }

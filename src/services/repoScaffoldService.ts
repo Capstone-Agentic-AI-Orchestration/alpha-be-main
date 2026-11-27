@@ -345,7 +345,8 @@ async function hostingOrUnavailable(
   try {
     return await runHostingSetup(nameWithOwner, stack, partner, workspaceId, app);
   } catch (err: any) {
-    logError(`Hosting setup failed for ${nameWithOwner}${app ? ` (${app})` : ''}:`, err?.message ?? err);
+    const target = app ? `${nameWithOwner} (${app})` : nameWithOwner;
+    logError(`Hosting setup failed for ${target}:`, err?.message ?? err);
     return unavailableHostingStatus(nameWithOwner, roleForStack(stack), platformForStack(stack), err?.message ?? String(err), partner ?? null);
   }
 }
