@@ -853,3 +853,78 @@ describe('removing a repository’s hosting', () => {
     expect(await service.tearDownHosting('acme/shop-be')).toEqual({ repo: 'acme/shop-be', removed: [], kept: [], failed: [] });
   });
 });
+
+describe('a monorepo: a frontend and a backend hosted from one repository', () => {
+  const env = { RENDER_API_KEY: 'rnd_test', VERCEL_TOKEN: 'vcl_test' };
+  const monorepo = {
+    id: 'p-shop',
+    resources: [{
+      id: 'r1', type: 'github_repo', name: 'acme/shop', pathOrUrl: 'https://github.com/acme/shop', shape: 'monorepo',
+      apps: [
+        { id: 'web', role: 'frontend', stack: 'react', path: 'apps/web' },
+        { id: 'api', role: 'backend', stack: 'nodejs', path: 'apps/api' }
+      ]
+    }]
+  } as unknown as Project;
+
+  it('hosts the API on Render from apps/api, under the app’s own names', async () => {
+    const { service, render } = await load({ env });
+    const status = await service.setUpHosting({ repo: 'acme/shop', stackHint: 'nodejs', app: 'api' });
+
+    expect(status).toMatchObject({ app: 'api', role: 'backend', platform: 'render', partner: 'acme/shop' });
+    expect(render.client.createService).toHaveBeenCalledWith(expect.objectContaining({ name: 'shop-api', rootDir: 'apps/api', branch: 'main' }));
+    expect(render.client.createService).toHaveBeenCalledWith(expect.objectContaining({ name: 'shop-api-uat', rootDir: 'apps/api', branch: 'uat' }));
+  });
+
+  it('hosts the frontend on Vercel from apps/web and wires the two apps to each other', async () => {
+    const { service, render, vercel, variableWrites } = await load({ env });
+    await service.setUpHosting({ repo: 'acme/shop', stackHint: 'nodejs', app: 'api' });
+    const status = await service.setUpHosting({ repo: 'acme/shop', stackHint: 'react', app: 'web' });
+
+    expect(vercel.client.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'shop-web', org: 'acme', repo: 'shop', rootDirectory: 'apps/web', framework: 'vite' })
+    );
+    const project = vercel.projects.get('shop-web');
+    expect(vercel.envVars.get(project.id)).toEqual(expect.arrayContaining([
+      { key: 'VITE_API_URL', value: 'https://shop-api.onrender.com', target: ['production'] },
+      { key: 'VITE_API_URL', value: 'https://shop-api-uat.onrender.com', target: ['preview'] }
+    ]));
+    // The API allows the frontend it now has.
+    expect(render.envVars.get(render.services.get('shop-api').id)).toMatchObject({ CORS_ORIGINS: 'https://shop-web.vercel.app' });
+    expect(status).toMatchObject({ app: 'web', partnerWiring: { ok: true } });
+    // Both apps share the repository's variables, so each app's carry its name.
+    expect(variableWrites.map(write => write.body?.name)).toContain('ALPHA_URL_WEB_MAIN');
+    expect(variableWrites.map(write => write.body?.name)).toContain('ALPHA_URL_API_MAIN');
+    expect(variableWrites.map(write => write.body?.name)).not.toContain('ALPHA_URL_MAIN');
+  });
+
+  it('asks which app when a monorepo is asked about as a whole, and reads each app from the project', async () => {
+    const { service } = await load({ env });
+
+    const whole = await service.getHostingStatus({ repo: 'acme/shop', project: monorepo });
+    expect(whole).toMatchObject({ state: 'unavailable', error: expect.stringMatching(/web or api/) });
+
+    const web = await service.getHostingStatus({ repo: 'acme/shop', project: monorepo, app: 'web' });
+    expect(web).toMatchObject({ app: 'web', role: 'frontend', platform: 'vercel', state: 'not_set_up' });
+  });
+
+  it('does not host an app as the other kind', async () => {
+    const { service } = await load({ env });
+    const status = await service.setUpHosting({ repo: 'acme/shop', stackHint: 'nodejs', app: 'web' });
+    expect(status).toMatchObject({ state: 'unavailable' });
+  });
+
+  it('removes both apps’ hosting when the repository goes', async () => {
+    const { service, render } = await load({ env });
+    await service.setUpHosting({ repo: 'acme/shop', stackHint: 'nodejs', app: 'api' });
+    await service.setUpHosting({ repo: 'acme/shop', stackHint: 'react', app: 'web' });
+    for (const hosted of render.services.values()) hosted.repo = 'https://github.com/acme/shop';
+
+    const teardown = await service.tearDownHosting('acme/shop');
+
+    expect(teardown.removed).toEqual(expect.arrayContaining([
+      'Render service shop-api', 'Render service shop-api-uat', 'Vercel project shop-web'
+    ]));
+    expect(teardown.failed).toEqual([]);
+  });
+});

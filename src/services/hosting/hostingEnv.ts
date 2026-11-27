@@ -2,6 +2,7 @@ import { validateEnvironmentScope } from './envScope.js';
 import { recordHostingChange, type HostingActor } from './hostingAudit.js';
 import {
   getHostingStatus,
+  hostedNameFor,
   isAlphaManagedKey,
   platformForStack,
   renderClient,
@@ -11,7 +12,8 @@ import {
   vercelClient,
   type HostingBranch,
   type HostingContext,
-  type HostingRole
+  type HostingRole,
+  type HostingTarget
 } from './hostingService.js';
 
 /**
@@ -102,7 +104,11 @@ export function validateEnvWrite(role: HostingRole, request: EnvWriteRequest): v
 
 function roleOf(ctx: HostingContext): HostingRole {
   const stack = resolveStack(ctx);
-  if (!stack) throw new EnvRequestError(`Could not tell whether ${ctx.repo} is a backend or a frontend.`);
+  if (!stack) {
+    throw new EnvRequestError(
+      ctx.app ? `Could not tell what the ${ctx.app} app of ${ctx.repo} is.` : `Could not tell whether ${ctx.repo} is a backend or a frontend.`
+    );
+  }
   return roleForStack(stack);
 }
 
@@ -134,7 +140,7 @@ export async function listHostingEnv(ctx: HostingContext): Promise<HostingEnvLis
     };
   }
   const client = vercelClient();
-  const project = client ? await client.findProjectByName(ctx.repo.split('/')[1]) : null;
+  const project = client ? await client.findProjectByName(hostedNameFor(ctx)) : null;
   const vars = project && client ? await client.listEnvVars(project.id) : [];
   return {
     ...base,
@@ -154,20 +160,20 @@ function resultOf(changed: string[], failed: EnvChangeResult['failed']): 'ok' | 
   return changed.length ? 'partial' : 'failed';
 }
 
-async function renderServiceFor(repo: string, environment: HostingBranch) {
+async function renderServiceFor(target: HostingTarget, environment: HostingBranch) {
   const client = renderClient();
   if (!client) throw new EnvRequestError('Render is not configured on this server.');
-  const names = renderServiceNames(repo.split('/')[1]);
+  const names = renderServiceNames(hostedNameFor(target));
   const service = await client.findServiceByName(environment === 'main' ? names.main : names.uat);
-  if (!service) throw new EnvRequestError(`${repo} has no ${environment} service yet. Set up hosting first.`);
+  if (!service) throw new EnvRequestError(`${hostedNameFor(target)} has no ${environment} service yet. Set up hosting first.`);
   return { client, service };
 }
 
-async function vercelProjectFor(repo: string) {
+async function vercelProjectFor(target: HostingTarget) {
   const client = vercelClient();
   if (!client) throw new EnvRequestError('Vercel is not configured on this server.');
-  const project = await client.findProjectByName(repo.split('/')[1]);
-  if (!project) throw new EnvRequestError(`${repo} has no Vercel project yet. Set up hosting first.`);
+  const project = await client.findProjectByName(hostedNameFor(target));
+  if (!project) throw new EnvRequestError(`${hostedNameFor(target)} has no Vercel project yet. Set up hosting first.`);
   return { client, project };
 }
 
@@ -181,13 +187,13 @@ function vercelScope(environment: HostingBranch) {
 async function redeploy(ctx: HostingContext, environment: HostingBranch): Promise<void> {
   const [owner, name] = ctx.repo.split('/');
   if (platformForStack(resolveStack(ctx)!) === 'render') {
-    const { client, service } = await renderServiceFor(ctx.repo, environment);
+    const { client, service } = await renderServiceFor(ctx, environment);
     await client.triggerDeploy(service.id);
     return;
   }
-  const { client, project } = await vercelProjectFor(ctx.repo);
+  const { client, project } = await vercelProjectFor(ctx);
   await client.createDeployment({
-    name,
+    name: hostedNameFor(ctx),
     projectId: project.id,
     org: owner,
     repo: name,
@@ -255,7 +261,7 @@ export async function setHostingEnv(
   const failed: EnvChangeResult['failed'] = [];
 
   if (role === 'backend') {
-    const { client, service } = await renderServiceFor(ctx.repo, environment);
+    const { client, service } = await renderServiceFor(ctx, environment);
     for (const v of request.vars) {
       try {
         await client.setEnvVar(service.id, v.key, v.value);
@@ -265,7 +271,7 @@ export async function setHostingEnv(
       }
     }
   } else {
-    const { client, project } = await vercelProjectFor(ctx.repo);
+    const { client, project } = await vercelProjectFor(ctx);
     const scope = vercelScope(environment);
     // A branch-scoped variable needs the project linked to its repository.
     if (scope.gitBranch && !project.link?.repo) {
@@ -303,10 +309,10 @@ export async function deleteHostingEnv(
   const failed: EnvChangeResult['failed'] = [];
   try {
     if (role === 'backend') {
-      const { client, service } = await renderServiceFor(ctx.repo, environment);
+      const { client, service } = await renderServiceFor(ctx, environment);
       await client.deleteEnvVar(service.id, key);
     } else {
-      const { client, project } = await vercelProjectFor(ctx.repo);
+      const { client, project } = await vercelProjectFor(ctx);
       const scope = vercelScope(environment);
       // Matched on the branch too: the same key usually exists once per environment.
       const record = (await client.listEnvVars(project.id)).find(

@@ -1,8 +1,16 @@
 import { NextFunction, Request, Response, Router } from 'express';
 import { githubService } from '../services/githubService.js';
-import { createPairedProject, createScaffoldedRepository } from '../services/repoScaffoldService.js';
+import { createMonorepoRepository, createPairedProject, createScaffoldedRepository } from '../services/repoScaffoldService.js';
 import { projectStore } from '../store/stores.js';
-import { SUPPORTED_STACKS } from '../services/scaffoldBuilder.js';
+import {
+  BACKEND_STACKS,
+  FRONTEND_STACKS,
+  MONOREPO_BACKEND_STACKS,
+  MONOREPO_FRONTEND_STACKS,
+  SUPPORTED_STACKS
+} from '../services/scaffoldBuilder.js';
+import { getScaffoldOptions } from '../services/scaffoldOptions.js';
+import { monorepoResourceApps } from '../services/monorepoApps.js';
 import path from 'node:path';
 import { requireEntityWorkspace, requireWorkspaceCapability } from './workspaceContext.js';
 import { CORS_ORIGIN, ALPHA_ORG, GITHUB_CLIENT_ID, IS_CLOUD } from '../config/env.js';
@@ -419,10 +427,22 @@ githubRouter.post('/github/repos', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/github/scaffold-options
+ *
+ * The stacks the create-repository form may offer for each shape: the ones
+ * Alpha can scaffold and host and the workflow library has CI callers for.
+ */
+githubRouter.get('/github/scaffold-options', async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
+  res.json(await getScaffoldOptions());
+});
+
+/**
  * POST /api/github/repos/scaffold
  *
  * Create an organization repository that starts with a project structure.
- * Body: { projectId, repoName, stack, org?, visibility?, shape?, includeDocker? }
+ * Body: { projectId, repoName, stack, org?, visibility?, shape?, includeDocker? }; a paired or
+ * monorepo shape takes { frontendStack, backendStack } instead of `stack`.
  *
  * The organization is resolved from the project, not from the caller: the first
  * repository may set it, every later one inherits it. `org` is required at this
@@ -435,6 +455,7 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
   const { projectId, repoName, stack, org, visibility, shape, includeDocker, deploy, frontendStack, backendStack } =
     req.body ?? {};
   const paired = shape === 'paired';
+  const monorepo = shape === 'monorepo';
 
   if (!projectId || typeof projectId !== 'string') {
     return res.status(400).json({ error: 'A "projectId" is required.' });
@@ -442,10 +463,14 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
   if (!repoName || typeof repoName !== 'string') {
     return res.status(400).json({ error: 'A repository "repoName" is required.' });
   }
-  if (paired) {
-    if (!['react', 'nextjs'].includes(frontendStack) || !['nodejs', 'nestjs'].includes(backendStack)) {
+  if (paired || monorepo) {
+    const frontends = (monorepo ? MONOREPO_FRONTEND_STACKS : FRONTEND_STACKS) as string[];
+    const backends = (monorepo ? MONOREPO_BACKEND_STACKS : BACKEND_STACKS) as string[];
+    if (!frontends.includes(frontendStack) || !backends.includes(backendStack)) {
       return res.status(400).json({
-        error: 'A paired project needs "frontendStack" (react or nextjs) and "backendStack" (nodejs or nestjs).'
+        error:
+          `A ${monorepo ? 'monorepo' : 'paired project'} needs "frontendStack" (${frontends.join(' or ')}) ` +
+          `and "backendStack" (${backends.join(' or ')}).`
       });
     }
   } else if (!stack || !SUPPORTED_STACKS.includes(stack)) {
@@ -494,10 +519,11 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
       // repositories too. GitHub also refuses a multi-line description outright (422).
       ...(deploy === undefined ? {} : { deploy })
     };
-    // Standalone answers the repository itself, as before; paired answers both.
-    const result = paired
-      ? { shape: 'paired', repositories: await createPairedProject({ ...common, frontendStack, backendStack }) }
-      : await createScaffoldedRepository({ ...common, stack, repoShape: shape ?? 'standalone' });
+    // Standalone and monorepo answer the repository itself, as before; paired answers both.
+    let result;
+    if (paired) result = { shape: 'paired', repositories: await createPairedProject({ ...common, frontendStack, backendStack }) };
+    else if (monorepo) result = await createMonorepoRepository({ ...common, frontendStack, backendStack });
+    else result = await createScaffoldedRepository({ ...common, stack, repoShape: shape ?? 'standalone' });
 
     // Record the repositories on the project here, in the same request, and remember the
     // organization on first use so later repositories cannot land somewhere else. The form
@@ -505,12 +531,17 @@ githubRouter.post('/github/repos/scaffold', async (req: Request, res: Response) 
     // a slow scaffold), the repositories existed on GitHub with nothing in Alpha pointing at them.
     const created = 'repositories' in result ? result.repositories : [result];
     const stacks = paired ? [backendStack, frontendStack] : [stack];
+    let shapeOf: 'paired' | 'monorepo' | 'standalone' = 'standalone';
+    if (paired) shapeOf = 'paired';
+    if (monorepo) shapeOf = 'monorepo';
     const known = new Set((project.resources ?? []).map(resource => resource.pathOrUrl.toLowerCase()));
     const stamp = Date.now();
     const added = created.filter(repo => !known.has(repo.url.toLowerCase())).map((repo, index) => ({
       id: `res-${stamp}-${index}`, type: 'github_repo' as const, name: repo.nameWithOwner, pathOrUrl: repo.url,
       // Work lands on dev; uat and main only move by promotion.
-      branchOrMachine: 'dev', stack: stacks[created.indexOf(repo)], shape: paired ? 'paired' as const : 'standalone' as const,
+      branchOrMachine: 'dev', shape: shapeOf,
+      // A monorepo has two stacks, one per app, instead of one for the repository.
+      ...(monorepo ? { apps: monorepoResourceApps(frontendStack, backendStack) } : { stack: stacks[created.indexOf(repo)] }),
       ...(repo.localPath ? { localPath: repo.localPath } : {})
     }));
     await projectStore().update(req.workspace!.workspaceId, project.id, {

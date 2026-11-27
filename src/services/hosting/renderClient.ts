@@ -99,6 +99,8 @@ export interface CreateRenderServiceInput {
   envVars?: Array<{ key: string; value: string }>;
   /** Creates the service inside this project environment; ungrouped when absent. */
   environmentId?: string;
+  /** Build and run from this folder of the repository -- a monorepo's `apps/api`. Root when absent. */
+  rootDir?: string;
   /**
    * Documented only for Blueprints and the dashboard, not this endpoint --
    * worth asking for anyway, since a service that redeploys once checks pass
@@ -220,6 +222,7 @@ export function createRenderClient(apiKey: string, fetchImpl: typeof fetch = fet
         repo: input.repo,
         branch: input.branch,
         ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+        ...(input.rootDir ? { rootDir: input.rootDir } : {}),
         // `autoDeployTrigger` supersedes the older yes/no `autoDeploy`; sending
         // both can be refused, so the trigger goes alone when there is one.
         ...(input.autoDeployTrigger ? { autoDeployTrigger: input.autoDeployTrigger } : { autoDeploy: 'yes' }),

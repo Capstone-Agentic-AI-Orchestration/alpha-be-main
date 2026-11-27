@@ -625,6 +625,9 @@ describe('creating repositories from the web', () => {
       createPairedProject: async (input: { repoName: string }) => {
         scaffoldInputs.push(input); return [repo(`${input.repoName}-be`), repo(`${input.repoName}-fe`)];
       },
+      createMonorepoRepository: async (input: { repoName: string }) => {
+        scaffoldInputs.push(input); return { ...repo(input.repoName), shape: 'monorepo', deployTarget: null, apps: [] };
+      },
     }));
     const app = await startCloudApi();
     const project = await createOwnedProject(app, { name: 'Informational Website', key: 'INF', ...projectFields });
@@ -641,6 +644,31 @@ describe('creating repositories from the web', () => {
     expect(project.resources.map((r: { name: string; stack: string; branchOrMachine: string }) => [r.name, r.stack, r.branchOrMachine])).toEqual([
       ['Capstone-Org/info-be', 'nodejs', 'dev'], ['Capstone-Org/info-fe', 'react', 'dev'],
     ]);
+  });
+
+  it('records a monorepo as one repository with its two apps', async () => {
+    const { app, projectId } = await pmApi();
+    const res = await call(app, 'POST', '/api/github/repos/scaffold', { projectId, repoName: 'info', org: 'Capstone-Org', shape: 'monorepo', frontendStack: 'react', backendStack: 'nodejs' });
+    expect(res.status).toBe(201);
+    expect(scaffoldInputs[0]).toMatchObject({ repoName: 'info', frontendStack: 'react', backendStack: 'nodejs' });
+    const project = (await call(app, 'GET', '/api/projects')).body.find((item: { id: string }) => item.id === projectId);
+    expect(project.resources).toHaveLength(1);
+    expect(project.resources[0]).toMatchObject({
+      name: 'Capstone-Org/info', shape: 'monorepo', branchOrMachine: 'dev',
+      apps: [
+        { id: 'web', role: 'frontend', stack: 'react', path: 'apps/web' },
+        { id: 'api', role: 'backend', stack: 'nodejs', path: 'apps/api' }
+      ]
+    });
+    expect(project.resources[0]).not.toHaveProperty('stack');
+  });
+
+  it('refuses a monorepo of stacks outside React and the Node.js API', async () => {
+    const { app, projectId } = await pmApi();
+    const res = await call(app, 'POST', '/api/github/repos/scaffold', { projectId, repoName: 'info', org: 'Capstone-Org', shape: 'monorepo', frontendStack: 'nextjs', backendStack: 'nodejs' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/monorepo needs "frontendStack" \(react\)/);
+    expect(scaffoldInputs).toHaveLength(0);
   });
 
   /**

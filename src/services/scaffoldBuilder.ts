@@ -11,6 +11,8 @@
 // A root README is generated here rather than relying on GitHub's `auto_init`,
 // because repositories created from a source directory never get that.
 
+import { MONOREPO_APPS } from './monorepoLayout.js';
+
 export interface ScaffoldFile {
   path: string;
   content: string;
@@ -22,6 +24,27 @@ export type CanonicalStack = 'nestjs' | 'nodejs' | 'nextjs' | 'react';
 
 /** Every stack the scaffold can emit, in the order the UI should offer them. */
 export const SUPPORTED_STACKS: CanonicalStack[] = ['nodejs', 'nestjs', 'nextjs', 'react'];
+
+/** The frontend stacks: a paired project's `-fe` repository. */
+export const FRONTEND_STACKS: CanonicalStack[] = ['react', 'nextjs'];
+/** The backend stacks: a paired project's `-be` repository. */
+export const BACKEND_STACKS: CanonicalStack[] = ['nodejs', 'nestjs'];
+
+/**
+ * What a monorepo's `apps/web` and `apps/api` can be: React and the Node.js
+ * API, the stacks the team works in. Everything below is written per stack,
+ * so another one is an entry here plus its monorepo CI caller in the workflow library.
+ */
+export const MONOREPO_FRONTEND_STACKS: CanonicalStack[] = ['react'];
+export const MONOREPO_BACKEND_STACKS: CanonicalStack[] = ['nodejs'];
+
+/** How each stack is offered in the create form. */
+export const STACK_LABELS: Record<CanonicalStack, string> = {
+  react: 'React',
+  nextjs: 'Next.js',
+  nodejs: 'Node.js API',
+  nestjs: 'NestJS'
+};
 
 /**
  * Accept loose stack ids ('nestjs-api', 'react-app') as well as canonical keys.
@@ -978,6 +1001,9 @@ function buildStandaloneScaffold(options: BuildScaffoldOptions): ScaffoldFile[] 
 export function buildProjectScaffold(options: BuildScaffoldOptions): ScaffoldFile[] {
   const shape = normalizeRepoShape(options.repoShape);
 
+  if (shape === 'monorepo') {
+    throw new Error('A monorepo has a frontend and a backend stack. Build it with buildMonorepoScaffold.');
+  }
   if (shape !== 'standalone') {
     throw new Error(
       `Repository shape "${shape}" is not supported yet. Use "standalone".`
@@ -985,4 +1011,157 @@ export function buildProjectScaffold(options: BuildScaffoldOptions): ScaffoldFil
   }
 
   return buildStandaloneScaffold(options);
+}
+
+// ─── Monorepo ─────────────────────────────────────────────────────────────────
+
+export interface BuildMonorepoScaffoldOptions {
+  /** The repository's name. Each app is named after it: `<name>-web` and `<name>-api`. */
+  serviceName: string;
+  /** One of MONOREPO_FRONTEND_STACKS, for `apps/web`. */
+  frontendStack: string;
+  /** One of MONOREPO_BACKEND_STACKS, for `apps/api`. */
+  backendStack: string;
+  /** A Dockerfile for the API. The frontend is hosted by Vercel and never gets one. */
+  includeDocker?: boolean;
+  nodeVersion?: string;
+  description?: string;
+}
+
+/** Exact stack ids only: a monorepo must not quietly become a different pair than the one asked for. */
+function assertMonorepoStacks(frontendStack: string, backendStack: string): { web: CanonicalStack; api: CanonicalStack } {
+  if (!(MONOREPO_FRONTEND_STACKS as string[]).includes(frontendStack)) {
+    throw new Error(`Invalid frontend stack "${frontendStack}" for a monorepo. Use ${MONOREPO_FRONTEND_STACKS.join(' or ')}.`);
+  }
+  if (!(MONOREPO_BACKEND_STACKS as string[]).includes(backendStack)) {
+    throw new Error(`Invalid backend stack "${backendStack}" for a monorepo. Use ${MONOREPO_BACKEND_STACKS.join(' or ')}.`);
+  }
+  return { web: frontendStack as CanonicalStack, api: backendStack as CanonicalStack };
+}
+
+/** A root script that runs `script` in each app, backend first, stopping at the first failure. */
+function inEachApp(script: string): string {
+  return [MONOREPO_APPS.api.path, MONOREPO_APPS.web.path].map(dir => `npm run ${script} --prefix ${dir}`).join(' && ');
+}
+
+/**
+ * The root package.json: convenience scripts over both apps, nothing more.
+ *
+ * No npm workspaces. Workspaces move every lockfile to the root, and
+ * everything that builds an app -- the CI's `npm ci` in its folder, Render's
+ * and Vercel's installs in their root directory -- expects the app's own
+ * lockfile beside its package.json. `postinstall` installs both apps, so a
+ * fresh clone still needs only `npm install` and `npm run dev`.
+ */
+function buildMonorepoPackageJson(packageName: string, description: string): string {
+  const api = MONOREPO_APPS.api.path;
+  const web = MONOREPO_APPS.web.path;
+  const pkg = {
+    name: packageName,
+    version: '0.1.0',
+    private: true,
+    description,
+    scripts: {
+      postinstall: `npm install --prefix ${api} && npm install --prefix ${web}`,
+      dev: `concurrently --names api,web --kill-others-on-fail "npm run dev --prefix ${api}" "npm run dev --prefix ${web}"`,
+      'dev:api': `npm run dev --prefix ${api}`,
+      'dev:web': `npm run dev --prefix ${web}`,
+      build: inEachApp('build'),
+      test: inEachApp('test'),
+      'test:cov': inEachApp('test:cov'),
+      typecheck: inEachApp('typecheck'),
+      lint: inEachApp('lint')
+    },
+    devDependencies: { concurrently: '^9.2.1' }
+  };
+  return JSON.stringify(pkg, null, 2) + '\n';
+}
+
+function buildMonorepoReadme(
+  serviceName: string,
+  stacks: { web: CanonicalStack; api: CanonicalStack },
+  description: string | undefined
+): string {
+  const web = MONOREPO_APPS.web.path;
+  const api = MONOREPO_APPS.api.path;
+  return [
+    `# ${serviceName}`,
+    '',
+    description?.trim() ? description.trim() : `${serviceName} — created with Alpha.`,
+    '',
+    'One repository with a frontend and a backend. Each app is a complete project with its own',
+    '`package.json`, lockfile, tests and README, and builds and deploys on its own.',
+    '',
+    '| Folder | App | Stack | Runs locally at |',
+    '| ------ | --- | ----- | --------------- |',
+    `| \`${web}\` | Frontend | ${STACK_LABELS[stacks.web]} | http://localhost:${stacks.web === 'react' ? REACT_DEV_PORT : NEXTJS_DEV_PORT} |`,
+    `| \`${api}\` | Backend | ${STACK_LABELS[stacks.api]} | http://localhost:${BACKEND_DEFAULT_PORT} |`,
+    '',
+    '## Getting started',
+    '',
+    '```bash',
+    `cp ${api}/.env.example ${api}/.env`,
+    `cp ${web}/.env.example ${web}/.env`,
+    'npm install      # installs both apps',
+    'npm run dev      # starts both apps',
+    '```',
+    '',
+    'The frontend calls the backend at the URL in its `.env`, and the backend allows the frontend in',
+    '`CORS_ORIGINS`; the defaults already point at each other.',
+    '',
+    '## Scripts',
+    '',
+    'Run from the repository root; each runs the same script in both apps, backend first.',
+    '',
+    '| Command | Does |',
+    '| ------- | ---- |',
+    '| `npm run dev` | Run both apps in watch mode (`dev:api` and `dev:web` run one) |',
+    '| `npm run build` | Build both apps |',
+    '| `npm test` | Test both apps |',
+    '| `npm run typecheck` | Type-check both apps |',
+    '| `npm run lint` | Lint both apps |',
+    '',
+    `To work on one app, run its own scripts from its folder, e.g. \`cd ${web} && npm test\`.`,
+    ''
+  ].join('\n');
+}
+
+/** The repository-wide ignores; each app also keeps its own `.gitignore`. */
+function buildMonorepoGitignore(): string {
+  return ['node_modules/', '.env', '.env.local', '.env.*.local', '*.log', 'npm-debug.log*', '.DS_Store', ''].join('\n');
+}
+
+/**
+ * The file list for a monorepo: the frontend's standalone scaffold under
+ * `apps/web`, the backend's under `apps/api`, and a root that ties them together.
+ *
+ * Each app is byte-for-byte what a single repository of its stack gets --
+ * same scripts, same tests, same `.env.example` -- because everything
+ * downstream (the CI's reusable jobs, Render, Vercel) already knows how to
+ * build that project and only needs to be told which folder it is in.
+ */
+export function buildMonorepoScaffold(options: BuildMonorepoScaffoldOptions): ScaffoldFile[] {
+  const stacks = assertMonorepoStacks(options.frontendStack, options.backendStack);
+  const { serviceName, description } = options;
+  const app = (id: 'web' | 'api', stack: CanonicalStack, includeDocker: boolean): ScaffoldFile[] =>
+    buildStandaloneScaffold({
+      serviceName: `${serviceName}-${id}`,
+      stack,
+      includeDocker,
+      ...(options.nodeVersion ? { nodeVersion: options.nodeVersion } : {})
+    }).map(file => ({ path: `${MONOREPO_APPS[id].path}/${file.path}`, content: file.content }));
+
+  return [
+    { path: 'README.md', content: buildMonorepoReadme(serviceName, stacks, description) },
+    { path: '.gitignore', content: buildMonorepoGitignore() },
+    {
+      path: 'package.json',
+      content: buildMonorepoPackageJson(
+        toPackageName(serviceName),
+        `${STACK_LABELS[stacks.web]} frontend and ${STACK_LABELS[stacks.api]} backend`
+      )
+    },
+    ...app('api', stacks.api, options.includeDocker ?? false),
+    ...app('web', stacks.web, false)
+  ];
 }

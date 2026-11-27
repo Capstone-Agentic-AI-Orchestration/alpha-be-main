@@ -36,3 +36,20 @@ describe('repository file overview for the planner', () => {
     expect(overview).not.toContain('starter scaffold');
   });
 });
+
+describe('a monorepo in the planner overview', () => {
+  it('says which folder is the frontend and which the backend, and still spots a fresh scaffold', () => {
+    const overview = repositoryFileOverview(repo({
+      'package.json': '{}',
+      'apps/web/package.json': '{}', 'apps/web/src/main.tsx': '', 'apps/web/src/App.tsx': '',
+      'apps/api/package.json': '{}', 'apps/api/src/index.ts': '', 'apps/api/src/app.ts': ''
+    }));
+    expect(overview).toContain('frontend (the website) is the app in apps/web/');
+    expect(overview).toContain('backend (the API) is the app in apps/api/');
+    expect(overview).toContain('starter scaffold');
+  });
+
+  it('says nothing about apps for an ordinary repository', () => {
+    expect(repositoryFileOverview(repo({ 'package.json': '{}', 'src/index.ts': '' }))).not.toContain('monorepo');
+  });
+});

@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response, Router } from 'express';
 
 import { usesCloudDirectory } from '../services/cloudWorkspaces.js';
+import { parseMonorepoApp, type MonorepoAppId } from '../services/monorepoApps.js';
 import {
   describePending,
   grantedRepo,
@@ -36,7 +37,7 @@ const ENVIRONMENTS = new Set(['main', 'uat', 'dev']);
 interface BridgeRequest {
   grant: RunGrant;
   repo: string;
-  hints: { stack?: string; partner?: string };
+  hints: { stack?: string; partner?: string; app?: MonorepoAppId };
 }
 
 const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
@@ -60,7 +61,13 @@ function authorize(req: Request, res: Response, write: boolean): BridgeRequest |
     res.status(403).json({ error: 'This run has read-only access. Describe the change for a person to make.' });
     return null;
   }
-  const { repo: canonical, ...hints } = entry;
+  const { repo: canonical, apps, ...hints } = entry;
+  // A monorepo app: its own stack, and no partner hint -- the partner is the other app.
+  const app = parseMonorepoApp(text(req.body?.app));
+  if (app) {
+    const stack = apps?.[app];
+    return { grant, repo: canonical, hints: { ...(stack ? { stack } : {}), app } };
+  }
   return { grant, repo: canonical, hints };
 }
 

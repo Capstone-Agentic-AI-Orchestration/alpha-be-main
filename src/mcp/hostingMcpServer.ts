@@ -43,6 +43,13 @@ const schema = (properties: Record<string, unknown>, required: string[] = []) =>
 
 const REPO = str('The repository as owner/name -- one of this run\'s project repositories.');
 const ENVIRONMENT = str('main (production), uat or dev. A backend has main and uat only.', { enum: ['main', 'uat', 'dev'] });
+const APP = str(
+  'Only for a monorepo, whose frontend (apps/web) and backend (apps/api) are hosted separately: web or api. Omit for any other repository.',
+  { enum: ['web', 'api'] }
+);
+
+/** The repository, and the app when one was named. */
+const target = (args: Record<string, any>) => ({ repo: args.repo, ...(args.app ? { app: args.app } : {}) });
 
 async function bridge(op: string, body: Record<string, unknown>): Promise<unknown> {
   if (!DAEMON_URL || !RUN_TOKEN) {
@@ -79,9 +86,10 @@ async function bridge(op: string, body: Record<string, unknown>): Promise<unknow
 const TOOLS: Record<string, ToolDef> = {
   hosting_status: {
     description:
-      'Where a repository is hosted (Render for a backend, Vercel for a frontend), each environment\'s live URL and latest deploy, and its pair.',
-    inputSchema: schema({ repo: REPO }, ['repo']),
-    run: args => bridge('status', { repo: args.repo })
+      'Where a repository is hosted (Render for a backend, Vercel for a frontend), each environment\'s live URL and latest deploy, and its pair. ' +
+      'A monorepo hosts its two apps separately: ask about each with app web or api.',
+    inputSchema: schema({ repo: REPO, app: APP }, ['repo']),
+    run: args => bridge('status', target(args))
   },
   hosting_logs: {
     description:
@@ -89,6 +97,7 @@ const TOOLS: Record<string, ToolDef> = {
     inputSchema: schema(
       {
         repo: REPO,
+        app: APP,
         branch: ENVIRONMENT,
         type: str('build or app (runtime). Omit for both.', { enum: ['build', 'app'] }),
         errors_only: { type: 'boolean', description: 'Only error lines.' },
@@ -99,7 +108,7 @@ const TOOLS: Record<string, ToolDef> = {
     ),
     run: args =>
       bridge('logs', {
-        repo: args.repo,
+        ...target(args),
         branch: args.branch,
         ...(args.type ? { type: args.type } : {}),
         ...(args.errors_only ? { level: 'error' } : {}),
@@ -110,8 +119,8 @@ const TOOLS: Record<string, ToolDef> = {
   hosting_env_list: {
     description:
       'The environment variables set on each hosted environment, by name. Values are never shown -- they are write-only -- except the URLs Alpha sets itself.',
-    inputSchema: schema({ repo: REPO }, ['repo']),
-    run: args => bridge('env/list', { repo: args.repo })
+    inputSchema: schema({ repo: REPO, app: APP }, ['repo']),
+    run: args => bridge('env/list', target(args))
   },
   hosting_env_set: {
     description:
@@ -119,6 +128,7 @@ const TOOLS: Record<string, ToolDef> = {
     inputSchema: schema(
       {
         repo: REPO,
+        app: APP,
         environment: ENVIRONMENT,
         vars: {
           type: 'array',
@@ -131,13 +141,14 @@ const TOOLS: Record<string, ToolDef> = {
       ['repo', 'environment', 'vars']
     ),
     access: 'write',
-    run: args => bridge('env/set', { repo: args.repo, environment: args.environment, vars: args.vars, redeploy: args.redeploy !== false })
+    run: args => bridge('env/set', { ...target(args), environment: args.environment, vars: args.vars, redeploy: args.redeploy !== false })
   },
   hosting_env_delete: {
     description: 'Remove one environment variable from one hosted environment (not main -- ask a person for production).',
     inputSchema: schema(
       {
         repo: REPO,
+        app: APP,
         environment: str('uat or dev.', { enum: ['uat', 'dev'] }),
         key: str('The variable to remove.'),
         redeploy: { type: 'boolean', description: 'Redeploy so the change takes effect now. Default true.' }
@@ -145,7 +156,7 @@ const TOOLS: Record<string, ToolDef> = {
       ['repo', 'environment', 'key']
     ),
     access: 'write',
-    run: args => bridge('env/delete', { repo: args.repo, environment: args.environment, key: args.key, redeploy: args.redeploy !== false })
+    run: args => bridge('env/delete', { ...target(args), environment: args.environment, key: args.key, redeploy: args.redeploy !== false })
   }
 };
 

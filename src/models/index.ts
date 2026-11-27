@@ -245,16 +245,31 @@ export interface ProjectResourceHosting {
   };
 }
 
+/**
+ * One app of a monorepo resource: where it lives in the repository and what it
+ * was scaffolded from. See `services/monorepoApps.ts`.
+ */
+export interface ProjectResourceApp {
+  id: 'web' | 'api';
+  role: 'frontend' | 'backend';
+  /** Stack the app was scaffolded from: react for web, nodejs for api (see MONOREPO_*_STACKS). */
+  stack: string;
+  /** Folder inside the repository, e.g. `apps/web`. */
+  path: string;
+}
+
 export interface ProjectResource {
   id: string;
   type: 'github_repo' | 'local_path' | 'local_dir' | 'documentation' | 'api_endpoint';
   name: string;
   pathOrUrl: string;
   branchOrMachine?: string;
-  /** Stack the scaffold was generated from. Absent on attached repositories. */
+  /** Stack the scaffold was generated from. Absent on attached repositories and on monorepos, which have `apps`. */
   stack?: string;
-  /** Repository shape the scaffold used. Absent on attached repositories. */
+  /** Repository shape the scaffold used: standalone, paired or monorepo. Absent on attached repositories. */
   shape?: string;
+  /** A monorepo's apps, frontend and backend, each in its own folder. Present only when `shape` is `monorepo`. */
+  apps?: ProjectResourceApp[];
   /**
    * Managed working copy on this machine, when Alpha created or cloned it.
    * Absent means there is no local checkout yet.

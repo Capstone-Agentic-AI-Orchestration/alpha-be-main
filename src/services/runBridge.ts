@@ -19,8 +19,8 @@ export interface RunGrant {
   agentId: string | null;
   /** The workspace the run was started in; its forwards to the cloud carry it. */
   workspaceId: string | null;
-  /** `owner/name`, lowercased for comparison, each with what the project knows about it. */
-  repos: Record<string, { repo: string; stack?: string; partner?: string }>;
+  /** `owner/name`, lowercased for comparison, each with what the project knows about it -- a monorepo's stack per app. */
+  repos: Record<string, { repo: string; stack?: string; partner?: string; apps?: Partial<Record<'web' | 'api', string>> }>;
   access: 'read' | 'write';
 }
 
@@ -70,7 +70,7 @@ export interface PendingHostingChange {
   agentId: string | null;
   workspaceId: string | null;
   repo: string;
-  hints: { stack?: string; partner?: string };
+  hints: { stack?: string; partner?: string; app?: 'web' | 'api' };
   environment: 'main';
   vars: Array<{ key: string; value: string }>;
   redeploy: boolean;

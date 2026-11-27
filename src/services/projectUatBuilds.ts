@@ -2,6 +2,7 @@ import type { TransactionalSql } from '../store/database.js';
 import { PostgresProjectStore } from '../store/postgresProjectStore.js';
 import { parseRepoRef, reposForProject } from './githubIssueMapping.js';
 import { resolveStack, roleForStack, renderClient, vercelClient } from './hosting/hostingService.js';
+import { hostedName, hostedTargetsFor, type MonorepoAppId } from './monorepoApps.js';
 import { UrlEmbeddabilityProbe } from './hosting/embeddability.js';
 import type { ProjectTarget } from './clientProjectPortal.js';
 import { uatError, type UatBuild, type UatBuildPart } from '../ticketing/projectUat.js';
@@ -31,24 +32,30 @@ export function createProjectUatBuilds(db: TransactionalSql): ProjectUatBuilds {
     if (!value) uatError(404,'client_project_unavailable','This project is unavailable.');
     return value;
   }
-  function role(value: Project, repo: string) {
-    const stack = resolveStack({project:value,repo});
-    return stack ? roleForStack(stack) : null;
+  /** Each hosted app of `repo` with its role: one for a single-app repository, a frontend and a backend for a monorepo. */
+  function hosted(value: Project, repo: string): Array<{ app?: MonorepoAppId; role: 'frontend' | 'backend' }> {
+    return hostedTargetsFor(value, repo).flatMap(target => {
+      const stack = resolveStack({ project: value, repo, ...(target.app ? { app: target.app } : {}) });
+      return stack ? [{ ...(target.app ? { app: target.app } : {}), role: roleForStack(stack) }] : [];
+    });
   }
+  const frontendOf = (value: Project, repo: string) => hosted(value, repo).find(entry => entry.role === 'frontend');
   return {
     async targets(target) {
       const value = await project(target);
-      return reposForProject(value).filter(repo => role(value,repo)==='frontend').map(repository => ({repository}));
+      return reposForProject(value).filter(repo => frontendOf(value,repo)).map(repository => ({repository}));
     },
     async resolve(target, repository) {
       try {
       const value = await project(target);
       const repositories = reposForProject(value);
-      if (!repositories.includes(repository) || role(value,repository)!=='frontend') uatError(404,'uat_target_unavailable','Choose a frontend attached to this project.');
+      const frontendApp = repositories.includes(repository) ? frontendOf(value, repository) : undefined;
+      if (!frontendApp) uatError(404,'uat_target_unavailable','Choose a frontend attached to this project.');
       const client = vercelClient();
       if (!client) uatError(503,'uat_provider_unavailable','Vercel is not configured for UAT verification.');
       const [owner,name] = repository.split('/');
-      const host = await client.findProjectByName(name);
+      // A monorepo's frontend is hosted as `name-web`, still linked to the repository `name`.
+      const host = await client.findProjectByName(hostedName(repository, frontendApp!.app));
       if (!host || host.link?.type!=='github' || host.link.org?.toLowerCase()!==owner.toLowerCase()
         || host.link.repo?.toLowerCase()!==name.toLowerCase()) uatError(409,'uat_repository_mismatch','The frontend deployment is not linked to this project repository.');
       const deploy = await client.latestDeployment(host.id,{branch:'uat'});
@@ -58,10 +65,12 @@ export function createProjectUatBuilds(db: TransactionalSql): ProjectUatBuilds {
       const frontend: UatBuildPart = {repository,branch:'uat',deploymentId:deploy.uid,
         commitSha:verifiedSha(deploy.meta?.githubCommitSha),url:publicUrl(deploy.url,'.vercel.app')};
       const backends: UatBuildPart[] = [];
-      for (const repo of repositories.filter(repo => role(value,repo)==='backend')) {
+      const backendTargets = repositories.flatMap(repo =>
+        hosted(value, repo).filter(entry => entry.role === 'backend').map(entry => ({ repo, app: entry.app })));
+      for (const { repo, app } of backendTargets) {
         const render = renderClient();
         if (!render) uatError(503,'uat_provider_unavailable','Render is required to verify this project’s UAT API.');
-        const service = await render.findServiceByName(`${repo.split('/')[1]}-uat`);
+        const service = await render.findServiceByName(`${hostedName(repo, app)}-uat`);
         const source = service?.repo ? parseRepoRef(service.repo) : null;
         if (!service || service.branch!=='uat' || `${source?.owner}/${source?.repo}`.toLowerCase()!==repo.toLowerCase()) {
           uatError(409,'uat_backend_unverified','The project’s UAT API service could not be verified.');
