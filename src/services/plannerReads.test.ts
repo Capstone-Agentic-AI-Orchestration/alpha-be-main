@@ -97,12 +97,15 @@ describe('planning with proof of reading', () => {
     expect(result.plan.plannerReads).toEqual([{ repository: 'acme/api', path: 'src/tasks.ts' }]);
   }));
 
-  it('refuses the plan when the correction still has not opened the file', withRepository(async dir => {
+  it('asks for one correction, then lets the plan through when the file is still unopened', withRepository(async dir => {
     const turn = vi.fn(async (options: CliTurnOptions) => {
       openFiles(options, []);
       return response(plannedJson(planWith(['src/tasks.ts'])));
     });
-    await expect(new OrchestrationPlanner(turn).createPlan(baseInput(dir))).rejects.toThrow(/never opened: src\/tasks\.ts/);
+    // The specialist reads the file before changing it and acceptance judges the real diff,
+    // so a second miss no longer stops the build before anyone starts.
+    const result = await new OrchestrationPlanner(turn).createPlan(baseInput(dir));
+    expect(result.plan.tasks.length).toBeGreaterThan(0);
     expect(turn).toHaveBeenCalledTimes(2);
   }));
 
