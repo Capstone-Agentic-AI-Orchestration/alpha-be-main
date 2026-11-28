@@ -19,6 +19,7 @@ import {
   IS_DESKTOP
 } from '../config/env.js';
 import { currentGitHubIdentity, withGitHubIdentity } from './githubRequestContext.js';
+import { clearStaleIndexLock } from '../utils/gitUtils.js';
 import { githubApi, githubApiWithToken, tokenForThisRequest } from './githubApi.js';
 import { withIsolatedRepository, type IsolatedGit } from './isolatedGit.js';
 import { failedRunLogs } from './agentCiActions.js';
@@ -941,6 +942,7 @@ export class GhCliGitHubService implements IGitHubService {
     push = true
   ): Promise<boolean> {
     assertSafeBranchName(branchName);
+    if (await clearStaleIndexLock(cwd)) logInfo(`Removed a stale git index lock in ${cwd} before committing.`);
     await execFileAsync('git', ['add', '-A'], { cwd });
 
     // `diff --cached --quiet` exits 1 when the index holds changes. Asking git

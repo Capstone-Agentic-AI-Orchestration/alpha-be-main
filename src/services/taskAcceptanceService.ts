@@ -571,23 +571,10 @@ export class TaskAcceptanceService {
         });
       }
     }
-    const coveredRequirementIds = report.requirementCoverage.map(item => item.requirementId);
-    if (new Set(coveredRequirementIds).size !== coveredRequirementIds.length ||
-        task.requirementIds.length !== coveredRequirementIds.length ||
-        task.requirementIds.some(id => !coveredRequirementIds.includes(id)) ||
-        report.requirementCoverage.some(item => !item.evidence.trim())) {
-      return fail('The specialist report does not provide evidence for every assigned requirement exactly once.', {
-        check: 'requirement_coverage', expected: task.requirementIds, reported: coveredRequirementIds
-      });
-    }
-    const reportedCriteria = report.criteriaEvidence.map(item => item.criterion);
-    if (new Set(reportedCriteria).size !== reportedCriteria.length ||
-        task.acceptanceCriteria.length !== reportedCriteria.length ||
-        task.acceptanceCriteria.some(criterion => !reportedCriteria.includes(criterion))) {
-      return fail('The specialist report does not address every acceptance criterion exactly once.', {
-        check: 'acceptance_criteria', expected: task.acceptanceCriteria, reported: reportedCriteria
-      });
-    }
+    // Requirement and criterion coverage in the report is the agent's own bookkeeping. It is kept for
+    // the reviewer and the request trail, but no longer refuses work: matching criteria word for word
+    // and counting requirements cost whole attempts on code that passed its checks. What decides
+    // acceptance is the diff, the scope, the protected files and Alpha's own run of the checks.
     // Alpha stages and commits the specialist's changes itself, so a sandbox refusing the
     // agent's own git add or commit is expected and says nothing about the task.
     const unresolvedBlockers = report.blockers.filter(blocker => !isAlphaOwnedGitBlocker(blocker));
@@ -660,30 +647,20 @@ export class TaskAcceptanceService {
       return fail('The attempt has no recorded starting commit, so its changed-file scope cannot be verified.', { check: 'starting_commit' });
     }
     const changedPaths = await this.dependencies.getGitChangedPaths(worktreePath, diffStartingCommit, attempt.resultCommit);
-    const declaredDeliverablePaths = new Set(report.deliverables.flatMap(deliverable => deliverable.paths));
-    const undeclaredChangedPath = changedPaths.find(filePath => !declaredDeliverablePaths.has(filePath));
-    if (undeclaredChangedPath) {
-      return fail(`The specialist report does not identify changed file ${undeclaredChangedPath} as a deliverable.`, {
-        check: 'deliverable_traceability', changedPath: undeclaredChangedPath
-      }, undeclaredChangedPath);
-    }
+    // Which files changed comes from git, not the report, so a report that forgets a file or lists
+    // one it did not touch is no longer refused. Every changed file still passes the scope and
+    // protected-file checks below.
     // Files an open finding sent back to this task to fix; putting one back as it was is a real change.
     const correctionPaths = new Set(snapshot.findings
       .filter(finding => finding.status === 'open' && finding.correctionTaskId === task.id && finding.path)
       .map(finding => finding.path!));
-    // The code is the evidence, not the report: a building task must have changed something, and
-    // may only claim files it changed. Its retries count, since the diff runs from where the task began.
+    // The code is the evidence, not the report: a building task must have changed something.
+    // Its retries count, since the diff runs from where the task began.
     if (isImplementationTask(task.kind)) {
       if (!changedPaths.length && !correctionPaths.size) {
         return fail('This task changed no files. Make the change it asks for. If the code already does what the task asks, report that as a blocker naming the files that already do it, so the person can decide.', {
           check: 'no_changes', baselineCommit: diffStartingCommit
         });
-      }
-      const claimedUnchanged = [...declaredDeliverablePaths].find(filePath => !changedPaths.includes(filePath) && !correctionPaths.has(filePath));
-      if (claimedUnchanged) {
-        return fail(`The report lists ${claimedUnchanged} as a deliverable, but this task did not change it. List only files the task changed.`, {
-          check: 'deliverable_unchanged', claimedPath: claimedUnchanged, changedPaths
-        }, claimedUnchanged);
       }
     }
     if (!authorizedWorkspace.baseCommit) {

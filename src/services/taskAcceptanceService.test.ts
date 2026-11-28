@@ -208,15 +208,16 @@ describe('task acceptance and targeted correction', () => {
       expect(launches[1].taskPackage.corrections.join(' ')).toContain('This task changed no files.');
     });
 
-    it('sends back a report that claims a file the task did not change', async () => {
+    it('accepts working code whose report also lists a file the task did not change', async () => {
       const { repository, launches, orchestration, acceptance, runId } = await setUp('alpha-claimed-unchanged-');
       const first = launches[0];
       fs.writeFileSync(path.join(repository, 'src', 'App.tsx'), 'export const App = () => "Home";\n');
       const resultCommit = commit(repository, 'Homepage');
       await orchestration.handleRunnerCompleted(completedRun(first, resultCommit, ['src/App.tsx', 'src/App.css']));
       const outcome = await acceptance.evaluateAndAccept({ workspaceId, runId, taskId: 'homepage', attemptId: first.attemptId, acceptedBy: 'orchestrator' });
-      expect(outcome.decision).toBe('retrying');
-      expect(launches[1].taskPackage.corrections.join(' ')).toContain('The report lists src/App.css as a deliverable, but this task did not change it.');
+      // Git decides what changed; a wrong list in the report no longer costs an attempt.
+      // This fixture's work passes every check and waits for the person's approval.
+      expect(outcome.decision).toBe('awaiting_approval');
     });
   });
 
