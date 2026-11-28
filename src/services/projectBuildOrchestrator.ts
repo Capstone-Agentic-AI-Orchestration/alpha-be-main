@@ -28,6 +28,7 @@ import { orchestrationRequestFingerprint } from './orchestrationService.js';
 import type { OrchestrationSnapshot } from './orchestrationStateMachine.js';
 import { OrchestrationPlanner, OrchestrationPlanningError, type AgreedChecklistStep, type PlannerAgentIdentity, type PlanningDecision } from './orchestrationPlanner.js';
 import { composeProjectContext } from './projectPlaybook.js';
+import { clientRequestBriefs } from './clientRequestBriefs.js';
 import { MAX_PROJECT_CONTEXT_CHARS, orchestrationRequiredCheckSchema, type OrchestrationPlan } from './orchestrationContract.js';
 import { inspectOrchestrationPlanningWorktree, removeStaleOrchestrationPlanningWorktree } from './orchestrationPlanningRecovery.js';
 import { orchestrationSessionId } from './orchestrationSession.js';
@@ -615,12 +616,16 @@ async function startOrchestratedProjectBuild(input: {
   // The cards this build was asked to build: the plan's fit check must cover each one.
   const buildsCards = (boardCards?.cards ?? (issue && !isBuildRecord(issue) ? [issue] : []))
     .map(card => ({ key: card.identifier, title: card.title }));
+  // The client requests those tasks were made for, as background for the plan.
+  const clientRequests = await clientRequestBriefs(workspaceId, project.id,
+    (boardCards?.cards ?? (issue && !isBuildRecord(issue) ? [issue] : [])).map(card => card.id));
   let planned;
   try {
     // The detected stack and the project description, read from the planning checkouts.
     const projectContext = composeProjectContext({
       description: project.description,
-      repositories: reservations.map(item => ({ repository: item.repository, dir: item.worktreePath }))
+      repositories: reservations.map(item => ({ repository: item.repository, dir: item.worktreePath })),
+      clientRequests
     });
     // A restored plan is used as it was; orchestrationService.start validates it like any other.
     planned = input.presetPlan ? { plan: structuredClone(input.presetPlan) } : await planner.createPlan({

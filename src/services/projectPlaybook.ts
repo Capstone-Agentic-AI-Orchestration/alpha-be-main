@@ -51,6 +51,8 @@ export function detectRepositoryStack(repositoryDir: string): string | undefined
 export function composeProjectContext(input: {
   description?: string;
   repositories: ReadonlyArray<{ repository: string; dir: string }>;
+  /** The client requests behind the tasks being built: background, never scope. */
+  clientRequests?: ReadonlyArray<{ reference: string; title: string; description: string }>;
 }): string {
   const sections: string[] = [];
   for (const { repository, dir } of input.repositories) {
@@ -64,6 +66,28 @@ export function composeProjectContext(input: {
     ].filter(Boolean).join('\n'));
   }
   const description = projectBrief(input.description);
-  const context = [description ? 'Project: ' + description : '', ...sections].filter(Boolean).join('\n\n');
+  const context = [description ? 'Project: ' + description : '', clientRequestSection(input.clientRequests ?? []), ...sections]
+    .filter(Boolean).join('\n\n');
   return context.length > MAX_PROJECT_CONTEXT_CHARS ? context.slice(0, MAX_PROJECT_CONTEXT_CHARS - 14).trimEnd() + '\n… (shortened)' : context;
+}
+
+const MAX_CLIENT_REQUEST_CHARS = 1_500;
+
+/**
+ * What the client asked for, in their words, for the tasks being built. Marked
+ * as background: each task is one piece of its request, and building the rest
+ * of the request is not this build's job.
+ */
+function clientRequestSection(requests: ReadonlyArray<{ reference: string; title: string; description: string }>): string {
+  const lines = requests.slice(0, 5).map(request => {
+    const text = request.description.trim().replace(/\s+/g, ' ');
+    const clipped = text.length > MAX_CLIENT_REQUEST_CHARS ? text.slice(0, MAX_CLIENT_REQUEST_CHARS - 1).trimEnd() + '…' : text;
+    return '- ' + [request.reference, request.title].filter(Boolean).join(' · ') + (clipped ? ': ' + clipped : '');
+  });
+  if (!lines.length) return '';
+  return [
+    '## Client requests behind this build',
+    'Background only: the client’s own words for the larger request these tasks belong to. The tasks and their checklists are the scope; do not build the rest of the request.',
+    ...lines
+  ].join('\n');
 }
