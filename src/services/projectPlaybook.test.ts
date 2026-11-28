@@ -4,6 +4,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { composeProjectContext, detectRepositoryStack } from './projectPlaybook.js';
 
+describe('client requests in the project context', () => {
+  it('gives the planner the client’s words as background, after the project and never as scope', () => {
+    const context = composeProjectContext({
+      description: 'A laundry shop website.',
+      repositories: [],
+      clientRequests: [{ reference: 'TKT-1', title: 'Informational website', description: 'Rates, turnaround times and\nWhatsApp pickup.' }]
+    });
+    expect(context).toContain('## Client requests behind this build');
+    expect(context).toContain('The tasks and their checklists are the scope; do not build the rest of the request.');
+    expect(context).toContain('- TKT-1 · Informational website: Rates, turnaround times and WhatsApp pickup.');
+    expect(context.indexOf('Project:')).toBeLessThan(context.indexOf('## Client requests'));
+    expect(composeProjectContext({ description: 'A laundry shop website.', repositories: [], clientRequests: [] })).not.toContain('Client requests');
+  });
+});
+
 const dirs: string[] = [];
 function repo(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-playbook-'));

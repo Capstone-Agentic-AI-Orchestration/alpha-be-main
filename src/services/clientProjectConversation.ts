@@ -98,6 +98,8 @@ const LINKED_TASKS_SQL = `select x.ticket_id,i.id,i.identifier,i.title,i.status 
     union
     select ticket_id,issue_id from alpha_private.ticket_work_bindings where workspace_id=$1 and ticket_id=any($2::text[])
   ) x join public.issues i on i.id=x.issue_id and i.workspace_id=$1
+    -- An archived task is off the board: it no longer counts toward the request, nor shows to the client.
+    and i.archived_at is null
   order by i.created_at,i.id collate "C"`;
 
 interface TimelineRow {
@@ -292,7 +294,10 @@ export class ClientProjectConversation {
     });
   }
 
-  /** PM: link a task on the request's project to the request. Idempotent; a task belongs to one request. */
+  /**
+   * PM: link a task on the request's project to the request. Idempotent; a task belongs to one request.
+   * New work under a request someone ticked done reopens it, so the client does not see Done while it is underway.
+   */
   async linkTask(workspaceId: string, ticketId: unknown, subject: TicketSubject, input: unknown) {
     const ticket = parse(id, ticketId);
     const { issueId, source } = parse(linkSchema, input);
@@ -316,11 +321,16 @@ export class ClientProjectConversation {
       if (existing.some(row => row.ticket_id !== ticket)) {
         throw new TicketWorkflowError(409, 'task_already_linked', 'This task already belongs to another request.');
       }
+      let reopened = false;
       if (!existing.length) {
         await sql.query(`insert into alpha_private.request_task_links(workspace_id,issue_id,ticket_id,project_id,source,linked_by)
           values ($1,$2,$3,$4,$5,$6)`, [workspaceId, issueId, ticket, request.project_id, source, subject.userId]);
+        const { rows: reopenedRows } = await sql.query<{ ticket_id: string }>(
+          `update alpha_private.client_request_checks set done=false,changed_by_kind='pm',changed_by=$3,changed_at=now()
+            where workspace_id=$1 and ticket_id=$2 and done returning ticket_id`, [workspaceId, ticket, subject.userId]);
+        reopened = reopenedRows.length > 0;
       }
-      return { ticketId: ticket, issueId };
+      return { ticketId: ticket, issueId, reopened };
     });
   }
 

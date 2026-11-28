@@ -6,6 +6,7 @@ import type { TicketSubject } from '../store/ticketCommandStore.js';
 import { newTicketWorkflow } from '../ticketing/workflow.js';
 import { PostgresClientProjectPortal } from './clientProjectPortal.js';
 import { ClientProjectConversation, requestChecklistStatus } from './clientProjectConversation.js';
+import { clientRequestBriefsFromDatabase } from './clientRequestBriefs.js';
 
 const client: TicketSubject = { kind: 'client', userId: 'client-a', sessionId: 'a'.repeat(64) };
 const other: TicketSubject = { kind: 'client', userId: 'client-b', sessionId: 'b'.repeat(64) };
@@ -140,6 +141,42 @@ describe('one conversation per client and project', () => {
     expect((await app.requests(target, client)).items.find(r => r.ticketId === 't-closed')?.checklist).toBe('done');
     await expect(app.setDone(target, 't-closed', client, { done: false })).rejects.toMatchObject({ code: 'request_finished' });
     await expect(app.setDone(target, 't-declined', client, { done: true })).rejects.toMatchObject({ code: 'request_not_checkable' });
+  });
+
+  it('reopens a request ticked done when a new task is added under it', async () => {
+    await app.setDone(target, 't-1', client, { done: true });
+    expect(await app.linkTask('workspace-a', 't-1', pm, { issueId: 'issue-1' })).toMatchObject({ reopened: true });
+    const request = (await app.requests(target, client)).items.find(r => r.ticketId === 't-1');
+    expect(request).toMatchObject({ checklist: 'in_progress', doneBy: null });
+    expect((await app.timeline(target, client)).items.map(item => item.kind)).toContain('request_reopened');
+    // Linking the same task again changes nothing.
+    expect(await app.linkTask('workspace-a', 't-1', pm, { issueId: 'issue-1' })).toMatchObject({ reopened: false });
+  });
+
+  it('leaves archived tasks out of a request’s progress', async () => {
+    await app.linkTask('workspace-a', 't-1', pm, { issueId: 'issue-1' });
+    await app.linkTask('workspace-a', 't-1', pm, { issueId: 'issue-2' });
+    expect((await app.requests(target, client)).items.find(r => r.ticketId === 't-1')?.checklist).toBe('in_progress');
+    await db.query(`update public.issues set archived_at = now() where id = 'issue-1'`);
+    const request = (await app.requests(target, client)).items.find(r => r.ticketId === 't-1');
+    expect(request?.linkedTasks.map(task => task.issueId)).toEqual(['issue-2']);
+    expect(request?.checklist).toBe('ready_to_check');
+  });
+
+  it('gives a build the live requests behind its tasks, on that project only', async () => {
+    await app.linkTask('workspace-a', 't-1', pm, { issueId: 'issue-1' });
+    await app.linkTask('workspace-a', 't-2', pm, { issueId: 'issue-2' });
+    expect(await clientRequestBriefsFromDatabase(db, 'workspace-a', 'project-a', ['issue-1', 'issue-2'])).toEqual([
+      { reference: 't-1', title: 'Request t-1', description: 'Details for Request t-1' },
+      { reference: 't-2', title: 'Request t-2', description: 'Details for Request t-2' }]);
+    expect(await clientRequestBriefsFromDatabase(db, 'workspace-a', 'project-c', ['issue-1'])).toEqual([]);
+    // A cancelled request is not background for anything: its link is ignored.
+    await ticket('t-cancelled', 'client-a', '2026-11-04T10:00:00Z', { status: 'cancelled' });
+    await db.query(`insert into public.issues(id,workspace_id,identifier,title,status,priority,project_id)
+      values ('issue-3','workspace-a','A-3','Old work','todo','medium','project-a')`);
+    await db.query(`insert into alpha_private.request_task_links(workspace_id,issue_id,ticket_id,project_id,source,linked_by)
+      values ('workspace-a','issue-3','t-cancelled','project-a','conversation','pm')`);
+    expect((await clientRequestBriefsFromDatabase(db, 'workspace-a', 'project-a', ['issue-1', 'issue-3'])).map(b => b.reference)).toEqual(['t-1']);
   });
 
   it('links a task only to a request on the same project, once, and only for PMs', async () => {
