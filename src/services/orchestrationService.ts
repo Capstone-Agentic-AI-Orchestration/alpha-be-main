@@ -43,6 +43,7 @@ import {
   ALPHA_ORCHESTRATION_MAX_TOKENS
 } from '../config/env.js';
 import { AUTO_REPAIR_ATTEMPT_LIMIT, MAX_REPAIR_ATTEMPTS_PER_EPISODE, MAX_RECOVERY_GUIDANCE_CHARS, MAX_REPORT_FORMAT_CORRECTIONS, hasRepeatedRecoveryFailure, reportFormatCorrectionCount, safeRecoveryGuidance, workAttemptCount, totalWorkAttemptCount } from './orchestrationRecoveryPolicy.js';
+import { verificationFailureEvidence } from './verificationEvidence.js';
 
 // The reviewer reads every accepted patch in one prompt, sent through stdin. 64 KiB
 // stopped a first feature build on a starter project (72 KB of real code), so the
@@ -112,6 +113,10 @@ export function repairGuidanceForFailure(failureReason: string): string {
     guidance = 'The test runner found no tests. Add a focused smoke test for the implemented behavior, or correct the test script if the repository already contains tests. Do not make an empty test command pass silently.';
   } else if (/cannot find module|module not found|module_not_found/i.test(normalized)) {
     guidance = 'The test runner cannot resolve a module. Check the import path and package manifest, install only the required dependency, update the lockfile, and rerun the failed check.';
+  } else if (/error ts\d+/i.test(normalized)) {
+    guidance = 'TypeScript reported the type errors listed below. Fix each one at the file and line shown, without any, @ts-ignore or loosening tsconfig, then run typecheck and test with project_run_check before reporting.';
+  } else if (/\b\d+:\d+ +error\b/.test(normalized) || normalized.includes('✖')) {
+    guidance = 'ESLint reported the errors listed below. Fix each one at the file and line shown, following the rule named at the end of the line, without disabling rules or editing the lint configuration, then run lint with project_run_check before reporting.';
   }
 
   return `[orchestrator-repair] ${guidance} Failure evidence: ${evidence}`;
@@ -1250,7 +1255,8 @@ export class OrchestrationService {
         && (run.verificationEvidence?.status === 'failed' || /verification failed|could not prepare .*dependencies/i.test(run.testSummary ?? ''));
       const isRepairableImplementationFailure = failedStage?.id === 'implementation' && isImplementationTask(task.kind) &&
         !NON_REPAIRABLE_AGENT_FAILURE.test(failedStage.logs.slice(-30).join('\n'));
-      const verificationOutput = failedStage?.logs.slice(-30).join('\n').slice(-4_000);
+      // The failing commands' error lines, first, so the repair sees them before any noise is cut.
+      const verificationOutput = failedStage ? verificationFailureEvidence(failedStage.logs) || failedStage.logs.slice(-30).join('\n').slice(-1_600) : '';
       const reason = isVerificationFailure
         ? [run.testSummary || 'The repository verification check failed.', verificationOutput].filter(Boolean).join('\n')
         : describeRunnerFailure(run, failedStage?.logs ?? []);

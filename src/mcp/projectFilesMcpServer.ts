@@ -15,6 +15,7 @@ import { isImplementationTask } from '../services/agentRoleContracts.js';
 import { recordPlannerRead } from '../services/plannerReads.js';
 import { auditTaskDependencies, taskCanAudit, deleteTaskFile, editTaskFile, generateTaskLockfile, parseTaskFileScope, runTaskCheck, stopTaskOperations, writeTaskFile, type TaskFileScope } from '../services/taskFileAccess.js';
 import { normalizeAndValidateAgentReport } from '../services/orchestrationAgentReport.js';
+import { TaskCheckGate } from '../services/taskCheckGate.js';
 
 import {
   listFiles,
@@ -37,6 +38,18 @@ const TASK = parseTaskFileScope(process.env.ALPHA_TASK_SCOPE);
  */
 const READ_LOG = process.env.ALPHA_READ_LOG?.trim() || null;
 if (READ_LOG) fs.appendFileSync(READ_LOG, '');
+
+/** Checks run before handing in; see TaskCheckGate. Only for tasks that edit files and may run checks. */
+const CHECK_GATE = TASK && !TASK.reportOnly && isImplementationTask(TASK.kind) && TASK.requiredChecks.length
+  ? new TaskCheckGate(TASK.requiredChecks)
+  : null;
+/** A file tool that changed the files: the checks must run again before handing in. */
+const changing = <T,>(run: () => T): T => {
+  const value = run();
+  if (value instanceof Promise) return value.then(result => { CHECK_GATE?.recordChange(); return result; }) as T;
+  CHECK_GATE?.recordChange();
+  return value;
+};
 
 interface ToolDef {
   description: string;
@@ -122,28 +135,42 @@ if (TASK) {
     TOOLS.project_write_file = {
       description: 'Create a source file inside this task’s approved path scope. To replace an existing file, include its current content as expected_content (as project_read_file shows it, without line numbers; line endings and a byte-order mark do not matter, and the file keeps its own). For small changes prefer project_edit_file.',
       inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), content: str('Full UTF-8 content.'), expected_content: str('Current content when replacing an existing file; line endings do not matter.') }, ['path', 'content']),
-      run: args => writeTaskFile(ROOTS, TASK, args as any)
+      run: args => changing(() => writeTaskFile(ROOTS, TASK, args as any))
     };
     TOOLS.project_edit_file = {
       description: 'Replace exactly one occurrence of old_text in an approved file. Copy old_text from project_read_file without the line numbers; line endings do not matter and the file keeps its own. Refuses text that matches zero or several times, and out-of-scope paths.',
       inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), old_text: str('Nonempty text matching exactly once (line endings ignored).'), new_text: str('Replacement text.') }, ['path', 'old_text', 'new_text']),
-      run: args => editTaskFile(ROOTS, TASK, args as any)
+      run: args => changing(() => editTaskFile(ROOTS, TASK, args as any))
     };
     TOOLS.project_delete_file = {
       description: 'Delete an approved source file only when its current content matches expected_content (line endings do not matter).',
       inputSchema: schema({ path: str('Repository-relative path with forward slashes.'), expected_content: str('Current file content; line endings do not matter.') }, ['path', 'expected_content']),
-      run: args => deleteTaskFile(ROOTS, TASK, args as any)
+      run: args => changing(() => deleteTaskFile(ROOTS, TASK, args as any))
     };
     TOOLS.project_generate_lockfile = {
       description: 'Generate package-lock.json for an npm project with lifecycle scripts disabled in a disposable folder. Requires package-lock.json in the assigned write scope.',
-      inputSchema: schema({}), run: () => generateTaskLockfile(ROOTS, TASK)
+      inputSchema: schema({}), run: () => changing(() => generateTaskLockfile(ROOTS, TASK))
     };
   }
   if (!TASK.reportOnly && (TASK.kind === 'validation' || isImplementationTask(TASK.kind))) {
     TOOLS.project_run_check = {
-      description: 'Run one task-authorized repository check in a disposable source copy; return exact results without changing project files.',
-      inputSchema: schema({ script: str('One requiredChecks name from this task.') }, ['script']),
-      run: args => runTaskCheck(ROOTS, TASK, args.script)
+      description: 'Run task-authorized repository checks in one disposable source copy (dependencies installed once); return exact results without changing project files. Run every assigned check before project_submit_work.',
+      inputSchema: schema({
+        scripts: { type: 'array', items: { type: 'string' }, description: 'requiredChecks names from this task, e.g. ["test","typecheck","lint"].' },
+        script: str('One requiredChecks name (use scripts for several).')
+      }),
+      run: async args => {
+        let scripts: string[] = [];
+        if (Array.isArray(args.scripts) && args.scripts.length) scripts = args.scripts.map(String);
+        else if (typeof args.script === 'string') scripts = [args.script];
+        if (!scripts.length) throw new Error('Name the checks to run in scripts.');
+        try {
+          return await runTaskCheck(ROOTS, TASK, scripts);
+        } finally {
+          // Ran, whatever the result: a failure the agent cannot fix must not trap it.
+          CHECK_GATE?.recordRun(scripts);
+        }
+      }
     };
   }
 }
@@ -174,6 +201,8 @@ function submitWork(task: TaskFileScope, reportFile: string, args: Record<string
   }
   const filled = { schemaVersion: task.reportSchemaVersion, taskId: task.taskId, ...(report as Record<string, unknown>) };
   if (filled.taskId !== task.taskId) throw new Error('taskId must be ' + task.taskId + '.');
+  const unchecked = CHECK_GATE?.refusal();
+  if (unchecked) throw new Error(unchecked);
   const checked = normalizeAndValidateAgentReport(filled, task.reportSchemaVersion);
   if (!checked.success) throw new Error('Not accepted yet: ' + checked.error + ' Fix that and call project_submit_work again.');
   fs.writeFileSync(reportFile, JSON.stringify(checked.report));
