@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import type { OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { getCurrentBranch, getHeadCommit, isGitWorkingTreeClean } from '../utils/gitUtils.js';
-import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
+import { codeTaskAllowsPath } from '../utils/pathScope.js';
 import { worktreeChangesHash } from './orchestrationWorktreeRecovery.js';
 
 const exec = promisify(execFile);
@@ -48,7 +48,7 @@ function archive(snapshot: OrchestrationSnapshot, task: OrchestrationTaskRecord,
   if (patch && /^(?:new file mode|old mode|new mode) 120000$/m.test(fs.readFileSync(patch.file, 'utf8'))) throw new Error('A symbolic-link patch needs manual review.');
   const untracked = files.filter(item => item.relative.startsWith('untracked/'));
   const allows = (relative: string) => relative && !path.isAbsolute(relative) && !relative.split(/[\\/]/).includes('..') && !relative.split(/[\\/]/).some(part => part.toLowerCase() === '.git') &&
-    scopeAllowsPath(task.scope, relative);
+    codeTaskAllowsPath(task.scope, relative);
   if (untracked.some(item => !allows(item.relative.slice('untracked/'.length)))) throw new Error('The archive contains a file outside this step’s approved scope.');
   return { workspace, folder, hash: hash.digest('hex'), patch, untracked, allows, files: files.map(item => item.relative), savedAt: String(metadata.savedAt ?? '') };
 }

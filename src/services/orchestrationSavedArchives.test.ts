@@ -38,7 +38,7 @@ describe('inspected same-task archive restoration', () => {
     fs.appendFileSync(path.join(cwd, 'src', 'app.ts'), 'new edit');
     await expect(restoreSavedArchive(snapshot, task, { archiveId: saved.id, archiveHash: saved.hash, candidateHash: clean })).rejects.toThrow(/changed/);
     git('restore', 'src/app.ts');
-    task.scope.includePaths = ['elsewhere/**']; expect(listSavedArchives(snapshot, task)).toHaveLength(0);
+    task.scope.excludePaths = ['src/**']; expect(listSavedArchives(snapshot, task)).toHaveLength(0); task.scope.excludePaths = [];
     task.scope.includePaths = ['src/**']; snapshot.run.repositoryWorkspaces![0].baseCommit = 'a'.repeat(40);
     await expect(restoreSavedArchive(snapshot, task, { archiveId: saved.id, archiveHash: saved.hash, candidateHash: clean })).rejects.toThrow(/checkpoint/);
     expect(fs.existsSync(path.join(cwd, 'src', 'email.ts'))).toBe(false);

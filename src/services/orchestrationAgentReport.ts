@@ -80,7 +80,7 @@ function normalizeVersion1Report(value: unknown): unknown {
     normalized.reportedChecks = report.reportedChecks.map(item => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
       const check = { ...(item as Record<string, unknown>) };
-      for (const alias of ['name', 'check']) {
+      for (const alias of ['name', 'check', 'command', 'checkName', 'scriptName']) {
         if (check.script === undefined && typeof check[alias] === 'string') {
           check.script = check[alias];
           delete check[alias];
@@ -123,7 +123,56 @@ function normalizeVersion1Report(value: unknown): unknown {
       return finding;
     });
   }
-  return normalized;
+  return clipReportText(withoutUnknownKeys(normalized));
+}
+
+/**
+ * Report fields Alpha does not read are dropped instead of failing the whole report: a summary
+ * one character too long, or an extra "decisions" list, used to cost a full work attempt while
+ * the code itself was fine. Only known fields reach the schema; their meaning is unchanged.
+ */
+const REPORT_KEYS = new Set(Object.keys(orchestrationAgentReportSchema.shape));
+// Alias keys stay, so a check naming two different scripts or results is still refused, not guessed.
+const CHECK_KEYS = new Set(['script', 'result', 'evidence', 'status', 'name', 'check', 'command', 'checkName', 'scriptName']);
+function withoutUnknownKeys(report: Record<string, unknown>): Record<string, unknown> {
+  const kept = Object.fromEntries(Object.entries(report).filter(([key]) => REPORT_KEYS.has(key)));
+  if (Array.isArray(kept.reportedChecks)) {
+    kept.reportedChecks = kept.reportedChecks.map(item => item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).filter(([key]) => CHECK_KEYS.has(key)))
+      : item);
+  }
+  return kept;
+}
+
+/** Text over a field's limit is shortened, not refused; the limits exist to bound storage. */
+function clip(value: unknown, max: number): unknown {
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  return text.length > max ? text.slice(0, max - 1).trimEnd() + '\u2026' : value;
+}
+function clipEach(list: unknown, fields: Record<string, number>): unknown {
+  if (!Array.isArray(list)) return list;
+  return list.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const copy = { ...(item as Record<string, unknown>) };
+    for (const [field, max] of Object.entries(fields)) if (field in copy) copy[field] = clip(copy[field], max);
+    return copy;
+  });
+}
+function clipReportText(report: Record<string, unknown>): Record<string, unknown> {
+  const SHORT = 240;
+  const DETAIL = 4_000;
+  return {
+    ...report,
+    ...('summary' in report ? { summary: clip(report.summary, DETAIL) } : {}),
+    ...(Array.isArray(report.blockers) ? { blockers: report.blockers.map(item => clip(item, SHORT)) } : {}),
+    ...('requirementCoverage' in report ? { requirementCoverage: clipEach(report.requirementCoverage, { evidence: DETAIL }) } : {}),
+    ...('criteriaEvidence' in report ? { criteriaEvidence: clipEach(report.criteriaEvidence, { criterion: DETAIL, evidence: DETAIL }) } : {}),
+    ...('deliverables' in report ? { deliverables: clipEach(report.deliverables, { summary: DETAIL }) } : {}),
+    ...('reportedChecks' in report ? { reportedChecks: clipEach(report.reportedChecks, { script: SHORT, evidence: DETAIL }) } : {}),
+    ...('reviewFindings' in report ? { reviewFindings: clipEach(report.reviewFindings, { title: SHORT, evidence: DETAIL, instruction: DETAIL }) } : {}),
+    ...('findingCoverage' in report ? { findingCoverage: clipEach(report.findingCoverage, { evidence: DETAIL }) } : {})
+  };
 }
 
 /** Convert wording only where its contract meaning is unambiguous. */

@@ -19,12 +19,17 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 describe('task authority before a file changes', () => {
-  it.each(['../escape.ts', 'src/../escape.ts', '/absolute.ts', 'C:/elsewhere.ts', 'src\\api.ts', '.git/config', 'src/.env', 'src/generated/client.ts', 'frontend/App.tsx'])('denies %s before writing', target => {
+  it.each(['../escape.ts', 'src/../escape.ts', '/absolute.ts', 'C:/elsewhere.ts', 'src\\api.ts', '.git/config', 'src/.env', 'src/generated/client.ts', 'node_modules/pkg/index.js'])('denies %s before writing', target => {
     expect(() => writeTaskFile(roots, scope, { path: target, content: 'bad' })).toThrow();
     expect(fs.readFileSync(path.join(dir, 'src', 'api.ts'), 'utf8')).toBe('before');
   });
   it.each(['requirements', 'architecture', 'review', 'validation', 'delivery'] as const)('keeps %s tasks read-only even with a wide include', kind => {
     expect(() => writeTaskFile(roots, { ...scope, kind, includePaths: ['**'] }, { path: 'src/api.ts', content: 'bad', expected_content: 'before' })).toThrow('read-only');
+  });
+  it('lets a code task change a file its change needs outside the suggested paths', () => {
+    // Suggested paths are where the change belongs, not a fence: a shared config or type is in bounds.
+    expect(writeTaskFile(roots, scope, { path: 'config/app.ts', content: 'export const ok = true;\n' })).toContain('config/app.ts');
+    expect(fs.readFileSync(path.join(dir, 'config', 'app.ts'), 'utf8')).toContain('ok');
   });
   it('binds the repository and refuses report-only retries', () => {
     expect(() => writeTaskFile(roots, { ...scope, repository: 'other/repo' }, { path: 'src/new.ts', content: 'bad' })).toThrow();
@@ -144,6 +149,6 @@ describe('managed task commands', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'task-fixture', version: '1.0.0', scripts: { preinstall: 'node -e "process.exit(99)"' } }));
     await expect(generateTaskLockfile(roots, scope)).resolves.toContain('package-lock.json');
     expect(JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8')).lockfileVersion).toBeGreaterThan(0);
-    await expect(generateTaskLockfile(roots, { ...scope, includePaths: ['src/**'] })).rejects.toThrow('outside');
+    await expect(generateTaskLockfile(roots, { ...scope, excludePaths: ['package-lock.json'] })).rejects.toThrow('excluded');
   }, 30_000);
 });

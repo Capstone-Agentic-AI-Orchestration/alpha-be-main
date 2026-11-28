@@ -1913,8 +1913,10 @@ export class OrchestrationService {
         previousResponse: reportCorrection.previousResponse.slice(0, 12_000)
       };
     }
+    // The latest earlier attempt that failed or was refused: a retry that cannot see why the
+    // last try ended asks for "the failure details" instead of fixing them.
     const priorFailure = [...snapshot.attempts].reverse().find(attempt =>
-      attempt.taskId === taskId && attempt.status === 'failed' && attempt.failureReason
+      attempt.taskId === taskId && (attempt.status === 'failed' || attempt.status === 'rejected') && attempt.failureReason
     );
     if (!reportCorrection && priorFailure?.failureReason) {
       taskPackage.corrections.push(
@@ -2067,7 +2069,8 @@ export class OrchestrationService {
     const report = acceptedAttempt.result?.agentReport as { deliverables?: Array<{ paths?: string[] }> } | undefined;
     const reportedPaths = (report?.deliverables ?? []).flatMap(deliverable => deliverable.paths ?? []);
     const tracked = await getGitTrackedPathsAtCommit(worktree, acceptedAttempt.resultCommit!);
-    const included = (filePath: string) => scopeAllowsPath(task.scope, filePath);
+    // Files the task changed outside its suggested paths are part of what the reviewer reads.
+    const included = (filePath: string) => scopeAllowsPath(task.scope, filePath) || changedPaths.includes(filePath);
     const candidates = tracked.filter(filePath =>
       included(filePath) && REVIEW_SOURCE_EXTENSIONS.test(filePath) && !SENSITIVE_REVIEW_PATH.test(filePath)
     );

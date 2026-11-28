@@ -15,7 +15,7 @@ describe('official role boundaries', () => {
       // The Manager moved to v6 when it began writing feature specs.
       // Manager v7 adds board management for developers.
       // Every role moved up one when blockers became look-first (Manager v8, the rest v6).
-      expect(template.version).toBe(template.key === 'manager' ? 8 : 6);
+      expect(template.version).toBe(template.key === 'manager' ? 9 : 7);
       expect(template.systemPrompt).toContain('When blocked: ' + LOOK_FIRST);
       expect(template.systemPrompt).toContain('say in your summary what you searched');
       expect(PREVIOUS_TEMPLATE_PROMPTS[template.key].length).toBeGreaterThanOrEqual(3);

@@ -33,6 +33,7 @@ import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
 import { runVerification, shouldRunRepositoryVerification, type VerificationResult } from './verificationService.js';
 import { describeRepositoryExecution } from './repositoryExecution.js';
+import { siblingReadRoots } from './orchestrationWorkspace.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
 import { ALPHA_CLOUD_RUN_ACTIVITY, ALPHA_ORCHESTRATION_TRANSPORT_RETRIES, RUNS_DIR } from '../config/env.js';
@@ -169,7 +170,7 @@ export function appendOrchestrationTaskPolicy(
       ? 'This approved task requires dependency audit evidence. Invoke project_audit_dependencies for the assigned repository without asking the user whether to run npm audit. Reference its returned evidence IDs in auditEvidenceIds; findings are assessment results, while tool/registry failures are concrete setup blockers. Do not request unrestricted terminal permissions or another agent’s scope.'
       : '',
     `Required checks: ${orchestration.taskPackage.reportCorrection ? 'None for this report-format correction; do not run commands.' : orchestration.taskPackage.task.requiredChecks.length ? orchestration.taskPackage.task.requiredChecks.join(', ') : 'No task-specific scripts; the repository’s configured conventional checks will be discovered.'}`,
-    `Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'none configured; do not broaden the task and expect scope review before acceptance.'}`,
+    `Where the change belongs: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'not specified'}. You may also change other files in this repository that the change needs, except excluded paths, secrets, dependency folders and git internals.`,
     orchestration.taskPackage.task.scope.excludePaths.length
       ? `Forbidden path patterns:\n${orchestration.taskPackage.task.scope.excludePaths.map(item => `- ${item}`).join('\n')}`
       : '',
@@ -376,6 +377,28 @@ class SkipPullRequest extends Error {}
  * that person cannot be resolved or may no longer operate agents, and the
  * board pass is checked again on every call.
  */
+/** The build's other repositories a task may read; none when the run cannot be loaded. */
+function buildSiblingRoots(orchestrationRunId: string, taskRepository: string) {
+  try {
+    const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
+    return run ? siblingReadRoots(run, taskRepository) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Opt-in, off by default: ALPHA_NATIVE_TASK_EDITS=codex lets a Codex code task edit and test with
+ * Codex's own tools inside its worktree, under Codex's workspace-write sandbox (writes stay in the
+ * worktree, no network). Only Codex has an OS sandbox here, so other runtimes keep Alpha's
+ * path-checked file tools. Alpha still commits, judges the diff and runs the checks itself.
+ */
+export function nativeTaskEditsEnabled(provider: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  return provider === 'OpenAI' && (env.ALPHA_NATIVE_TASK_EDITS ?? '').trim().toLowerCase() === 'codex';
+}
+
+const NATIVE_EDITS_NOTICE = 'Native editing is on for this task. You may read, create and edit files and run commands with your own tools inside this repository folder; this replaces the instruction to edit only through Alpha\'s task file tools. Alpha\'s project tools still read the other repositories in this build. Stay inside this repository folder, never touch secrets, dependency folders or git internals, and do not commit, switch branches or push: Alpha commits your work. Before project_submit_work, run the assigned checks with project_run_check.';
+
 export async function specialistBoardScope(orchestrationRunId: string, agentId: string | null, agentName: string): Promise<BoardRunScope | undefined> {
   try {
     const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
@@ -736,7 +759,18 @@ export class RunnerService extends EventEmitter {
     const task = ctx.orchestration?.taskPackage.task;
     const taskRepository = task?.repository ?? issue.githubRepo ?? 'task';
     // Named after the repository, not the hashed worktree folder, so paths the tools show read naturally.
-    const taskRoots = task ? [{ name: taskRepository.split('/').pop() || path.basename(cwd), repo: taskRepository, dir: cwd }] : undefined;
+    // The task's own repository first: reads default to it, and writes only ever go there.
+    const siblingRoots = task ? buildSiblingRoots(ctx.orchestration!.orchestrationRunId, taskRepository) : [];
+    const taskRoots = task ? [{ name: taskRepository.split('/').pop() || path.basename(cwd), repo: taskRepository, dir: cwd }, ...siblingRoots] : undefined;
+    const nativeEdits = Boolean(task && isImplementationTask(task.kind) && !ctx.orchestration?.taskPackage.reportCorrection &&
+      nativeTaskEditsEnabled(persona.modelProvider));
+    // Where the agent's process runs: its worktree when it edits natively, otherwise a context folder.
+    const turnDir = task && !nativeEdits ? taskTurnDir : cwd;
+    // Natively, Codex's sandbox may write only the task's own worktree: the other build
+    // repositories are not added as writable folders and stay readable through Alpha's tools.
+    const taskAccess = nativeEdits
+      ? { approvalMode: 'approve' as const, projectRoots: taskRoots!.slice(0, 1) }
+      : { approvalMode: 'ask' as const, projectRoots: taskRoots };
     const taskMcpServers = task ? ['alpha-task-files', ...(['audit', 'review', 'delivery'].includes(task.kind) ? ['alpha-github'] : [])] : persona.mcpServers;
     /*
      * A specialist in a build may read the board and comment on its own card,
@@ -792,8 +826,12 @@ export class RunnerService extends EventEmitter {
         .join(''),
     } : issue;
     const prompt = [
+      nativeEdits ? NATIVE_EDITS_NOTICE : '',
       ctx.orchestration && !ctx.orchestration.taskPackage.reportCorrection
-        ? describeRepositoryExecution(cwd, task?.requiredChecks) : '',
+        ? describeRepositoryExecution(cwd, task?.requiredChecks, {
+          branchName: ctx.orchestration.branchName, baseRef: ctx.orchestration.baseRef, baseCommit: ctx.orchestration.baseCommit,
+          otherRepositories: siblingRoots.map(root => root.name)
+        }) : '',
       this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad, ctx.orchestration)
     ].filter(Boolean).join('\n\n');
     // Repository memory comes first. A build task carries it in its task package (read at the
@@ -812,10 +850,10 @@ export class RunnerService extends EventEmitter {
     const invocation = buildTurnInvocation(
       {
         runId,
-        cwd: task ? taskTurnDir : cwd,
+        cwd: turnDir,
         // Native tools have no project authority. Alpha's task MCP checks every write.
         mode: task ? 'chat' : 'run',
-        ...(task ? { approvalMode: 'ask' as const, projectRoots: taskRoots } : {}),
+        ...(task ? taskAccess : {}),
         // Keeps the persona out of argv — see TurnInvocation.stdin.
         personaFile: writeTurnPersona(runId, systemPrompt) ?? undefined,
         provider: persona.modelProvider,
@@ -862,7 +900,7 @@ export class RunnerService extends EventEmitter {
         bin,
         args,
         idleTimeoutMs: ctx.orchestration ? EXECUTION_LIMITS.BUILD_IDLE_TIMEOUT_MS : undefined,
-        cwd: task ? taskTurnDir : cwd,
+        cwd: turnDir,
         // Agent env first, then the family's isolation overrides — see cliHome.
         // Then the credential isolation chat has always had: the run prompt tells
         // the agent the shell cannot reach GitHub, and without this it could. Only

@@ -11,6 +11,34 @@ import { promisify } from 'node:util';
  */
 const execFileAsync = promisify(execFile);
 
+/** A lock this old belongs to a git process that died, not one still running. */
+const STALE_INDEX_LOCK_MS = 2 * 60_000;
+
+/**
+ * Remove an index.lock left by a git process that was killed mid-command (an agent stopped,
+ * a crash, a closed app). Every later git add or commit in that checkout failed with
+ * "Unable to create index.lock" until a person deleted it. A recent lock is left alone, since a
+ * git command may still own it. Returns whether a lock was removed.
+ */
+export async function clearStaleIndexLock(cwd: string, maxAgeMs = STALE_INDEX_LOCK_MS): Promise<boolean> {
+  let gitDir: string;
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--git-dir'], { cwd });
+    gitDir = path.resolve(cwd, stdout.trim());
+  } catch {
+    return false;
+  }
+  const lock = path.join(gitDir, 'index.lock');
+  const stat = fs.statSync(lock, { throwIfNoEntry: false });
+  if (!stat || Date.now() - stat.mtimeMs < maxAgeMs) return false;
+  try {
+    fs.rmSync(lock, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function isGitRepo(cwd: string): Promise<boolean> {
   try {
     await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd });

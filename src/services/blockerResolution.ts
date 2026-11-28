@@ -13,7 +13,7 @@ import {
   type PrerequisiteAmendment
 } from './prerequisiteTasks.js';
 import { sameRepository } from '../utils/repositoryName.js';
-import { scopeAllowsPath } from '../utils/pathScope.js';
+import { scopeAllowsPath, codeTaskAllowsPath } from '../utils/pathScope.js';
 import { logError } from '../utils/logger.js';
 import { repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
 import { taskChangeBaseline } from './orchestrationCheckpoints.js';
@@ -560,7 +560,7 @@ export class BlockerResolutionService {
   /** A fix changes only the blocked task's own repository, inside its scope. */
   private outsideTask(answer: BlockerFix, gathered: Gathered, task: OrchestrationTaskRecord): string | undefined {
     const outside = answer.expectedFiles.find(file => !sameRepository(file.repository, gathered.repository) ||
-      !isSafeRelativePath(file.path) || !scopeAllowsPath(task.scope, file.path.replace(/\\/g, '/')));
+      !isSafeRelativePath(file.path) || !codeTaskAllowsPath(task.scope, file.path.replace(/\\/g, '/')));
     return outside ? `${outside.repository}:${outside.path} is outside ${task.id}'s repository or path scope` : undefined;
   }
 

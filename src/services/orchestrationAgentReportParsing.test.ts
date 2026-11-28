@@ -152,4 +152,15 @@ describe('structured specialist report parsing', () => {
     expect(unknown.report).toBeUndefined();
     expect(unknown.error).toContain('reportedChecks.0.result');
   });
+
+  it('shortens overlong text and drops fields Alpha does not read instead of refusing the report', () => {
+    const parsed = parseAgentReport(JSON.stringify({
+      ...validReviewReport([]), summary: 'x'.repeat(5_000), blockers: ['y'.repeat(300)], decisions: [{ about: 'a', decision: 'b' }]
+    }));
+
+    expect(parsed.error).toBeUndefined();
+    expect((parsed.report!.summary as string)).toHaveLength(4_000);
+    expect((parsed.report!.blockers as string[])[0]).toHaveLength(240);
+    expect(parsed.report).not.toHaveProperty('decisions');
+  });
 });
