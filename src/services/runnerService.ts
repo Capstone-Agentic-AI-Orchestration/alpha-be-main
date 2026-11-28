@@ -387,6 +387,18 @@ function buildSiblingRoots(orchestrationRunId: string, taskRepository: string) {
   }
 }
 
+/**
+ * Opt-in, off by default: ALPHA_NATIVE_TASK_EDITS=codex lets a Codex code task edit and test with
+ * Codex's own tools inside its worktree, under Codex's workspace-write sandbox (writes stay in the
+ * worktree, no network). Only Codex has an OS sandbox here, so other runtimes keep Alpha's
+ * path-checked file tools. Alpha still commits, judges the diff and runs the checks itself.
+ */
+export function nativeTaskEditsEnabled(provider: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  return provider === 'OpenAI' && (env.ALPHA_NATIVE_TASK_EDITS ?? '').trim().toLowerCase() === 'codex';
+}
+
+const NATIVE_EDITS_NOTICE = 'Native editing is on for this task. You may read, create and edit files and run commands with your own tools inside this repository folder; this replaces the instruction to edit only through Alpha\'s task file tools. Alpha\'s project tools still read the other repositories in this build. Stay inside this repository folder, never touch secrets, dependency folders or git internals, and do not commit, switch branches or push: Alpha commits your work. Before project_submit_work, run the assigned checks with project_run_check.';
+
 export async function specialistBoardScope(orchestrationRunId: string, agentId: string | null, agentName: string): Promise<BoardRunScope | undefined> {
   try {
     const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
@@ -750,6 +762,15 @@ export class RunnerService extends EventEmitter {
     // The task's own repository first: reads default to it, and writes only ever go there.
     const siblingRoots = task ? buildSiblingRoots(ctx.orchestration!.orchestrationRunId, taskRepository) : [];
     const taskRoots = task ? [{ name: taskRepository.split('/').pop() || path.basename(cwd), repo: taskRepository, dir: cwd }, ...siblingRoots] : undefined;
+    const nativeEdits = Boolean(task && isImplementationTask(task.kind) && !ctx.orchestration?.taskPackage.reportCorrection &&
+      nativeTaskEditsEnabled(persona.modelProvider));
+    // Where the agent's process runs: its worktree when it edits natively, otherwise a context folder.
+    const turnDir = task && !nativeEdits ? taskTurnDir : cwd;
+    // Natively, Codex's sandbox may write only the task's own worktree: the other build
+    // repositories are not added as writable folders and stay readable through Alpha's tools.
+    const taskAccess = nativeEdits
+      ? { approvalMode: 'approve' as const, projectRoots: taskRoots!.slice(0, 1) }
+      : { approvalMode: 'ask' as const, projectRoots: taskRoots };
     const taskMcpServers = task ? ['alpha-task-files', ...(['audit', 'review', 'delivery'].includes(task.kind) ? ['alpha-github'] : [])] : persona.mcpServers;
     /*
      * A specialist in a build may read the board and comment on its own card,
@@ -805,6 +826,7 @@ export class RunnerService extends EventEmitter {
         .join(''),
     } : issue;
     const prompt = [
+      nativeEdits ? NATIVE_EDITS_NOTICE : '',
       ctx.orchestration && !ctx.orchestration.taskPackage.reportCorrection
         ? describeRepositoryExecution(cwd, task?.requiredChecks, {
           branchName: ctx.orchestration.branchName, baseRef: ctx.orchestration.baseRef, baseCommit: ctx.orchestration.baseCommit,
@@ -828,10 +850,10 @@ export class RunnerService extends EventEmitter {
     const invocation = buildTurnInvocation(
       {
         runId,
-        cwd: task ? taskTurnDir : cwd,
+        cwd: turnDir,
         // Native tools have no project authority. Alpha's task MCP checks every write.
         mode: task ? 'chat' : 'run',
-        ...(task ? { approvalMode: 'ask' as const, projectRoots: taskRoots } : {}),
+        ...(task ? taskAccess : {}),
         // Keeps the persona out of argv — see TurnInvocation.stdin.
         personaFile: writeTurnPersona(runId, systemPrompt) ?? undefined,
         provider: persona.modelProvider,
@@ -878,7 +900,7 @@ export class RunnerService extends EventEmitter {
         bin,
         args,
         idleTimeoutMs: ctx.orchestration ? EXECUTION_LIMITS.BUILD_IDLE_TIMEOUT_MS : undefined,
-        cwd: task ? taskTurnDir : cwd,
+        cwd: turnDir,
         // Agent env first, then the family's isolation overrides — see cliHome.
         // Then the credential isolation chat has always had: the run prompt tells
         // the agent the shell cannot reach GitHub, and without this it could. Only

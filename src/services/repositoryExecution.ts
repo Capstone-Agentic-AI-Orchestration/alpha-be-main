@@ -205,6 +205,15 @@ export interface BuildExecutionFacts {
   otherRepositories?: readonly string[];
 }
 
+/** Agents stopped to "confirm the branch" they could not see; it is Alpha's to set up, so say what it is. */
+function branchFact(build: BuildExecutionFacts | undefined): string {
+  if (!build?.branchName) return '';
+  const from = build.baseRef ? ' from ' + build.baseRef : '';
+  const at = build.baseCommit ? ' at ' + build.baseCommit.slice(0, 12) : '';
+  return 'Branch: Alpha created ' + build.branchName + from + at +
+    ' for this build. Alpha creates, commits to and publishes this branch; do not set up, switch or verify branches yourself.';
+}
+
 export function describeRepositoryExecution(cwd: string, requiredScripts?: readonly string[], build?: BuildExecutionFacts): string {
   const manifest = readManifest(cwd);
   const commands = discoverVerificationCommands(cwd, requiredScripts);
@@ -222,11 +231,7 @@ export function describeRepositoryExecution(cwd: string, requiredScripts?: reado
     missing.length ? 'Missing assigned checks: ' + missing.join(', ') + '.' : '',
     'Specialists request only assigned checks through project_run_check; commands shown here describe what Alpha executes, not shell permission.',
     'Checks use CI=true and a five-minute process limit. No watch mode or unmanaged servers. Alpha owns Git checkpoints.',
-    // Agents stopped to "confirm the branch" they could not see; it is Alpha's to set up, so say what it is.
-    build?.branchName
-      ? 'Branch: Alpha created ' + build.branchName + (build.baseRef ? ' from ' + build.baseRef : '') + (build.baseCommit ? ' at ' + build.baseCommit.slice(0, 12) : '')
-        + ' for this build. Alpha creates, commits to and publishes this branch; do not set up, switch or verify branches yourself.'
-      : '',
+    branchFact(build),
     build?.otherRepositories?.length
       ? 'Other repositories in this build, readable (not writable) with the project tools by naming the repository: ' + build.otherRepositories.join(', ') + '. Read their routes, types and schemas instead of guessing a contract.'
       : '',
