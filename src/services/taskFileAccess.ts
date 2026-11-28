@@ -161,9 +161,13 @@ export function deleteTaskFile(roots: ProjectRoot[], scope: TaskFileScope, args:
 }
 
 /** Only names authorized by the task; scripts run in a disposable source copy. */
-export async function runTaskCheck(roots: ProjectRoot[], scope: TaskFileScope, script: string, verify?: typeof runVerification) {
+export async function runTaskCheck(roots: ProjectRoot[], scope: TaskFileScope, script: string | readonly string[], verify?: typeof runVerification) {
   if (stopping) throw new Error('The task was stopped.');
-  if (scope.reportOnly || !scope.requiredChecks.includes(script as TaskFileScope['requiredChecks'][number])) throw new Error('This check is not authorized by the task.');
+  const scripts = [...new Set(typeof script === 'string' ? [script] : script)];
+  const unauthorized = scripts.filter(name => !scope.requiredChecks.includes(name as TaskFileScope['requiredChecks'][number]));
+  if (scope.reportOnly || !scripts.length || unauthorized.length) {
+    throw new Error('This check is not authorized by the task' + (unauthorized.length ? ': ' + unauthorized.join(', ') : '') + '.');
+  }
   const root = pickRoot(roots, scope.repository);
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-task-check-'));
   let bytes = 0;
@@ -187,7 +191,7 @@ export async function runTaskCheck(roots: ProjectRoot[], scope: TaskFileScope, s
       verify = (await import('./verificationService.js')).runVerification;
     }
     activeChecks.add(checkRunId);
-    return await verify({ runId: checkRunId, cwd: scratch, requiredScripts: [script], shouldContinue: () => !stopping });
+    return await verify({ runId: checkRunId, cwd: scratch, requiredScripts: scripts, shouldContinue: () => !stopping });
   } finally {
     activeChecks.delete(checkRunId);
     releaseAuthority?.();
