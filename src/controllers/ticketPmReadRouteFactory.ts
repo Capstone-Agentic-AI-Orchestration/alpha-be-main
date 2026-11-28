@@ -51,6 +51,10 @@ import type { TicketLifecycleRuntime } from '../services/ticketLifecycleRuntime.
 import { createTicketScopeRouter } from './ticketScopeController.js';
 import { createTicketPmDeliveryCandidatesRouter } from './ticketPmDeliveryCandidatesController.js';
 import { createTicketPmResultRouter } from './ticketPmResultController.js';
+import { createPmClientRemovalRouter } from './clientRemovalController.js';
+import { ClientRemoval, type ClientIdentityRetirement } from '../services/clientRemoval.js';
+import { archiveProject } from '../services/projectArchiveService.js';
+import { projectStore } from '../store/stores.js';
 
 /**
  * Production composition for the existing PM Tickets page.
@@ -67,6 +71,7 @@ export function createTicketPmReadRouteBoundary(
   communicationEnabled = false,
   documents?: TicketDocumentsApplication,
   lifecycle?: TicketLifecycleRuntime,
+  clientIdentity?: ClientIdentityRetirement | null,
 ): Router {
   const router = Router({ caseSensitive: true, strict: true });
   const queue = createTicketQueueService(new PostgresTicketQueueStore(db));
@@ -152,6 +157,12 @@ export function createTicketPmReadRouteBoundary(
   if (triageEnabled) router.use(createPmClientConversationRouter(new ClientProjectConversation(db, new PostgresClientProjectPortal(db)), relayRequest));
   if (triageEnabled) router.use(createPmProjectStageRouter(new ClientProjectStages(db, new PostgresClientProjectPortal(db)), relayRequest));
   if (triageEnabled) router.use(createPmProjectUatRouter(new ProjectUat(db,new PostgresClientProjectPortal(db),createProjectUatBuilds(db),projectUatStorage()),relayRequest));
+  // Before the queue and read routers, whose /:ticketId routes would otherwise see "clients".
+  if (triageEnabled) {
+    router.use(createPmClientRemovalRouter(new ClientRemoval(db, {
+      projects: projectStore, archive: archiveProject, identity: clientIdentity ?? null,
+    }), relayRequest));
+  }
   router.use(createTicketQueueRouter(queue, relayRequest));
   router.use(createTicketReadRouter({ ...reads,
     async detail(target, subject) {

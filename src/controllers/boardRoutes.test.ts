@@ -278,6 +278,51 @@ describe('the cloud project routes', () => {
     expect(res.status).toBe(403);
     expect((await db.query('select id from projects')).rows).toHaveLength(0);
   });
+
+  it('archive and restore a project only through the archive routes', async () => {
+    const app = await startCloudApi();
+    const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
+
+    // An edit cannot archive: that would skip archiving the repositories.
+    await call(app, 'PUT', `/api/projects/${project.id}`, { archivedAt: '2026-01-01T00:00:00.000Z' });
+    expect((await db.query<{ archived_at: unknown }>('select archived_at from projects')).rows[0].archived_at).toBeNull();
+
+    const archived = await call(app, 'POST', `/api/projects/${project.id}/archive`);
+    expect(archived.status).toBe(200);
+    expect(archived.body).toMatchObject({ project: { id: project.id, archivedBy: 'PM1' }, repositories: [] });
+    expect(archived.body.project.archivedAt).toBeTruthy();
+    expect((await call(app, 'GET', '/api/projects')).body[0].archivedAt).toBe(archived.body.project.archivedAt);
+
+    const restored = await call(app, 'POST', `/api/projects/${project.id}/restore`);
+    expect(restored.body.project.archivedAt).toBeUndefined();
+
+    session = { login: 'Dev1', role: 'dev' };
+    const dev = await startCloudApi();
+    expect((await call(dev, 'POST', `/api/projects/${project.id}/archive`)).status).toBe(403);
+  });
+
+  it('check everything before deleting a project with its repositories', async () => {
+    const app = await startCloudApi();
+    const project = (await createProject(app, { name: 'Checkout', key: 'CHK' })).body;
+
+    const unconfirmed = await call(app, 'DELETE', `/api/projects/${project.id}?repositories=delete&confirm=nope`);
+    expect(unconfirmed.status).toBe(400);
+    expect(unconfirmed.body.error).toContain('Type CHK');
+
+    await db.query(`insert into alpha_private.tickets(id,workspace_id,reference,title,description,client_safe_company_label,source,status,version,
+      workflow_state,project_id,created_at,client_updated_at,internal_updated_at)
+      values ('t1','ws-default','T-1','Request','Description','Client','public_inquiry','received',0,
+        jsonb_build_object('id','t1','workspaceId','ws-default','version',0,'status','received','clientId',null),$1,now(),now(),now())`,
+    [project.id]);
+    const linked = await call(app, 'DELETE', `/api/projects/${project.id}?repositories=delete&confirm=chk`);
+    expect(linked.status).toBe(409);
+    expect(linked.body.error).toContain('Nothing was deleted');
+    expect((await db.query('select id from projects')).rows).toHaveLength(1);
+    await db.query(`delete from alpha_private.tickets where id = 't1'`);
+
+    const deleted = await call(app, 'DELETE', `/api/projects/${project.id}?repositories=delete&confirm=chk`);
+    expect(deleted.body).toEqual({ success: true, repositories: [] });
+  });
 });
 
 describe('the cloud board change routes', () => {

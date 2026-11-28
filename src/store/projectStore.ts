@@ -4,6 +4,11 @@ export class ProjectLinkedToTicketError extends Error {
   constructor() { super('This project is still linked to one or more client tickets.'); this.name = 'ProjectLinkedToTicketError'; }
 }
 
+/** The database has not been given the archive columns yet. */
+export class ProjectArchiveUnavailableError extends Error {
+  constructor() { super('Archiving projects needs a database update that has not been applied yet.'); this.name = 'ProjectArchiveUnavailableError'; }
+}
+
 /**
  * Projects, as the board sees them.
  *
@@ -23,6 +28,17 @@ export interface ProjectStore {
   create(workspaceId: string, input: Partial<Project>): Promise<Project>;
   update(workspaceId: string, id: string, updates: Partial<Project>): Promise<Project | null>;
   remove(workspaceId: string, id: string): Promise<boolean>;
+  /**
+   * Archive (a timestamp) or restore (null) a project. Separate from `update`,
+   * which never touches the archive columns, so an ordinary edit keeps working
+   * on a database the archive migration has not reached yet.
+   */
+  setArchived(workspaceId: string, id: string, archive: { at: string; by: string } | null): Promise<Project | null>;
+  /**
+   * Whether client tickets point at the project, which stops it being deleted.
+   * Only the cloud keeps tickets; a desktop answers false.
+   */
+  linkedToTickets(workspaceId: string, id: string): Promise<boolean>;
 
   /** A project's build steps in order, or null if the project is not in this workspace. */
   getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null>;

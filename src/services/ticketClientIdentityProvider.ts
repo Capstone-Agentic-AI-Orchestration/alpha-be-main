@@ -134,4 +134,17 @@ export class TicketClientIdentityProvider implements TicketClientIdentityVerifie
       return null;
     }
   }
+
+  /**
+   * Delete a client's Auth account, when a PM removes the client. Their email
+   * is free again, so a later inquiry gets a new account; an account already
+   * gone counts as done.
+   */
+  async deleteUser(userId: string): Promise<void> {
+    if (typeof userId !== 'string' || !userId.trim() || userId.length > 200 || userId.trim() !== userId) {
+      throw new Error('Client account id is invalid.');
+    }
+    const { error } = await this.admin.auth.admin.deleteUser(userId);
+    if (error && error.status !== 404) throw new Error('Client identity provider could not delete the account.');
+  }
 }

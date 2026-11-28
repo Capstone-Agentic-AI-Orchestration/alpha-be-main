@@ -1677,6 +1677,8 @@ export class SQLiteService {
       ['issues', 'due_date TEXT'],
       ['issues', 'archived_at TEXT'],
       ['issues', 'archived_by TEXT'],
+      ['projects', 'archived_at TEXT'],
+      ['projects', 'archived_by TEXT'],
       ['issues', 'parent_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL'],
       ['issues', "depends_on_issue_ids TEXT NOT NULL DEFAULT '[]'"],
       // Identifies the local daemon that owns an in-progress read-only plan.
@@ -2517,7 +2519,9 @@ export class SQLiteService {
       githubOrg: r.github_org || undefined,
       createdBy: r.created_by || undefined,
       envVars: JSON.parse(r.env_vars || '[]'),
-      createdAt: r.created_at
+      createdAt: r.created_at,
+      archivedAt: r.archived_at || undefined,
+      archivedBy: r.archived_by || undefined
     }));
   }
 
@@ -2590,7 +2594,8 @@ export class SQLiteService {
           name = @name, key = @key, description = @description, color = @color, icon = @icon,
           status = @status, priority = @priority, start_date = @startDate, target_date = @targetDate,
           lead_type = @leadType, lead_name = @leadName, lead_agent_id = @leadAgentId, resources = @resources,
-          github_org = @githubOrg, created_by = @createdBy, env_vars = @envVars
+          github_org = @githubOrg, created_by = @createdBy, env_vars = @envVars,
+          archived_at = @archivedAt, archived_by = @archivedBy
         WHERE id = @id AND workspace_id = @workspaceId
       `);
       stmt.run({
@@ -2600,7 +2605,10 @@ export class SQLiteService {
         resources: JSON.stringify(merged.resources || []),
         githubOrg: merged.githubOrg || null,
         createdBy: merged.createdBy || null,
-        envVars: JSON.stringify(merged.envVars || [])
+        envVars: JSON.stringify(merged.envVars || []),
+        // Carried by the team board's sync; the routes strip them from edits.
+        archivedAt: merged.archivedAt || null,
+        archivedBy: merged.archivedBy || null
       });
       if (Object.prototype.hasOwnProperty.call(updates, 'leadAgentId') || Object.prototype.hasOwnProperty.call(updates, 'leadSquadId')) {
         const now = new Date().toISOString();
@@ -2611,6 +2619,13 @@ export class SQLiteService {
       }
       return merged;
     })();
+  }
+
+  /** Archive (a timestamp and who) or restore (null) a project; null when it is not here. */
+  setProjectArchived(id: string, archive: { at: string; by: string } | null): Project | null {
+    const changed = this.db.prepare('UPDATE projects SET archived_at = ?, archived_by = ? WHERE id = ? AND workspace_id = ?')
+      .run(archive?.at ?? null, archive?.by ?? null, id, this.workspaceId()).changes;
+    return changed ? this.getProjects().find(project => project.id === id) ?? null : null;
   }
 
   deleteProject(id: string): boolean {

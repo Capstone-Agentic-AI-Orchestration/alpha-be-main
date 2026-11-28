@@ -14,7 +14,11 @@ import { sqliteService } from '../services/sqliteService.js';
 import { machineRuntimes } from '../services/machineRuntimes.js';
 import { BUILTIN_SKILLS } from '../services/builtinSkills.js';
 import { BuildStepError } from '../store/buildSteps.js';
-import { ProjectLinkedToTicketError } from '../store/projectStore.js';
+import { ProjectArchiveUnavailableError, ProjectLinkedToTicketError } from '../store/projectStore.js';
+import { archiveProject, restoreProject } from '../services/projectArchiveService.js';
+import { deleteProjectRepository, RepoDeletionError, type RepoDeletionResult } from '../services/repoDeletionService.js';
+import { reposForProject } from '../services/githubIssueMapping.js';
+import { GitHubApiError } from '../services/githubApi.js';
 import { agentValidationError } from './agentValidation.js';
 import { checkWorkspace } from './workspaceValidation.js';
 import {
@@ -697,8 +701,12 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
     if (!check.ok) return res.status(400).json({ error: check.detail });
   }
 
-  // Who created it is not something an edit can change.
-  const { createdBy: _owner, leadName: _leadName, leadType: _leadType, ...changes } = req.body ?? {};
+  // Who created it is not something an edit can change, nor is archiving: that
+  // goes through the archive routes, which archive the repositories with it.
+  const {
+    createdBy: _owner, leadName: _leadName, leadType: _leadType,
+    archivedAt: _archivedAt, archivedBy: _archivedBy, ...changes
+  } = req.body ?? {};
   if (typeof changes.leadSquadId === 'string' && changes.leadSquadId.trim()) {
     return res.status(410).json({ error: 'Squads were removed. The Orchestrator assigns agents to each build task by role.' });
   }
@@ -723,12 +731,54 @@ dataRouter.put('/projects/:id', route(async (req: Request, res: Response) => {
 dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => {
   if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
   if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  const workspaceId = req.workspace!.workspaceId;
+
+  /*
+   * ?repositories=delete also deletes every repository of the project, with
+   * its hosting, the way the per-repository delete does. Checked first and
+   * stopped at the first failure, so the project outlives any repository it
+   * could not delete and the delete can simply be tried again.
+   */
+  const repositories: RepoDeletionResult[] = [];
+  const withRepositories = req.query.repositories === 'delete';
+  if (withRepositories) {
+    if (!requireWorkspaceCapability(req, res, 'project.provision_repository')) return;
+    let project = await projectStore().get(workspaceId, req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const confirm = typeof req.query.confirm === 'string' ? req.query.confirm.trim().toLowerCase() : '';
+    if (confirm !== project.key.toLowerCase()) {
+      return res.status(400).json({ error: `Type ${project.key} to confirm deleting the project and its repositories.` });
+    }
+    if (await projectStore().linkedToTickets(workspaceId, project.id)) {
+      return res.status(409).json({ error: `${TICKET_LINKED} Nothing was deleted.` });
+    }
+    for (const repo of reposForProject(project)) {
+      try {
+        const result = await deleteProjectRepository({ workspaceId, project, repo });
+        repositories.push(result);
+        project = result.project ?? project;
+      } catch (err) {
+        const deleted = repositories.map(result => result.repo);
+        const alreadyDeleted = deleted.length ? '; already deleted: ' + deleted.join(', ') : '';
+        const kept = `The project was kept, so you can try again${alreadyDeleted}.`;
+        if (err instanceof RepoDeletionError) {
+          return res.status(err.status).json({ error: `${err.message} ${kept}`, repositories, ...(err.hosting ? { hosting: err.hosting } : {}) });
+        }
+        if (err instanceof GitHubApiError) {
+          const status = [401, 403, 404, 422, 429].includes(err.status) ? err.status : 502;
+          return res.status(status).json({ error: `GitHub refused deleting ${repo}: ${err.message} ${kept}`, repositories });
+        }
+        throw err;
+      }
+    }
+  }
+
   let deleted: boolean;
   try {
-    deleted = await projectStore().remove(req.workspace!.workspaceId, req.params.id);
+    deleted = await projectStore().remove(workspaceId, req.params.id);
   } catch (error) {
     if (error instanceof ProjectLinkedToTicketError) {
-      return res.status(409).json({ error: 'This project is linked to one or more client tickets. Unlink those tickets before deleting the project.' });
+      return res.status(409).json({ error: TICKET_LINKED, repositories });
     }
     throw error;
   }
@@ -736,7 +786,45 @@ dataRouter.delete('/projects/:id', route(async (req: Request, res: Response) => 
     await workspaceRegistry.unbind('projects', req.params.id);
     void supabaseService.unshareProject(req.params.id);
   }
-  res.json({ success: deleted });
+  res.json(withRepositories ? { success: deleted, repositories } : { success: deleted });
+}));
+
+const TICKET_LINKED = 'This project is linked to one or more client tickets. Unlink those tickets before deleting the project.';
+
+/**
+ * Archive a project: its repositories become read-only on GitHub and it leaves
+ * the project lists, keeping its board and history. Restore undoes both.
+ * Answers the project and what happened to each repository; a repository
+ * GitHub refused is reported, and archiving again retries it.
+ */
+dataRouter.post('/projects/:id/archive', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    const result = await archiveProject({ workspaceId: req.workspace!.workspaceId, project, by: req.workspace!.userId });
+    void supabaseService.shareProjectArchive(result.project);
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof ProjectArchiveUnavailableError) return res.status(503).json({ error: err.message });
+    throw err;
+  }
+}));
+
+dataRouter.post('/projects/:id/restore', route(async (req: Request, res: Response) => {
+  if (!requireWorkspaceCapability(req, res, 'project.manage')) return;
+  if (!requireProjectWorkspace(req, res, req.params.id)) return;
+  const project = await projectStore().get(req.workspace!.workspaceId, req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    const result = await restoreProject({ workspaceId: req.workspace!.workspaceId, project });
+    void supabaseService.shareProjectArchive(result.project);
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof ProjectArchiveUnavailableError) return res.status(503).json({ error: err.message });
+    throw err;
+  }
 }));
 
 /**

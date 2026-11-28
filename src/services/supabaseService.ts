@@ -485,6 +485,19 @@ export class SupabaseService {
     }
   }
 
+  /** Archive or restore a project on the team's board, touching only the archive columns. */
+  async shareProjectArchive(project: Project): Promise<void> {
+    if (!this.sharesBoard() || !this.client) return;
+    try {
+      const { error } = await this.client.from('projects')
+        .update({ archived_at: project.archivedAt ?? null, archived_by: project.archivedBy ?? null })
+        .eq('id', project.id);
+      if (error) throw error;
+    } catch (err: any) {
+      this.reportFailure(`archive project ${project.key}`, err);
+    }
+  }
+
   /** Drop what was exchanged for the account that just signed out. */
   forgetCredentials(): void {
     this.tokens.forget();
