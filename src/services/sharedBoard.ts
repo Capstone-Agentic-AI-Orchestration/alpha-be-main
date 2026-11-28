@@ -475,6 +475,8 @@ function sharedProjectFields(cloud: Project, mine?: Project): Partial<Project> {
     leadAgentId: cloud.leadAgentId,
     githubOrg: cloud.githubOrg,
     createdBy: cloud.createdBy,
+    archivedAt: cloud.archivedAt,
+    archivedBy: cloud.archivedBy,
     resources: [...(cloud.resources ?? []), ...machineLocal]
   };
 }

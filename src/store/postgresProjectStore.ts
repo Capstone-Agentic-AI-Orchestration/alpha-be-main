@@ -1,7 +1,7 @@
 import type { BuildStepPhase, Project, ProjectBuildStep, ProjectResource } from '../models/index.js';
 import { BuildStepError, normalizeBuildSteps } from './buildSteps.js';
 import { DatabaseError, type Sql } from './database.js';
-import { ProjectLinkedToTicketError, withProjectDefaults, type ProjectStore } from './projectStore.js';
+import { ProjectArchiveUnavailableError, ProjectLinkedToTicketError, withProjectDefaults, type ProjectStore } from './projectStore.js';
 
 /**
  * Projects in the cloud.
@@ -150,11 +150,35 @@ export class PostgresProjectStore implements ProjectStore {
       const databaseError = cause as { code?: unknown; constraint?: unknown };
       const sqlState = error instanceof DatabaseError ? error.sqlState : databaseError.code;
       if ((sqlState === '23503' || sqlState === '23001')
-        && databaseError.constraint === 'tickets_project_link_fk') {
+        && TICKET_LINK_CONSTRAINTS.has(String(databaseError.constraint))) {
         throw new ProjectLinkedToTicketError();
       }
       throw error;
     }
+  }
+
+  async setArchived(workspaceId: string, id: string, archive: { at: string; by: string } | null): Promise<Project | null> {
+    let rows: Array<{ id: string }>;
+    try {
+      ({ rows } = await this.sql.query<{ id: string }>(
+        'update projects set archived_at = $3, archived_by = $4 where workspace_id = $1 and id = $2 returning id',
+        [workspaceId, id, archive?.at ?? null, archive?.by ?? null]
+      ));
+    } catch (error) {
+      const sqlState = error instanceof DatabaseError ? error.sqlState : (error as { code?: unknown })?.code;
+      if (sqlState === '42703') throw new ProjectArchiveUnavailableError();
+      throw error;
+    }
+    return rows[0] ? this.get(workspaceId, id) : null;
+  }
+
+  async linkedToTickets(workspaceId: string, id: string): Promise<boolean> {
+    const { rows } = await this.sql.query<{ linked: boolean }>(
+      `select exists(select 1 from alpha_private.tickets where workspace_id = $1 and project_id = $2)
+           or exists(select 1 from alpha_private.ticket_work_bindings where workspace_id = $1 and project_id = $2) as linked`,
+      [workspaceId, id]
+    );
+    return rows[0]?.linked === true;
   }
 
   async getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null> {
@@ -304,7 +328,13 @@ export interface ProjectRow {
   created_at: Timestamp;
   completed_at?: Timestamp;
   milestones?: Project['milestones'] | null;
+  /** Absent until the archive migration has run. */
+  archived_at?: Timestamp;
+  archived_by?: string | null;
 }
+
+/** Client-ticket tables whose rows refuse a project's deletion. */
+const TICKET_LINK_CONSTRAINTS = new Set(['tickets_project_link_fk', 'ticket_work_bindings_project_id_fkey']);
 
 /** An empty date is stored as null, not as the epoch. */
 const date = (value?: string): string | null => value || null;
@@ -375,6 +405,8 @@ export function toProject(row: ProjectRow): Project {
     createdAt: iso(row.created_at),
     completedAt: row.completed_at ? iso(row.completed_at) : undefined,
     milestones: row.milestones ?? [],
+    archivedAt: row.archived_at ? iso(row.archived_at) : undefined,
+    archivedBy: row.archived_by ?? undefined,
     // Machine-local, and never stored here; see the class comment.
     envVars: []
   };

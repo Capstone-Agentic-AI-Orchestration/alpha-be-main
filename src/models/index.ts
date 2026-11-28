@@ -311,6 +311,13 @@ export interface Project {
    */
   githubOrg?: string;
   createdAt: string;
+  /**
+   * When the project was archived, and by whom. An archived project leaves the
+   * project lists and its repositories are archived on GitHub; it keeps its
+   * board and history and can be restored. Only the archive routes set these.
+   */
+  archivedAt?: string;
+  archivedBy?: string;
 
   /**
    * Environment values for work on this project.

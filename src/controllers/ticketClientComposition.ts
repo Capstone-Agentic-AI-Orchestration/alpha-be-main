@@ -55,6 +55,8 @@ export interface TicketClientComposition {
     secretProtector: TicketInvitationSecretProtector;
   };
   documents: TicketDocumentsApplication;
+  /** Deletes a removed client's Auth account; see ClientRemoval. */
+  identity: { deleteUser(userId: string): Promise<void> };
   startDeliveryWorker(onUnavailable: () => void, onActionNoticesUnavailable?: () => void): () => void;
 }
 
@@ -138,6 +140,7 @@ export function createTicketClientComposition(input: {
 
   return {
     router, documents,
+    identity: { deleteUser: userId => identityProvider.deleteUser(userId) },
     pmInvitation: { enabled: Boolean(input.emailProvider), policy: invitationPolicy, secretProtector: secrets.invitation },
     startDeliveryWorker(onUnavailable, onActionNoticesUnavailable) {
       const stopInvitations = delivery ? startTicketClientInvitationDeliveryWorker({

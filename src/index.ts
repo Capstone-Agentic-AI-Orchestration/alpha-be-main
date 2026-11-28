@@ -305,7 +305,7 @@ app.use('/api/ticket-work', IS_CLOUD
 app.use('/api/tickets', IS_CLOUD && (ALPHA_TICKETING_READS_ENABLED || ALPHA_TICKETING_TRIAGE_ENABLED)
   ? createTicketPmReadRouteBoundary(database(), undefined, ALPHA_TICKETING_TRIAGE_ENABLED,
     false, ticketClient?.pmInvitation ?? unavailableClientInvitation, Boolean(ticketClient),
-    ticketClient?.documents, ticketLifecycle ?? undefined)
+    ticketClient?.documents, ticketLifecycle ?? undefined, ticketClient?.identity ?? null)
   : createTicketUnavailableRouter());
 app.use('/api', workspaceRouter);
 app.use('/api', downloadRouter);

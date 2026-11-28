@@ -46,6 +46,14 @@ export class SqliteProjectStore implements ProjectStore {
     return runWithWorkspace(workspaceId, () => sqliteService.deleteProject(id));
   }
 
+  async setArchived(workspaceId: string, id: string, archive: { at: string; by: string } | null): Promise<Project | null> {
+    return runWithWorkspace(workspaceId, () => sqliteService.setProjectArchived(id, archive));
+  }
+
+  async linkedToTickets(): Promise<boolean> {
+    return false;
+  }
+
   async getBuildSteps(workspaceId: string, projectId: string): Promise<ProjectBuildStep[] | null> {
     return runWithWorkspace(workspaceId, () => orNullWhenMissing(() => sqliteService.getProjectBuildSteps(projectId)));
   }

@@ -105,7 +105,8 @@ export class PostgresTicketQueueStore implements TicketQueueStore {
   }
 }
 
-class PostgresTicketQueueTransaction implements TicketQueueTransaction {
+/** Exported so another PM action can read the queue inside its own transaction. */
+export class PostgresTicketQueueTransaction implements TicketQueueTransaction {
   private readonly authorization: PostgresTicketAuthorization;
 
   constructor(private readonly sql: Sql) {
@@ -246,6 +247,12 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 -- The same access test countQueue uses, so the counts agree.
                 coalesce(sg.status = 'active' and cg.active, false) as client_access_active,
                 coalesce(sg.status = 'active' and sg.revoked_at is null, false) as service_active,
+                -- A PM removed this client (ClientRemoval records it on each of their tickets).
+                exists (
+                  select 1 from alpha_private.ticket_audit_events removal
+                  where removal.workspace_id = t.workspace_id and removal.ticket_id = t.id
+                    and removal.event_type = 'client_removed'
+                ) as client_removed,
                 coalesce(cg.active and cg.revoked_at is null, false) as ticket_grant_active,
                 coalesce(${CLIENT_VISIBLE_PROJECT_SQL}, false) as project_visible,
                 -- The queue's unread rule for this PM: a client reply after their read cursor.
@@ -276,6 +283,7 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 min(client_group_name) as display_name,
                 min(company) as company,
                 bool_or(service_active) as service_active,
+                bool_or(client_removed) as client_removed,
                 count(*) filter (where ${COUNT_NEEDS_PM_SQL}) as needs_pm_count,
                 count(*) filter (where ${COUNT_WAITING_CLIENT_SQL}) as waiting_client_count,
                 count(*) filter (where ${COUNT_OPEN_SQL}) as open_count,
@@ -303,6 +311,8 @@ class PostgresTicketQueueTransaction implements TicketQueueTransaction {
                 from client_projects cp where cp.client_group_key = c.client_group_key
               ), '[]'::json) as projects
        from clients c
+       -- A removed client leaves the page; their tickets stay in the queue.
+       where not c.client_removed
        order by c.needs_pm_count desc, c.last_activity_at desc, c.client_group_key collate "C"`,
       [scope.workspaceId, scope.principal.userId],
     );
