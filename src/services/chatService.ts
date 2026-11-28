@@ -96,6 +96,7 @@ const MANAGER_BOARD_INSTRUCTIONS = [
   'Archiving, changing a card assigned to someone else, and changes to more than five cards in one reply wait for the developer to confirm. When a tool says a change is waiting or refused, say so plainly; never retry it another way.',
   'Never move a card into Building or Done, never start or plan a build, and never delegate to other agents. A developer starts a build from the card; a person marks it Done after review.',
   'Write checklists as pass/fail items: a build treats each item as a requirement, and one build covers at most 20.',
+  'The product picture attached to the message is this project\'s recorded brief and planned work: the same picture Alpha answers from. When the developer asks you to break the project, its brief or a client request into tasks, that is board upkeep, not inventing scope: create one card per piece of work the brief describes, each with pass/fail checklist items, and nothing the brief does not describe. Changes to more than five cards wait for the developer to confirm, so propose them together in one reply. Ask the developer only when there is no brief, or it does not cover what they asked for.',
   'Answer questions about tasks and builds from the board and the build records attached to the message; when they do not cover something, say so. Use alpha-project-files and read-only alpha-github only for repository facts. No file edits, shell commands, deployment or publication.',
   'End by listing what you changed and what is waiting for the developer to confirm. Do not write an ALPHA_ROUTE line.'
 ].join(' ');
@@ -2077,7 +2078,9 @@ export class ChatService extends EventEmitter {
     });
 
     // Never resume a session that previously held broader chat/tool authority.
-    const policyHash = createHash('sha256').update(`${persona.personaHash}:scoped-chat-v2${board ? `:board-${board.access}${board.askPanel ? '-ask' : ''}-v2` : ''}:${preview.sourceKey}`).digest('hex');
+    // -v3: the Manager's board instructions changed, so a resumed session must start afresh.
+    const boardPolicy = board ? ':board-' + board.access + (board.askPanel ? '-ask' : '') + '-v3' : '';
+    const policyHash = createHash('sha256').update(`${persona.personaHash}:scoped-chat-v2${boardPolicy}:${preview.sourceKey}`).digest('hex');
     const priorSession = storedSession?.personaHash === policyHash ? storedSession : null;
 
     /**
@@ -2155,8 +2158,12 @@ export class ChatService extends EventEmitter {
         delegated ? undefined : sessionMemoryPrompt(threadId, ownerId),
         // Live records ride with the message so a resumed session keeps a stable prefix.
         board?.records,
-        // A first Manager turn in an existing Ask thread cannot resume the earlier agent's session.
-        board?.askPanel && !priorSession ? describeRecentConversation(threadId) : undefined,
+        // The Manager keeps the board from the same picture Alpha answers from: without the brief,
+        // a request to turn it into tasks read as "invent the scope" and was refused.
+        board?.access === 'write' && activeProject ? chatProductPicture(activeProject, 'team', previewContext?.workspaceId) : undefined,
+        // A first Manager turn cannot resume the earlier agent's session: give it what was said, so
+        // "create all the tasks for this" knows what "this" is. In the Ask panel and in a project chat.
+        (board?.askPanel || board?.access === 'write') && !priorSession ? describeRecentConversation(threadId) : undefined,
         priorTurn ? `${prompt}
 
 ---

@@ -178,7 +178,7 @@ export async function runVerification(options: {
   if (missingScripts.length) {
     return { status: 'failed', commands: [], missingScripts, summary: `Required checks unavailable: ${missingScripts.join(', ')}.` };
   }
-  const problems = commands.map(command => verificationScriptProblem(scripts, command.script)).filter(Boolean);
+  const problems = commands.map(command => verificationScriptProblem(scripts, command.script, undefined, undefined, options.cwd)).filter(Boolean);
   if (problems.length) {
     return { status: 'failed', commands: [], missingScripts, summary: 'Bounded verification refused: ' + problems.join(' ') };
   }

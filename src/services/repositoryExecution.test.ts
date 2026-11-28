@@ -33,4 +33,45 @@ describe('repository execution grounding', () => {
     expect(verificationScriptProblem({ test: 'npm run typecheck && npm run typecheck', typecheck: 'tsc --noEmit' }, 'test')).toBeUndefined();
     expect(verificationScriptProblem({ test: 'npm run missing' }, 'test')).toContain('Missing referenced');
   });
+
+  describe('root scripts that run each app\'s own script', () => {
+    // The layout of a two-app repository: every root check runs the same-named script in each app.
+    const rootScripts = Object.fromEntries(['build', 'test', 'typecheck', 'lint'].map(name =>
+      [name, `npm run ${name} --prefix apps/api && npm run ${name} --prefix apps/web`]));
+    function repo(web: Record<string, string> = { build: 'vite build', test: 'vitest run', typecheck: 'tsc --noEmit', lint: 'eslint .' }) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-monorepo-'));
+      dirs.push(dir);
+      const write = (sub: string, scripts: Record<string, string>) => {
+        fs.mkdirSync(path.join(dir, sub), { recursive: true });
+        fs.writeFileSync(path.join(dir, sub, 'package.json'), JSON.stringify({ scripts }));
+      };
+      write('.', rootScripts);
+      write('apps/api', { build: 'tsc -p tsconfig.build.json', test: 'jest', typecheck: 'tsc --noEmit', lint: 'eslint . --max-warnings=0' });
+      write('apps/web', web);
+      return dir;
+    }
+
+    it('are not cycles: each delegates to another package', () => {
+      const dir = repo();
+      for (const check of ['build', 'test', 'typecheck', 'lint']) {
+        expect(verificationScriptProblem(rootScripts, check, undefined, undefined, dir)).toBeUndefined();
+      }
+      // Without the repository to read, the delegated script is left opaque rather than called a cycle.
+      expect(verificationScriptProblem(rootScripts, 'test')).toBeUndefined();
+      expect(describeRepositoryExecution(dir, ['test'])).not.toContain('unavailable');
+    });
+
+    it('still finds a watcher or a real cycle in the app it delegates to', () => {
+      expect(verificationScriptProblem(rootScripts, 'test', undefined, undefined, repo({ test: 'vitest' }))).toContain('Watch mode');
+      expect(verificationScriptProblem(rootScripts, 'test', undefined, undefined, repo({ test: 'npm run test --prefix ../..' }))).toContain('Cyclic');
+      expect(verificationScriptProblem({ test: 'npm run test' }, 'test')).toContain('Cyclic');
+      expect(verificationScriptProblem({ test: 'npm run test --prefix apps/missing' }, 'test', undefined, undefined, repo())).toContain('Missing referenced verification package');
+    });
+
+    it('leaves workspace-wide commands to the process limit instead of calling them cycles', () => {
+      for (const test of ['npm run test --workspaces', 'npm run test -w apps/api', 'pnpm -r test', 'pnpm --filter api test', 'yarn workspace api test']) {
+        expect(verificationScriptProblem({ test }, 'test')).toBeUndefined();
+      }
+    });
+  });
 });

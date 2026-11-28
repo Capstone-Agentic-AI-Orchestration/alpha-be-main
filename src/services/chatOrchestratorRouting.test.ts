@@ -970,6 +970,25 @@ describe('The Manager Agent keeps the board for a developer', () => {
     expect(turnInputs[0].boardScope).toMatchObject({ access: 'read' });
     expect(turnInputs[0].systemPrompt).toContain('Only the Manager Agent changes cards');
   });
+
+  it('gives the Manager the project brief and the conversation, so it can turn the brief into cards', async () => {
+    const { chatService, sqlite } = await askFixture();
+    sqlite.updateProject('project-1', { description: 'FreshPress Laundry: a website showing service rates, turnaround times and WhatsApp pickup.' });
+    cliReplies = ['FreshPress is a neighborhood laundry; the board has one task so far.'];
+    await send(chatService, 'what is this project about?', { projectId: 'project-1', routing: { context: developer, canBuild: true } });
+    turnInputs = [];
+    cliReplies = [
+      'ALPHA_ROUTE ' + JSON.stringify({ route: 'board', goal: 'Create the tasks for the FreshPress website', repositories: [], assignments: [] }),
+      'Proposed six cards; they wait for your confirmation.'
+    ];
+    await send(chatService, 'can you create all the tasks for this', { projectId: 'project-1', routing: { context: developer, canBuild: true } });
+    const manager = turnInputs[1];
+    expect(manager.boardScope).toMatchObject({ access: 'write' });
+    expect(manager.prompt).toContain('service rates, turnaround times and WhatsApp pickup');
+    expect(manager.prompt).toContain('Recent conversation');
+    expect(manager.prompt).toContain('FreshPress is a neighborhood laundry');
+    expect(manager.systemPrompt).toContain('that is board upkeep, not inventing scope');
+  });
 });
 
 describe('Orchestrator questions before planning', () => {
