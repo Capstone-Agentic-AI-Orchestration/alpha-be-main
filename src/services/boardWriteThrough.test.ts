@@ -21,6 +21,8 @@ let opened: { close(): void }[] = [];
 /** Issues handed to the push, in order. */
 let pushed: any[];
 let pushResult: (issue: any) => any;
+/** Issues handed to the team's board, in order. */
+let shared: any[];
 
 async function load() {
   process.env.ALPHA_HOME = tmp;
@@ -36,6 +38,11 @@ async function load() {
 
   const sql = await import('./sqliteService.js');
   opened.push(sql.sqliteService);
+  const board = await import('./supabaseService.js');
+  shared = [];
+  vi.spyOn(board.supabaseService, 'shareIssue').mockImplementation(async (issue: any) => {
+    shared.push(issue);
+  });
   const wt = await import('./boardWriteThrough.js');
   return { svc: sql.sqliteService as any, wt };
 }
@@ -126,6 +133,25 @@ describe('an issue the board has never seen', () => {
     expect(saved.githubNumber).toBe(7);
     expect(saved.githubRepo).toBe('o/r');
   });
+
+  /**
+   * Stored only locally, the number never reached the cloud, whose next GitHub
+   * sync then made a second card for the issue (MON-1 beside MON-103).
+   */
+  it('gives the team’s board the number too', async () => {
+    const { svc, wt } = await load();
+    plant(svc, { githubNumber: undefined, githubRepo: undefined });
+    pushResult = () => ({
+      pushed: true,
+      patch: { githubRepo: 'o/r', githubNumber: 7, githubUrl: 'https://github.com/o/r/issues/7' }
+    });
+
+    wt.updateIssueAndPush('iss-1', { status: 'review' });
+    await settle();
+
+    expect(shared).toHaveLength(1);
+    expect(shared[0]).toMatchObject({ id: 'iss-1', status: 'review', githubRepo: 'o/r', githubNumber: 7 });
+  });
 });
 
 describe('when the board cannot be reached', () => {
@@ -138,6 +164,8 @@ describe('when the board cannot be reached', () => {
     await settle();
 
     expect(svc.getIssues().find((i: any) => i.id === 'iss-1').status).toBe('review');
+    // GitHub refusing the change is no reason to keep it from the team.
+    expect(shared.map(issue => issue.status)).toEqual(['review']);
   });
 
   /** A rejected promise here would be an unhandled rejection, which kills the daemon. */

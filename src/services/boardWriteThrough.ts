@@ -52,10 +52,25 @@ export function updateIssueAndPush(issueId: string, updates: Partial<Issue>): vo
        * back matters: without it the next status change would open a second
        * issue instead of moving this one.
        */
-      if (result.patch) sqliteService.updateIssue(issueId, result.patch);
+      const saved = result.patch ? sqliteService.updateIssue(issueId, result.patch) : null;
       if (result.error) {
         logError(`Board push failed for ${updated.identifier}: ${result.error}`);
       }
+      return saved ?? updated;
     })
-    .catch(err => logError(`Board push failed for ${updated.identifier}:`, err));
+    .catch(err => {
+      logError(`Board push failed for ${updated.identifier}:`, err);
+      return updated;
+    })
+    /*
+     * Then the team's board, with whatever GitHub number the push just made.
+     *
+     * Storing the number only here left every other copy of the board without
+     * it. The cloud's next GitHub sync met the new issue, found no card with
+     * its number, and made a second card for it; a teammate's desktop running
+     * the same card opened a second issue. Both happened: MON-103 and MON-1
+     * were one task, and CLO-102 opened #2 and #3. `shareIssue` reports its
+     * own failures and never throws.
+     */
+    .then(latest => supabaseService.shareIssue(latest));
 }
