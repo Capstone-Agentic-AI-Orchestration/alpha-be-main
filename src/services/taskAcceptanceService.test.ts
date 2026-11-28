@@ -678,14 +678,14 @@ describe('task acceptance and targeted correction', () => {
           id: 'create-api', title: 'Create task API', description: 'Implement the task creation endpoint.',
           kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-API'],
           acceptanceCriteria: ['The API persists a created task.'], requiredChecks: ['test'],
-          scope: { includePaths: ['src/**'], excludePaths: [] }
+          scope: { includePaths: ['src/**'], excludePaths: ['docs/**'] }
         },
         {
           // Does not build on create-api: the plan runs them as separate work, so its accepted files stay protected.
           id: 'preserve-api', title: 'Preserve task API behavior', description: 'Make a compatible improvement to the API implementation.',
           kind: 'backend', ownerAgentId: 'backend-agent', dependsOn: [], requirementIds: ['REQ-COMPAT'],
           acceptanceCriteria: ['The accepted create API behavior remains intact.'], requiredChecks: ['test'],
-          scope: { includePaths: ['src/**'], excludePaths: [] }
+          scope: { includePaths: ['src/**'], excludePaths: ['docs/**'] }
         }
       ]
     });

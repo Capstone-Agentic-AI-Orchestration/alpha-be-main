@@ -14,7 +14,7 @@ import { OrchestrationService } from './orchestrationService.js';
 import { buildFinalValidationAmendment, buildOrchestrationReviewAmendment, OrchestrationReviewPlanError } from './orchestrationReviewWorkflow.js';
 import type { OrchestrationAttemptRecord, OrchestrationSnapshot, OrchestrationTaskRecord } from './orchestrationStateMachine.js';
 import { repositoryWorkspaceForRun, repositoryWorkspaceForTask } from './orchestrationWorkspace.js';
-import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
+import { codeTaskAllowsPath } from '../utils/pathScope.js';
 import { buildTaskRequiredChecks, repositoryChecks } from './repositoryChecks.js';
 import { isTestFile, testFileWeakeningDetail, testsNotKeptExactly } from './testWeakening.js';
 import { classifyRisk } from './riskTier.js';
@@ -67,7 +67,7 @@ const MAX_WEAKENING_CHECK_BYTES = 1024 * 1024;
 /** Same case rule as the write tool (pathMatchesScope), so a file it allowed is never rejected here. */
 function taskAllowsPath(task: OrchestrationTaskRecord, filePath: string): boolean {
   return isImplementationTask(task.kind) &&
-    scopeAllowsPath(task.scope, filePath);
+    codeTaskAllowsPath(task.scope, filePath);
 }
 
 /** Title of a finding, as the reviewer or Alpha's acceptance gate wrote it. */

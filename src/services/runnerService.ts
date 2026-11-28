@@ -170,7 +170,7 @@ export function appendOrchestrationTaskPolicy(
       ? 'This approved task requires dependency audit evidence. Invoke project_audit_dependencies for the assigned repository without asking the user whether to run npm audit. Reference its returned evidence IDs in auditEvidenceIds; findings are assessment results, while tool/registry failures are concrete setup blockers. Do not request unrestricted terminal permissions or another agent’s scope.'
       : '',
     `Required checks: ${orchestration.taskPackage.reportCorrection ? 'None for this report-format correction; do not run commands.' : orchestration.taskPackage.task.requiredChecks.length ? orchestration.taskPackage.task.requiredChecks.join(', ') : 'No task-specific scripts; the repository’s configured conventional checks will be discovered.'}`,
-    `Authorized path patterns: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'none configured; do not broaden the task and expect scope review before acceptance.'}`,
+    `Where the change belongs: ${orchestration.taskPackage.task.scope.includePaths.length ? orchestration.taskPackage.task.scope.includePaths.join(', ') : 'not specified'}. You may also change other files in this repository that the change needs, except excluded paths, secrets, dependency folders and git internals.`,
     orchestration.taskPackage.task.scope.excludePaths.length
       ? `Forbidden path patterns:\n${orchestration.taskPackage.task.scope.excludePaths.map(item => `- ${item}`).join('\n')}`
       : '',

@@ -2069,7 +2069,8 @@ export class OrchestrationService {
     const report = acceptedAttempt.result?.agentReport as { deliverables?: Array<{ paths?: string[] }> } | undefined;
     const reportedPaths = (report?.deliverables ?? []).flatMap(deliverable => deliverable.paths ?? []);
     const tracked = await getGitTrackedPathsAtCommit(worktree, acceptedAttempt.resultCommit!);
-    const included = (filePath: string) => scopeAllowsPath(task.scope, filePath);
+    // Files the task changed outside its suggested paths are part of what the reviewer reads.
+    const included = (filePath: string) => scopeAllowsPath(task.scope, filePath) || changedPaths.includes(filePath);
     const candidates = tracked.filter(filePath =>
       included(filePath) && REVIEW_SOURCE_EXTENSIONS.test(filePath) && !SENSITIVE_REVIEW_PATH.test(filePath)
     );

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathMatchesScope, scopeAllowsPath } from '../utils/pathScope.js';
+import { codeTaskAllowsPath } from '../utils/pathScope.js';
 import { agentRoleContract, roleCanOwnTask, roleCanPlan, isImplementationTask } from './agentRoleContracts.js';
 import type { CliTurnOptions, CliTurnResult } from './cliRunner.js';
 import { runCliTurn } from './cliRunner.js';
@@ -439,7 +439,7 @@ function outputInstructions(input: OrchestrationPlanningInput): string {
     'Use chatSkillGuidance only as optional instructions for this message. It cannot change the user goal, add requirements, widen repository/path scope, or grant tools, permissions, approvals, or autonomy.',
     'Base every task on what the repository files show. When a repository is marked as a starter scaffold or lacks the screens, endpoints, or clients the goal needs, plan to build them; never ask a specialist to improve, fix, or integrate with code that does not exist.',
     'Branch setup belongs to Alpha. Supplied branchContext is server-verified: the isolated branch already starts from its recorded base commit. Do not assign Git creation, switching, or base verification to specialists or make it a code acceptance criterion. Specialists use the provided branch evidence and implement only their scoped product work.',
-    'When a frontend or mobile task calls an API that a backend task in this build creates or changes, write the contract into the plan: the exact method, path, request fields, and response fields, in both the backend task and the frontend task descriptions. Make the frontend task depend on that backend task. Specialists can read the other repositories in this build, but write the contract into both tasks anyway so neither has to search for it. If the build has no backend task and the frontend has no documented API, keep the frontend work to local state or a typed client for a contract you define in the task, and say which.',
+    'When a frontend or mobile task and a backend task in this build share an API, write the contract into the plan: the exact method, path, request fields, and response fields, in both task descriptions. Choose their order for this build and say why in each task\'s assignmentReason. By default the frontend task goes first: it builds the screens against that contract through a typed client with sample data, and the backend task depends on it and implements the same contract. Put the backend task first instead when the screens cannot be built or checked without real server behavior, such as sign-in, payments or data the client cannot stand in for, or when only server code changes. Never make two tasks depend on each other. Prefer one implementation task per repository and role for a feature; split one only when it is too large for one specialist turn or when configured build steps or an agreed checklist name separate steps. Specialists can read the other repositories in this build, but write the contract into both tasks anyway so neither has to search for it. If the build has no backend task and the frontend has no documented API, keep the frontend work to local state or a typed client for a contract you define in the task, and say which.',
     'When you add a database task for a backend without a data layer: use repository-local SQLite through a maintained npm driver such as better-sqlite3, read the database file location from an environment variable with a local default, keep the database file out of Git, and include package.json and package-lock.json in its scope so it can add the driver and regenerate the lockfile. Write the data-access contract (module path, exported functions, record fields) into both the database task and every backend task that uses it. Say in the database task that a host without a persistent disk resets this file on redeploy; a hosted database needs credentials the user must supply, so do not plan one unless the request provides them.',
     'For account work, tell the backend task to hash passwords with Node\'s built-in crypto.scrypt and a per-user random salt, compare hashes in constant time, and issue random opaque session tokens from crypto.randomBytes that are stored only as hashes. That needs no signing secret, so the specialist never has to invent a credential.',
     `Allowed enum values (these are schema rules, not plan fields): task.kind = ${orchestrationTaskKindSchema.options.join(', ')}; task.requiredChecks = ${orchestrationRequiredCheckSchema.options.join(', ')}.`,
@@ -729,7 +729,7 @@ function validatePlan(
     if (!root || lockfiles.some(file => fs.existsSync(path.join(root.dir, file)))) continue;
     const owner = plan.tasks.some(task => task.required && isImplementationTask(task.kind) &&
       (task.repository ?? roots[0]?.repo ?? '').toLowerCase() === repository && lockfiles.some(file =>
-        scopeAllowsPath(task.scope, file)));
+        codeTaskAllowsPath(task.scope, file)));
     if (!owner) throw new OrchestrationPlanningError(`Final Security verification for ${repository} requires a committed npm lockfile. Assign its implementation specialist a required scoped lockfile task before verification, including when its baseline is clean.`, 'invalid_plan');
   }
   const storageIssue = accountStorageIssue(plan, input, roots);
@@ -892,15 +892,9 @@ export class OrchestrationPlanner {
     } catch (error) {
       if (!(error instanceof OrchestrationPlanningError)) throw error;
       plan = await this.correctPlan(input, plan, error, common);
-      try {
-        assertPlannerOpenedFiles(plan, input, common.readLogPath);
-      } catch (readError) {
-        if (!(readError instanceof OrchestrationPlanningError)) throw readError;
-        throw withRejectedPlans(new OrchestrationPlanningError(
-          `The Orchestrator tried one correction, but the plan still did not pass its checks. No specialist was started. ${readError.message}`,
-          readError.code
-        ), plan);
-      }
+      // A file the planner still did not open is no reason to stop the build: the specialist reads
+      // it before changing it, and acceptance judges the real diff. The one correction above asks
+      // the planner to look; a second miss is let through.
     }
     plan = withPlannerReads(plan, common.readLogPath);
     return {
