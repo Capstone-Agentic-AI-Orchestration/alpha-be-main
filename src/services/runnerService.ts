@@ -33,6 +33,7 @@ import { isFinalSquadMember } from './squadPosition.js';
 import { workspaceQueue } from './workspaceQueue.js';
 import { runVerification, shouldRunRepositoryVerification, type VerificationResult } from './verificationService.js';
 import { describeRepositoryExecution } from './repositoryExecution.js';
+import { siblingReadRoots } from './orchestrationWorkspace.js';
 import { logInfo, logError } from '../utils/logger.js';
 import { PrototypeRun, PrototypeRunStage, StageId, Issue, RunActivity, RunActivityKind, SquadMemberAssignment } from '../models/index.js';
 import { ALPHA_CLOUD_RUN_ACTIVITY, ALPHA_ORCHESTRATION_TRANSPORT_RETRIES, RUNS_DIR } from '../config/env.js';
@@ -376,6 +377,16 @@ class SkipPullRequest extends Error {}
  * that person cannot be resolved or may no longer operate agents, and the
  * board pass is checked again on every call.
  */
+/** The build's other repositories a task may read; none when the run cannot be loaded. */
+function buildSiblingRoots(orchestrationRunId: string, taskRepository: string) {
+  try {
+    const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
+    return run ? siblingReadRoots(run, taskRepository) : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function specialistBoardScope(orchestrationRunId: string, agentId: string | null, agentName: string): Promise<BoardRunScope | undefined> {
   try {
     const run = sqliteService.getOrchestrationSnapshot(orchestrationRunId)?.run;
@@ -736,7 +747,9 @@ export class RunnerService extends EventEmitter {
     const task = ctx.orchestration?.taskPackage.task;
     const taskRepository = task?.repository ?? issue.githubRepo ?? 'task';
     // Named after the repository, not the hashed worktree folder, so paths the tools show read naturally.
-    const taskRoots = task ? [{ name: taskRepository.split('/').pop() || path.basename(cwd), repo: taskRepository, dir: cwd }] : undefined;
+    // The task's own repository first: reads default to it, and writes only ever go there.
+    const siblingRoots = task ? buildSiblingRoots(ctx.orchestration!.orchestrationRunId, taskRepository) : [];
+    const taskRoots = task ? [{ name: taskRepository.split('/').pop() || path.basename(cwd), repo: taskRepository, dir: cwd }, ...siblingRoots] : undefined;
     const taskMcpServers = task ? ['alpha-task-files', ...(['audit', 'review', 'delivery'].includes(task.kind) ? ['alpha-github'] : [])] : persona.mcpServers;
     /*
      * A specialist in a build may read the board and comment on its own card,
@@ -793,7 +806,10 @@ export class RunnerService extends EventEmitter {
     } : issue;
     const prompt = [
       ctx.orchestration && !ctx.orchestration.taskPackage.reportCorrection
-        ? describeRepositoryExecution(cwd, task?.requiredChecks) : '',
+        ? describeRepositoryExecution(cwd, task?.requiredChecks, {
+          branchName: ctx.orchestration.branchName, baseRef: ctx.orchestration.baseRef, baseCommit: ctx.orchestration.baseCommit,
+          otherRepositories: siblingRoots.map(root => root.name)
+        }) : '',
       this.buildTaskPrompt(promptIssue, plan, ctx.squad?.handoff, mcp.serverNames, access, ctx.squad, ctx.orchestration)
     ].filter(Boolean).join('\n\n');
     // Repository memory comes first. A build task carries it in its task package (read at the

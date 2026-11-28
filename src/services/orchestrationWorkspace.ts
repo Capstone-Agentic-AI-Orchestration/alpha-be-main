@@ -1,4 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { OrchestrationRunRecord, OrchestrationSnapshot, OrchestrationRepositoryWorkspace } from './orchestrationStateMachine.js';
+import type { ProjectRoot } from './projectFiles.js';
 
 import { canonicalRepository } from '../utils/repositoryName.js';
 
@@ -32,6 +35,23 @@ export function repositoryWorkspaceForTask(
 export function authorizedRepositoriesForRun(run: OrchestrationRunRecord): string[] {
   const saved = run.repositoryWorkspaces?.map(item => item.repository).filter(Boolean) ?? [];
   return saved.length ? saved : [run.repository];
+}
+
+/**
+ * The build's other repositories, as read-only roots for a task in one of them. A frontend task
+ * reads the backend's real routes and types instead of stopping when its description leaves a
+ * field out. Writes, checks and audits still resolve to the task's own repository only
+ * (taskFileAccess picks the root by the task scope), so these folders are never written.
+ */
+export function siblingReadRoots(run: OrchestrationRunRecord, taskRepository: string): ProjectRoot[] {
+  const own = canonicalRepository(taskRepository);
+  return (run.repositoryWorkspaces ?? [])
+    .filter(item => canonicalRepository(item.repository) !== own && item.worktreePath && fs.existsSync(item.worktreePath))
+    .map(item => ({
+      name: item.repository.split('/').pop() || path.basename(item.worktreePath),
+      repo: item.repository,
+      dir: fs.realpathSync.native(item.worktreePath)
+    }));
 }
 
 /**

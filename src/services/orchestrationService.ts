@@ -1913,8 +1913,10 @@ export class OrchestrationService {
         previousResponse: reportCorrection.previousResponse.slice(0, 12_000)
       };
     }
+    // The latest earlier attempt that failed or was refused: a retry that cannot see why the
+    // last try ended asks for "the failure details" instead of fixing them.
     const priorFailure = [...snapshot.attempts].reverse().find(attempt =>
-      attempt.taskId === taskId && attempt.status === 'failed' && attempt.failureReason
+      attempt.taskId === taskId && (attempt.status === 'failed' || attempt.status === 'rejected') && attempt.failureReason
     );
     if (!reportCorrection && priorFailure?.failureReason) {
       taskPackage.corrections.push(

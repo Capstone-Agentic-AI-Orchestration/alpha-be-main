@@ -66,7 +66,9 @@ const schema = (properties: Record<string, unknown>, required: string[] = []) =>
   required,
   additionalProperties: false
 });
-const repository = str('Repository folder name or owner/repo. Optional when the project has one repository on this computer.');
+const repository = str('Repository folder name or owner/repo. Optional: defaults to your task\'s repository in a build, or to the only repository.');
+/** In a build task, reads without a repository name mean the task's own repository. */
+const inTaskRepository = (args: Record<string, any>) => TASK && !args.repository ? { ...args, repository: TASK.repository } : args;
 
 const TOOLS: Record<string, ToolDef> = {
   project_list_repositories: {
@@ -81,7 +83,7 @@ const TOOLS: Record<string, ToolDef> = {
       path: str('Folder inside the repository, relative to it. Empty for the top level.'),
       depth: int('How many levels to list, 1 to 4. Default 2.')
     }),
-    run: args => listFiles(ROOTS, args)
+    run: args => listFiles(ROOTS, inTaskRepository(args))
   },
   project_read_file: {
     description: 'Read a text file in one of the project repositories, with line numbers. Secret files such as .env are not shown.',
@@ -91,7 +93,8 @@ const TOOLS: Record<string, ToolDef> = {
       start_line: int('First line to show. Default 1.'),
       max_lines: int('How many lines, up to 2000. Default 400.')
     }, ['path']),
-    run: args => {
+    run: raw => {
+      const args = inTaskRepository(raw);
       const content = readFile(ROOTS, args);
       if (READ_LOG) {
         const target = resolveInProject(ROOTS, args.repository, args.path);
@@ -121,7 +124,7 @@ const TOOLS: Record<string, ToolDef> = {
       path: str('Limit to a file or folder inside the repository.'),
       max_count: int('For log: how many commits, up to 50. Default 20.')
     }, ['command']),
-    run: args => runGit(ROOTS, args)
+    run: args => runGit(ROOTS, inTaskRepository(args))
   }
 };
 
